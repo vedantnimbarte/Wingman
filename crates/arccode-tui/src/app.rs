@@ -6,9 +6,10 @@
 //! in flight.
 
 use std::io::{stdout, Stdout};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use arccode_core::{AgentEvent, AgentLoop, AgentStop};
+use arccode_core::{AgentEvent, AgentLoop, AgentStop, Provider};
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode,
@@ -30,10 +31,18 @@ use crate::widgets::{
     Transcript, TranscriptItem,
 };
 
+/// Closure passed in by the CLI/runtime that knows how to construct a
+/// provider for a given `provider_id`. We don't want `arccode-tui` to
+/// depend on `arccode-providers` directly — this keeps the dependency
+/// graph one-way and lets the TUI swap providers mid-session.
+pub type ProviderBuilder =
+    Arc<dyn Fn(&str) -> std::result::Result<Arc<dyn Provider>, String> + Send + Sync>;
+
 pub struct AppCtx {
     pub provider_id: String,
     pub model: String,
     pub mode: String,
+    pub builder: ProviderBuilder,
 }
 
 pub async fn run(mut agent: AgentLoop, ctx: AppCtx) -> Result<()> {
@@ -69,6 +78,7 @@ enum Cmd {
     Clear,
     Help,
     Mode(String),
+    Model(String),
     Submit(String),
     None,
 }
@@ -86,6 +96,7 @@ fn parse_slash(line: &str) -> Cmd {
         "/clear" => Cmd::Clear,
         "/help" | "/?" => Cmd::Help,
         "/mode" if !arg.is_empty() => Cmd::Mode(arg.to_string()),
+        "/model" if !arg.is_empty() => Cmd::Model(arg.to_string()),
         "" => Cmd::None,
         _ => Cmd::Submit(line.to_string()),
     }
@@ -123,7 +134,7 @@ async fn run_inner(
         draw(terminal, &ui)?;
 
         // Idle: wait for a user input event.
-        let next_action = idle_step(&mut events, &mut ui, terminal).await?;
+        let next_action = idle_step(&mut events, &mut ui, terminal, agent, &ctx.builder).await?;
         match next_action {
             IdleAction::Quit => return Ok(()),
             IdleAction::Submit(prompt) => {
@@ -146,6 +157,8 @@ async fn idle_step(
     events: &mut EventStream,
     ui: &mut UiState,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    agent: &mut AgentLoop,
+    builder: &ProviderBuilder,
 ) -> Result<IdleAction> {
     while let Some(ev) = events.next().await {
         match ev {
@@ -176,6 +189,29 @@ async fn idle_step(
                                     "(mode display set to {m}; live permission swap lands in M2)"
                                 )));
                             }
+                            Cmd::Model(arg) => match arg.split_once('/') {
+                                Some((provider_id, model_id)) => match builder(provider_id) {
+                                    Ok(provider) => {
+                                        agent.swap_provider(provider);
+                                        agent.set_model(model_id.to_string());
+                                        ui.status.provider = provider_id.to_string();
+                                        ui.status.model = model_id.to_string();
+                                        ui.transcript.push(TranscriptItem::System(format!(
+                                            "switched to {provider_id}/{model_id}"
+                                        )));
+                                    }
+                                    Err(e) => {
+                                        ui.transcript.push(TranscriptItem::Error(format!(
+                                            "/model {provider_id}: {e}"
+                                        )));
+                                    }
+                                },
+                                None => {
+                                    ui.transcript.push(TranscriptItem::Error(
+                                            "/model expects provider/model_id (e.g. anthropic/claude-opus-4-7)".into(),
+                                        ));
+                                }
+                            },
                             Cmd::None => {}
                             Cmd::Submit(prompt) => return Ok(IdleAction::Submit(prompt)),
                         }
@@ -289,9 +325,11 @@ fn truncate(mut s: String, max: usize) -> String {
 
 fn help_text() -> String {
     String::from(
-        "Slash commands:\n  /help            this message\n  /clear           reset \
-         the conversation\n  /mode <m>        change display mode (read-only/auto-edit/yolo)\n  \
-         /quit            exit\n\nKeys: Enter submit, Up/Down history, Esc clear input, Ctrl-C exit.",
+        "Slash commands:\n  /help                       this message\n  /clear            \
+         reset the conversation\n  /model provider/model       switch model (e.g. \
+         /model openai/gpt-4.1)\n  /mode <m>                   change display mode \
+         (read-only/auto-edit/yolo)\n  /quit                       exit\n\nKeys: \
+         Enter submit, Up/Down history, Esc clear input, Ctrl-C exit.",
     )
 }
 

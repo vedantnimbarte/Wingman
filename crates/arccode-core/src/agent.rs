@@ -9,6 +9,7 @@
 //! JSON logger) consume the same stream.
 
 use crate::{
+    tokens::{CompactPlan, Compactor, ToolOutputBudget},
     CacheBreakpoint, CompletionRequest, ContentBlock, Message, Provider, Role, StopReason,
     StreamEvent, ToolSpec, Usage,
 };
@@ -95,6 +96,11 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     /// Cache after `system` + tools by default. Empty disables explicit caching.
     pub cache_breakpoints: Vec<CacheBreakpoint>,
+    /// Truncate large tool outputs before feeding them back to the model.
+    pub tool_output_budget: ToolOutputBudget,
+    /// Compaction policy. Compaction runs **before** each request if the
+    /// estimated context size crosses `compactor.trigger_tokens`.
+    pub compactor: Compactor,
 }
 
 impl Default for AgentConfig {
@@ -106,6 +112,8 @@ impl Default for AgentConfig {
             max_tokens: 4096,
             temperature: None,
             cache_breakpoints: vec![CacheBreakpoint::AfterSystem, CacheBreakpoint::AfterTools],
+            tool_output_budget: ToolOutputBudget::default(),
+            compactor: Compactor::default(),
         }
     }
 }
@@ -140,6 +148,21 @@ impl AgentLoop {
         self.history.clear();
     }
 
+    /// Swap in a different provider. Conversation history is preserved so
+    /// the new model picks up mid-stream — providers translate `Message`s
+    /// through their own adapter on the next request.
+    pub fn swap_provider(&mut self, provider: Arc<dyn Provider>) {
+        self.provider = provider;
+    }
+
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.config.model = model.into();
+    }
+
+    pub fn model(&self) -> &str {
+        &self.config.model
+    }
+
     /// Drive a single user turn to completion. The returned stream yields
     /// events live and terminates after a `Stop` event.
     pub fn run(&mut self, user_prompt: String) -> BoxStream<'_, AgentEvent> {
@@ -153,6 +176,14 @@ impl AgentLoop {
         let stream = async_stream::stream! {
             let specs = tools.specs();
             for turn in 0..config.max_turns {
+                // Compaction pass — fold the oldest non-recap span into a single
+                // recap message when we cross the trigger budget.
+                if let Some(CompactPlan { recap, replaced }) =
+                    config.compactor.plan(history, config.system.as_deref())
+                {
+                    history.splice(0..replaced, std::iter::once(recap));
+                }
+
                 let req = CompletionRequest {
                     model: config.model.clone(),
                     system: config.system.clone(),
@@ -264,14 +295,17 @@ impl AgentLoop {
                 let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
                 for (id, name, input) in tool_calls {
                     let outcome = tools.dispatch(&name, input).await;
+                    let truncated = config.tool_output_budget.trim(&outcome.content);
+                    // UIs see the *full* output so the user can scroll/copy;
+                    // the *model* only sees the truncated version below.
                     yield AgentEvent::ToolResult {
                         id: id.clone(),
-                        output: outcome.content.clone(),
+                        output: outcome.content,
                         is_error: outcome.is_error,
                     };
                     results.push(ContentBlock::ToolResult {
                         tool_use_id: id,
-                        content: outcome.content,
+                        content: truncated,
                         is_error: outcome.is_error,
                     });
                 }

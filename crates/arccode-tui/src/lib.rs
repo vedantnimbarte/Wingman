@@ -6,4 +6,4 @@
 mod app;
 mod widgets;
 
-pub use app::{run, AppCtx};
+pub use app::{run, AppCtx, ProviderBuilder};

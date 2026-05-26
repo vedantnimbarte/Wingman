@@ -10,6 +10,7 @@ pub mod error;
 pub mod message;
 pub mod provider;
 pub mod stream;
+pub mod tokens;
 pub mod tool;
 pub mod usage;
 
@@ -18,5 +19,8 @@ pub use error::{ArccodeError, Result};
 pub use message::{ContentBlock, Message, Role};
 pub use provider::{CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities};
 pub use stream::{ProviderEventStream, StopReason, StreamEvent};
+pub use tokens::{
+    estimate_history_tokens, estimate_tokens, CompactPlan, Compactor, ToolOutputBudget,
+};
 pub use tool::ToolSpec;
 pub use usage::Usage;

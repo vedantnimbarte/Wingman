@@ -351,8 +351,42 @@ impl Config {
             (
                 "ollama".to_string(),
                 ProviderConfig {
-                    base_url: Some("http://localhost:11434".into()),
+                    // Ollama exposes an OpenAI-compatible shim at /v1.
+                    base_url: Some("http://localhost:11434/v1".into()),
                     model: Some("llama3.1:8b".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "openrouter".to_string(),
+                ProviderConfig {
+                    api_key: Some("${OPENROUTER_API_KEY}".into()),
+                    model: Some("anthropic/claude-opus-4-7".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "lmstudio".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:1234/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vllm".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:8000/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "litellm".to_string(),
+                ProviderConfig {
+                    api_key: Some("${LITELLM_API_KEY}".into()),
+                    base_url: Some("http://localhost:4000/v1".into()),
+                    model: Some("anthropic/claude-opus-4-7".into()),
                     ..Default::default()
                 },
             ),

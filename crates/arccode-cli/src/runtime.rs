@@ -5,8 +5,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use arccode_config::{Config, PermissionMode, ProjectPaths};
-use arccode_core::{AgentConfig, AgentLoop, Provider};
-use arccode_providers::AnthropicProvider;
+use arccode_core::{AgentConfig, AgentLoop, Compactor, Provider, ToolOutputBudget};
+use arccode_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiVariant};
 use arccode_tools::{ToolCtx, ToolRegistry};
 use std::sync::Arc;
 
@@ -70,10 +70,55 @@ pub fn build_provider(cfg: &Config, provider_id: &str) -> Result<Arc<dyn Provide
             }
             Ok(Arc::new(p))
         }
+        "gemini" => {
+            let key = resolve_api_key(pc.api_key.as_deref(), "GOOGLE_API_KEY")
+                .or_else(|_| resolve_api_key(pc.api_key.as_deref(), "GEMINI_API_KEY"))?;
+            let mut p = GeminiProvider::new(key)?;
+            if let Some(url) = &pc.base_url {
+                p = p.with_base_url(url);
+            }
+            Ok(Arc::new(p))
+        }
+        id if openai_variant(id).is_some() => {
+            let variant = openai_variant(id).unwrap();
+            let key = resolve_optional_api_key(pc.api_key.as_deref(), variant);
+            let mut p = OpenAiCompatProvider::new(variant, key)?;
+            if let Some(url) = &pc.base_url {
+                p = p.with_base_url(url);
+            }
+            Ok(Arc::new(p))
+        }
         other => Err(anyhow!(
-            "provider '{other}' is not yet implemented (M1 ships Anthropic; OpenAI/Gemini/Ollama land in M2)"
+            "provider '{other}' is not implemented yet (M2 ships Anthropic + OpenAI/OpenRouter/LM Studio/vLLM/LiteLLM/Ollama; Gemini next)"
         )),
     }
+}
+
+fn openai_variant(id: &str) -> Option<OpenAiVariant> {
+    Some(match id {
+        "openai" => OpenAiVariant::OpenAI,
+        "openrouter" => OpenAiVariant::OpenRouter,
+        "lmstudio" | "lm_studio" => OpenAiVariant::LmStudio,
+        "vllm" => OpenAiVariant::Vllm,
+        "litellm" => OpenAiVariant::LiteLlm,
+        "ollama" => OpenAiVariant::Ollama,
+        _ => return None,
+    })
+}
+
+fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -> Option<String> {
+    if let Some(s) = from_config {
+        if !s.is_empty() && !looks_like_placeholder(s) {
+            return Some(s.to_string());
+        }
+    }
+    let env_name = match variant {
+        OpenAiVariant::OpenAI => "OPENAI_API_KEY",
+        OpenAiVariant::OpenRouter => "OPENROUTER_API_KEY",
+        OpenAiVariant::LiteLlm => "LITELLM_API_KEY",
+        OpenAiVariant::LmStudio | OpenAiVariant::Vllm | OpenAiVariant::Ollama => return None,
+    };
+    std::env::var(env_name).ok()
 }
 
 fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> {
@@ -108,6 +153,11 @@ pub fn build_agent(cfg: &Config, selection: &Selection, mode: PermissionMode) ->
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
         system: Some(system),
+        tool_output_budget: ToolOutputBudget::new(cfg.tokens.tool_output_max_lines),
+        compactor: Compactor {
+            trigger_tokens: cfg.tokens.compact_at_tokens,
+            ..Default::default()
+        },
         ..Default::default()
     };
     Ok(AgentLoop::new(provider, Arc::new(registry), agent_cfg))
