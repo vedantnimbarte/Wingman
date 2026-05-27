@@ -35,7 +35,8 @@ use crate::modal::{
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
     composer::ComposerView, slash_suggest::SlashSuggest, status::StatusView,
-    transcript::TranscriptView, Composer, StatusLine, Transcript, TranscriptItem,
+    transcript::TranscriptView, welcome::WelcomeView, Composer, StatusLine, Transcript,
+    TranscriptItem,
 };
 
 /// Closure passed in by the CLI/runtime that knows how to construct a
@@ -1004,10 +1005,14 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
                 Constraint::Length(1), // status
             ])
             .split(area);
-        TranscriptView {
-            transcript: &ui.transcript,
+        if ui.transcript.items.is_empty() {
+            WelcomeView { status: &ui.status }.render(chunks[0], f.buffer_mut());
+        } else {
+            TranscriptView {
+                transcript: &ui.transcript,
+            }
+            .render(chunks[0], f.buffer_mut());
         }
-        .render(chunks[0], f.buffer_mut());
         ComposerView {
             composer: &ui.composer,
         }
