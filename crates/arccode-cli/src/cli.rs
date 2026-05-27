@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(long, value_name = "PROMPT")]
     pub print: Option<String>,
 
+    /// Run prompts from a JSONL file non-interactively.
+    #[arg(long, value_name = "FILE")]
+    pub batch: Option<String>,
+
     /// Emit newline-delimited JSON events instead of text. Use with `--print`.
     #[arg(long)]
     pub json: bool,
@@ -71,6 +75,18 @@ pub enum ConfigAction {
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     logging::install_tracing(cli.verbose, cli.quiet);
+
+    if let Some(file) = cli.batch {
+        let cfg = load_config()?;
+        let mode_override = parse_mode(cli.mode.as_deref())?;
+        let opts = commands::batch::BatchOptions {
+            file,
+            json: cli.json,
+            mode_override,
+            model_override: cli.model,
+        };
+        return commands::batch::run(cfg, opts).await;
+    }
 
     if let Some(prompt) = cli.print {
         let cfg = load_config()?;

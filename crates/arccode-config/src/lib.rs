@@ -97,6 +97,22 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+/// Per-project tool settings.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolsConfig {
+    /// Additional shell patterns to always deny even in yolo mode.
+    /// e.g. ["rm -rf /", "sudo"]
+    #[serde(default)]
+    pub shell_denylist: Vec<String>,
+    /// Override the tool output budget (max lines per tool call). 0 = use global default.
+    #[serde(default)]
+    pub tool_output_max_lines: Option<u32>,
+    /// Comma-separated list of tools to disable for this project.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
+}
+
 /// Top-level merged configuration. Constructed via [`Config::load`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -116,6 +132,10 @@ pub struct Config {
 
     /// MCP servers, keyed by user-chosen short name. Activated in M3.
     pub mcp: BTreeMap<String, McpServerConfig>,
+
+    /// Per-project tool settings.
+    #[serde(default)]
+    pub tools: ToolsConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

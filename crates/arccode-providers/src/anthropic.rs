@@ -340,6 +340,14 @@ fn encode_block(b: &ContentBlock) -> Value {
             "content": content,
             "is_error": is_error,
         }),
+        ContentBlock::Image { data, media_type } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }),
     }
 }
 

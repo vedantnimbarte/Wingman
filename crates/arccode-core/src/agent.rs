@@ -124,6 +124,9 @@ pub struct AgentLoop {
     config: AgentConfig,
     /// Conversation history that persists across calls to `run`.
     history: Vec<Message>,
+    /// Per-turn tool output cache. Keyed by (tool_name, canonical_json_args).
+    /// Cleared at the start of each call to `run`.
+    tool_cache: std::collections::HashMap<(String, String), ToolOutcome>,
 }
 
 impl AgentLoop {
@@ -137,6 +140,24 @@ impl AgentLoop {
             tools,
             config,
             history: Vec::new(),
+            tool_cache: Default::default(),
+        }
+    }
+
+    /// Construct an `AgentLoop` with pre-loaded conversation history, useful
+    /// for resuming a previous session via session records.
+    pub fn with_history(
+        provider: Arc<dyn Provider>,
+        tools: Arc<dyn ToolDispatcher>,
+        config: AgentConfig,
+        history: Vec<Message>,
+    ) -> Self {
+        Self {
+            provider,
+            tools,
+            config,
+            history,
+            tool_cache: Default::default(),
         }
     }
 
@@ -163,15 +184,38 @@ impl AgentLoop {
         &self.config.model
     }
 
+    pub fn set_temperature(&mut self, t: Option<f32>) {
+        self.config.temperature = t;
+    }
+
+    pub fn get_temperature(&self) -> Option<f32> {
+        self.config.temperature
+    }
+
+    pub fn set_max_tokens(&mut self, n: u32) {
+        self.config.max_tokens = n;
+    }
+
+    pub fn get_max_tokens(&self) -> u32 {
+        self.config.max_tokens
+    }
+
+    pub fn get_model(&self) -> &str {
+        &self.config.model
+    }
+
     /// Drive a single user turn to completion. The returned stream yields
     /// events live and terminates after a `Stop` event.
     pub fn run(&mut self, user_prompt: String) -> BoxStream<'_, AgentEvent> {
+        // Clear the per-turn tool cache at the start of each new user turn.
+        self.tool_cache.clear();
         self.history.push(Message::user_text(user_prompt));
 
         let provider = self.provider.clone();
         let tools = self.tools.clone();
         let config = self.config.clone();
         let history = &mut self.history;
+        let tool_cache = &mut self.tool_cache;
 
         let stream = async_stream::stream! {
             let specs = tools.specs();
@@ -294,7 +338,15 @@ impl AgentLoop {
                 // Dispatch tools and append their results as a user-role message.
                 let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
                 for (id, name, input) in tool_calls {
-                    let outcome = tools.dispatch(&name, input).await;
+                    let cache_key = (name.clone(), serde_json::to_string(&input).unwrap_or_default());
+                    let outcome = if let Some(cached) = tool_cache.get(&cache_key) {
+                        // Cache hit: reuse the previous result without re-dispatching.
+                        cached.clone()
+                    } else {
+                        let fresh = tools.dispatch(&name, input).await;
+                        tool_cache.insert(cache_key, fresh.clone());
+                        fresh
+                    };
                     let truncated = config.tool_output_budget.trim(&outcome.content);
                     // UIs see the *full* output so the user can scroll/copy;
                     // the *model* only sees the truncated version below.

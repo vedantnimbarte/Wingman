@@ -40,6 +40,14 @@ impl Transcript {
         self.items.clear();
         self.scroll = 0;
     }
+
+    pub fn scroll_up(&mut self) {
+        self.scroll = self.scroll.saturating_sub(1);
+    }
+
+    pub fn scroll_down(&mut self) {
+        self.scroll = self.scroll.saturating_add(1);
+    }
 }
 
 pub struct TranscriptView<'a> {
@@ -64,12 +72,7 @@ impl<'a> Widget for TranscriptView<'a> {
                     lines.push(Line::from(""));
                 }
                 TranscriptItem::AssistantText(s) => {
-                    for l in s.lines() {
-                        lines.push(Line::from(Span::raw(l.to_string())));
-                    }
-                    if !s.ends_with('\n') {
-                        // ensure newline separation from next item
-                    }
+                    lines.extend(render_assistant_text(s));
                     lines.push(Line::from(""));
                 }
                 TranscriptItem::ToolCall { name, summary } => {
@@ -110,4 +113,26 @@ impl<'a> Widget for TranscriptView<'a> {
             .scroll((self.transcript.scroll, 0))
             .render(area, buf);
     }
+}
+
+fn render_assistant_text(s: &str) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let mut in_code_block = false;
+    for line in s.lines() {
+        if line.starts_with("```") {
+            in_code_block = !in_code_block;
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else if in_code_block {
+            lines.push(Line::from(Span::styled(
+                line.to_string(),
+                Style::default().fg(Color::Yellow),
+            )));
+        } else {
+            lines.push(Line::from(Span::raw(line.to_string())));
+        }
+    }
+    lines
 }

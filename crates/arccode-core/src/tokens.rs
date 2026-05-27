@@ -88,6 +88,11 @@ pub fn estimate_history_tokens(history: &[Message], system: Option<&str>) -> u32
                 ContentBlock::ToolResult { content, .. } => {
                     total = total.saturating_add(estimate_tokens(content));
                 }
+                // Image data is large binary — use a conservative fixed estimate.
+                ContentBlock::Image { data, .. } => {
+                    // base64 data length / 4 chars-per-token (same heuristic as text)
+                    total = total.saturating_add(estimate_tokens(data));
+                }
             }
         }
     }
@@ -195,6 +200,12 @@ fn synthesize_recap(messages: &[Message]) -> String {
                         if *is_error { "errored" } else { "ok" },
                         truncate_chars(first, 100)
                     ));
+                }
+                ContentBlock::Image { media_type, .. } => {
+                    if !summary.is_empty() {
+                        summary.push_str("; ");
+                    }
+                    summary.push_str(&format!("image ({media_type})"));
                 }
             }
         }

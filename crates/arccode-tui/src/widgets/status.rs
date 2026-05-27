@@ -18,6 +18,8 @@ pub struct StatusLine {
     pub mode: String,
     /// Key is `provider/model`. Empty when the user hasn't sent anything.
     pub usage: BTreeMap<String, Usage>,
+    /// Whether the agent is currently connected / active.
+    pub connected: bool,
 }
 
 impl StatusLine {
@@ -55,7 +57,9 @@ impl<'a> Widget for StatusView<'a> {
         } else {
             s.provider.clone()
         };
+        let dot_color = if s.connected { Color::Green } else { Color::Red };
         let mut spans = vec![
+            Span::styled("● ", Style::default().fg(dot_color)),
             Span::styled(
                 format!(" {provider_label} "),
                 Style::default()
@@ -82,6 +86,30 @@ impl<'a> Widget for StatusView<'a> {
                 ),
                 Style::default().fg(Color::DarkGray),
             ));
+
+            let cost_usd = {
+                let mut c = 0.0f64;
+                for (key, u) in &s.usage {
+                    if let Some(price) = arccode_core::price_for(key) {
+                        c += price.cost(u);
+                    }
+                }
+                c
+            };
+
+            spans.push(Span::raw("  "));
+            if cost_usd > 0.0 {
+                spans.push(Span::styled(
+                    format!("${:.4}", cost_usd),
+                    Style::default().fg(Color::Green),
+                ));
+            } else if !s.usage.is_empty() {
+                // Provider with no pricing data (e.g. local model)
+                spans.push(Span::styled(
+                    "local",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
         Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::Reset))

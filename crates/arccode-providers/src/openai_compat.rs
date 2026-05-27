@@ -351,8 +351,9 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
         Role::Assistant => "assistant",
     };
 
-    // Collect text blocks (concatenated) and tool_use blocks (mapped to tool_calls).
+    // Collect text blocks (concatenated), image blocks, and tool_use blocks (mapped to tool_calls).
     let mut text = String::new();
+    let mut image_parts: Vec<Value> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     for b in &m.content {
         match b {
@@ -370,11 +371,27 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
                 }));
             }
             ContentBlock::ToolResult { .. } => { /* handled above */ }
+            ContentBlock::Image { data, media_type } => {
+                image_parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data}"),
+                    }
+                }));
+            }
         }
     }
 
     let mut msg = json!({ "role": role });
-    if !text.is_empty() {
+    if !image_parts.is_empty() {
+        // Vision: build a multi-part content array with text + images.
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({"type": "text", "text": text}));
+        }
+        parts.extend(image_parts);
+        msg["content"] = Value::Array(parts);
+    } else if !text.is_empty() {
         msg["content"] = json!(text);
     } else if tool_calls.is_empty() {
         // Empty assistant message — OpenAI requires `content` or `tool_calls`.

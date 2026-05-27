@@ -1,162 +1,187 @@
-//! `@<path>` token expansion.
+//! `@file` attachment expansion for the TUI composer.
 //!
-//! Walks the user's submitted prompt for whitespace-delimited `@<path>`
-//! tokens, reads each file (size-capped), and prepends an "Attached files"
-//! block so the model sees the full content while the transcript shows
-//! exactly what the user typed.
+//! Tokens of the form `@path/to/file` inside a user prompt are replaced with
+//! the file's contents (text files) or a sentinel placeholder (image files).
+//! Image files are base64-encoded and returned separately in [`ExpandResult`]
+//! so that callers can forward them to providers that support vision.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Hard cap per attachment in bytes. Beyond this, the file is summarized
-/// as a warning instead of being inlined.
-const MAX_BYTES: usize = 100 * 1024;
+use base64::Engine as _;
 
-pub struct Expansion {
-    /// What to send to the model. Equal to the original prompt if there
-    /// were no `@<path>` tokens.
+/// A single image attachment extracted from the prompt.
+#[derive(Debug, Clone)]
+pub struct ImageAttachment {
+    /// Original file path as typed by the user.
+    pub path: String,
+    /// MIME type derived from the file extension (e.g. `"image/png"`).
+    pub media_type: String,
+    /// Raw image bytes encoded as standard base64.
+    pub base64: String,
+}
+
+/// Result returned by [`expand`].
+#[derive(Debug, Default)]
+pub struct ExpandResult {
+    /// The prompt text with `@…` tokens replaced.
     pub prompt: String,
-    /// Human-readable notes the host should surface (e.g. as transcript
-    /// `System` lines): files that were missing, too large, or unreadable.
+    /// Non-fatal warnings (e.g. file not found, unreadable).
     pub warnings: Vec<String>,
-    /// Number of files successfully inlined.
+    /// Number of text attachments successfully inlined.
     pub attached: usize,
+    /// Image attachments found during expansion (vision input).
+    pub images: Vec<ImageAttachment>,
 }
 
-/// Scan `prompt` for `@<path>` tokens and produce an expanded version
-/// with file contents prepended.
-pub fn expand(prompt: &str, project_root: &Path) -> Expansion {
-    let paths = collect_paths(prompt);
-    if paths.is_empty() {
-        return Expansion {
-            prompt: prompt.to_string(),
-            warnings: Vec::new(),
-            attached: 0,
-        };
-    }
+/// Image extensions that we handle as binary/vision data rather than text.
+const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp"];
 
-    let mut blocks: Vec<String> = Vec::new();
-    let mut warnings: Vec<String> = Vec::new();
-    let mut attached = 0;
-    for rel in &paths {
-        let full = project_root.join(rel);
-        match std::fs::metadata(&full) {
-            Err(_) => {
-                warnings.push(format!("@{rel}: file not found"));
-                continue;
-            }
-            Ok(m) if m.len() as usize > MAX_BYTES => {
-                warnings.push(format!(
-                    "@{rel}: skipped, {} bytes exceeds {}KB cap",
-                    m.len(),
-                    MAX_BYTES / 1024
-                ));
-                continue;
-            }
-            Ok(_) => {}
-        }
-        match std::fs::read_to_string(&full) {
-            Ok(contents) => {
-                let lang = lang_hint(rel);
-                blocks.push(format!("### {rel}\n```{lang}\n{contents}\n```\n"));
-                attached += 1;
-            }
-            Err(e) => warnings.push(format!("@{rel}: read failed ({e})")),
-        }
-    }
-
-    let expanded = if blocks.is_empty() {
-        prompt.to_string()
-    } else {
-        format!(
-            "Attached files:\n\n{}\n{prompt}",
-            blocks.join("\n"),
-            prompt = prompt
-        )
+/// Expand `@path` tokens in `prompt` relative to `root`.
+///
+/// - Text files are inlined as fenced code blocks.
+/// - Image files are base64-encoded and stored in [`ExpandResult::images`];
+///   a short `[IMAGE: filename]` placeholder is inserted in the prompt.
+/// - Unresolvable tokens are left as-is and a warning is recorded.
+pub fn expand(prompt: &str, root: &Path) -> ExpandResult {
+    let mut result = ExpandResult {
+        prompt: String::with_capacity(prompt.len()),
+        ..Default::default()
     };
-    Expansion {
-        prompt: expanded,
-        warnings,
-        attached,
-    }
-}
 
-/// Collect unique `@<path>` tokens from `prompt`, in first-occurrence order.
-fn collect_paths(prompt: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let bytes = prompt.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'@' && (i == 0 || bytes[i - 1].is_ascii_whitespace()) {
-            let start = i + 1;
-            let mut j = start;
-            while j < bytes.len() && !bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j > start {
-                if let Ok(s) = std::str::from_utf8(&bytes[start..j]) {
-                    let path = s.trim_end_matches([',', '.', ';', ':', ')']);
-                    if !path.is_empty() && !out.iter().any(|p| p == path) {
-                        out.push(path.to_string());
-                    }
+    let mut remaining = prompt;
+    while let Some(at_pos) = remaining.find('@') {
+        // Copy everything before the `@`.
+        result.prompt.push_str(&remaining[..at_pos]);
+        remaining = &remaining[at_pos + 1..];
+
+        // Collect the path token: runs until whitespace or end-of-string.
+        let end = remaining
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(remaining.len());
+        let token = &remaining[..end];
+        remaining = &remaining[end..];
+
+        if token.is_empty() {
+            // Lone `@` with no path — pass through literally.
+            result.prompt.push('@');
+            continue;
+        }
+
+        let path: PathBuf = if Path::new(token).is_absolute() {
+            PathBuf::from(token)
+        } else {
+            root.join(token)
+        };
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
+            // --- Image attachment ---
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let media_type = ext_to_media_type(&ext);
+                    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(token);
+                    result
+                        .prompt
+                        .push_str(&format!("[IMAGE: {filename}]"));
+                    result.images.push(ImageAttachment {
+                        path: token.to_string(),
+                        media_type: media_type.to_string(),
+                        base64: b64,
+                    });
+                }
+                Err(e) => {
+                    result
+                        .warnings
+                        .push(format!("@{token}: cannot read image: {e}"));
+                    result.prompt.push('@');
+                    result.prompt.push_str(token);
                 }
             }
-            i = j;
         } else {
-            i += 1;
+            // --- Text attachment ---
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => {
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(token);
+                    result.prompt.push_str(&format!(
+                        "```{filename}\n{contents}\n```"
+                    ));
+                    result.attached += 1;
+                }
+                Err(e) => {
+                    result
+                        .warnings
+                        .push(format!("@{token}: {e}"));
+                    result.prompt.push('@');
+                    result.prompt.push_str(token);
+                }
+            }
         }
     }
-    out
+
+    // Append whatever's left after the last `@` (or the whole string if none).
+    result.prompt.push_str(remaining);
+    result
 }
 
-fn lang_hint(path: &str) -> &'static str {
-    match Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-    {
-        "rs" => "rust",
-        "py" => "python",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" | "mjs" => "javascript",
-        "go" => "go",
-        "java" => "java",
-        "c" | "h" => "c",
-        "cpp" | "cc" | "hpp" => "cpp",
-        "rb" => "ruby",
-        "sh" | "bash" => "bash",
-        "toml" => "toml",
-        "yaml" | "yml" => "yaml",
-        "json" => "json",
-        "md" => "markdown",
-        _ => "",
+fn ext_to_media_type(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => "application/octet-stream",
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _;
 
     #[test]
-    fn collects_paths_at_word_boundary() {
-        let p = collect_paths("look at @Cargo.toml and @src/lib.rs");
-        assert_eq!(p, vec!["Cargo.toml", "src/lib.rs"]);
+    fn no_at_tokens_passes_through() {
+        let r = expand("hello world", Path::new("/tmp"));
+        assert_eq!(r.prompt, "hello world");
+        assert!(r.warnings.is_empty());
+        assert_eq!(r.attached, 0);
+        assert!(r.images.is_empty());
     }
 
     #[test]
-    fn ignores_at_mid_word() {
-        let p = collect_paths("email me at foo@bar.com");
-        assert!(p.is_empty());
+    fn lone_at_passes_through() {
+        let r = expand("email me @ foo", Path::new("/tmp"));
+        assert_eq!(r.prompt, "email me @ foo");
     }
 
     #[test]
-    fn deduplicates() {
-        let p = collect_paths("@a.rs and @a.rs again");
-        assert_eq!(p, vec!["a.rs"]);
+    fn missing_file_produces_warning() {
+        let r = expand("see @does_not_exist.txt", Path::new("/tmp"));
+        assert_eq!(r.warnings.len(), 1);
+        assert!(r.warnings[0].contains("does_not_exist.txt"));
     }
 
     #[test]
-    fn strips_trailing_punctuation() {
-        let p = collect_paths("see @file.rs, please");
-        assert_eq!(p, vec!["file.rs"]);
+    fn text_file_is_inlined() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, "hello").unwrap();
+        let path = f.path().to_string_lossy().to_string();
+        // Use absolute path so root doesn't matter.
+        let prompt = format!("contents: @{path}");
+        let r = expand(&prompt, Path::new("/tmp"));
+        assert!(r.prompt.contains("hello"), "got: {}", r.prompt);
+        assert_eq!(r.attached, 1);
+        assert!(r.warnings.is_empty());
     }
 }

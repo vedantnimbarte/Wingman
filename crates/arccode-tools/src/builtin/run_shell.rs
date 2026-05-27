@@ -52,6 +52,12 @@ impl Tool for RunShell {
         if !ctx.allows_shell() {
             return ToolOutcome::err(format!("shell denied under permission mode {}", ctx.mode));
         }
+        if ctx.is_shell_denied(&args.command) {
+            return ToolOutcome::err(format!(
+                "shell command denied by project denylist: {}",
+                args.command
+            ));
+        }
         let cwd = args
             .cwd
             .as_deref()

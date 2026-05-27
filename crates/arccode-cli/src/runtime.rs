@@ -162,10 +162,15 @@ fn looks_like_placeholder(s: &str) -> bool {
     s.trim().starts_with("${") && s.trim().ends_with('}')
 }
 
-pub async fn build_registry(_cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
+pub async fn build_registry(cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
     let cwd = std::env::current_dir()?;
     let paths = ProjectPaths::discover(&cwd);
-    let ctx = ToolCtx::new(mode, cwd, paths.root.clone());
+    let ctx = ToolCtx::new_with_config(
+        mode,
+        cwd,
+        paths.root.clone(),
+        cfg.tools.shell_denylist.clone(),
+    );
     let mut reg = ToolRegistry::new(ctx).with_builtins();
     if let Some(indexer) = build_indexer(&paths)? {
         reg = reg.with_semantic_search(indexer);

@@ -20,3 +20,4 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

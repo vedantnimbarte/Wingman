@@ -35,6 +35,8 @@ pub struct FilePicker {
     ranked: Vec<usize>,
     query: String,
     selected: usize,
+    /// Indices into `entries` that have been toggled via Space.
+    checked: std::collections::HashSet<usize>,
     truncated: bool,
 }
 
@@ -49,6 +51,7 @@ impl FilePicker {
             ranked,
             query: String::new(),
             selected: 0,
+            checked: Default::default(),
             truncated,
         }
     }
@@ -62,8 +65,31 @@ impl FilePicker {
             .cloned()
     }
 
+    /// Returns all checked paths, or the single highlighted path if none checked.
+    pub fn take_selected_all(&mut self) -> Vec<String> {
+        if !self.checked.is_empty() {
+            let mut result: Vec<String> = self.checked
+                .iter()
+                .filter_map(|&i| self.entries.get(i).cloned())
+                .collect();
+            result.sort();
+            result
+        } else {
+            self.take_selected().into_iter().collect()
+        }
+    }
+
     pub fn handle_key(&mut self, k: KeyEvent) -> ModalOutcome {
         match k.code {
+            KeyCode::Char(' ') => {
+                if let Some(&idx) = self.ranked.get(self.selected) {
+                    if self.checked.contains(&idx) {
+                        self.checked.remove(&idx);
+                    } else {
+                        self.checked.insert(idx);
+                    }
+                }
+            }
             KeyCode::Char(c) => {
                 self.query.push(c);
                 self.rerank();
@@ -159,7 +185,13 @@ impl FilePicker {
             .map(|(off, &idx)| {
                 let i = start + off;
                 let entry = &self.entries[idx];
-                let marker = if i == self.selected { "› " } else { "  " };
+                let is_checked = self.checked.contains(&idx);
+                let marker = match (i == self.selected, is_checked) {
+                    (true, true)   => "›☑ ",
+                    (true, false)  => "›  ",
+                    (false, true)  => " ☑ ",
+                    (false, false) => "   ",
+                };
                 let style = if i == self.selected {
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
                 } else {
@@ -172,10 +204,10 @@ impl FilePicker {
 
         let hint = if self.truncated {
             format!(
-                "↑/↓ navigate · Enter attach · Esc cancel · (capped at {MAX_FILES} files)"
+                "↑/↓ navigate · Space toggle · Enter attach · Esc cancel · (capped at {MAX_FILES} files)"
             )
         } else {
-            "↑/↓ navigate · Enter attach · Esc cancel".to_string()
+            "↑/↓ navigate · Space toggle · Enter attach · Esc cancel".to_string()
         };
         Paragraph::new(Line::from(Span::styled(
             hint,

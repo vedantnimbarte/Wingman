@@ -6,6 +6,10 @@ pub struct ToolCtx {
     pub mode: PermissionMode,
     pub cwd: PathBuf,
     pub project_root: PathBuf,
+    /// Extra shell command patterns that are always denied, even in yolo mode.
+    /// Each entry is a substring pattern: if the command contains it, the call
+    /// is rejected before execution.
+    pub extra_denylist: Vec<String>,
 }
 
 impl ToolCtx {
@@ -14,7 +18,25 @@ impl ToolCtx {
             mode,
             cwd,
             project_root,
+            extra_denylist: Vec::new(),
         }
+    }
+
+    /// Like [`new`] but also accepts a project-level denylist of shell patterns.
+    pub fn new_with_config(
+        mode: PermissionMode,
+        cwd: PathBuf,
+        project_root: PathBuf,
+        extra_denylist: Vec<String>,
+    ) -> Self {
+        Self { mode, cwd, project_root, extra_denylist }
+    }
+
+    /// Returns `true` if the given shell command matches any entry in the
+    /// project-level denylist (substring match). Always-deny takes precedence
+    /// over the permission mode.
+    pub fn is_shell_denied(&self, command: &str) -> bool {
+        self.extra_denylist.iter().any(|pattern| command.contains(pattern.as_str()))
     }
 
     /// Resolve a tool-supplied path against the cwd. Returns canonicalized

@@ -182,6 +182,44 @@ fn parse_frontmatter(front: &str) -> std::collections::BTreeMap<String, String> 
     out
 }
 
+/// Extract all `{{var}}` placeholder names from a skill body, in order of
+/// first appearance, deduplicated.
+pub fn extract_vars(body: &str) -> Vec<String> {
+    let mut seen = std::collections::LinkedList::new();
+    let mut set = std::collections::HashSet::new();
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' && chars.peek() == Some(&'{') {
+            chars.next(); // consume second '{'
+            let mut name = String::new();
+            for c2 in chars.by_ref() {
+                if c2 == '}' {
+                    // consume potential second '}'
+                    break;
+                }
+                name.push(c2);
+            }
+            // consume closing '}'
+            chars.next();
+            let name = name.trim().to_string();
+            if !name.is_empty() && set.insert(name.clone()) {
+                seen.push_back(name);
+            }
+        }
+    }
+    seen.into_iter().collect()
+}
+
+/// Replace all `{{var}}` placeholders in `body` with the values from `vars`.
+/// Unknown variable names are left as-is.
+pub fn apply_vars(body: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut result = body.to_string();
+    for (k, v) in vars {
+        result = result.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    result
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SkillError {
     #[error("io: {0}")]

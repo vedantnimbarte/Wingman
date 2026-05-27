@@ -28,6 +28,12 @@ pub enum ContentBlock {
         #[serde(default)]
         is_error: bool,
     },
+    Image {
+        /// base64-encoded image data
+        data: String,
+        /// MIME type: "image/jpeg", "image/png", "image/gif", "image/webp"
+        media_type: String,
+    },
 }
 
 impl ContentBlock {

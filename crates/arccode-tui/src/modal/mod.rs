@@ -12,17 +12,27 @@
 use crossterm::event::KeyEvent;
 use ratatui::{buffer::Buffer, layout::Rect};
 
+pub mod diff_preview;
 pub mod file_picker;
+pub mod help;
 pub mod login;
 pub mod mcp;
 pub mod model_picker;
+pub mod params;
+pub mod session_picker;
+pub mod skill_vars;
 pub mod skills;
 pub mod usage;
 
+pub use diff_preview::{DiffDecision, DiffPreviewModal};
 pub use file_picker::FilePicker;
+pub use help::HelpModal;
 pub use login::{LoginPayload, LoginTask, LoginWizard};
 pub use mcp::{McpAddPayload, McpServerSummary, McpTask, McpView};
 pub use model_picker::{ModelChoice, ModelPicker};
+pub use params::ParamsModal;
+pub use session_picker::{SessionEntry, SessionPicker};
+pub use skill_vars::SkillVarsModal;
 pub use skills::SkillsView;
 pub use usage::UsageView;
 
@@ -56,6 +66,11 @@ pub enum ActiveModal {
     Usage(UsageView),
     Skills(SkillsView),
     Mcp(McpView),
+    Help(HelpModal),
+    Params(ParamsModal),
+    SessionPicker(SessionPicker),
+    SkillVars(SkillVarsModal),
+    DiffPreview(DiffPreviewModal),
 }
 
 impl ActiveModal {
@@ -72,6 +87,11 @@ impl ActiveModal {
             Self::Usage(v) => v.handle_key(key),
             Self::Skills(v) => v.handle_key(key),
             Self::Mcp(v) => v.handle_key(key),
+            Self::Help(v) => v.handle_key(key),
+            Self::Params(v) => v.handle_key(key),
+            Self::SessionPicker(v) => v.handle_key(key),
+            Self::SkillVars(v) => v.handle_key(key),
+            Self::DiffPreview(v) => v.handle_key(key),
         }
     }
 
@@ -85,6 +105,11 @@ impl ActiveModal {
             Self::Usage(_) => None,
             Self::Skills(_) => None,
             Self::Mcp(v) => v.take_pending_task().map(ModalTask::Mcp),
+            Self::Help(_) => None,
+            Self::Params(_) => None,
+            Self::SessionPicker(_) => None,
+            Self::SkillVars(_) => None,
+            Self::DiffPreview(_) => None,
         }
     }
 
@@ -98,6 +123,11 @@ impl ActiveModal {
             Self::Usage(_) => {}
             Self::Skills(_) => {}
             Self::Mcp(v) => v.task_completed(result),
+            Self::Help(_) => {}
+            Self::Params(_) => {}
+            Self::SessionPicker(_) => {}
+            Self::SkillVars(_) => {}
+            Self::DiffPreview(_) => {}
         }
     }
 
@@ -110,6 +140,11 @@ impl ActiveModal {
             Self::Usage(v) => v.render(area, buf),
             Self::Skills(v) => v.render(area, buf),
             Self::Mcp(v) => v.render(area, buf),
+            Self::Help(v) => v.render(area, buf),
+            Self::Params(v) => v.render(area, buf),
+            Self::SessionPicker(v) => v.render(area, buf),
+            Self::SkillVars(v) => v.render(area, buf),
+            Self::DiffPreview(v) => v.render(area, buf),
         }
     }
 }

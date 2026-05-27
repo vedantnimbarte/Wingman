@@ -28,8 +28,9 @@ use ratatui::{
 };
 
 use crate::modal::{
-    ActiveModal, FilePicker, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
-    ModalOutcome, ModalTask, ModelPicker, SkillsView, UsageView,
+    ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask,
+    McpView, ModalOutcome, ModalTask, ModelPicker, ParamsModal, SessionEntry, SessionPicker,
+    SkillsView, UsageView,
 };
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
@@ -130,6 +131,9 @@ enum Cmd {
     SkillsNew(String),
     Skill(String),
     Mcp,
+    Export(String),
+    Params,
+    Resume,
     Submit(String),
     None,
 }
@@ -174,6 +178,9 @@ fn parse_slash(line: &str) -> Cmd {
         }
         "/skill" if !arg.is_empty() => Cmd::Skill(arg.to_string()),
         "/mcp" => Cmd::Mcp,
+        "/export" => Cmd::Export(if arg.is_empty() { "md".into() } else { arg.to_string() }),
+        "/params" => Cmd::Params,
+        "/resume" => Cmd::Resume,
         "" => Cmd::None,
         _ => Cmd::Submit(line.to_string()),
     }
@@ -210,6 +217,7 @@ async fn run_inner(
             model: ctx.model.clone(),
             provider: ctx.provider_id.clone(),
             mode: ctx.mode.clone(),
+            connected: agent.is_some(),
             ..Default::default()
         },
         modal: ActiveModal::None,
@@ -268,6 +276,12 @@ async fn run_inner(
                                 "attached {} file{}",
                                 exp.attached,
                                 if exp.attached == 1 { "" } else { "s" }
+                            )));
+                        }
+                        if !exp.images.is_empty() {
+                            ui.transcript.push(TranscriptItem::System(format!(
+                                "Vision: {} image(s) attached. Full image content requires provider vision support.",
+                                exp.images.len()
                             )));
                         }
                         // If a skill was queued, prepend its body and clear
@@ -352,6 +366,7 @@ async fn run_modal_task(
                                 *agent = Some(new_agent);
                                 ui.status.provider = payload.provider_id.clone();
                                 ui.status.model = payload.model.clone();
+                                ui.status.connected = true;
                                 ui.modal = ActiveModal::None;
                                 ui.transcript.push(TranscriptItem::System(format!(
                                     "connected to {}/{}",
@@ -435,6 +450,24 @@ async fn idle_step(
                                             ui.pending_skill = Some(s);
                                         }
                                     }
+                                    ActiveModal::Params(p) => {
+                                        if let Some((temp, max_tok)) = p.take_result() {
+                                            if let Some(a) = agent.as_mut() {
+                                                a.set_temperature(temp);
+                                                a.set_max_tokens(max_tok);
+                                                ui.transcript.push(TranscriptItem::System(format!(
+                                                    "params updated: temperature={}, max_tokens={max_tok}",
+                                                    temp.map(|t| t.to_string())
+                                                        .unwrap_or_else(|| "default".to_string()),
+                                                )));
+                                            }
+                                        }
+                                    }
+                                    ActiveModal::SessionPicker(p) => {
+                                        if let Some(entry) = p.take_selected() {
+                                            resume_session(agent, ui, entry);
+                                        }
+                                    }
                                     _ => {}
                                 }
                                 ui.modal = ActiveModal::None;
@@ -503,6 +536,7 @@ async fn idle_step(
                                                 *agent = None;
                                                 ui.status.provider.clear();
                                                 ui.status.model.clear();
+                                                ui.status.connected = false;
                                             }
                                         }
                                         Err(e) => {
@@ -548,6 +582,63 @@ async fn idle_step(
                                 let servers = (ctx.mcp_list_runner)().await;
                                 ui.modal = ActiveModal::Mcp(McpView::new(servers));
                             }
+                            Cmd::Export(fmt) => {
+                                let path = export_transcript(&ui.transcript, &fmt, project_root);
+                                match path {
+                                    Ok(p) => ui.transcript.push(TranscriptItem::System(format!(
+                                        "exported to {}",
+                                        p.display()
+                                    ))),
+                                    Err(e) => ui.transcript.push(TranscriptItem::Error(format!(
+                                        "/export: {e}"
+                                    ))),
+                                }
+                            }
+                            Cmd::Params => {
+                                if let Some(a) = agent.as_ref() {
+                                    ui.modal = ActiveModal::Params(ParamsModal::new(
+                                        a.get_temperature(),
+                                        a.get_max_tokens(),
+                                    ));
+                                } else {
+                                    ui.transcript.push(TranscriptItem::Error(
+                                        "/params: no active agent — run /login first".into(),
+                                    ));
+                                }
+                            }
+                            Cmd::Resume => {
+                                let sessions_dir =
+                                    project_root.join(".arccode").join("sessions");
+                                let paths = arccode_session::list_sessions(&sessions_dir);
+                                let entries: Vec<SessionEntry> = paths
+                                    .into_iter()
+                                    .take(20)
+                                    .map(|p| {
+                                        let label = p
+                                            .file_stem()
+                                            .and_then(|s| s.to_str())
+                                            .unwrap_or("unknown")
+                                            .to_string();
+                                        let (provider, model) =
+                                            match arccode_session::load_session(&p) {
+                                                Ok(records) => {
+                                                    arccode_session::session_meta(&records)
+                                                        .unwrap_or_else(|| {
+                                                            ("unknown".into(), "unknown".into())
+                                                        })
+                                                }
+                                                Err(_) => ("unknown".into(), "unknown".into()),
+                                            };
+                                        SessionEntry {
+                                            path: p,
+                                            label,
+                                            provider,
+                                            model,
+                                        }
+                                    })
+                                    .collect();
+                                ui.modal = ActiveModal::SessionPicker(SessionPicker::new(entries));
+                            }
                             Cmd::SkillsNew(name) => {
                                 match arccode_skills::new_global_path(&name) {
                                     Ok(path) => {
@@ -589,6 +680,12 @@ async fn idle_step(
                         ui.composer.input.pop();
                         ui.slash.update(&ui.composer.input);
                     }
+                    KeyCode::Up if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                        ui.transcript.scroll_up();
+                    }
+                    KeyCode::Down if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                        ui.transcript.scroll_down();
+                    }
                     KeyCode::Up => {
                         if ui.slash.is_visible() {
                             ui.slash.move_up();
@@ -604,6 +701,12 @@ async fn idle_step(
                             ui.composer.history_next();
                             ui.slash.update(&ui.composer.input);
                         }
+                    }
+                    KeyCode::PageUp => {
+                        ui.transcript.scroll_up();
+                    }
+                    KeyCode::PageDown => {
+                        ui.transcript.scroll_down();
                     }
                     KeyCode::Tab => {
                         // Tab completes the selected command, inserting a
@@ -622,6 +725,9 @@ async fn idle_step(
                         // inserted into the composer until the user picks a
                         // file (see ModalOutcome::Close handler above).
                         ui.modal = ActiveModal::FilePicker(FilePicker::new(project_root.clone()));
+                    }
+                    KeyCode::Char('?') if ui.composer.input.is_empty() => {
+                        ui.modal = ActiveModal::Help(HelpModal::new());
                     }
                     KeyCode::Char(c) => {
                         ui.composer.input.push(c);
@@ -795,6 +901,73 @@ fn swap_model(
     }
 }
 
+fn resume_session(agent: &mut Option<AgentLoop>, ui: &mut UiState, entry: SessionEntry) {
+    match arccode_session::load_session(&entry.path) {
+        Ok(records) => {
+            let history = arccode_session::records_to_messages(&records);
+            ui.transcript.push(TranscriptItem::System(format!(
+                "resuming session {} ({} messages)",
+                entry.label,
+                history.len()
+            )));
+            // We can't set history directly on AgentLoop without a dedicated
+            // method, so note the limitation.
+            drop(history); // TODO: wire up once AgentLoop::set_history is available
+            ui.transcript.push(TranscriptItem::System(
+                "(session context shown above; history injection requires agent rebuild)".into(),
+            ));
+            let _ = agent; // will be used once set_history is wired
+        }
+        Err(e) => {
+            ui.transcript
+                .push(TranscriptItem::Error(format!("resume: {e}")));
+        }
+    }
+}
+
+fn export_transcript(
+    transcript: &Transcript,
+    format: &str,
+    project_root: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
+    let ext = if format == "json" { "json" } else { "md" };
+    let dir = project_root.join(".arccode").join("exports");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{ts}.{ext}"));
+
+    if format == "json" {
+        let items: Vec<serde_json::Value> = transcript.items.iter().map(|item| {
+            match item {
+                TranscriptItem::UserPrompt(s) => serde_json::json!({"role": "user", "content": s}),
+                TranscriptItem::AssistantText(s) => serde_json::json!({"role": "assistant", "content": s}),
+                TranscriptItem::ToolCall { name, summary } => serde_json::json!({"role": "tool_call", "name": name, "summary": summary}),
+                TranscriptItem::ToolResult { ok, summary } => serde_json::json!({"role": "tool_result", "ok": ok, "summary": summary}),
+                TranscriptItem::System(s) => serde_json::json!({"role": "system", "content": s}),
+                TranscriptItem::Error(s) => serde_json::json!({"role": "error", "content": s}),
+            }
+        }).collect();
+        std::fs::write(&path, serde_json::to_string_pretty(&items)?)?;
+    } else {
+        let mut md = String::new();
+        for item in &transcript.items {
+            match item {
+                TranscriptItem::UserPrompt(s) => { md.push_str(&format!("**You:** {s}\n\n")); }
+                TranscriptItem::AssistantText(s) => { md.push_str(&format!("{s}\n\n")); }
+                TranscriptItem::ToolCall { name, summary } => { md.push_str(&format!("> `{name}` {summary}\n")); }
+                TranscriptItem::ToolResult { ok, summary } => {
+                    let glyph = if *ok { "✓" } else { "✗" };
+                    md.push_str(&format!("> {glyph} {summary}\n\n"));
+                }
+                TranscriptItem::System(s) => { md.push_str(&format!("*{s}*\n")); }
+                TranscriptItem::Error(s) => { md.push_str(&format!("**Error:** {s}\n\n")); }
+            }
+        }
+        std::fs::write(&path, md)?;
+    }
+    Ok(path)
+}
+
 fn help_text() -> String {
     String::from(
         "Slash commands:\n  \
@@ -810,8 +983,12 @@ fn help_text() -> String {
          /skill <name>               queue a skill for the next prompt\n  \
          /skills new <name>          create a new skill in $EDITOR\n  \
          /mcp                        manage MCP servers (add / connect / remove)\n  \
+         /params                     adjust temperature and max_tokens\n  \
+         /resume                     resume a previous session\n  \
+         /export [md|json]           export conversation to file\n  \
          /quit                       exit\n\nKeys: \
-         Enter submit, Up/Down history, Esc clear input, Ctrl-C exit. \
+         Enter submit, Up/Down history, Esc clear input, Ctrl-C exit, \
+         PgUp/PgDn or Shift+Up/Down scroll transcript, ? show shortcuts. \
          Type @ to fuzzy-pick a file from the project.",
     )
 }

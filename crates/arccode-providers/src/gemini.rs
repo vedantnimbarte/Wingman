@@ -273,6 +273,12 @@ fn encode_contents(messages: &[Message]) -> Value {
                     "functionCall": { "name": name, "args": input }
                 }),
                 ContentBlock::ToolResult { .. } => json!({}),
+                ContentBlock::Image { data, media_type } => json!({
+                    "inline_data": {
+                        "mime_type": media_type,
+                        "data": data,
+                    }
+                }),
             })
             .collect();
         out.push(json!({ "role": role, "parts": parts }));
