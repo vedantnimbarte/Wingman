@@ -76,23 +76,13 @@ impl<'a> Widget for ComposerView<'a> {
                 Style::default().fg(Color::Cyan),
             )
         };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(border_style)
-            .title(Span::styled(title, title_style));
-
-        // Render the bordered block first, then paint our content inside
-        // its inner rect. Doing it in two steps (rather than via
-        // `Paragraph::block`) makes the clipping behavior obvious: text
-        // can never bleed onto the border rows.
-        let inner = block.inner(area);
-        block.render(area, buf);
-
         // Tailor the placeholder to the available horizontal space so it
         // never gets cropped or visually overruns the cursor.
-        let hint = if inner.width >= 60 {
+        // Subtract 2 for left/right borders when estimating inner width.
+        let inner_width = area.width.saturating_sub(2);
+        let hint = if inner_width >= 60 {
             " type a message · / for commands · @ to attach a file"
-        } else if inner.width >= 40 {
+        } else if inner_width >= 40 {
             " type a message · / commands · @ files"
         } else {
             " type / for commands"
@@ -128,6 +118,15 @@ impl<'a> Widget for ComposerView<'a> {
                 Span::styled("▏", Style::default().fg(Color::Cyan)),
             ])
         };
-        Paragraph::new(line).render(inner, buf);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border_style)
+            .title(Span::styled(title, title_style));
+
+        // Use Paragraph::block() so ratatui owns the layout and places the
+        // text inside the border rect — avoids any off-by-one with manual
+        // block.inner() + separate renders.
+        Paragraph::new(line).block(block).render(area, buf);
     }
 }
