@@ -74,7 +74,11 @@ pub enum ConfigAction {
 
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
-    logging::install_tracing(cli.verbose, cli.quiet);
+    // Suppress INFO logs during TUI mode (no verbose flag) so stderr output
+    // doesn't bleed into the alternate-screen buffer and corrupt the display.
+    let is_tui = cli.command.is_none() && cli.print.is_none() && cli.batch.is_none();
+    let quiet_for_logging = cli.quiet || (is_tui && cli.verbose == 0);
+    logging::install_tracing(cli.verbose, quiet_for_logging);
 
     if let Some(file) = cli.batch {
         let cfg = load_config()?;

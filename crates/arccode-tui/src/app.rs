@@ -227,17 +227,6 @@ async fn run_inner(
         pending_skill: None,
         slash: SlashSuggest::default(),
     };
-    if agent.is_some() {
-        ui.transcript.push(TranscriptItem::System(format!(
-            "arccode {}/{} · mode={} · /help for commands · /quit to exit",
-            ctx.provider_id, ctx.model, ctx.mode
-        )));
-    } else {
-        ui.transcript.push(TranscriptItem::System(
-            "No provider configured — type /login to get started.".into(),
-        ));
-    }
-
     let mut events = EventStream::new();
     loop {
         ui.composer.busy = false;
