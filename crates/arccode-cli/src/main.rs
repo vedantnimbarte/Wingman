@@ -6,6 +6,7 @@
 mod cli;
 mod commands;
 mod logging;
+mod mcp_adapter;
 mod runtime;
 
 use std::process::ExitCode;

@@ -28,7 +28,7 @@ arccode-tui = { path = "crates/arccode-tui", version = "0.0.1" }
 arccode-providers = { path = "crates/arccode-providers", version = "0.0.1" }
 arccode-tools = { path = "crates/arccode-tools", version = "0.0.1" }
 arccode-session = { path = "crates/arccode-session", version = "0.0.1" }
-arccode-rag = { path = "crates/arccode-rag", version = "0.0.1" }
+arccode-rag = { path = "crates/arccode-rag", version = "0.0.1", default-features = false }
 arccode-mcp = { path = "crates/arccode-mcp", version = "0.0.1" }
 
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }

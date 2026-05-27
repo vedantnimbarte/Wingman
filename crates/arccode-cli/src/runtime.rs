@@ -7,6 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use arccode_config::{Config, PermissionMode, ProjectPaths};
 use arccode_core::{AgentConfig, AgentLoop, Compactor, Provider, ToolOutputBudget};
 use arccode_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiVariant};
+use arccode_rag::{Embedder, HashEmbedder, IndexStore, Indexer};
 use arccode_tools::{ToolCtx, ToolRegistry};
 use std::sync::Arc;
 
@@ -136,19 +137,70 @@ fn looks_like_placeholder(s: &str) -> bool {
     s.trim().starts_with("${") && s.trim().ends_with('}')
 }
 
-pub fn build_registry(cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
+pub async fn build_registry(cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
     let cwd = std::env::current_dir()?;
     let paths = ProjectPaths::discover(&cwd);
     let ctx = ToolCtx::new(mode, cwd, paths.root.clone());
-    let mut reg = ToolRegistry::new(ctx);
-    let _ = cfg; // reserved for future per-tool config knobs
-    reg = reg.with_builtins();
+    let mut reg = ToolRegistry::new(ctx).with_builtins();
+    if let Some(indexer) = build_indexer(&paths)? {
+        reg = reg.with_semantic_search(indexer);
+    }
+    // MCP servers — best-effort connect; failures are logged and skipped.
+    if !cfg.mcp.is_empty() {
+        let servers = arccode_mcp::connect_all(&cfg.mcp).await;
+        for adapter in crate::mcp_adapter::build_adapters(&servers) {
+            reg.register(adapter);
+        }
+    }
     Ok(reg)
 }
 
-pub fn build_agent(cfg: &Config, selection: &Selection, mode: PermissionMode) -> Result<AgentLoop> {
+/// Build the project's RAG indexer. Uses fastembed (BGE small) by default
+/// and falls back to a deterministic hash embedder if fastembed init fails
+/// (e.g. on systems without ONNX runtime libraries).
+pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
+    let embedder = pick_embedder();
+    let store = match IndexStore::open(&paths.index_db, embedder.id(), embedder.dim()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("disabling RAG: could not open index db: {e}");
+            return Ok(None);
+        }
+    };
+    Ok(Some(Arc::new(Indexer::new(
+        paths.root.clone(),
+        embedder,
+        Arc::new(store),
+    ))))
+}
+
+fn pick_embedder() -> Arc<dyn Embedder> {
+    #[cfg(feature = "embeddings")]
+    {
+        match arccode_rag::FastembedEmbedder::new(Some(model_cache_dir())) {
+            Ok(e) => return Arc::new(e),
+            Err(err) => {
+                tracing::warn!("fastembed init failed, falling back to hash embedder: {err}");
+            }
+        }
+    }
+    Arc::new(HashEmbedder::default())
+}
+
+#[cfg(feature = "embeddings")]
+fn model_cache_dir() -> std::path::PathBuf {
+    arccode_config::global_dir()
+        .map(|d| d.join("models"))
+        .unwrap_or_else(|_| std::path::PathBuf::from(".arccode/models"))
+}
+
+pub async fn build_agent(
+    cfg: &Config,
+    selection: &Selection,
+    mode: PermissionMode,
+) -> Result<AgentLoop> {
     let provider = build_provider(cfg, &selection.provider_id)?;
-    let registry = build_registry(cfg, mode)?;
+    let registry = build_registry(cfg, mode).await?;
     let system = build_system_prompt(mode);
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
@@ -171,10 +223,14 @@ pub fn build_system_prompt(mode: PermissionMode) -> String {
         "You are arccode, a terminal coding agent. You help the user inspect, \
          edit, and run code from the command line.\n\
          \n\
-         Available tools: read_file, write_file, edit_file, run_shell, list_dir, glob, grep.\n\
+         Available tools: semantic_search, read_file, write_file, edit_file, run_shell, list_dir, glob, grep.\n\
          \n\
          Style rules:\n\
-         - Prefer narrow, targeted reads (`read_file` with `offset`/`limit`) over reading whole files.\n\
+         - For \"where is X\" or \"how does Y work\" questions, call `semantic_search` first \
+         to find the relevant chunks, then `read_file` the specific line range you need. \
+         Avoid reading whole files when a targeted range will do.\n\
+         - Use `grep` for exact-string lookups and `glob` for filename patterns; \
+         use `semantic_search` for conceptual / fuzzy queries.\n\
          - Edit with `edit_file` and include enough surrounding context that `old_string` is unique.\n\
          - Verify your edits when reasonable (compile, run a test, re-read the diff).\n\
          - Be concise. Don't restate what the diff already shows.\n\

@@ -13,6 +13,29 @@ arccode-config = { workspace = true }
 
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+anyhow = { workspace = true }
+
+# Filesystem walking + watching
+ignore = "0.4"
+notify = "6"
+notify-debouncer-mini = "0.4"
+
+# Storage
+rusqlite = { version = "0.31", features = ["bundled", "blob"] }
+
+# Embeddings (fastembed downloads ONNX models on first use; gated by feature
+# so the rest of the workspace builds without ONNX runtime present).
+fastembed = { version = "5", optional = true }
+
+# Hashing for change detection
+blake3 = "1"
+
+[features]
+default = ["embeddings"]
+embeddings = ["dep:fastembed"]
+

@@ -18,9 +18,12 @@ arccode-providers = { workspace = true }
 arccode-tools = { workspace = true }
 arccode-session = { workspace = true }
 arccode-tui = { workspace = true }
+arccode-rag = { workspace = true, default-features = false }
+arccode-mcp = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }
+async-trait = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -29,3 +32,10 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+
+[features]
+default = ["embeddings"]
+# Pulls in fastembed-rs + ONNX runtime for real semantic search. Disable
+# this to ship a smaller binary that falls back to a deterministic
+# hash-based embedder (poor recall but fast and dep-free).
+embeddings = ["arccode-rag/embeddings"]

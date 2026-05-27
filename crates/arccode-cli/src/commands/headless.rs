@@ -22,7 +22,7 @@ pub struct HeadlessOptions {
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
     let selection = runtime::resolve_selection(&cfg, opts.model_override.as_deref())?;
-    let mut agent = runtime::build_agent(&cfg, &selection, mode)?;
+    let mut agent = runtime::build_agent(&cfg, &selection, mode).await?;
 
     // Open session log under the project's .arccode/sessions/ dir.
     let cwd = std::env::current_dir()?;
