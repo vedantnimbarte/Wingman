@@ -39,6 +39,13 @@ impl ToolRegistry {
         self.register(crate::builtin::Grep);
         self
     }
+
+    /// Register the `semantic_search` tool against a shared indexer. Call
+    /// this on top of [`with_builtins`] when RAG is wired.
+    pub fn with_semantic_search(mut self, indexer: std::sync::Arc<arccode_rag::Indexer>) -> Self {
+        self.register(crate::builtin::SemanticSearch::new(indexer));
+        self
+    }
 }
 
 #[async_trait]

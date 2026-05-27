@@ -10,6 +10,7 @@ description = "Built-in tools (file/shell/search) for arccode"
 [dependencies]
 arccode-core = { workspace = true }
 arccode-config = { workspace = true }
+arccode-rag = { workspace = true, default-features = false }
 
 tokio = { workspace = true }
 async-trait = { workspace = true }

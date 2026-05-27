@@ -13,7 +13,10 @@ arccode-config = { workspace = true }
 
 tokio = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+rmcp = { version = "1", default-features = false, features = ["client", "transport-child-process", "macros"] }

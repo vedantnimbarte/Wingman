@@ -91,7 +91,20 @@ pub async fn run() -> Result<ExitCode> {
             let mode_override = parse_mode(cli.mode.as_deref())?;
             let mode = mode_override.unwrap_or(cfg.permission_mode);
             let selection = crate::runtime::resolve_selection(&cfg, cli.model.as_deref())?;
-            let agent = crate::runtime::build_agent(&cfg, &selection, mode)?;
+            let agent = crate::runtime::build_agent(&cfg, &selection, mode).await?;
+
+            // Kick off background indexing for the project. The handle is
+            // held until the TUI exits.
+            let project = ProjectPaths::discover(&std::env::current_dir()?);
+            let _watch_handle = match crate::runtime::build_indexer(&project)? {
+                Some(indexer) => {
+                    arccode_rag::spawn_background_indexer(indexer, project.root.clone())
+                        .map_err(anyhow::Error::msg)
+                        .ok()
+                }
+                None => None,
+            };
+
             let cfg_for_builder = cfg.clone();
             let builder: arccode_tui::ProviderBuilder = std::sync::Arc::new(move |id: &str| {
                 crate::runtime::build_provider(&cfg_for_builder, id).map_err(|e| e.to_string())
