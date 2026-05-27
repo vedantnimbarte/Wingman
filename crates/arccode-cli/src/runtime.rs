@@ -243,7 +243,9 @@ pub async fn build_registry_with_learn(
         paths.root.clone(),
         cfg.tools.shell_denylist.clone(),
     );
-    let mut reg = ToolRegistry::new(ctx).with_builtins();
+    let mut reg = ToolRegistry::new(ctx)
+        .with_builtins()
+        .with_hooks(cfg.hooks.clone());
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {
         reg = reg.with_semantic_search(idx);
@@ -361,6 +363,44 @@ pub async fn build_agent(
     Ok(agent)
 }
 
+/// Like `build_agent` but, on failure, walks `cfg.router.fallback_models`
+/// in order until one succeeds. The selection that actually built is
+/// printed to stderr so the user knows what's serving the request.
+pub async fn build_agent_with_fallback(
+    cfg: &Config,
+    selection: &Selection,
+    mode: PermissionMode,
+) -> Result<AgentLoop> {
+    match build_agent(cfg, selection, mode).await {
+        Ok(a) => Ok(a),
+        Err(primary_err) => {
+            for raw in &cfg.router.fallback_models {
+                let Some((p, m)) = raw.split_once('/') else {
+                    tracing::warn!("skipping fallback '{raw}': expected provider/model");
+                    continue;
+                };
+                let sel = Selection {
+                    provider_id: p.to_string(),
+                    model: m.to_string(),
+                };
+                match build_agent(cfg, &sel, mode).await {
+                    Ok(a) => {
+                        eprintln!(
+                            "arccode: primary failed ({primary_err}); falling back to {}/{}",
+                            sel.provider_id, sel.model
+                        );
+                        return Ok(a);
+                    }
+                    Err(e) => {
+                        tracing::warn!("fallback {raw} failed: {e}");
+                    }
+                }
+            }
+            Err(primary_err)
+        }
+    }
+}
+
 /// Variant that also returns the shared `Arc<ToolRegistry>` so callers can
 /// register/unregister tools at runtime (used by the MCP registry).
 pub async fn build_agent_and_registry(
@@ -404,6 +444,72 @@ pub async fn build_agent_registry_learn(
     };
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
+
+    // Register the `spawn_subagent` tool against this registry. The runner
+    // closure builds a fresh inner agent on each call — crucially WITHOUT
+    // `spawn_subagent` registered on it, so recursion is bounded to depth 1.
+    {
+        let cfg_for_runner = cfg.clone();
+        let mode_for_runner = mode;
+        let runner: arccode_tools::builtin::SubagentRunner = Arc::new(
+            move |spec: arccode_tools::builtin::SubagentSpec| {
+                let cfg = cfg_for_runner.clone();
+                let mode = mode_for_runner;
+                Box::pin(async move {
+                    let sel = if spec.model.contains('/') {
+                        let (p, m) = spec.model.split_once('/').unwrap();
+                        Selection {
+                            provider_id: p.to_string(),
+                            model: m.to_string(),
+                        }
+                    } else {
+                        resolve_selection(&cfg, None).map_err(|e| e.to_string())?
+                    };
+                    let provider = build_provider(&cfg, &sel.provider_id)
+                        .map_err(|e| e.to_string())?;
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let paths = ProjectPaths::discover(&cwd);
+                    let ctx = ToolCtx::new_with_config(
+                        mode,
+                        cwd,
+                        paths.root.clone(),
+                        cfg.tools.shell_denylist.clone(),
+                    );
+                    let mut inner_reg = ToolRegistry::new(ctx)
+                        .with_builtins()
+                        .with_hooks(cfg.hooks.clone());
+                    if let Ok(Some(idx)) = build_indexer(&paths) {
+                        inner_reg = inner_reg.with_semantic_search(idx);
+                    }
+                    let inner_reg = Arc::new(inner_reg);
+                    let agent_cfg = AgentConfig {
+                        model: sel.model.clone(),
+                        system: Some(format!(
+                            "You are an isolated subagent invoked by a parent. \
+                             Focus narrowly on the task; respond with only the \
+                             final answer (no preamble). Description: {}",
+                            spec.description
+                        )),
+                        ..Default::default()
+                    };
+                    let mut agent = AgentLoop::new(provider, inner_reg, agent_cfg);
+                    let mut stream = agent.run(spec.task);
+                    let mut out = String::new();
+                    use futures::StreamExt;
+                    while let Some(ev) = stream.next().await {
+                        match ev {
+                            arccode_core::AgentEvent::TextDelta { text } => out.push_str(&text),
+                            arccode_core::AgentEvent::Error { message } => return Err(message),
+                            arccode_core::AgentEvent::Stop { .. } => break,
+                            _ => {}
+                        }
+                    }
+                    Ok(out)
+                })
+            },
+        );
+        registry.register_arc(Arc::new(arccode_tools::builtin::SpawnSubagent::new(runner)));
+    }
 
     // Compose the system prompt: base + memory index + skills catalog.
     let memory_store = learn

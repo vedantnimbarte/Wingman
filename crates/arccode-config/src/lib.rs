@@ -66,6 +66,11 @@ pub enum PermissionMode {
     /// Reads/searches free; every write or shell call prompts.
     #[default]
     ReadOnly,
+    /// Like read-only, but the assistant is expected to produce an
+    /// explicit plan via `present_plan` before any write/shell tool runs.
+    /// Once the user approves the plan, the runtime promotes the session
+    /// to `auto-edit` for the remainder of the user turn.
+    Plan,
     /// Writes/shell inside the project tree auto-allowed; out-of-tree paths
     /// and a denylist of destructive shell patterns still prompt.
     AutoEdit,
@@ -78,10 +83,11 @@ impl std::str::FromStr for PermissionMode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "read-only" | "readonly" | "ro" => Ok(Self::ReadOnly),
+            "plan" => Ok(Self::Plan),
             "auto-edit" | "autoedit" | "auto" => Ok(Self::AutoEdit),
             "yolo" => Ok(Self::Yolo),
             other => Err(format!(
-                "unknown permission mode '{other}' (expected read-only, auto-edit, yolo)"
+                "unknown permission mode '{other}' (expected read-only, plan, auto-edit, yolo)"
             )),
         }
     }
@@ -91,6 +97,7 @@ impl std::fmt::Display for PermissionMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::ReadOnly => "read-only",
+            Self::Plan => "plan",
             Self::AutoEdit => "auto-edit",
             Self::Yolo => "yolo",
         })
@@ -136,6 +143,88 @@ pub struct Config {
     /// Per-project tool settings.
     #[serde(default)]
     pub tools: ToolsConfig,
+
+    /// User-defined shell hooks fired at well-known points.
+    #[serde(default)]
+    pub hooks: HooksConfig,
+
+    /// Periodic prompts that fire when `arccode schedule run` is invoked
+    /// (e.g. from cron / a launchd plist / Task Scheduler).
+    #[serde(default)]
+    pub schedule: Vec<ScheduledTask>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ScheduledTask {
+    /// Stable id used to record last-run-at.
+    pub id: String,
+    /// Cadence in seconds; the task fires when at least this many seconds
+    /// have elapsed since its last successful run.
+    pub every_secs: u64,
+    /// Prompt to send headlessly.
+    pub prompt: String,
+    /// Optional model override (`provider/model`).
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// User-defined shell hooks. Each hook is a shell command run when the
+/// matching event fires. A hook that exits non-zero with `block: true`
+/// turns a tool call into an error (for `pre_tool_use`) or surfaces a
+/// warning otherwise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct HooksConfig {
+    /// Fired before a tool runs. Receives `ARCCODE_TOOL_NAME` and
+    /// `ARCCODE_TOOL_INPUT` (JSON) in the env.
+    #[serde(default)]
+    pub pre_tool_use: Vec<Hook>,
+    /// Fired after a tool runs. Receives `ARCCODE_TOOL_NAME`,
+    /// `ARCCODE_TOOL_INPUT`, `ARCCODE_TOOL_OUTPUT`, `ARCCODE_TOOL_IS_ERROR`.
+    #[serde(default)]
+    pub post_tool_use: Vec<Hook>,
+    /// Fired when the assistant emits its final Stop for a user turn.
+    /// Receives `ARCCODE_STOP_REASON`.
+    #[serde(default)]
+    pub stop: Vec<Hook>,
+    /// Fired when the user submits a prompt. Receives `ARCCODE_USER_PROMPT`.
+    /// If `block: true` and the hook exits non-zero, the prompt is rejected.
+    #[serde(default)]
+    pub user_prompt_submit: Vec<Hook>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Hook {
+    /// Shell command to execute. Run via `sh -c` (or `cmd /C` on Windows).
+    pub command: String,
+    /// Glob-ish substring match on tool name; empty = match all. Only used
+    /// for tool-related hook kinds.
+    #[serde(default)]
+    pub match_tool: String,
+    /// If true, a non-zero exit cancels the action (rejects the tool call
+    /// for `pre_tool_use`, rejects the prompt for `user_prompt_submit`).
+    #[serde(default)]
+    pub block: bool,
+    /// Timeout in seconds (default: 10).
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_hook_timeout() -> u64 {
+    10
+}
+
+impl Default for Hook {
+    fn default() -> Self {
+        Self {
+            command: String::new(),
+            match_tool: String::new(),
+            block: false,
+            timeout_secs: default_hook_timeout(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -156,8 +245,29 @@ pub struct ProviderConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TuiConfig {
+    /// Theme name: "default" | "light" | "mono" — or any custom name that
+    /// matches a `~/.arccode/themes/<name>.toml` file.
     pub theme: String,
     pub show_token_usage: bool,
+    /// Optional color overrides; if any are set they override the named
+    /// theme for that one role. Values are crossterm/ratatui color names
+    /// (`"red"`, `"darkgray"`, …) or `"#rrggbb"` hex.
+    #[serde(default)]
+    pub colors: ThemeColors,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ThemeColors {
+    pub user_prompt: Option<String>,
+    pub assistant: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_summary: Option<String>,
+    pub tool_ok: Option<String>,
+    pub tool_err: Option<String>,
+    pub system: Option<String>,
+    pub error: Option<String>,
+    pub code_block: Option<String>,
 }
 
 impl Default for TuiConfig {
@@ -165,6 +275,7 @@ impl Default for TuiConfig {
         Self {
             theme: "default".into(),
             show_token_usage: true,
+            colors: ThemeColors::default(),
         }
     }
 }
@@ -196,6 +307,11 @@ pub struct RouterConfig {
     /// "Fast" model used for classification, summarization, and recap.
     /// Form: `provider/model_id`, e.g. `anthropic/claude-haiku-4-5-20251001`.
     pub fast_model: Option<String>,
+    /// Ordered fallback chain. If the primary model errors (network /
+    /// rate-limit / provider 5xx), the runtime walks this list in order.
+    /// Each entry is `provider/model_id`.
+    #[serde(default)]
+    pub fallback_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

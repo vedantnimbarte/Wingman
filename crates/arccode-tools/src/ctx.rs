@@ -63,7 +63,7 @@ impl ToolCtx {
         match self.mode {
             PermissionMode::Yolo => true,
             PermissionMode::AutoEdit => self.is_inside_project(path),
-            PermissionMode::ReadOnly => false,
+            PermissionMode::ReadOnly | PermissionMode::Plan => false,
         }
     }
 

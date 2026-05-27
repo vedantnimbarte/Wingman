@@ -12,7 +12,7 @@ mod registry;
 pub mod builtin;
 
 pub use ctx::ToolCtx;
-pub use registry::ToolRegistry;
+pub use registry::{run_hook, HookResult, ToolRegistry};
 
 use arccode_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;

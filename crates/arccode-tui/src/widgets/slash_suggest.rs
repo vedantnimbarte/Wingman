@@ -76,6 +76,10 @@ pub const CATALOG: &[Command] = &[
         description: "manage MCP servers",
     },
     Command {
+        name: "/find",
+        description: "search this transcript · /findnext, /findprev",
+    },
+    Command {
         name: "/quit",
         description: "exit arccode",
     },

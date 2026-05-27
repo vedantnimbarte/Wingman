@@ -44,9 +44,64 @@ plus a planned MCP host.
 - **Layered configuration.** Defaults → global `~/.arccode/config.toml` →
   project `.arccode/config.toml` → `ARCCODE_*` env vars → CLI flags. TOML
   sub-tables merge instead of clobbering.
-- **Permission modes.** `read-only` (default), `auto-edit` (writes/shell
+- **Permission modes.** `read-only` (default), `plan` (read-only + the
+  agent must call `present_plan` before any edit), `auto-edit` (writes/shell
   inside the project tree auto-allowed, denylist still prompts), and `yolo`
   (no prompts; per-session only, never persisted).
+- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `stop`, and
+  `user_prompt_submit` shell hooks fire from the agent loop and can
+  block a tool call by exiting non-zero (`[hooks]` in config).
+- **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
+  (DuckDuckGo HTML, no API key) tools pair for "look something up".
+- **Atomic multi-file patches.** The `apply_patch` tool applies a
+  multi-file edit block atomically — no partial writes on failure.
+- **Working-tree checkpoints.** `arccode checkpoint` snapshots the tree
+  into a tagged `git stash`; `arccode undo` restores the most recent one.
+- **`arccode init`.** Scans the project (Cargo.toml, package.json,
+  pyproject.toml, go.mod, …) and writes a starter `ARCCODE.md`.
+- **`arccode cost`.** Per-model token + USD spend table derived from
+  `~/.arccode/usage.json` and `pricing.rs`.
+- **`arccode session list / fork`.** Browse recent session JSONLs;
+  fork an old session (optionally truncating to N records) and resume it.
+- **User-defined slash commands.** Drop a markdown file at
+  `~/.arccode/commands/<name>.md` (or `<project>/.arccode/commands/`) and
+  it becomes `/<name>` in the TUI. `$ARGS` is substituted.
+- **In-transcript search.** `/find <query>`, `/findnext`, `/findprev`,
+  `/findclear` walk hits inside the current transcript. Mouse wheel
+  scrolling is enabled.
+- **File-tree sidebar.** `Ctrl+B` toggles a left-side file browser; `j`/`k`
+  move, `Tab` descends, `Enter` inserts the path into the composer.
+- **Themes.** `tui.theme = "default" | "light" | "mono"`, plus optional
+  per-role color overrides under `tui.colors` (`"#rrggbb"` hex or named).
+- **Model fallback.** `router.fallback_models = ["openai/gpt-4.1",
+  "openrouter/anthropic/claude-opus-4-7"]` — on primary failure the
+  runtime walks the chain in order.
+- **Subagent tool.** The model can call `spawn_subagent` to run an
+  isolated inner agent loop on a focused sub-task (depth-capped at 1).
+- **Notebook reads.** `read_file` on a `.ipynb` returns cells as fenced
+  code blocks + markdown, not raw JSON.
+- **Scheduled tasks.** `[[schedule]]` config entries fire from
+  `arccode schedule` (call from cron / Task Scheduler).
+- **Memory packs.** `arccode memory export/import/diff` for sharing
+  team-level memory.
+- **Worktree sandbox.** `arccode worktree create <branch>` spins up an
+  isolated working copy under `.arccode/worktrees/`.
+- **PR review.** `arccode review <pr#>` (or `--local <base>`) runs a
+  one-shot review prompt against the diff.
+- **Local model auto-discovery.** `arccode discover` probes localhost
+  Ollama / LM Studio / vLLM and prints available models.
+- **Skill auto-extraction.** `arccode skill extract` scans recent session
+  JSONLs for repeated tool-call sequences (e.g. `grep_tool → read_file →
+  edit_file`) and writes draft skill markdown files under
+  `~/.arccode/skills/proposed/` for you to review.
+- **Multi-model code review.** `arccode review-multi <pr#> --models
+  anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
+  review out across reviewers in parallel and merges findings by
+  file:line, marking which ones each reviewer raised.
+- **Interactive hunk review.** `arccode diff <file>` walks each hunk of
+  the working-tree diff one at a time with `[a]ccept / [r]eject / [s]kip
+  / [q]uit`, then writes the merged result. Also accepts `--patch
+  <file.patch>` for an arbitrary unified diff.
 
 ---
 
@@ -236,6 +291,60 @@ reset` zeros the counter; `/learn status` shows where you stand.
 
 ---
 
+## Hooks
+
+User-defined shell hooks fire at four well-known points. Configure under
+`[hooks]` in `config.toml`:
+
+```toml
+[[hooks.pre_tool_use]]
+command = "cargo fmt --check"
+match_tool = "edit_file"      # also matches "edit_file*" or "*"
+block = true                  # exit != 0 cancels the tool call
+timeout_secs = 10
+
+[[hooks.post_tool_use]]
+command = "echo \"$ARCCODE_TOOL_NAME ran\""
+
+[[hooks.stop]]
+command = "notify-send 'arccode done'"
+
+[[hooks.user_prompt_submit]]
+command = "grep -qiv secret <<< \"$ARCCODE_USER_PROMPT\""
+block = true                  # reject prompts containing 'secret'
+```
+
+The agent loop populates per-event environment variables
+(`ARCCODE_TOOL_NAME`, `ARCCODE_TOOL_INPUT`, `ARCCODE_TOOL_OUTPUT`,
+`ARCCODE_TOOL_IS_ERROR`, `ARCCODE_STOP_REASON`, `ARCCODE_USER_PROMPT`).
+Hooks run via `sh -c` on Unix and `cmd /C` on Windows, with the
+configured `timeout_secs` (default 10).
+
+---
+
+## User-defined slash commands
+
+Place markdown files at `~/.arccode/commands/<name>.md` (global) or
+`<project>/.arccode/commands/<name>.md` (project). When the user types
+`/<name> rest of line` in the TUI, the markdown body is expanded into the
+prompt with the literal token `$ARGS` replaced by `rest of line`, and
+submitted as if typed directly. Project-local commands shadow globals.
+
+Example `~/.arccode/commands/refactor.md`:
+
+```markdown
+Refactor the following Rust code with these constraints:
+1. Keep the public API unchanged.
+2. Prefer iterators over explicit loops.
+3. Run `cargo clippy` mentally and address obvious lints.
+
+$ARGS
+```
+
+Then in the TUI: `/refactor crates/foo/src/lib.rs` expands to a complete prompt.
+
+---
+
 ## Configuration
 
 `arccode` resolves configuration in this order (lowest to highest precedence):
@@ -325,8 +434,14 @@ is resolved against the environment at load time.
 | Mode         | Reads / Search | Writes inside project | Shell                       | Out-of-tree paths |
 | ------------ | -------------- | --------------------- | --------------------------- | ----------------- |
 | `read-only`  | allowed        | prompts               | prompts                     | prompts           |
+| `plan`       | allowed        | denied (plan first)   | denied                      | denied            |
 | `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | prompts           |
 | `yolo`       | allowed        | auto-allowed          | auto-allowed                | auto-allowed      |
+
+In `plan` mode the assistant is expected to call `present_plan` and wait for
+the user before requesting any write/shell tool. The `present_plan` tool is
+always available so the model can produce a structured plan even outside
+plan mode (it just won't gate anything in that case).
 
 `yolo` is per-session only — never persisted to config.
 
@@ -358,6 +473,24 @@ arccode [OPTIONS] [COMMAND]
 | `config init`        | Write a starter `~/.arccode/config.toml`. `--force` to overwrite. |
 | `config show`        | Print the merged effective configuration. `--json` for JSON output. |
 | `config paths`       | Print the resolved global and project config paths.    |
+| `init`               | Scan the current project and write a starter `ARCCODE.md`. `--force` to overwrite. |
+| `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
+| `undo`               | Restore the most recent `arccode checkpoint` via `git stash pop`. |
+| `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. |
+| `session list`       | List recent session JSONL files for this project.       |
+| `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
+| `worktree create <branch>` | Create a `git worktree` under `.arccode/worktrees/<branch>` for sandboxed experiments. |
+| `worktree list`      | `git worktree list` passthrough.                        |
+| `worktree remove <path>` | Remove a worktree by path.                          |
+| `memory export <out>` | Export the global memory dir to a directory or `.json` pack. |
+| `memory import <path>` | Import a memory pack (`--force` to overwrite).        |
+| `memory diff <a> <b>` | Show differences between two packs (or live dir vs. pack). |
+| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
+| `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
+| `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
+| `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.arccode/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
+| `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
+| `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
 
 Running `arccode` with no subcommand launches the TUI against the resolved
 provider and model.
@@ -375,11 +508,16 @@ decide whether to act, prompt, or refuse based on that context.
 | `read_file`       | Read a file by absolute path. Returns content with line numbers.        |
 | `write_file`      | Create or overwrite a file.                                             |
 | `edit_file`       | Exact string replacement inside an existing file.                       |
+| `apply_patch`     | Multi-file atomic edit (Update / Add / Delete blocks).                  |
+| `spawn_subagent`  | Run an isolated inner agent loop on a sub-task; depth-capped at 1.      |
 | `glob_tool`       | Find files by glob pattern (e.g. `**/*.rs`).                            |
 | `grep_tool`       | Content search via ripgrep semantics.                                   |
 | `list_dir`        | List a directory.                                                       |
 | `run_shell`       | Execute a shell command. Subject to the permission denylist.            |
+| `web_fetch`       | Download an http(s) URL, strip HTML, return text.                       |
+| `web_search`      | DuckDuckGo HTML search (no API key); pairs with `web_fetch`.            |
 | `semantic_search` | Cosine search the project RAG index for relevant code chunks.           |
+| `present_plan`    | Structured plan block; required step before edits in `plan` mode.       |
 | `save_memory`     | Persist a fact / preference / instruction across sessions.              |
 | `recall_memory`   | Read the full body of a memory by slug.                                 |
 | `forget_memory`   | Delete a memory by slug.                                                |

@@ -57,6 +57,36 @@ pub enum SessionRecord {
     },
 }
 
+/// Copy `src` to a freshly-named session file under `dest_dir`, optionally
+/// truncating to the first `take` records (`None` = full copy).
+///
+/// Returns the path of the new session file. Useful for `arccode session
+/// fork`: the new file is `/resume`-able and the original is untouched.
+pub async fn fork_session(
+    src: &Path,
+    dest_dir: &Path,
+    take: Option<usize>,
+) -> Result<PathBuf, SessionError> {
+    tokio::fs::create_dir_all(dest_dir).await?;
+    let body = tokio::fs::read_to_string(src).await?;
+    let mut out = String::new();
+    let total = match take {
+        Some(n) => n,
+        None => usize::MAX,
+    };
+    for (i, line) in body.lines().enumerate() {
+        if i >= total {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let ts = Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string();
+    let dest = dest_dir.join(format!("{ts}-fork.jsonl"));
+    tokio::fs::write(&dest, out).await?;
+    Ok(dest)
+}
+
 pub struct SessionLog {
     path: PathBuf,
     file: tokio::fs::File,

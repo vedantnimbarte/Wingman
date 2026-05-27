@@ -50,6 +50,14 @@ impl Tool for ReadFile {
             return ToolOutcome::err(format!("refusing to read binary file {}", path.display()));
         }
         let text = String::from_utf8_lossy(&bytes).into_owned();
+        // Jupyter notebooks: render cells as a markdown-ish layout so the
+        // model sees code and prose, not raw JSON.
+        let rendered = if path.extension().and_then(|s| s.to_str()) == Some("ipynb") {
+            render_notebook(&text).unwrap_or(text)
+        } else {
+            text
+        };
+        let text = rendered;
         let lines: Vec<&str> = text.lines().collect();
         let start = args
             .offset
@@ -70,4 +78,149 @@ impl Tool for ReadFile {
 fn looks_binary(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(8192)];
     head.contains(&0)
+}
+
+/// Render a Jupyter `.ipynb` JSON document into a flat, model-friendly
+/// markdown layout: code cells become fenced code blocks (language taken
+/// from `metadata.language_info.name` or `language` per cell, fallback
+/// `text`), markdown cells become their raw markdown source, and stream
+/// outputs become a `> stdout:` block. Returns `None` on parse failure so
+/// the caller can fall back to the raw JSON.
+fn render_notebook(text: &str) -> Option<String> {
+    let nb: serde_json::Value = serde_json::from_str(text).ok()?;
+    let lang_global = nb
+        .get("metadata")
+        .and_then(|m| m.get("language_info"))
+        .and_then(|l| l.get("name"))
+        .and_then(|n| n.as_str())
+        .unwrap_or("python")
+        .to_string();
+    let cells = nb.get("cells")?.as_array()?;
+    let mut out = String::new();
+    for (i, cell) in cells.iter().enumerate() {
+        let kind = cell.get("cell_type").and_then(|v| v.as_str()).unwrap_or("");
+        let source = match cell.get("source") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(a)) => a
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        };
+        match kind {
+            "markdown" => {
+                out.push_str(&format!("<!-- cell {i}: markdown -->\n"));
+                out.push_str(&source);
+                if !source.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            "code" => {
+                let lang = cell
+                    .get("metadata")
+                    .and_then(|m| m.get("language"))
+                    .and_then(|l| l.as_str())
+                    .unwrap_or(&lang_global);
+                out.push_str(&format!("<!-- cell {i}: code -->\n"));
+                out.push_str("```");
+                out.push_str(lang);
+                out.push('\n');
+                out.push_str(&source);
+                if !source.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str("```\n");
+                // Stream outputs (stdout/stderr only — skip rich displays).
+                if let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
+                    let mut stream_text = String::new();
+                    for o in outputs {
+                        if o.get("output_type").and_then(|v| v.as_str()) == Some("stream") {
+                            if let Some(t) = o.get("text") {
+                                match t {
+                                    serde_json::Value::String(s) => stream_text.push_str(s),
+                                    serde_json::Value::Array(a) => {
+                                        for line in a.iter().filter_map(|v| v.as_str()) {
+                                            stream_text.push_str(line);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                    if !stream_text.is_empty() {
+                        out.push_str("> stdout:\n");
+                        for line in stream_text.lines() {
+                            out.push_str("> ");
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                }
+                out.push('\n');
+            }
+            "raw" => {
+                out.push_str(&format!("<!-- cell {i}: raw -->\n"));
+                out.push_str(&source);
+                out.push_str("\n\n");
+            }
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arccode_config::PermissionMode;
+    use serde_json::json;
+
+    #[test]
+    fn renders_notebook_cells() {
+        let nb = json!({
+            "metadata": { "language_info": { "name": "python" } },
+            "cells": [
+                { "cell_type": "markdown", "source": ["# Title\n", "Hello\n"] },
+                { "cell_type": "code", "source": "print(1+1)\n",
+                  "outputs": [{ "output_type": "stream", "name": "stdout", "text": ["2\n"] }] },
+            ]
+        })
+        .to_string();
+        let rendered = render_notebook(&nb).unwrap();
+        assert!(rendered.contains("# Title"));
+        assert!(rendered.contains("```python"));
+        assert!(rendered.contains("print(1+1)"));
+        assert!(rendered.contains("> stdout"));
+        assert!(rendered.contains("> 2"));
+    }
+
+    #[tokio::test]
+    async fn read_file_renders_ipynb() {
+        let dir = std::env::temp_dir().join(format!(
+            "arccode-nb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("x.ipynb");
+        let nb = json!({
+            "cells": [
+                { "cell_type": "code", "source": "x = 1\n" }
+            ]
+        });
+        std::fs::write(&path, nb.to_string()).unwrap();
+        let ctx = ToolCtx::new(PermissionMode::ReadOnly, dir.clone(), dir.clone());
+        let out = ReadFile
+            .run(json!({ "path": path.to_string_lossy() }), &ctx)
+            .await;
+        assert!(!out.is_error, "got error: {}", out.content);
+        assert!(out.content.contains("x = 1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

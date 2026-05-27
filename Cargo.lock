@@ -296,15 +296,18 @@ dependencies = [
  "arccode-session",
  "arccode-skills",
  "async-trait",
+ "futures",
  "globset",
  "ignore",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "similar",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "urlencoding",
 ]
 
 [[package]]

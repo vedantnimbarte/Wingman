@@ -35,7 +35,10 @@ use crate::modal::{
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
     composer::ComposerView, slash_suggest::SlashSuggest, status::StatusView,
-    transcript::TranscriptView, welcome::WelcomeView, Composer, StatusLine, Transcript,
+    file_tree::{FileTree, FileTreeView},
+    transcript::TranscriptView,
+    welcome::WelcomeView,
+    Composer, StatusLine, Transcript,
     TranscriptItem,
 };
 
@@ -140,6 +143,10 @@ enum Cmd {
     Recall(String),     // query for cross-session search
     SkillStats(String), // "" = all skills, "<name>" = one skill
     Learn(String),      // "status" | "on" | "off"
+    Find(String),       // search transcript
+    FindNext,
+    FindPrev,
+    FindClear,
     Submit(String),
     None,
 }
@@ -196,9 +203,45 @@ fn parse_slash(line: &str) -> Cmd {
         "/export" => Cmd::Export(if arg.is_empty() { "md".into() } else { arg.to_string() }),
         "/params" => Cmd::Params,
         "/resume" => Cmd::Resume,
+        "/find" if !arg.is_empty() => Cmd::Find(arg.to_string()),
+        "/findnext" | "/fn" => Cmd::FindNext,
+        "/findprev" | "/fp" => Cmd::FindPrev,
+        "/findclear" | "/fc" => Cmd::FindClear,
         "" => Cmd::None,
-        _ => Cmd::Submit(line.to_string()),
+        _ => {
+            // User-defined slash commands: ~/.arccode/commands/<name>.md or
+            // <project>/.arccode/commands/<name>.md. The file body is the
+            // prompt template; `$ARGS` (literal) is substituted with `arg`.
+            if let Some(name) = head.strip_prefix('/') {
+                if let Some(template) = load_user_command(name) {
+                    let expanded = template.replace("$ARGS", arg);
+                    return Cmd::Submit(expanded);
+                }
+            }
+            Cmd::Submit(line.to_string())
+        }
     }
+}
+
+fn load_user_command(name: &str) -> Option<String> {
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return None;
+    }
+    // Project-local first, then global.
+    if let Ok(cwd) = std::env::current_dir() {
+        let project = arccode_config::ProjectPaths::discover(&cwd);
+        let p = project.root.join(".arccode").join("commands").join(format!("{name}.md"));
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Some(text);
+        }
+    }
+    if let Ok(global) = arccode_config::global_dir() {
+        let p = global.join("commands").join(format!("{name}.md"));
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Some(text);
+        }
+    }
+    None
 }
 
 struct UiState {
@@ -218,6 +261,8 @@ struct UiState {
     pending_skill: Option<arccode_skills::Skill>,
     /// Inline slash-command autocomplete that floats above the composer.
     slash: SlashSuggest,
+    /// Toggleable left sidebar file tree.
+    sidebar: Option<FileTree>,
 }
 
 async fn run_inner(
@@ -240,6 +285,7 @@ async fn run_inner(
         last_lifetime_flush: std::time::Instant::now(),
         pending_skill: None,
         slash: SlashSuggest::default(),
+        sidebar: None,
     };
     let mut events = EventStream::new();
     loop {
@@ -415,6 +461,70 @@ async fn idle_step(
                     && matches!(k.code, KeyCode::Char('c'))
                 {
                     return Ok(IdleAction::Quit);
+                }
+                // Ctrl+B toggles the file-tree sidebar. When focused (i.e.
+                // sidebar is Some AND the composer is empty), navigation
+                // keys steer the sidebar instead of the composer.
+                if k.modifiers.contains(KeyModifiers::CONTROL)
+                    && matches!(k.code, KeyCode::Char('b'))
+                {
+                    if ui.sidebar.is_some() {
+                        ui.sidebar = None;
+                    } else {
+                        ui.sidebar = Some(FileTree::new(project_root.clone()));
+                    }
+                    draw(terminal, ui)?;
+                    continue;
+                }
+                // When the sidebar is open AND composer is empty, j/k/Up/
+                // Down move the sidebar selection; Enter picks; Tab/Backspace
+                // descend/ascend; Esc closes the sidebar.
+                if let Some(tree) = ui.sidebar.as_mut() {
+                    if ui.composer.input.is_empty() {
+                        match k.code {
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                tree.move_down();
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                tree.move_up();
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Enter => {
+                                if let Some(path) = tree.enter() {
+                                    let rel = tree.pick_relative(&path);
+                                    ui.composer.input.push_str(&format!("@{rel} "));
+                                    ui.sidebar = None;
+                                }
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Tab => {
+                                let _ = tree.enter();
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Backspace => {
+                                if let Some(parent) = tree.cwd.parent() {
+                                    if tree.cwd != tree.root {
+                                        tree.cwd = parent.to_path_buf();
+                                        tree.selected = 0;
+                                        tree.refresh();
+                                    }
+                                }
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Esc => {
+                                ui.sidebar = None;
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 // If a modal is open, it gets first crack at the key. Esc
                 // always closes the modal regardless of the modal's own
@@ -823,6 +933,37 @@ async fn idle_step(
                                     }
                                 }
                             }
+                            Cmd::Find(q) => {
+                                let n = ui.transcript.search_set(&q);
+                                ui.transcript.push(TranscriptItem::System(format!(
+                                    "/find: {n} match{} for '{q}' (/findnext, /findprev, /findclear)",
+                                    if n == 1 { "" } else { "es" }
+                                )));
+                            }
+                            Cmd::FindNext => {
+                                if ui.transcript.search.is_some() {
+                                    ui.transcript.search_next();
+                                } else {
+                                    ui.transcript.push(TranscriptItem::System(
+                                        "/findnext: no active search (run /find <query>)".into(),
+                                    ));
+                                }
+                            }
+                            Cmd::FindPrev => {
+                                if ui.transcript.search.is_some() {
+                                    ui.transcript.search_prev();
+                                } else {
+                                    ui.transcript.push(TranscriptItem::System(
+                                        "/findprev: no active search (run /find <query>)".into(),
+                                    ));
+                                }
+                            }
+                            Cmd::FindClear => {
+                                ui.transcript.search_clear();
+                                ui.transcript.push(TranscriptItem::System(
+                                    "/findclear: search cleared".into(),
+                                ));
+                            }
                             Cmd::None => {}
                             Cmd::Submit(prompt) => return Ok(IdleAction::Submit(prompt)),
                         }
@@ -889,6 +1030,20 @@ async fn idle_step(
                 draw(terminal, ui)?;
             }
             Ok(CtEvent::Resize(_, _)) => draw(terminal, ui)?,
+            Ok(CtEvent::Mouse(m)) => {
+                use crossterm::event::MouseEventKind;
+                match m.kind {
+                    MouseEventKind::ScrollUp => {
+                        ui.transcript.scroll_up();
+                        draw(terminal, ui)?;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        ui.transcript.scroll_down();
+                        draw(terminal, ui)?;
+                    }
+                    _ => {}
+                }
+            }
             Ok(_) => {}
             Err(e) => {
                 ui.transcript
@@ -1151,14 +1306,28 @@ fn help_text() -> String {
 fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Result<()> {
     terminal.draw(|f| {
         let area = f.area();
-        let chunks = Layout::default()
+        let vchunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(3),    // transcript
+                Constraint::Min(3),    // transcript (+sidebar)
                 Constraint::Length(3), // composer
                 Constraint::Length(1), // status
             ])
             .split(area);
+        // Optional left sidebar.
+        let (sidebar_area, body_area) = if ui.sidebar.is_some() {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(32), Constraint::Min(20)])
+                .split(vchunks[0]);
+            (Some(h[0]), h[1])
+        } else {
+            (None, vchunks[0])
+        };
+        if let (Some(area_l), Some(tree)) = (sidebar_area, ui.sidebar.as_ref()) {
+            FileTreeView { tree }.render(area_l, f.buffer_mut());
+        }
+        let chunks = [body_area, vchunks[1], vchunks[2]];
         if ui.transcript.items.is_empty() {
             WelcomeView { status: &ui.status }.render(chunks[0], f.buffer_mut());
         } else {

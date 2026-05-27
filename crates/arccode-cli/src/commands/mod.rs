@@ -1,3 +1,15 @@
 pub mod batch;
+pub mod checkpoint;
 pub mod config;
+pub mod cost;
+pub mod diff;
+pub mod discover;
 pub mod headless;
+pub mod init;
+pub mod memory;
+pub mod review;
+pub mod review_multi;
+pub mod schedule;
+pub mod session;
+pub mod skill;
+pub mod worktree;

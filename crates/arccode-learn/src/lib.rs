@@ -17,6 +17,7 @@
 //!                        above into the agent loop's before/after-turn hook
 //!                        points.
 
+pub mod extract;
 pub mod hooks;
 pub mod memory;
 pub mod proposal;

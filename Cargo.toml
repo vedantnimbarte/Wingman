@@ -59,6 +59,11 @@ sha2 = "0.10"
 base64 = "0.22"
 urlencoding = "2"
 
+[profile.dev]
+# Windows MSVC hits a 4 GB PDB cap (LNK1318) when the workspace grows.
+# `line-tables-only` keeps backtraces useful while staying under the limit.
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

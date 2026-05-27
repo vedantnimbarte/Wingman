@@ -52,6 +52,144 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Generate or refresh ARCCODE.md by introspecting the current project.
+    Init {
+        /// Overwrite an existing ARCCODE.md.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Checkpoint the working tree into a named git stash for /undo recovery.
+    Checkpoint {
+        /// Optional label.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Restore the most recent arccode checkpoint via `git stash pop`.
+    Undo,
+    /// Show estimated token spend by model from ~/.arccode/usage.json.
+    Cost {
+        /// Output as JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Session utilities.
+    Session {
+        #[command(subcommand)]
+        action: SessionAction,
+    },
+    /// `git worktree` helper — isolate an experiment under .arccode/worktrees.
+    Worktree {
+        #[command(subcommand)]
+        action: WorktreeAction,
+    },
+    /// Memory pack utilities.
+    Memory {
+        #[command(subcommand)]
+        action: MemoryAction,
+    },
+    /// One-shot code review of a PR or local diff.
+    Review {
+        /// PR number to review (uses `gh pr diff`).
+        pr: Option<String>,
+        /// Review local commits against this base ref instead.
+        #[arg(long, value_name = "BASE")]
+        local: Option<String>,
+        /// Path to a custom review prompt template.
+        #[arg(long, value_name = "FILE")]
+        template: Option<String>,
+    },
+    /// Probe localhost for running Ollama / LM Studio / vLLM and print
+    /// discovered models.
+    Discover,
+    /// Run any [[schedule]] entries whose cadence is due.
+    Schedule {
+        /// Force-run all configured schedule entries regardless of cadence.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Skill utilities.
+    Skill {
+        #[command(subcommand)]
+        action: SkillAction,
+    },
+    /// Multi-model code review: run review against several models in
+    /// parallel and merge findings.
+    ReviewMulti {
+        /// PR number to review (uses `gh pr diff`).
+        pr: Option<String>,
+        /// Review local commits against this base ref instead.
+        #[arg(long, value_name = "BASE")]
+        local: Option<String>,
+        /// Comma-separated list of provider/model pairs to consult.
+        #[arg(long, value_name = "LIST")]
+        models: String,
+    },
+    /// Interactive diff viewer: walk a unified diff hunk by hunk and
+    /// accept or reject each one before writing the result.
+    Diff {
+        /// File to view the working-tree diff for (calls `git diff -- <file>`).
+        file: Option<String>,
+        /// Or supply a path to a unified-diff file directly.
+        #[arg(long, value_name = "FILE")]
+        patch: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillAction {
+    /// Scan recent sessions and write proposed skill drafts under
+    /// ~/.arccode/skills/proposed/.
+    Extract {
+        /// Minimum number of distinct sessions a pattern must appear in.
+        #[arg(long, default_value_t = 2)]
+        min: usize,
+        /// Overwrite existing draft files.
+        #[arg(long)]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorktreeAction {
+    /// Create a worktree under <project>/.arccode/worktrees/<branch>.
+    Create { branch: String },
+    /// List git worktrees (calls `git worktree list`).
+    List,
+    /// Remove a worktree by path.
+    Remove { path: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum MemoryAction {
+    /// Export the global memory directory to a target directory or single JSON pack file.
+    Export { out: String },
+    /// Import a memory pack (directory or JSON pack file) into the global memory directory.
+    Import {
+        path: String,
+        /// Overwrite existing entries with the same name.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show a unified diff of two memory packs (or the live dir vs. a pack).
+    Diff { a: String, b: String },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SessionAction {
+    /// List recent sessions for this project.
+    List {
+        /// Maximum number of entries.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Fork an existing session JSONL into a new file (optionally truncated).
+    Fork {
+        /// Path to the session JSONL to fork.
+        src: String,
+        /// Truncate the new file to the first N records.
+        #[arg(long)]
+        at: Option<usize>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -106,6 +244,33 @@ pub async fn run() -> Result<ExitCode> {
 
     match cli.command {
         Some(Command::Config { action }) => commands::config::run(action).await,
+        Some(Command::Init { force }) => commands::init::run(force).await,
+        Some(Command::Checkpoint { label }) => commands::checkpoint::create(label).await,
+        Some(Command::Undo) => commands::checkpoint::undo().await,
+        Some(Command::Cost { json }) => commands::cost::run(json).await,
+        Some(Command::Session { action }) => commands::session::run(action).await,
+        Some(Command::Worktree { action }) => match action {
+            WorktreeAction::Create { branch } => commands::worktree::create(branch).await,
+            WorktreeAction::List => commands::worktree::list().await,
+            WorktreeAction::Remove { path } => commands::worktree::remove(path).await,
+        },
+        Some(Command::Memory { action }) => match action {
+            MemoryAction::Export { out } => commands::memory::export(out).await,
+            MemoryAction::Import { path, force } => commands::memory::import(path, force).await,
+            MemoryAction::Diff { a, b } => commands::memory::diff(a, b).await,
+        },
+        Some(Command::Review { pr, local, template }) => {
+            commands::review::run(pr, local, template).await
+        }
+        Some(Command::Discover) => commands::discover::run().await,
+        Some(Command::Schedule { all }) => commands::schedule::run(all).await,
+        Some(Command::Skill { action }) => match action {
+            SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
+        },
+        Some(Command::ReviewMulti { pr, local, models }) => {
+            commands::review_multi::run(pr, local, models).await
+        }
+        Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
         None => {
             let cfg = load_config()?;
             let mode_override = parse_mode(cli.mode.as_deref())?;
@@ -288,6 +453,7 @@ pub async fn run() -> Result<ExitCode> {
                 mcp_runner,
                 mcp_list_runner,
             };
+            arccode_tui::init_theme(&cfg.tui);
             arccode_tui::run(agent, ctx).await?;
             Ok(ExitCode::SUCCESS)
         }
