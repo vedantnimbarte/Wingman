@@ -10,6 +10,7 @@ description = "ratatui-based terminal UI for arccode"
 [dependencies]
 arccode-core = { workspace = true }
 arccode-config = { workspace = true }
+arccode-skills = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -18,3 +19,5 @@ anyhow = { workspace = true }
 serde_json = { workspace = true }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+ignore = "0.4"
+nucleo-matcher = "0.3"

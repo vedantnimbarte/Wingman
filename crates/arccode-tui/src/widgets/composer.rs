@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Widget},
 };
@@ -63,25 +63,71 @@ pub struct ComposerView<'a> {
 
 impl<'a> Widget for ComposerView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = if self.composer.busy {
-            " ⏳ working "
+        let (title, title_style, border_style) = if self.composer.busy {
+            (
+                " ⏳ working ",
+                Style::default().fg(Color::Yellow),
+                Style::default().fg(Color::Yellow),
+            )
         } else {
-            " › "
-        };
-        let title_style = if self.composer.busy {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::Cyan)
+            (
+                " › ",
+                Style::default().fg(Color::Cyan),
+                Style::default().fg(Color::Cyan),
+            )
         };
         let block = Block::default()
-            .borders(Borders::TOP)
+            .borders(Borders::ALL)
+            .border_style(border_style)
             .title(Span::styled(title, title_style));
-        let mut text = self.composer.input.clone();
-        if !self.composer.busy {
-            text.push('▏'); // cursor
-        }
-        Paragraph::new(Line::from(text))
-            .block(block)
-            .render(area, buf);
+
+        // Render the bordered block first, then paint our content inside
+        // its inner rect. Doing it in two steps (rather than via
+        // `Paragraph::block`) makes the clipping behavior obvious: text
+        // can never bleed onto the border rows.
+        let inner = block.inner(area);
+        block.render(area, buf);
+
+        // Tailor the placeholder to the available horizontal space so it
+        // never gets cropped or visually overruns the cursor.
+        let hint = if inner.width >= 60 {
+            " type a message · / for commands · @ to attach a file"
+        } else if inner.width >= 40 {
+            " type a message · / commands · @ files"
+        } else {
+            " type / for commands"
+        };
+
+        let line = if self.composer.busy {
+            if self.composer.input.is_empty() {
+                Line::from(Span::styled(
+                    "thinking…",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    self.composer.input.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            }
+        } else if self.composer.input.is_empty() {
+            Line::from(vec![
+                Span::styled("▏", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    hint,
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::raw(self.composer.input.clone()),
+                Span::styled("▏", Style::default().fg(Color::Cyan)),
+            ])
+        };
+        Paragraph::new(line).render(inner, buf);
     }
 }

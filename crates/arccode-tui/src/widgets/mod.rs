@@ -1,4 +1,5 @@
 pub mod composer;
+pub mod slash_suggest;
 pub mod status;
 pub mod transcript;
 

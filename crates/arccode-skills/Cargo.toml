@@ -1,0 +1,13 @@
+[package]
+name = "arccode-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Markdown-frontmatter skills loader for arccode"
+
+[dependencies]
+arccode-config = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }

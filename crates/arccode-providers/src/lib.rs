@@ -10,7 +10,9 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod openai_compat;
+pub mod probe;
 
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use openai_compat::{OpenAiCompatProvider, Variant as OpenAiVariant};
+pub use probe::probe;

@@ -4,7 +4,7 @@
 //! (headless --print, --json, future TUI) can just ask `Runtime::build(...)`.
 
 use anyhow::{anyhow, Context, Result};
-use arccode_config::{Config, PermissionMode, ProjectPaths};
+use arccode_config::{secrets, Config, PermissionMode, ProjectPaths};
 use arccode_core::{AgentConfig, AgentLoop, Compactor, Provider, ToolOutputBudget};
 use arccode_providers::{AnthropicProvider, GeminiProvider, OpenAiCompatProvider, OpenAiVariant};
 use arccode_rag::{Embedder, HashEmbedder, IndexStore, Indexer};
@@ -108,10 +108,8 @@ fn openai_variant(id: &str) -> Option<OpenAiVariant> {
 }
 
 fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -> Option<String> {
-    if let Some(s) = from_config {
-        if !s.is_empty() && !looks_like_placeholder(s) {
-            return Some(s.to_string());
-        }
+    if let Some(key) = check_config_value(from_config) {
+        return Some(key);
     }
     let env_name = match variant {
         OpenAiVariant::OpenAI => "OPENAI_API_KEY",
@@ -123,21 +121,48 @@ fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -
 }
 
 fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> {
-    if let Some(s) = from_config {
-        if !s.is_empty() && !looks_like_placeholder(s) {
-            return Ok(s.to_string());
-        }
+    if let Some(key) = check_config_value(from_config) {
+        return Ok(key);
     }
     std::env::var(env_name).map_err(|_| {
-        anyhow!("missing API key: set [providers.*].api_key in config or {env_name} in env")
+        anyhow!("missing API key: set [providers.*].api_key in config, store via /login, or set {env_name} in env")
     })
+}
+
+/// Inspect a `[providers.*].api_key` config value and turn it into the
+/// real key, if any. Recognized forms:
+///   - `keyring:<provider_id>`  — look up the OS keyring (Phase B)
+///   - non-empty, non-placeholder string — use directly (legacy)
+///   - `${ENV_VAR}` placeholder, empty, or missing — return None
+fn check_config_value(from_config: Option<&str>) -> Option<String> {
+    let s = from_config?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() || looks_like_placeholder(trimmed) {
+        return None;
+    }
+    if let Some(provider_id) = trimmed.strip_prefix("keyring:") {
+        match secrets::load(provider_id) {
+            Ok(Some(key)) => return Some(key),
+            Ok(None) => {
+                tracing::warn!(
+                    "config refers to keyring entry for '{provider_id}' but none was found"
+                );
+                return None;
+            }
+            Err(e) => {
+                tracing::warn!("keyring lookup for '{provider_id}' failed: {e}");
+                return None;
+            }
+        }
+    }
+    Some(trimmed.to_string())
 }
 
 fn looks_like_placeholder(s: &str) -> bool {
     s.trim().starts_with("${") && s.trim().ends_with('}')
 }
 
-pub async fn build_registry(cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
+pub async fn build_registry(_cfg: &Config, mode: PermissionMode) -> Result<ToolRegistry> {
     let cwd = std::env::current_dir()?;
     let paths = ProjectPaths::discover(&cwd);
     let ctx = ToolCtx::new(mode, cwd, paths.root.clone());
@@ -145,13 +170,9 @@ pub async fn build_registry(cfg: &Config, mode: PermissionMode) -> Result<ToolRe
     if let Some(indexer) = build_indexer(&paths)? {
         reg = reg.with_semantic_search(indexer);
     }
-    // MCP servers — best-effort connect; failures are logged and skipped.
-    if !cfg.mcp.is_empty() {
-        let servers = arccode_mcp::connect_all(&cfg.mcp).await;
-        for adapter in crate::mcp_adapter::build_adapters(&servers) {
-            reg.register(adapter);
-        }
-    }
+    // MCP servers are connected later via [`McpRegistry::seed`] so the
+    // shared `Arc<ToolRegistry>` can be reached from the TUI for runtime
+    // add / remove operations.
     Ok(reg)
 }
 
@@ -199,8 +220,19 @@ pub async fn build_agent(
     selection: &Selection,
     mode: PermissionMode,
 ) -> Result<AgentLoop> {
+    let (agent, _registry) = build_agent_and_registry(cfg, selection, mode).await?;
+    Ok(agent)
+}
+
+/// Variant that also returns the shared `Arc<ToolRegistry>` so callers can
+/// register/unregister tools at runtime (used by the MCP registry).
+pub async fn build_agent_and_registry(
+    cfg: &Config,
+    selection: &Selection,
+    mode: PermissionMode,
+) -> Result<(AgentLoop, Arc<ToolRegistry>)> {
     let provider = build_provider(cfg, &selection.provider_id)?;
-    let registry = build_registry(cfg, mode).await?;
+    let registry = Arc::new(build_registry(cfg, mode).await?);
     let system = build_system_prompt(mode);
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
@@ -212,7 +244,8 @@ pub async fn build_agent(
         },
         ..Default::default()
     };
-    Ok(AgentLoop::new(provider, Arc::new(registry), agent_cfg))
+    let agent = AgentLoop::new(provider, registry.clone(), agent_cfg);
+    Ok((agent, registry))
 }
 
 pub fn build_system_prompt(mode: PermissionMode) -> String {

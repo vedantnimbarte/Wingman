@@ -8,6 +8,7 @@
 pub mod agent;
 pub mod error;
 pub mod message;
+pub mod pricing;
 pub mod provider;
 pub mod stream;
 pub mod tokens;
@@ -18,6 +19,7 @@ pub use agent::{AgentConfig, AgentEvent, AgentLoop, AgentStop, ToolDispatcher, T
 pub use error::{ArccodeError, Result};
 pub use message::{ContentBlock, Message, Role};
 pub use provider::{CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities};
+pub use pricing::{price_for, Price};
 pub use stream::{ProviderEventStream, StopReason, StreamEvent};
 pub use tokens::{
     estimate_history_tokens, estimate_tokens, CompactPlan, Compactor, ToolOutputBudget,

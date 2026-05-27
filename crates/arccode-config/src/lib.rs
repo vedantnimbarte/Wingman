@@ -11,6 +11,7 @@
 //! `.arccode/` holds session log overrides and the repo index.
 
 mod paths;
+pub mod secrets;
 
 pub use paths::{
     ensure_global_dir, ensure_global_logs_dir, find_project_root, global_config_path,
@@ -319,6 +320,74 @@ impl Config {
     /// Render this config as TOML.
     pub fn to_toml_string(&self) -> Result<String, ConfigError> {
         Ok(toml::to_string_pretty(self)?)
+    }
+
+    /// Atomically write this config to `path`. Writes to a sibling tmpfile
+    /// then renames over the target so a crash mid-write can't leave a
+    /// half-written config. Creates the parent directory if missing.
+    pub fn save_atomic(&self, path: &Path) -> Result<(), ConfigError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Io {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let text = self.to_toml_string()?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).map_err(|source| ConfigError::Io {
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, path).map_err(|source| ConfigError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Ok(())
+    }
+
+    /// Persist a new default provider + model selection (and the per-provider
+    /// model + optional base_url) to `path`. Reads the existing file if
+    /// present so we don't overwrite unrelated sections; the provider's
+    /// `api_key` is set to the marker `"keyring:<provider_id>"` so the
+    /// runtime knows to look up the OS keyring.
+    ///
+    /// `base_url` is only persisted when `Some` — useful for local providers
+    /// (LM Studio, Ollama, vLLM) whose default URL the user may have
+    /// overridden in the login wizard.
+    pub fn set_default_provider_and_save(
+        path: &Path,
+        provider_id: &str,
+        model: &str,
+        base_url: Option<&str>,
+        with_keyring: bool,
+    ) -> Result<(), ConfigError> {
+        let mut cfg = if path.exists() {
+            // Re-read the raw file (not the merged config) so we only edit
+            // and write this one layer.
+            let table = read_raw(path)?;
+            toml::Value::Table(table)
+                .try_into()
+                .map_err(|source| ConfigError::Parse {
+                    path: path.to_path_buf(),
+                    source: Box::new(source),
+                })?
+        } else {
+            Config::default()
+        };
+
+        cfg.default_provider = Some(provider_id.to_string());
+        cfg.default_model = Some(format!("{provider_id}/{model}"));
+
+        let entry = cfg.providers.entry(provider_id.to_string()).or_default();
+        entry.model = Some(model.to_string());
+        if let Some(url) = base_url {
+            entry.base_url = Some(url.to_string());
+        }
+        if with_keyring {
+            entry.api_key = Some(format!("keyring:{provider_id}"));
+        }
+
+        cfg.save_atomic(path)
     }
 
     /// Starter config written by `arccode config init`.

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use arccode_core::Usage;
 use ratatui::{
     buffer::Buffer,
@@ -7,17 +9,35 @@ use ratatui::{
     widgets::{Paragraph, Widget},
 };
 
+/// Tracks per-`provider/model` usage. The status line renders the rolled-up
+/// total; the `/usage` modal renders a breakdown.
 #[derive(Debug, Default, Clone)]
 pub struct StatusLine {
     pub model: String,
     pub provider: String,
     pub mode: String,
-    pub usage: Usage,
+    /// Key is `provider/model`. Empty when the user hasn't sent anything.
+    pub usage: BTreeMap<String, Usage>,
 }
 
 impl StatusLine {
+    /// Merge usage into the slot for the *currently active* provider+model.
+    /// Called from `apply_event` when the agent stream emits Usage.
     pub fn merge_usage(&mut self, u: &Usage) {
-        self.usage.add(u);
+        if self.provider.is_empty() || self.model.is_empty() {
+            return;
+        }
+        let key = format!("{}/{}", self.provider, self.model);
+        self.usage.entry(key).or_default().add(u);
+    }
+
+    /// Sum across every model used this session.
+    pub fn total(&self) -> Usage {
+        let mut total = Usage::default();
+        for u in self.usage.values() {
+            total.add(u);
+        }
+        total
     }
 }
 
@@ -28,10 +48,16 @@ pub struct StatusView<'a> {
 impl<'a> Widget for StatusView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let s = self.status;
-        let cache_hit_pct = (s.usage.cache_hit_ratio() * 100.0).round() as u32;
-        let line = Line::from(vec![
+        let total = s.total();
+        let cache_hit_pct = (total.cache_hit_ratio() * 100.0).round() as u32;
+        let provider_label = if s.provider.is_empty() {
+            "no provider".to_string()
+        } else {
+            s.provider.clone()
+        };
+        let mut spans = vec![
             Span::styled(
-                format!(" {} ", s.provider),
+                format!(" {provider_label} "),
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -44,18 +70,20 @@ impl<'a> Widget for StatusView<'a> {
                 format!("mode={}", s.mode),
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::raw("  "),
-            Span::styled(
+        ];
+        if !s.usage.is_empty() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
                 format!(
                     "tok in:{} out:{} cache:{}%",
-                    s.usage.input_tokens + s.usage.cache_creation_input_tokens,
-                    s.usage.output_tokens,
+                    total.input_tokens + total.cache_creation_input_tokens,
+                    total.output_tokens,
                     cache_hit_pct
                 ),
                 Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        Paragraph::new(line)
+            ));
+        }
+        Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::Reset))
             .render(area, buf);
     }

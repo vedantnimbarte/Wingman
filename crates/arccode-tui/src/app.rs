@@ -6,6 +6,7 @@
 //! in flight.
 
 use std::io::{stdout, Stdout};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -18,17 +19,22 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::StreamExt;
+use futures::{future::BoxFuture, StreamExt};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     widgets::Widget,
     Terminal,
 };
 
+use crate::modal::{
+    ActiveModal, FilePicker, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
+    ModalOutcome, ModalTask, ModelPicker, SkillsView, UsageView,
+};
+use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
-    composer::ComposerView, status::StatusView, transcript::TranscriptView, Composer, StatusLine,
-    Transcript, TranscriptItem,
+    composer::ComposerView, slash_suggest::SlashSuggest, status::StatusView,
+    transcript::TranscriptView, Composer, StatusLine, Transcript, TranscriptItem,
 };
 
 /// Closure passed in by the CLI/runtime that knows how to construct a
@@ -38,15 +44,52 @@ use crate::widgets::{
 pub type ProviderBuilder =
     Arc<dyn Fn(&str) -> std::result::Result<Arc<dyn Provider>, String> + Send + Sync>;
 
+/// Closure that builds a fresh [`AgentLoop`] for a given provider+model.
+/// Used when the TUI launches without a provider configured and the user
+/// finishes the `/login` wizard. Async because building the agent connects
+/// MCP servers and may do other I/O.
+pub type AgentBuilder = Arc<
+    dyn Fn(String, String) -> BoxFuture<'static, std::result::Result<AgentLoop, String>>
+        + Send
+        + Sync,
+>;
+
+/// Closure the host registers so the `/login` modal can ask it to perform
+/// async work (probe a freshly-entered key, persist credentials, etc.)
+/// without the TUI crate having to depend on `arccode-providers` or
+/// `arccode-config`.
+pub type LoginRunner = Arc<
+    dyn Fn(LoginTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync,
+>;
+
+/// Optional callback to clear a stored credential. Used by `/logout`.
+pub type LogoutRunner =
+    Arc<dyn Fn(String) -> std::result::Result<(), String> + Send + Sync>;
+
+/// Runs one MCP server-management task on behalf of the modal.
+pub type McpRunner = Arc<
+    dyn Fn(McpTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync,
+>;
+
+/// Returns the current set of MCP server summaries for display.
+pub type McpListRunner = Arc<dyn Fn() -> BoxFuture<'static, Vec<McpServerSummary>> + Send + Sync>;
+
 pub struct AppCtx {
     pub provider_id: String,
     pub model: String,
     pub mode: String,
+    pub project_root: PathBuf,
     pub builder: ProviderBuilder,
+    pub agent_builder: AgentBuilder,
+    pub login_runner: LoginRunner,
+    pub logout_runner: LogoutRunner,
+    pub mcp_runner: McpRunner,
+    pub mcp_list_runner: McpListRunner,
 }
 
-pub async fn run(mut agent: AgentLoop, ctx: AppCtx) -> Result<()> {
+pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
     let mut terminal = setup_terminal()?;
+    let mut agent = agent;
     let res = run_inner(&mut terminal, &mut agent, ctx).await;
     restore_terminal(&mut terminal)?;
     res
@@ -78,7 +121,15 @@ enum Cmd {
     Clear,
     Help,
     Mode(String),
-    Model(String),
+    Model(Option<String>),
+    Login,
+    Logout(Option<String>),
+    Add(String),
+    Usage,
+    Skills,
+    SkillsNew(String),
+    Skill(String),
+    Mcp,
     Submit(String),
     None,
 }
@@ -96,7 +147,33 @@ fn parse_slash(line: &str) -> Cmd {
         "/clear" => Cmd::Clear,
         "/help" | "/?" => Cmd::Help,
         "/mode" if !arg.is_empty() => Cmd::Mode(arg.to_string()),
-        "/model" if !arg.is_empty() => Cmd::Model(arg.to_string()),
+        "/model" => Cmd::Model(if arg.is_empty() {
+            None
+        } else {
+            Some(arg.to_string())
+        }),
+        "/login" | "/connect" => Cmd::Login,
+        "/logout" => Cmd::Logout(if arg.is_empty() {
+            None
+        } else {
+            Some(arg.to_string())
+        }),
+        "/add" if !arg.is_empty() => Cmd::Add(arg.to_string()),
+        "/usage" => Cmd::Usage,
+        "/skills" => {
+            if let Some(rest) = arg.strip_prefix("new") {
+                let name = rest.trim().to_string();
+                if name.is_empty() {
+                    Cmd::Skills
+                } else {
+                    Cmd::SkillsNew(name)
+                }
+            } else {
+                Cmd::Skills
+            }
+        }
+        "/skill" if !arg.is_empty() => Cmd::Skill(arg.to_string()),
+        "/mcp" => Cmd::Mcp,
         "" => Cmd::None,
         _ => Cmd::Submit(line.to_string()),
     }
@@ -106,11 +183,24 @@ struct UiState {
     transcript: Transcript,
     composer: Composer,
     status: StatusLine,
+    modal: ActiveModal,
+    /// Snapshot of `~/.arccode/usage.json` as it was at startup. The
+    /// `/usage` modal's "Lifetime" tab renders `lifetime + status.usage`.
+    lifetime: LifetimeUsage,
+    /// Last time we flushed merged usage to disk. Used to debounce writes
+    /// at the end of each turn so an interactive session that fires
+    /// many short turns doesn't hammer the disk.
+    last_lifetime_flush: std::time::Instant,
+    /// Skill chosen via `/skill <name>` or the skills modal; its body is
+    /// prepended to the next user prompt and then cleared.
+    pending_skill: Option<arccode_skills::Skill>,
+    /// Inline slash-command autocomplete that floats above the composer.
+    slash: SlashSuggest,
 }
 
 async fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    agent: &mut AgentLoop,
+    agent: &mut Option<AgentLoop>,
     ctx: AppCtx,
 ) -> Result<()> {
     let mut ui = UiState {
@@ -122,30 +212,166 @@ async fn run_inner(
             mode: ctx.mode.clone(),
             ..Default::default()
         },
+        modal: ActiveModal::None,
+        lifetime: LifetimeUsage::load(),
+        last_lifetime_flush: std::time::Instant::now(),
+        pending_skill: None,
+        slash: SlashSuggest::default(),
     };
-    ui.transcript.push(TranscriptItem::System(format!(
-        "arccode {}/{} · mode={} · /help for commands · /quit to exit",
-        ctx.provider_id, ctx.model, ctx.mode
-    )));
+    if agent.is_some() {
+        ui.transcript.push(TranscriptItem::System(format!(
+            "arccode {}/{} · mode={} · /help for commands · /quit to exit",
+            ctx.provider_id, ctx.model, ctx.mode
+        )));
+    } else {
+        ui.transcript.push(TranscriptItem::System(
+            "No provider configured — type /login to get started.".into(),
+        ));
+    }
 
     let mut events = EventStream::new();
     loop {
         ui.composer.busy = false;
         draw(terminal, &ui)?;
 
+        // Pump any async task the active modal has requested before we go
+        // back to waiting on input. Each iteration handles one task; the
+        // modal may queue another (e.g. Probe success → Commit).
+        if let Some(task) = ui.modal.take_pending_task() {
+            run_modal_task(task, &mut ui, agent, &ctx).await?;
+            continue;
+        }
+
         // Idle: wait for a user input event.
-        let next_action = idle_step(&mut events, &mut ui, terminal, agent, &ctx.builder).await?;
+        let next_action = idle_step(&mut events, &mut ui, terminal, agent, &ctx).await?;
         match next_action {
-            IdleAction::Quit => return Ok(()),
+            IdleAction::Quit => {
+                // Flush lifetime usage one last time on the way out.
+                ui.lifetime.save_merged(&ui.status.usage);
+                return Ok(());
+            }
             IdleAction::Submit(prompt) => {
                 ui.transcript
                     .push(TranscriptItem::UserPrompt(prompt.clone()));
-                ui.composer.busy = true;
-                draw(terminal, &ui)?;
-                run_turn(terminal, agent, &mut events, &mut ui, prompt).await?;
+                match agent.as_mut() {
+                    Some(a) => {
+                        // Inline any `@<path>` attachments before sending.
+                        // The transcript shows the literal user input; the
+                        // model sees the expanded form.
+                        let exp = crate::attachments::expand(&prompt, &ctx.project_root);
+                        for w in &exp.warnings {
+                            ui.transcript
+                                .push(TranscriptItem::System(format!("attachment: {w}")));
+                        }
+                        if exp.attached > 0 {
+                            ui.transcript.push(TranscriptItem::System(format!(
+                                "attached {} file{}",
+                                exp.attached,
+                                if exp.attached == 1 { "" } else { "s" }
+                            )));
+                        }
+                        // If a skill was queued, prepend its body and clear
+                        // the slot — skills are one-shot.
+                        let final_prompt = match ui.pending_skill.take() {
+                            Some(skill) => {
+                                ui.transcript.push(TranscriptItem::System(format!(
+                                    "applying skill '{}'",
+                                    skill.name
+                                )));
+                                format!("{}\n\n{}", skill.body, exp.prompt)
+                            }
+                            None => exp.prompt,
+                        };
+                        ui.composer.busy = true;
+                        draw(terminal, &ui)?;
+                        run_turn(terminal, a, &mut events, &mut ui, final_prompt).await?;
+                        // Persist lifetime usage at most once every 5s so
+                        // bursts of small turns don't churn the file.
+                        if ui.last_lifetime_flush.elapsed() >= std::time::Duration::from_secs(5) {
+                            ui.lifetime.save_merged(&ui.status.usage);
+                            ui.last_lifetime_flush = std::time::Instant::now();
+                        }
+                    }
+                    None => {
+                        ui.transcript.push(TranscriptItem::Error(
+                            "No provider configured — run /login to set one up.".into(),
+                        ));
+                    }
+                }
             }
         }
     }
+}
+
+/// Execute one modal-requested task and report the result back to the
+/// modal. On a successful commit, also constructs a fresh `AgentLoop` via
+/// `agent_builder`, swaps it into the session, updates the status line,
+/// and closes the modal.
+async fn run_modal_task(
+    task: ModalTask,
+    ui: &mut UiState,
+    agent: &mut Option<AgentLoop>,
+    ctx: &AppCtx,
+) -> Result<()> {
+    match task {
+        ModalTask::Mcp(mcp_task) => {
+            let result = (ctx.mcp_runner)(mcp_task).await;
+            ui.modal.task_completed(result);
+            // Refresh the server list either way — even a failed task may
+            // have partially mutated registry state.
+            let fresh = (ctx.mcp_list_runner)().await;
+            if let ActiveModal::Mcp(v) = &mut ui.modal {
+                v.set_servers(fresh);
+            }
+        }
+        ModalTask::Login(login_task) => {
+            // Remember which kind of task we ran so we can branch after the
+            // result comes back — Commit success also has to build a new
+            // agent and close the modal.
+            let was_commit = matches!(login_task, LoginTask::Commit(_));
+            let payload_after = if let LoginTask::Commit(ref p) = login_task {
+                Some(p.clone())
+            } else {
+                None
+            };
+
+            let result = (ctx.login_runner)(login_task).await;
+            ui.modal.task_completed(result.clone());
+
+            if was_commit {
+                match result {
+                    Ok(()) => {
+                        // Build the new agent now that keyring + config are
+                        // persisted. If this fails the modal stays open in
+                        // error state so the user can fix and retry.
+                        let payload = payload_after.expect("commit task carries payload");
+                        match (ctx.agent_builder)(payload.provider_id.clone(), payload.model.clone())
+                            .await
+                        {
+                            Ok(new_agent) => {
+                                *agent = Some(new_agent);
+                                ui.status.provider = payload.provider_id.clone();
+                                ui.status.model = payload.model.clone();
+                                ui.modal = ActiveModal::None;
+                                ui.transcript.push(TranscriptItem::System(format!(
+                                    "connected to {}/{}",
+                                    payload.provider_id, payload.model
+                                )));
+                            }
+                            Err(e) => {
+                                ui.modal.task_completed(Err(e));
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // task_completed already moved the wizard back to
+                        // the model-entry stage with an error to show.
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 enum IdleAction {
@@ -157,9 +383,12 @@ async fn idle_step(
     events: &mut EventStream,
     ui: &mut UiState,
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    agent: &mut AgentLoop,
-    builder: &ProviderBuilder,
+    agent: &mut Option<AgentLoop>,
+    ctx: &AppCtx,
 ) -> Result<IdleAction> {
+    let builder = &ctx.builder;
+    let logout_runner = &ctx.logout_runner;
+    let project_root = &ctx.project_root;
     while let Some(ev) = events.next().await {
         match ev {
             Ok(CtEvent::Key(k)) if k.kind == KeyEventKind::Press => {
@@ -168,9 +397,57 @@ async fn idle_step(
                 {
                     return Ok(IdleAction::Quit);
                 }
+                // If a modal is open, it gets first crack at the key. Esc
+                // always closes the modal regardless of the modal's own
+                // handler. Modal-specific finalization (e.g. file picker:
+                // insert selected path into the composer) happens here on
+                // a ModalOutcome::Close.
+                if ui.modal.is_open() {
+                    if matches!(k.code, KeyCode::Esc) {
+                        ui.modal = ActiveModal::None;
+                    } else {
+                        match ui.modal.handle_key(k) {
+                            ModalOutcome::Continue => {}
+                            ModalOutcome::Close => {
+                                match &mut ui.modal {
+                                    ActiveModal::FilePicker(p) => {
+                                        if let Some(path) = p.take_selected() {
+                                            ui.composer.input.push_str(&format!("@{path} "));
+                                        }
+                                    }
+                                    ActiveModal::ModelPicker(p) => {
+                                        if let Some(choice) = p.take_selected() {
+                                            swap_model(
+                                                ui,
+                                                agent,
+                                                builder,
+                                                &choice.provider_id,
+                                                &choice.model,
+                                            );
+                                        }
+                                    }
+                                    ActiveModal::Skills(v) => {
+                                        if let Some(s) = v.take_selected() {
+                                            ui.transcript.push(TranscriptItem::System(format!(
+                                                "skill '{}' queued for next prompt",
+                                                s.name
+                                            )));
+                                            ui.pending_skill = Some(s);
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                ui.modal = ActiveModal::None;
+                            }
+                        }
+                    }
+                    draw(terminal, ui)?;
+                    continue;
+                }
                 match k.code {
                     KeyCode::Enter => {
                         let raw = ui.composer.take_input();
+                        ui.slash.update(&ui.composer.input);
                         if raw.trim().is_empty() {
                             draw(terminal, ui)?;
                             continue;
@@ -189,40 +466,167 @@ async fn idle_step(
                                     "(mode display set to {m}; live permission swap lands in M2)"
                                 )));
                             }
-                            Cmd::Model(arg) => match arg.split_once('/') {
-                                Some((provider_id, model_id)) => match builder(provider_id) {
-                                    Ok(provider) => {
-                                        agent.swap_provider(provider);
-                                        agent.set_model(model_id.to_string());
-                                        ui.status.provider = provider_id.to_string();
-                                        ui.status.model = model_id.to_string();
-                                        ui.transcript.push(TranscriptItem::System(format!(
-                                            "switched to {provider_id}/{model_id}"
-                                        )));
-                                    }
-                                    Err(e) => {
-                                        ui.transcript.push(TranscriptItem::Error(format!(
-                                            "/model {provider_id}: {e}"
-                                        )));
-                                    }
-                                },
+                            Cmd::Model(None) => {
+                                ui.modal = ActiveModal::ModelPicker(ModelPicker::new());
+                            }
+                            Cmd::Model(Some(arg)) => match arg.split_once('/') {
+                                Some((provider_id, model_id)) => {
+                                    swap_model(ui, agent, builder, provider_id, model_id);
+                                }
                                 None => {
                                     ui.transcript.push(TranscriptItem::Error(
-                                            "/model expects provider/model_id (e.g. anthropic/claude-opus-4-7)".into(),
+                                            "/model expects provider/model_id (e.g. anthropic/claude-opus-4-7) or no argument to pick from a list".into(),
                                         ));
                                 }
                             },
+                            Cmd::Login => {
+                                ui.modal = ActiveModal::Login(LoginWizard::new());
+                            }
+                            Cmd::Logout(target) => {
+                                let provider_id =
+                                    target.unwrap_or_else(|| ui.status.provider.clone());
+                                if provider_id.is_empty() {
+                                    ui.transcript.push(TranscriptItem::Error(
+                                        "/logout: no provider to log out of".into(),
+                                    ));
+                                } else {
+                                    match logout_runner(provider_id.clone()) {
+                                        Ok(()) => {
+                                            ui.transcript.push(TranscriptItem::System(format!(
+                                                "logged out of {provider_id}"
+                                            )));
+                                            // If we just logged out of the
+                                            // active provider, clear the
+                                            // session agent so the user is
+                                            // forced through /login again.
+                                            if ui.status.provider == provider_id {
+                                                *agent = None;
+                                                ui.status.provider.clear();
+                                                ui.status.model.clear();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            ui.transcript.push(TranscriptItem::Error(format!(
+                                                "/logout {provider_id}: {e}"
+                                            )));
+                                        }
+                                    }
+                                }
+                            }
+                            Cmd::Add(path) => {
+                                ui.composer.input.push_str(&format!("@{} ", path.trim()));
+                            }
+                            Cmd::Usage => {
+                                let lifetime = ui.lifetime.combined(&ui.status.usage);
+                                ui.modal = ActiveModal::Usage(UsageView::new(
+                                    ui.status.usage.clone(),
+                                    lifetime,
+                                ));
+                            }
+                            Cmd::Skills => {
+                                let skills = arccode_skills::load_all(project_root);
+                                ui.modal = ActiveModal::Skills(SkillsView::new(skills));
+                            }
+                            Cmd::Skill(name) => {
+                                let skills = arccode_skills::load_all(project_root);
+                                match skills.into_iter().find(|s| s.name == name) {
+                                    Some(s) => {
+                                        ui.transcript.push(TranscriptItem::System(format!(
+                                            "skill '{}' queued for next prompt",
+                                            s.name
+                                        )));
+                                        ui.pending_skill = Some(s);
+                                    }
+                                    None => {
+                                        ui.transcript.push(TranscriptItem::Error(format!(
+                                            "/skill: no skill named '{name}'"
+                                        )));
+                                    }
+                                }
+                            }
+                            Cmd::Mcp => {
+                                let servers = (ctx.mcp_list_runner)().await;
+                                ui.modal = ActiveModal::Mcp(McpView::new(servers));
+                            }
+                            Cmd::SkillsNew(name) => {
+                                match arccode_skills::new_global_path(&name) {
+                                    Ok(path) => {
+                                        if !path.exists() {
+                                            if let Err(e) = std::fs::write(
+                                                &path,
+                                                arccode_skills::starter_template(&name),
+                                            ) {
+                                                ui.transcript.push(TranscriptItem::Error(
+                                                    format!("/skills new: write failed: {e}"),
+                                                ));
+                                                draw(terminal, ui)?;
+                                                continue;
+                                            }
+                                        }
+                                        if let Err(e) = launch_editor(terminal, &path) {
+                                            ui.transcript.push(TranscriptItem::Error(format!(
+                                                "/skills new: editor: {e}"
+                                            )));
+                                        } else {
+                                            ui.transcript.push(TranscriptItem::System(format!(
+                                                "skill saved at {}",
+                                                path.display()
+                                            )));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        ui.transcript.push(TranscriptItem::Error(format!(
+                                            "/skills new: {e}"
+                                        )));
+                                    }
+                                }
+                            }
                             Cmd::None => {}
                             Cmd::Submit(prompt) => return Ok(IdleAction::Submit(prompt)),
                         }
                     }
                     KeyCode::Backspace => {
                         ui.composer.input.pop();
+                        ui.slash.update(&ui.composer.input);
                     }
-                    KeyCode::Up => ui.composer.history_prev(),
-                    KeyCode::Down => ui.composer.history_next(),
-                    KeyCode::Esc => ui.composer.clear(),
-                    KeyCode::Char(c) => ui.composer.input.push(c),
+                    KeyCode::Up => {
+                        if ui.slash.is_visible() {
+                            ui.slash.move_up();
+                        } else {
+                            ui.composer.history_prev();
+                            ui.slash.update(&ui.composer.input);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if ui.slash.is_visible() {
+                            ui.slash.move_down();
+                        } else {
+                            ui.composer.history_next();
+                            ui.slash.update(&ui.composer.input);
+                        }
+                    }
+                    KeyCode::Tab => {
+                        // Tab completes the selected command, inserting a
+                        // trailing space so the user can type an arg.
+                        if let Some(name) = ui.slash.selected_command() {
+                            ui.composer.input = format!("{name} ");
+                            ui.slash.update(&ui.composer.input);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        ui.composer.clear();
+                        ui.slash.update(&ui.composer.input);
+                    }
+                    KeyCode::Char('@') => {
+                        // `@` summons the fuzzy file picker. The `@` is not
+                        // inserted into the composer until the user picks a
+                        // file (see ModalOutcome::Close handler above).
+                        ui.modal = ActiveModal::FilePicker(FilePicker::new(project_root.clone()));
+                    }
+                    KeyCode::Char(c) => {
+                        ui.composer.input.push(c);
+                        ui.slash.update(&ui.composer.input);
+                    }
                     _ => {}
                 }
                 draw(terminal, ui)?;
@@ -323,13 +727,92 @@ fn truncate(mut s: String, max: usize) -> String {
     s
 }
 
+/// Suspend the TUI, launch `$EDITOR` (falling back to a platform default)
+/// on `path` and block until it exits, then re-enter the alternate screen
+/// and request a redraw on the next `draw` call.
+fn launch_editor(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    path: &std::path::Path,
+) -> Result<()> {
+    // Leave the alternate screen so the editor draws on the user's normal
+    // terminal. We don't recreate the Terminal — same backend, just toggle
+    // raw mode and screen state.
+    disable_raw_mode().ok();
+    execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture).ok();
+    terminal.show_cursor().ok();
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+        if cfg!(windows) {
+            "notepad".to_string()
+        } else {
+            "nano".to_string()
+        }
+    });
+    let status = std::process::Command::new(&editor).arg(path).status();
+
+    // Restore the TUI either way.
+    enable_raw_mode().ok();
+    execute!(stdout(), EnterAlternateScreen, EnableMouseCapture).ok();
+    terminal.clear().ok();
+
+    match status {
+        Ok(_) => Ok(()),
+        Err(e) => Err(anyhow::anyhow!("could not launch '{editor}': {e}")),
+    }
+}
+
+/// Switch the live agent to `provider_id/model_id`. Surfaces success or
+/// failure as a transcript line; if there's no agent yet, asks the user to
+/// run `/login` first instead of crashing.
+fn swap_model(
+    ui: &mut UiState,
+    agent: &mut Option<AgentLoop>,
+    builder: &ProviderBuilder,
+    provider_id: &str,
+    model_id: &str,
+) {
+    match agent.as_mut() {
+        Some(a) => match builder(provider_id) {
+            Ok(provider) => {
+                a.swap_provider(provider);
+                a.set_model(model_id.to_string());
+                ui.status.provider = provider_id.to_string();
+                ui.status.model = model_id.to_string();
+                ui.transcript.push(TranscriptItem::System(format!(
+                    "switched to {provider_id}/{model_id}"
+                )));
+            }
+            Err(e) => {
+                ui.transcript
+                    .push(TranscriptItem::Error(format!("/model {provider_id}: {e}")));
+            }
+        },
+        None => {
+            ui.transcript.push(TranscriptItem::Error(
+                "No provider configured — run /login first.".into(),
+            ));
+        }
+    }
+}
+
 fn help_text() -> String {
     String::from(
-        "Slash commands:\n  /help                       this message\n  /clear            \
-         reset the conversation\n  /model provider/model       switch model (e.g. \
-         /model openai/gpt-4.1)\n  /mode <m>                   change display mode \
-         (read-only/auto-edit/yolo)\n  /quit                       exit\n\nKeys: \
-         Enter submit, Up/Down history, Esc clear input, Ctrl-C exit.",
+        "Slash commands:\n  \
+         /help                       this message\n  \
+         /clear                      reset the conversation\n  \
+         /login, /connect            set up a provider in a guided wizard\n  \
+         /logout [provider]          remove a stored API key\n  \
+         /model [provider/model]     switch model, or open a picker with no arg\n  \
+         /mode <m>                   change display mode (read-only/auto-edit/yolo)\n  \
+         /add <path>                 attach a file to the next prompt\n  \
+         /usage                      show per-model token + cost breakdown\n  \
+         /skills                     browse and apply skills\n  \
+         /skill <name>               queue a skill for the next prompt\n  \
+         /skills new <name>          create a new skill in $EDITOR\n  \
+         /mcp                        manage MCP servers (add / connect / remove)\n  \
+         /quit                       exit\n\nKeys: \
+         Enter submit, Up/Down history, Esc clear input, Ctrl-C exit. \
+         Type @ to fuzzy-pick a file from the project.",
     )
 }
 
@@ -353,6 +836,27 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
         }
         .render(chunks[1], f.buffer_mut());
         StatusView { status: &ui.status }.render(chunks[2], f.buffer_mut());
+
+        // Floating slash-command popup sits directly *above* the composer.
+        // We size it to fit within the rows available above the composer,
+        // and place its bottom edge exactly on the row just above the
+        // composer's top border — never overlapping it.
+        if ui.slash.is_visible() {
+            let composer = chunks[1];
+            let room_above = composer.y; // rows 0..composer.y are available
+            let height = ui.slash.rendered_height().min(room_above);
+            if height >= 3 {
+                let popup = Rect {
+                    x: composer.x,
+                    y: composer.y - height,
+                    width: composer.width,
+                    height,
+                };
+                ui.slash.render(popup, f.buffer_mut());
+            }
+        }
+
+        ui.modal.render(area, f.buffer_mut());
     })?;
     Ok(())
 }
