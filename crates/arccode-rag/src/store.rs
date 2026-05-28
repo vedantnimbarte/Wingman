@@ -42,6 +42,10 @@ pub struct ScoredChunk {
     pub end_line: u32,
     pub content: String,
     pub score: f32,
+    /// Enclosing symbol when the chunker had a parser available
+    /// (`"fn:add"`, `"struct:Foo"`). `None` for line-window chunks or
+    /// non-source files.
+    pub symbol: Option<String>,
 }
 
 impl IndexStore {
@@ -116,6 +120,10 @@ impl IndexStore {
              CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(file_hash);
             ",
         )?;
+        // Add the `symbol` column for indexes created before tree-sitter
+        // chunking was introduced. The error is ignored when the column
+        // already exists (SQLite has no IF NOT EXISTS for ALTER TABLE).
+        let _ = conn.execute("ALTER TABLE chunks ADD COLUMN symbol TEXT", []);
         Ok(())
     }
 
@@ -172,8 +180,8 @@ impl IndexStore {
         tx.execute("DELETE FROM chunks WHERE path = ?1", params![rel_path])?;
         {
             let mut stmt = tx.prepare(
-                "INSERT INTO chunks(path, start_line, end_line, content, file_hash, embedding) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO chunks(path, start_line, end_line, content, file_hash, embedding, symbol) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (c, emb) in chunks.iter().zip(embeddings.iter()) {
                 stmt.execute(params![
@@ -183,6 +191,7 @@ impl IndexStore {
                     c.content,
                     file_hash,
                     f32_slice_to_bytes(emb),
+                    c.symbol.as_deref(),
                 ])?;
             }
         }
@@ -218,8 +227,9 @@ impl IndexStore {
             return Ok(Vec::new());
         }
         let conn = self.db.lock().unwrap();
-        let mut stmt =
-            conn.prepare("SELECT path, start_line, end_line, content, embedding FROM chunks")?;
+        let mut stmt = conn.prepare(
+            "SELECT path, start_line, end_line, content, embedding, symbol FROM chunks",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -227,12 +237,13 @@ impl IndexStore {
                 r.get::<_, i64>(2)? as u32,
                 r.get::<_, String>(3)?,
                 r.get::<_, Vec<u8>>(4)?,
+                r.get::<_, Option<String>>(5)?,
             ))
         })?;
 
         let mut scored: Vec<ScoredChunk> = Vec::new();
         for row in rows {
-            let (path, start_line, end_line, content, emb_bytes) = row?;
+            let (path, start_line, end_line, content, emb_bytes, symbol) = row?;
             let emb = bytes_to_f32_vec(&emb_bytes);
             if emb.len() != self.dim {
                 continue;
@@ -249,6 +260,7 @@ impl IndexStore {
                 end_line,
                 content,
                 score,
+                symbol,
             });
         }
         scored.sort_by(|a, b| {
@@ -307,12 +319,14 @@ mod tests {
                 start_line: 1,
                 end_line: 10,
                 content: "alpha".into(),
+                symbol: None,
             },
             Chunk {
                 path: "b.rs".into(),
                 start_line: 1,
                 end_line: 10,
                 content: "beta".into(),
+                symbol: None,
             },
         ];
         let embeddings = [vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]];
@@ -338,6 +352,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             content: c.into(),
+            symbol: None,
         };
         store
             .replace_file("x.rs", "h1", &[make("v1")], &[vec![1.0, 0.0]])

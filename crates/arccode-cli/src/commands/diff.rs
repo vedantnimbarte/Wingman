@@ -46,7 +46,10 @@ pub async fn run(file: Option<String>, patch: Option<String>) -> Result<ExitCode
     let mut written_files = 0usize;
     let mut quit = false;
 
-    for fd in files {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let annotations = super::diff_annotate::annotate_all(&cwd, &files);
+
+    for (file_idx, fd) in files.into_iter().enumerate() {
         if quit {
             break;
         }
@@ -76,7 +79,10 @@ pub async fn run(file: Option<String>, patch: Option<String>) -> Result<ExitCode
                 cursor += 1;
             }
             // Show the hunk and ask the user.
-            print_hunk(i + 1, fd.hunks.len(), h);
+            let sym = annotations
+                .get(file_idx)
+                .and_then(|a| a.hunks.get(i).cloned().flatten());
+            print_hunk(i + 1, fd.hunks.len(), h, sym.as_deref());
             let choice = prompt_choice()?;
             match choice {
                 Choice::Quit => {
@@ -168,10 +174,14 @@ fn prompt_choice() -> Result<Choice> {
     }
 }
 
-fn print_hunk(idx: usize, total: usize, h: &Hunk) {
+fn print_hunk(idx: usize, total: usize, h: &Hunk, enclosing: Option<&str>) {
+    let sym_tag = match enclosing {
+        Some(s) => format!("  // {s}"),
+        None => String::new(),
+    };
     println!(
-        "\n--- hunk {idx}/{total} @ -{},{} +{},{} ---",
-        h.old_start, h.old_len, h.new_start, h.new_len
+        "\n--- hunk {idx}/{total} @ -{},{} +{},{} ---{sym_tag}",
+        h.old_start, h.old_len, h.new_start, h.new_len,
     );
     for line in &h.raw {
         let glyph = line.chars().next().unwrap_or(' ');

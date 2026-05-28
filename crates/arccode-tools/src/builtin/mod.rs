@@ -25,6 +25,13 @@ mod web_fetch;
 mod web_search;
 mod write_file;
 
+#[cfg(feature = "treesitter")]
+mod edit_symbol;
+#[cfg(feature = "treesitter")]
+mod find_symbol;
+#[cfg(feature = "treesitter")]
+mod outline;
+
 pub use apply_patch::ApplyPatch;
 pub use edit_file::EditFile;
 pub use forget_memory::ForgetMemory;
@@ -44,3 +51,10 @@ pub use spawn_subagent::{SpawnSubagent, SubagentRunner, SubagentSpec};
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 pub use write_file::WriteFile;
+
+#[cfg(feature = "treesitter")]
+pub use edit_symbol::EditSymbol;
+#[cfg(feature = "treesitter")]
+pub use find_symbol::FindSymbol;
+#[cfg(feature = "treesitter")]
+pub use outline::Outline;

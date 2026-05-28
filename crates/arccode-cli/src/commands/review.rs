@@ -44,6 +44,8 @@ pub async fn run(
             .with_context(|| format!("reading template {path}"))?,
         None => DEFAULT_TEMPLATE.to_string(),
     };
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let diff = super::diff_annotate::annotate_diff_text(&cwd, &diff);
     let prompt = format!("{template}\n```\n{diff}\n```");
 
     let cfg = load_config()?;

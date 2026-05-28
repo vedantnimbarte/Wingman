@@ -77,13 +77,18 @@ impl Tool for SemanticSearch {
         let mut out = String::new();
         for (i, h) in hits.iter().enumerate() {
             let snippet = truncate(&h.content, cap);
+            let sym = match &h.symbol {
+                Some(s) => format!("  [{s}]"),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "[{}] {}:{}-{}  (score {:.3})\n{}\n\n",
+                "[{}] {}:{}-{}  (score {:.3}){}\n{}\n\n",
                 i + 1,
                 h.path,
                 h.start_line,
                 h.end_line,
                 h.score,
+                sym,
                 snippet,
             ));
         }

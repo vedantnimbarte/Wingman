@@ -12,6 +12,7 @@ members = [
     "crates/arccode-mcp",
     "crates/arccode-skills",
     "crates/arccode-learn",
+    "crates/arccode-ts",
 ]
 
 [workspace.package]
@@ -34,6 +35,7 @@ arccode-rag = { path = "crates/arccode-rag", version = "0.0.1", default-features
 arccode-mcp = { path = "crates/arccode-mcp", version = "0.0.1" }
 arccode-skills = { path = "crates/arccode-skills", version = "0.0.1" }
 arccode-learn = { path = "crates/arccode-learn", version = "0.0.1" }
+arccode-ts = { path = "crates/arccode-ts", version = "0.0.1", default-features = false }
 
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
 async-trait = "0.1"

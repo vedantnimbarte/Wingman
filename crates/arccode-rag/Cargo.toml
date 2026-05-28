@@ -32,10 +32,15 @@ rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 # so the rest of the workspace builds without ONNX runtime present).
 fastembed = { version = "5", optional = true }
 
+# Tree-sitter-aware chunking. Gated so callers can opt out of the C
+# toolchain dependency.
+arccode-ts = { workspace = true, optional = true }
+
 # Hashing for change detection
 blake3 = "1"
 
 [features]
-default = ["embeddings"]
+default = ["embeddings", "treesitter"]
 embeddings = ["dep:fastembed"]
+treesitter = ["dep:arccode-ts", "arccode-ts/treesitter"]
 

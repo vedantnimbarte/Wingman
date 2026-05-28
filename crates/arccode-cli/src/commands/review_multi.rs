@@ -56,6 +56,8 @@ pub async fn run(pr: Option<String>, local_base: Option<String>, models_csv: Str
     }
 
     let cfg = load_config()?;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let diff = super::diff_annotate::annotate_diff_text(&cwd, &diff);
     let prompt = format!("{REVIEWER_PROMPT}\n```\n{diff}\n```");
 
     // Spawn one task per reviewer model. Each runs an isolated headless

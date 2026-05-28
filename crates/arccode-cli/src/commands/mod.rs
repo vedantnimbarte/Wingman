@@ -3,6 +3,7 @@ pub mod checkpoint;
 pub mod config;
 pub mod cost;
 pub mod diff;
+pub mod diff_annotate;
 pub mod discover;
 pub mod headless;
 pub mod init;

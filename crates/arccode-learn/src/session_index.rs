@@ -57,6 +57,7 @@ pub fn chunk_session(session_path: &std::path::Path, cap_chars: usize) -> Result
                 start_line: *start,
                 end_line: (*cursor).max(*start),
                 content: body,
+                symbol: None,
             });
         }
         buf.clear();

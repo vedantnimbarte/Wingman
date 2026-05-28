@@ -14,6 +14,9 @@ pub struct Chunk {
     pub start_line: u32,
     pub end_line: u32,
     pub content: String,
+    /// Optional enclosing symbol (e.g. `fn:agent_loop`, `struct:Foo`)
+    /// set by the tree-sitter chunker. `None` for line-window chunks.
+    pub symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +44,36 @@ impl Chunker {
 
     /// Chunk a file's contents. `rel_path` is stored on every chunk; pass a
     /// project-relative POSIX path.
+    ///
+    /// When the `treesitter` feature is on and the path matches a known
+    /// language, chunks are aligned to function/struct/class boundaries.
+    /// Otherwise the line-window strategy is used.
     pub fn chunk(&self, rel_path: &str, content: &str) -> Vec<Chunk> {
+        #[cfg(feature = "treesitter")]
+        {
+            use std::path::Path;
+            if let Some(lang) = arccode_ts::Language::from_path(Path::new(rel_path)) {
+                let sem = arccode_ts::semantic_chunks(lang, content);
+                if !sem.is_empty() {
+                    return sem
+                        .into_iter()
+                        .map(|c| Chunk {
+                            path: rel_path.to_string(),
+                            start_line: c.start_line,
+                            end_line: c.end_line,
+                            content: c.content,
+                            symbol: c.symbol.map(|s| format!("{}:{}", s.kind.label(), s.name)),
+                        })
+                        .collect();
+                }
+                // Parsing failed or produced nothing — fall through to
+                // the line-window path.
+            }
+        }
+        self.chunk_line_window(rel_path, content)
+    }
+
+    fn chunk_line_window(&self, rel_path: &str, content: &str) -> Vec<Chunk> {
         let lines: Vec<&str> = content.lines().collect();
         if lines.is_empty() {
             return Vec::new();
@@ -58,6 +90,7 @@ impl Chunker {
                 start_line: (start + 1) as u32,
                 end_line: end as u32,
                 content: body,
+                symbol: None,
             });
             if end == lines.len() {
                 break;
@@ -139,6 +172,22 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].start_line, 1);
         assert_eq!(chunks[0].end_line, 3);
+    }
+
+    #[cfg(feature = "treesitter")]
+    #[test]
+    fn rust_source_uses_semantic_chunks() {
+        let c = Chunker::default();
+        let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
+        let chunks = c.chunk("file.rs", src);
+        // Each fn becomes its own semantic chunk with the symbol tagged.
+        let named: Vec<&str> = chunks
+            .iter()
+            .filter_map(|c| c.symbol.as_deref())
+            .collect();
+        assert!(named.iter().any(|s| s.starts_with("fn:alpha")));
+        assert!(named.iter().any(|s| s.starts_with("fn:beta")));
+        assert!(named.iter().any(|s| s.starts_with("fn:gamma")));
     }
 
     #[test]

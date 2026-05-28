@@ -90,6 +90,12 @@ impl ToolRegistry {
         self.register(crate::builtin::WebFetch);
         self.register(crate::builtin::WebSearch);
         self.register(crate::builtin::PresentPlan);
+        #[cfg(feature = "treesitter")]
+        {
+            self.register(crate::builtin::FindSymbol);
+            self.register(crate::builtin::Outline);
+            self.register(crate::builtin::EditSymbol);
+        }
         self
     }
 

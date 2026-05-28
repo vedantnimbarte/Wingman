@@ -13,6 +13,11 @@ struct Args {
     offset: Option<u32>,
     #[serde(default)]
     limit: Option<u32>,
+    /// When `true` and the file is in a supported language, returns just
+    /// the signatures-only outline (one line per fn/struct/class/etc).
+    /// Lets the model fit many files' shapes into one context window.
+    #[serde(default)]
+    summary: bool,
 }
 
 #[async_trait]
@@ -21,14 +26,17 @@ impl Tool for ReadFile {
         ToolSpec {
             name: "read_file".into(),
             description: "Read a UTF-8 text file from disk. Optional 1-based `offset` and `limit` \
-                          restrict the returned line range. Refuses files that look binary."
+                          restrict the returned line range. Set `summary: true` to get a \
+                          signatures-only outline instead of the full text (supported languages: \
+                          rust, python, javascript, typescript, tsx, go). Refuses files that look binary."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Absolute or cwd-relative path." },
                     "offset": { "type": "integer", "minimum": 1, "description": "1-based starting line." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Max lines to return." }
+                    "limit": { "type": "integer", "minimum": 1, "description": "Max lines to return." },
+                    "summary": { "type": "boolean", "default": false, "description": "Return outline (signatures only) instead of full content." }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -58,6 +66,21 @@ impl Tool for ReadFile {
             text
         };
         let text = rendered;
+        // Summary mode: short-circuit with the tree-sitter outline when
+        // possible. Falls through to the full read if the language is
+        // unknown so the model still gets *something* useful.
+        if args.summary {
+            #[cfg(feature = "treesitter")]
+            {
+                if let Some(lang) = arccode_ts::Language::from_path(&path) {
+                    if let Some(out) = arccode_ts::outline(lang, &text) {
+                        if !out.is_empty() {
+                            return ToolOutcome::ok(out.trim_end().to_string());
+                        }
+                    }
+                }
+            }
+        }
         let lines: Vec<&str> = text.lines().collect();
         let start = args
             .offset

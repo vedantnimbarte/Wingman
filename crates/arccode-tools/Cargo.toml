@@ -14,6 +14,7 @@ arccode-rag = { workspace = true, default-features = false }
 arccode-learn = { workspace = true }
 arccode-skills = { workspace = true }
 arccode-session = { workspace = true }
+arccode-ts = { workspace = true, optional = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -29,4 +30,8 @@ regex = "1"
 similar = "2"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 urlencoding = { workspace = true }
+
+[features]
+default = ["treesitter"]
+treesitter = ["dep:arccode-ts", "arccode-ts/treesitter"]
 

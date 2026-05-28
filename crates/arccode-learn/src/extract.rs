@@ -26,6 +26,14 @@ pub struct ExtractedPattern {
     pub occurrences: usize,
     /// Representative user prompts that led into the pattern (up to 3).
     pub example_prompts: Vec<String>,
+    /// Best-effort AST hints harvested from `edit_file` / `edit_symbol` /
+    /// `write_file` calls in the matching sessions. Each entry is a short
+    /// label like `"rust:function"`, `"python:class"`, `"rust:match_expression"`.
+    /// Lets `arccode skill extract` propose drafts like
+    /// "user refactors Rust match expressions" instead of generic
+    /// "user edits files".
+    #[serde(default)]
+    pub ast_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -51,12 +59,12 @@ impl Default for ExtractConfig {
 /// Scan all session JSONLs under `sessions_dir`, return repeated tool-call
 /// sequences sorted by frequency (descending).
 pub fn extract_from_dir(sessions_dir: &Path, cfg: &ExtractConfig) -> Vec<ExtractedPattern> {
-    let mut per_session: Vec<(Vec<String>, Option<String>)> = Vec::new();
+    let mut per_session: Vec<SessionMeta> = Vec::new();
     for path in list_sessions(sessions_dir).into_iter().take(cfg.session_scan_limit) {
         if let Ok(records) = load_session(&path) {
-            let (seq, first_user) = tool_sequence(&records);
-            if !seq.is_empty() {
-                per_session.push((seq, first_user));
+            let meta = session_meta(&records);
+            if !meta.sequence.is_empty() {
+                per_session.push(meta);
             }
         }
     }
@@ -64,23 +72,30 @@ pub fn extract_from_dir(sessions_dir: &Path, cfg: &ExtractConfig) -> Vec<Extract
     // Count n-grams across sessions. We deliberately do *not* double-count
     // an n-gram that repeats within the same session — we care about
     // "appears across multiple flows," not "happens twice in one chat."
-    let mut counts: HashMap<Vec<String>, (usize, Vec<String>)> = HashMap::new();
-    for (seq, prompt) in &per_session {
+    let mut counts: HashMap<Vec<String>, CountEntry> = HashMap::new();
+    for meta in &per_session {
         let mut seen_in_this_session: std::collections::HashSet<Vec<String>> = Default::default();
         for n in cfg.min_seq_len..=cfg.max_seq_len {
-            if seq.len() < n {
+            if meta.sequence.len() < n {
                 break;
             }
-            for window in seq.windows(n) {
+            for window in meta.sequence.windows(n) {
                 let key = window.to_vec();
                 if !seen_in_this_session.insert(key.clone()) {
                     continue;
                 }
-                let entry = counts.entry(key).or_insert((0, Vec::new()));
-                entry.0 += 1;
-                if let Some(p) = prompt {
-                    if entry.1.len() < 3 && !entry.1.iter().any(|x| x == p) {
-                        entry.1.push(p.clone());
+                let entry = counts.entry(key).or_default();
+                entry.occurrences += 1;
+                if let Some(p) = &meta.first_user_prompt {
+                    if entry.example_prompts.len() < 3
+                        && !entry.example_prompts.iter().any(|x| x == p)
+                    {
+                        entry.example_prompts.push(p.clone());
+                    }
+                }
+                for hint in &meta.ast_hints {
+                    if !entry.ast_hints.contains(hint) {
+                        entry.ast_hints.push(hint.clone());
                     }
                 }
             }
@@ -89,11 +104,12 @@ pub fn extract_from_dir(sessions_dir: &Path, cfg: &ExtractConfig) -> Vec<Extract
 
     let mut patterns: Vec<ExtractedPattern> = counts
         .into_iter()
-        .filter(|(_, (n, _))| *n >= cfg.min_occurrences)
-        .map(|(seq, (n, examples))| ExtractedPattern {
+        .filter(|(_, e)| e.occurrences >= cfg.min_occurrences)
+        .map(|(seq, e)| ExtractedPattern {
             sequence: seq,
-            occurrences: n,
-            example_prompts: examples,
+            occurrences: e.occurrences,
+            example_prompts: e.example_prompts,
+            ast_hints: e.ast_hints,
         })
         .collect();
 
@@ -133,33 +149,133 @@ fn is_contiguous_sub(small: &[String], large: &[String]) -> bool {
 /// Extract the ordered sequence of tool names called by the assistant in
 /// this session, plus the *first* user prompt (for example purposes).
 pub fn tool_sequence(records: &[SessionRecord]) -> (Vec<String>, Option<String>) {
-    let mut seq = Vec::new();
-    let mut first_user: Option<String> = None;
+    let meta = session_meta(records);
+    (meta.sequence, meta.first_user_prompt)
+}
+
+#[derive(Debug, Default, Clone)]
+struct CountEntry {
+    occurrences: usize,
+    example_prompts: Vec<String>,
+    ast_hints: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct SessionMeta {
+    sequence: Vec<String>,
+    first_user_prompt: Option<String>,
+    /// AST hints harvested from `edit_*`/`write_file` tool inputs. Format:
+    /// `"<lang>:<symbol-kind>"` — e.g. `"rust:function"`, `"python:class"`.
+    /// De-duplicated within the session.
+    ast_hints: Vec<String>,
+}
+
+fn session_meta(records: &[SessionRecord]) -> SessionMeta {
+    let mut out = SessionMeta::default();
     for r in records {
         match r {
             SessionRecord::User { text, .. } => {
-                if first_user.is_none() {
-                    first_user = Some(text.clone());
+                if out.first_user_prompt.is_none() {
+                    out.first_user_prompt = Some(text.clone());
                 }
             }
             SessionRecord::Assistant { blocks, .. } => {
                 for b in blocks {
-                    if let ContentBlock::ToolUse { name, .. } = b {
-                        seq.push(name.clone());
+                    if let ContentBlock::ToolUse { name, input, .. } = b {
+                        out.sequence.push(name.clone());
+                        for hint in derive_ast_hint(name, input) {
+                            if !out.ast_hints.contains(&hint) {
+                                out.ast_hints.push(hint);
+                            }
+                        }
                     }
                 }
             }
             _ => {}
         }
     }
-    let _ = Role::Assistant; // silence dead-code on unused import path
-    (seq, first_user)
+    let _ = Role::Assistant;
+    out
+}
+
+/// Inspect a tool-use input and, if it's an edit-shaped tool, look up the
+/// target file on disk to infer the enclosing symbol kind. Returns one or
+/// more `"<lang>:<kind>"` labels; empty on miss.
+fn derive_ast_hint(tool_name: &str, input: &serde_json::Value) -> Vec<String> {
+    let target_path = match tool_name {
+        "edit_file" | "edit_symbol" | "write_file" | "apply_patch" | "read_file" => input
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string()),
+        _ => None,
+    };
+    let Some(path) = target_path else { return Vec::new() };
+    let p = std::path::Path::new(&path);
+
+    #[cfg(feature = "treesitter")]
+    {
+        let Some(lang) = arccode_ts::Language::from_path(p) else {
+            return Vec::new();
+        };
+        let lang_label = lang.label().to_string();
+
+        // For edit_symbol we know the name directly.
+        if tool_name == "edit_symbol" {
+            if let Some(name) = input.get("name").and_then(|n| n.as_str()) {
+                if let Ok(text) = std::fs::read_to_string(p) {
+                    let syms = arccode_ts::extract_symbols(lang, &text);
+                    if let Some(s) = syms.iter().find(|s| s.name == name) {
+                        return vec![format!("{lang_label}:{}", s.kind.label())];
+                    }
+                }
+                // Fall back to "function" — the tool only edits fn/method.
+                return vec![format!("{lang_label}:function")];
+            }
+        }
+
+        // For edit_file / apply_patch, try to locate the old_string in the
+        // current file and report the enclosing symbol's kind.
+        if matches!(tool_name, "edit_file") {
+            if let (Some(needle), Ok(text)) = (
+                input.get("old_string").and_then(|s| s.as_str()),
+                std::fs::read_to_string(p),
+            ) {
+                if let Some(byte_idx) = text.find(needle) {
+                    let line = text[..byte_idx].matches('\n').count() as u32 + 1;
+                    if let Some(sym) = arccode_ts::enclosing_symbol(lang, &text, line) {
+                        return vec![format!("{lang_label}:{}", sym.kind.label())];
+                    }
+                }
+            }
+        }
+
+        // Fallback: just record the language touched, without a kind. That
+        // alone is still useful ("user often edits rust files").
+        return vec![format!("{lang_label}:*")];
+    }
+    #[cfg(not(feature = "treesitter"))]
+    {
+        let _ = p;
+        Vec::new()
+    }
 }
 
 /// Render an [`ExtractedPattern`] as a draft skill markdown file.
 pub fn render_draft(p: &ExtractedPattern) -> (String, String) {
     let slug = make_slug(&p.sequence);
     let name = format!("auto-{slug}");
+    let hints_block = if p.ast_hints.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n## Files / symbols touched\n\nObserved on:\n{}\n",
+            p.ast_hints
+                .iter()
+                .map(|h| format!("- `{h}`"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    };
     let body = format!(
         "---\n\
          name: {name}\n\
@@ -173,7 +289,8 @@ pub fn render_draft(p: &ExtractedPattern) -> (String, String) {
          -->\n\n\
          ## Observed pattern\n\
          The assistant has run this exact tool-call sequence across {n} session(s):\n\n\
-         {chain}\n\n\
+         {chain}\n\
+         {hints_block}\n\
          ## Example prompts that led to this flow\n\n\
          {examples}\n\n\
          ## Suggested skill body (edit me)\n\n\
@@ -187,6 +304,7 @@ pub fn render_draft(p: &ExtractedPattern) -> (String, String) {
             .map(|s| format!("`{s}`"))
             .collect::<Vec<_>>()
             .join(" → "),
+        hints_block = hints_block,
         examples = if p.example_prompts.is_empty() {
             "_(none recorded)_".to_string()
         } else {
