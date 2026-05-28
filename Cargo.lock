@@ -127,10 +127,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
+name = "arccode-autonomous"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "arccode-config",
+ "arccode-core",
+ "async-trait",
+ "chrono",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "arccode-cli"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "arccode-autonomous",
  "arccode-config",
  "arccode-core",
  "arccode-learn",
@@ -144,6 +163,7 @@ dependencies = [
  "arccode-tui",
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "futures",
  "rand 0.8.6",

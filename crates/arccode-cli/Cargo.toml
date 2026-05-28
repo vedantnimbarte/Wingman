@@ -22,6 +22,7 @@ arccode-rag = { workspace = true, default-features = false }
 arccode-mcp = { workspace = true }
 arccode-learn = { workspace = true }
 arccode-skills = { workspace = true }
+arccode-autonomous = { workspace = true }
 arccode-ts = { workspace = true, optional = true }
 
 tokio = { workspace = true }
@@ -40,6 +41,7 @@ sha2 = { workspace = true }
 base64 = { workspace = true }
 urlencoding = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [features]
 default = ["embeddings", "treesitter"]

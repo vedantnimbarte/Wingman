@@ -1,0 +1,25 @@
+[package]
+name = "arccode-autonomous"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR."
+
+[dependencies]
+arccode-core = { workspace = true }
+arccode-config = { workspace = true }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]
+tempfile = "3"

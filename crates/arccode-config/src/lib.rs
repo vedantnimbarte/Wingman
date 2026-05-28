@@ -152,6 +152,12 @@ pub struct Config {
     /// (e.g. from cron / a launchd plist / Task Scheduler).
     #[serde(default)]
     pub schedule: Vec<ScheduledTask>,
+
+    /// Pilot mode (multi-agent orchestrator). See `plan.md` § Unified Pilot
+    /// Mode. A legacy `[autonomous]` section is auto-migrated into `[pilot]`
+    /// on load with a one-time warning.
+    #[serde(default, alias = "autonomous")]
+    pub pilot: PilotConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -666,6 +672,236 @@ fn strip_env_placeholder(s: &str) -> Option<&str> {
     s.strip_prefix("${").and_then(|s| s.strip_suffix('}'))
 }
 
+/// Capability tier — which pilot-mode features are on by default.
+///
+/// `assist` keeps the user in the loop on every decision; `copilot` is the
+/// default for day-to-day work; `autopilot` enables daemon discovery, the
+/// critic agent, and sandboxed execution. See `plan.md` § Capability tiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PilotTier {
+    Assist,
+    #[default]
+    Copilot,
+    Autopilot,
+}
+
+impl std::str::FromStr for PilotTier {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "assist" => Ok(Self::Assist),
+            "copilot" => Ok(Self::Copilot),
+            "autopilot" => Ok(Self::Autopilot),
+            other => Err(format!(
+                "unknown pilot tier '{other}' (expected assist, copilot, autopilot)"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for PilotTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Assist => "assist",
+            Self::Copilot => "copilot",
+            Self::Autopilot => "autopilot",
+        })
+    }
+}
+
+/// Top-level pilot-mode settings. See `plan.md` § Unified config schema.
+///
+/// Defaults mirror the table in the plan: `copilot` tier, 4-way concurrency,
+/// $10 budget, 30-minute task timeout, `cargo check --workspace` as the
+/// per-turn gate (E5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotConfig {
+    pub tier: PilotTier,
+    /// Model used for the manager agent, reviewers, and the critic. Form:
+    /// `provider/model_id` (e.g. `anthropic/claude-opus-4-7`).
+    pub default_model: Option<String>,
+    /// Cheaper model used for worker subprocesses.
+    pub worker_model: Option<String>,
+    pub max_concurrent_agents: u32,
+    pub max_usd: f64,
+    pub task_timeout_secs: u64,
+    /// Shell command run between worker turns as a sanity gate (E5).
+    /// Empty disables the per-turn check.
+    pub turn_gate_cmd: String,
+
+    pub approval: PilotApprovalConfig,
+    pub pr: PilotPrConfig,
+    pub sandbox: PilotSandboxConfig,
+    pub daemon: PilotDaemonConfig,
+    pub refine: PilotRefineConfig,
+    pub skills: PilotSkillsConfig,
+
+    /// Per-capability overrides. Each key turns one E1–E13 / J1–J15
+    /// capability on or off regardless of the tier's defaults.
+    #[serde(default)]
+    pub capabilities: BTreeMap<String, bool>,
+}
+
+impl Default for PilotConfig {
+    fn default() -> Self {
+        Self {
+            tier: PilotTier::default(),
+            default_model: None,
+            worker_model: None,
+            max_concurrent_agents: 4,
+            max_usd: 10.0,
+            task_timeout_secs: 1800,
+            turn_gate_cmd: "cargo check --workspace".into(),
+            approval: PilotApprovalConfig::default(),
+            pr: PilotPrConfig::default(),
+            sandbox: PilotSandboxConfig::default(),
+            daemon: PilotDaemonConfig::default(),
+            refine: PilotRefineConfig::default(),
+            skills: PilotSkillsConfig::default(),
+            capabilities: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotApprovalConfig {
+    pub auto_approve_usd: f64,
+    pub auto_approve_max_tasks: u32,
+    pub auto_approve_globs: Vec<String>,
+    /// Plans touching these globs always require a hard approval gate.
+    pub dangerous_paths: Vec<String>,
+    /// "Veto in N seconds" window for medium-risk plans.
+    pub notify_only_window_secs: u64,
+    /// Where notify-only plans are surfaced (e.g. "desktop", "slack:<webhook>").
+    pub notify_channel: String,
+}
+
+impl Default for PilotApprovalConfig {
+    fn default() -> Self {
+        Self {
+            auto_approve_usd: 1.00,
+            auto_approve_max_tasks: 5,
+            auto_approve_globs: vec![
+                "crates/**/*.rs".into(),
+                "docs/**".into(),
+                "README.md".into(),
+            ],
+            dangerous_paths: vec![
+                "**/migrations/**".into(),
+                ".github/**".into(),
+                "**/auth/**".into(),
+                "**/secrets*".into(),
+                "Cargo.lock".into(),
+            ],
+            notify_only_window_secs: 60,
+            notify_channel: "desktop".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotPrConfig {
+    pub auto_merge: bool,
+    /// "low" | "medium" | "high" — auto-merge is vetoed if `arccode review`
+    /// turns up any finding at or above this severity.
+    pub auto_merge_max_severity: String,
+    pub require_ci_green: bool,
+}
+
+impl Default for PilotPrConfig {
+    fn default() -> Self {
+        Self {
+            auto_merge: true,
+            auto_merge_max_severity: "low".into(),
+            require_ci_green: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotSandboxConfig {
+    /// "host" | "container" | "vm" — where workers run by default.
+    pub default_tier: String,
+    pub container_image: String,
+    /// "firecracker" | "qemu" | "cloud".
+    pub vm_provider: String,
+}
+
+impl Default for PilotSandboxConfig {
+    fn default() -> Self {
+        Self {
+            default_tier: "host".into(),
+            container_image: "arccode/sandbox:latest".into(),
+            vm_provider: "firecracker".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotDaemonConfig {
+    pub enabled: bool,
+    pub poll_interval_secs: u64,
+    pub auto_threshold: f64,
+    pub max_concurrent_runs: u32,
+    pub trusted_authors: Vec<String>,
+    pub trusted_labels: Vec<String>,
+    pub sources: Vec<String>,
+}
+
+impl Default for PilotDaemonConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_secs: 300,
+            auto_threshold: 0.75,
+            max_concurrent_runs: 2,
+            trusted_authors: Vec::new(),
+            trusted_labels: vec!["arccode:auto".into()],
+            sources: vec![
+                "github_issues".into(),
+                "ci_failures".into(),
+                "dependabot".into(),
+                "todos".into(),
+                "coverage_gaps".into(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotRefineConfig {
+    /// Cap on clarifying questions the agent may ask before planning (J1).
+    pub max_clarifying_questions: u32,
+    /// "off" | "low" | "medium" | "high" — how aggressively the agent
+    /// challenges goals it thinks are wrong.
+    pub challenge_threshold: String,
+    pub suggest_alternatives: bool,
+}
+
+impl Default for PilotRefineConfig {
+    fn default() -> Self {
+        Self {
+            max_clarifying_questions: 3,
+            challenge_threshold: "medium".into(),
+            suggest_alternatives: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotSkillsConfig {
+    /// Installed skill packs, each `owner/name@semver`.
+    pub packs: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +994,46 @@ mod tests {
         );
         // Global tokens section survives — no clobber from absent section.
         assert_eq!(cfg.tokens.compact_at_tokens, 50_000);
+    }
+
+    #[test]
+    fn pilot_config_defaults() {
+        let cfg = PilotConfig::default();
+        assert_eq!(cfg.tier, PilotTier::Copilot);
+        assert_eq!(cfg.max_concurrent_agents, 4);
+        assert!((cfg.max_usd - 10.0).abs() < 1e-9);
+        assert_eq!(cfg.task_timeout_secs, 1800);
+        assert_eq!(cfg.turn_gate_cmd, "cargo check --workspace");
+        assert!(cfg.pr.auto_merge);
+        assert_eq!(cfg.sandbox.default_tier, "host");
+        assert!(!cfg.daemon.enabled);
+    }
+
+    #[test]
+    fn pilot_tier_parses() {
+        assert_eq!("assist".parse::<PilotTier>().unwrap(), PilotTier::Assist);
+        assert_eq!("copilot".parse::<PilotTier>().unwrap(), PilotTier::Copilot);
+        assert_eq!(
+            "autopilot".parse::<PilotTier>().unwrap(),
+            PilotTier::Autopilot
+        );
+        assert!("orbit".parse::<PilotTier>().is_err());
+    }
+
+    #[test]
+    fn legacy_autonomous_section_migrates_to_pilot() {
+        // Per plan.md § Migration: existing [autonomous] config should be
+        // honored as [pilot] until M4 removes the alias.
+        let text = r#"
+            [autonomous]
+            tier = "assist"
+            max_concurrent_agents = 2
+            max_usd = 5.0
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.pilot.tier, PilotTier::Assist);
+        assert_eq!(cfg.pilot.max_concurrent_agents, 2);
+        assert!((cfg.pilot.max_usd - 5.0).abs() < 1e-9);
     }
 
     #[test]

@@ -133,6 +133,64 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         patch: Option<String>,
     },
+    /// Pilot mode: plan a multi-task goal, delegate to worker agents in
+    /// isolated worktrees, converge into a PR.
+    Pilot {
+        /// High-level objective in natural language.
+        goal: String,
+        /// Capability tier override.
+        #[arg(long, value_name = "TIER")]
+        tier: Option<String>,
+        /// Plan and write tasks.jsonl, do not spawn workers.
+        #[arg(long)]
+        plan_only: bool,
+        /// Auto-approve the plan (no interactive gate).
+        #[arg(long)]
+        yes: bool,
+        /// Force hard plan-approval gate regardless of tier.
+        #[arg(long)]
+        review: bool,
+        /// Tail the run in this terminal.
+        #[arg(long)]
+        watch: bool,
+        /// Skip `gh pr create` (just push the branch).
+        #[arg(long)]
+        no_pr: bool,
+        /// Branch from <REV> instead of HEAD.
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        /// Override pilot.max_concurrent_agents.
+        #[arg(long, value_name = "N")]
+        max_agents: Option<u32>,
+        /// Override pilot.max_usd cost cap.
+        #[arg(long, value_name = "FLOAT")]
+        max_usd: Option<f64>,
+        /// Override sandbox tier per run (host | container | vm).
+        #[arg(long, value_name = "TIER")]
+        sandbox: Option<String>,
+        /// Notification channel for plan/completion notices.
+        #[arg(long, value_name = "CHANNEL")]
+        channel: Option<String>,
+    },
+    /// Deprecated alias for `arccode pilot` — kept through M3, removed at M4.
+    #[command(hide = true)]
+    Autonomous {
+        goal: String,
+        #[arg(long)]
+        plan_only: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        review: bool,
+        #[arg(long)]
+        no_pr: bool,
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        #[arg(long, value_name = "N")]
+        max_agents: Option<u32>,
+        #[arg(long, value_name = "FLOAT")]
+        max_usd: Option<f64>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -271,6 +329,75 @@ pub async fn run() -> Result<ExitCode> {
             commands::review_multi::run(pr, local, models).await
         }
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
+        Some(Command::Pilot {
+            goal,
+            tier,
+            plan_only,
+            yes,
+            review,
+            watch,
+            no_pr,
+            base,
+            max_agents,
+            max_usd,
+            sandbox,
+            channel,
+        }) => {
+            let cfg = load_config()?;
+            commands::pilot::run(
+                cfg,
+                commands::pilot::PilotOptions {
+                    goal,
+                    tier,
+                    plan_only,
+                    yes,
+                    review,
+                    watch,
+                    no_pr,
+                    base,
+                    max_agents,
+                    max_usd,
+                    sandbox,
+                    channel,
+                    model_override: cli.model,
+                },
+            )
+            .await
+        }
+        Some(Command::Autonomous {
+            goal,
+            plan_only,
+            yes,
+            review,
+            no_pr,
+            base,
+            max_agents,
+            max_usd,
+        }) => {
+            eprintln!(
+                "[warn] `arccode autonomous` is deprecated and will be removed at M4 — use `arccode pilot` instead."
+            );
+            let cfg = load_config()?;
+            commands::pilot::run(
+                cfg,
+                commands::pilot::PilotOptions {
+                    goal,
+                    tier: None,
+                    plan_only,
+                    yes,
+                    review,
+                    watch: false,
+                    no_pr,
+                    base,
+                    max_agents,
+                    max_usd,
+                    sandbox: None,
+                    channel: None,
+                    model_override: cli.model,
+                },
+            )
+            .await
+        }
         None => {
             let cfg = load_config()?;
             let mode_override = parse_mode(cli.mode.as_deref())?;

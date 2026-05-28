@@ -8,6 +8,7 @@ pub mod discover;
 pub mod headless;
 pub mod init;
 pub mod memory;
+pub mod pilot;
 pub mod review;
 pub mod review_multi;
 pub mod schedule;

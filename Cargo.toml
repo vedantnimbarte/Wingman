@@ -13,6 +13,7 @@ members = [
     "crates/arccode-skills",
     "crates/arccode-learn",
     "crates/arccode-ts",
+    "crates/arccode-autonomous",
 ]
 
 [workspace.package]
@@ -36,6 +37,7 @@ arccode-mcp = { path = "crates/arccode-mcp", version = "0.0.1" }
 arccode-skills = { path = "crates/arccode-skills", version = "0.0.1" }
 arccode-learn = { path = "crates/arccode-learn", version = "0.0.1" }
 arccode-ts = { path = "crates/arccode-ts", version = "0.0.1", default-features = false }
+arccode-autonomous = { path = "crates/arccode-autonomous", version = "0.0.1" }
 
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
 async-trait = "0.1"
