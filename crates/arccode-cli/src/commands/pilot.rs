@@ -106,19 +106,44 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     eprintln!("[pilot] proposed {} task(s) (run id: {run_id}).", plan.len());
     eprint!("\n{}", render_plan(&plan));
 
-    // Approval flow: --yes auto-approves; --review forces hard gate; the
-    // tier-aware E1 trust ladder lands in Phase 7.8 and replaces this.
-    let approve = if opts.yes && !opts.review {
-        true
-    } else if !std::io::stdin().is_terminal() {
-        // Non-interactive (CI / pipe) with no --yes: reject the plan
-        // rather than block on a prompt that nobody can answer.
-        eprintln!(
-            "[pilot] no TTY and --yes not given — refusing to auto-approve plan."
-        );
-        false
-    } else {
-        prompt_for_approval(&plan, &opts.goal)?
+    // E1 trust-tiered approval. Classifier decides whether to proceed
+    // silently (auto), surface a veto window (notify-only), or fall
+    // back to the y/e/n prompt (hard).
+    let report = arccode_autonomous::approval::classify(
+        arccode_autonomous::approval::ClassifyInputs {
+            plan: &plan,
+            config: &pilot.approval,
+            tier: pilot.tier,
+            force_auto: opts.yes,
+            force_hard: opts.review,
+        },
+    );
+    eprintln!(
+        "[pilot] approval: {} (est. ${:.2}) — {}",
+        report.tier, report.estimated_usd, report.reason
+    );
+
+    let approve = match report.tier {
+        arccode_autonomous::approval::ApprovalTier::Auto => true,
+        arccode_autonomous::approval::ApprovalTier::NotifyOnly => {
+            run_notify_window(
+                &plan,
+                &opts.goal,
+                pilot.approval.notify_only_window_secs,
+                &pilot.approval.notify_channel,
+            )
+            .await?
+        }
+        arccode_autonomous::approval::ApprovalTier::Hard => {
+            if !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "[pilot] hard-gate required and no TTY — refusing to auto-approve plan."
+                );
+                false
+            } else {
+                prompt_for_approval(&plan, &opts.goal)?
+            }
+        }
     };
 
     if !approve {
@@ -297,6 +322,55 @@ fn open_plan_in_editor(plan: &[arccode_autonomous::planner::PlannedTask]) -> Res
 /// Trait shim — `std::io::Stdin::is_terminal` is stable since 1.70 but
 /// brought in via the `IsTerminal` trait.
 use std::io::IsTerminal;
+
+/// Notify-only veto window. Prints the plan summary + the configured
+/// notify channel hint, then sleeps for `window_secs`. If the user
+/// presses Enter (or sends Ctrl+C) the run is vetoed; otherwise we
+/// proceed. Non-interactive sessions auto-proceed silently — the
+/// classifier already decided this plan is safe enough to run unattended.
+async fn run_notify_window(
+    plan: &[arccode_autonomous::planner::PlannedTask],
+    goal: &str,
+    window_secs: u64,
+    channel: &str,
+) -> Result<bool> {
+    let _ = goal;
+    let count = plan.len();
+    eprintln!(
+        "[pilot] notify-only: {count} tasks in plan, vetoing window {window_secs}s (channel: {channel})."
+    );
+    eprintln!("[pilot] press Enter within the window to veto; ignore to proceed.");
+    if !std::io::stdin().is_terminal() {
+        // Non-interactive: just wait the window out so an operator
+        // watching logs has a chance to interrupt with SIGTERM.
+        tokio::time::sleep(std::time::Duration::from_secs(window_secs)).await;
+        eprintln!("[pilot] notify window elapsed; proceeding.");
+        return Ok(true);
+    }
+
+    // Read a single line from stdin on a blocking task; race it against
+    // the timeout. Tokio's tokio::io::stdin requires the `io-std`
+    // feature which the workspace doesn't enable; spawn_blocking is the
+    // workspace-friendly alternative.
+    let read_line = tokio::task::spawn_blocking(|| {
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_line(&mut buf);
+        buf
+    });
+    let timeout = tokio::time::sleep(std::time::Duration::from_secs(window_secs));
+    tokio::pin!(timeout);
+    tokio::pin!(read_line);
+    tokio::select! {
+        _ = &mut read_line => {
+            eprintln!("[pilot] veto received; rejecting plan.");
+            Ok(false)
+        }
+        _ = &mut timeout => {
+            eprintln!("[pilot] notify window elapsed; proceeding.");
+            Ok(true)
+        }
+    }
+}
 
 // ----------------------------------------------------------------------
 // `arccode pilot resume`
