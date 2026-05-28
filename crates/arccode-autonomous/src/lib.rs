@@ -5,10 +5,12 @@
 //! manager agent loop, worker subprocess supervisor, worktree merge, PR
 //! creation and TUI dashboard land in later phases.
 
+pub mod child_process;
 pub mod model;
 pub mod planner;
 pub mod role;
 pub mod store;
+pub mod worker;
 
 pub use model::{
     apply, tasks_by_id, Acceptance, Agent, AgentStatus, Event, Reversibility, Role, RunState,

@@ -33,6 +33,34 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Run as a pilot-mode worker subprocess: load the role's system prompt,
+    /// read the task spec from `--task-file`, run the agent loop with the
+    /// task as the user prompt, emit a final `task_complete` event. Hidden
+    /// from `--help`; only the orchestrator spawns workers this way.
+    #[arg(long, hide = true)]
+    pub worker_mode: bool,
+
+    /// Path to a JSON file containing the [`arccode_autonomous::Task`] this
+    /// worker should execute. Required with `--worker-mode`.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub task_file: Option<String>,
+
+    /// Role name (e.g. `developer`, `designer`). Used to look up the role
+    /// system prompt under `~/.arccode/agents/<role>.md`.
+    #[arg(long, hide = true, value_name = "ROLE")]
+    pub role: Option<String>,
+
+    /// Session id under `<project>/.arccode/sessions/<id>.jsonl` for the
+    /// worker's own transcript. The orchestrator records this so
+    /// `arccode session fork` can target the worker's turns later.
+    #[arg(long, hide = true, value_name = "ID", env = "ARCCODE_SESSION_ID")]
+    pub session_id: Option<String>,
+
+    /// Worktree path. The worker `cd`s here before running so all relative
+    /// edits land inside the per-task worktree.
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub worktree: Option<String>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -275,6 +303,22 @@ pub async fn run() -> Result<ExitCode> {
     let is_tui = cli.command.is_none() && cli.print.is_none() && cli.batch.is_none();
     let quiet_for_logging = cli.quiet || (is_tui && cli.verbose == 0);
     logging::install_tracing(cli.verbose, quiet_for_logging);
+
+    if cli.worker_mode {
+        let cfg = load_config()?;
+        let opts = commands::worker::WorkerOptions {
+            task_file: cli
+                .task_file
+                .ok_or_else(|| anyhow::anyhow!("--worker-mode requires --task-file"))?,
+            role: cli
+                .role
+                .ok_or_else(|| anyhow::anyhow!("--worker-mode requires --role"))?,
+            session_id: cli.session_id,
+            worktree: cli.worktree,
+            model_override: cli.model,
+        };
+        return commands::worker::run(cfg, opts).await;
+    }
 
     if let Some(file) = cli.batch {
         let cfg = load_config()?;
