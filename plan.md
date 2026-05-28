@@ -16,6 +16,128 @@ This builds on existing pieces:
 
 ---
 
+## Implementation status (as of 2026-05-28)
+
+The first build session shipped 12 commits to `main` covering all of M1
+plus four M2 enhancements. The product is **functionally usable
+end-to-end**: `arccode pilot run "<goal>"` plans, gates approval per
+tier, spawns workers in real git worktrees with cross-platform
+tree-kill supervision, gates Review on executable acceptance, retries
+up to 3 rungs on failure, squash-merges into an integration branch,
+and opens a PR. **101 tests** green (91 in `arccode-autonomous`, 10
+in `arccode-config`); workspace `cargo check` clean on Windows MSVC.
+
+Use the checklist below to pick up where the last session stopped.
+Items are tagged with the git commit that landed them.
+
+### M1 (assist tier) — ✅ Complete
+
+| Phase | Status | Commit | Notes |
+| ----- | :----: | ------ | ----- |
+| Phase 1 — Scaffolding & data model                | ✅ | `33e4ab9` | RunStore + Event schema + model types; tested replay across process restart |
+| Phase 2 — CLI surface & planner                   | ✅ | `33e4ab9` | `arccode pilot run/status/watch/resume`; default role markdown loader |
+| Phase 3 — Worker subprocess protocol              | ✅ | `1466e63` | Cross-platform Supervisor (Unix `setsid`+`kill -pgid`; Windows Job Objects); NDJSON parser |
+| Phase 4 — Manager agent + scheduling              | ✅ | `2b18bbe` | In-process AgentLoop + Orchestrator actor + 6 manager-only tools |
+| Phase 5 — Worktree integration & merge            | ✅ | `d7143f9` | `git worktree add`, per-task branches under `arccode/auto-tasks/`, squash-merge into `arccode/auto/<run-id>`, conflict halt |
+| Phase 6 — PR creation                             | ✅ | `86a659d` | `gh pr create` with `git push` + compare-URL fallback |
+| Phase 7 — TUI dashboard                           | ✅ | `3a15c71` | Renderer + `pilot status`/`pilot watch` CLIs via mtime polling. **Deferred:** deep arccode-tui integration (Ctrl+A, slash commands, in-app top-bar) — see M4 polish |
+| Phase 8 — Cross-provider validation + polish      | ✅ | `ade3984`, `5584db6` | Cost-cap (assign-time + budget watchdog), provider gate, retry watchdog, README provider-support table, end-to-end pipeline wired, e2e stub-provider test. **Deferred:** live 9-provider validation (needs user API keys) |
+
+### M2 (copilot tier) — 4 of 13 enhancements done
+
+| Item | Status | Commit | Notes |
+| ---- | :----: | ------ | ----- |
+| E1 — Trust-tiered auto-approval         | ✅ | `1a686fd` | Auto / notify-only / hard tiers; cost + globset + dangerous_paths classifier |
+| E2 — Two-pass repo-aware planner        | ✅ | `aa7b335` | Grounding pass + draft + static critique + optional LLM rewrite |
+| E3 — Executable acceptance + self-verify| ✅ | `0bfd84d` | `run_acceptance` builtin tool + orchestrator gates Review→Done on green results |
+| E4 — Conflict avoidance + rebase-as-you-go + auto merge-fixer | ❌ | — | Critique catches static overlap (E2); runtime write-set scheduler + auto-fixer worker not built |
+| E5 — 4-rung retry ladder + per-turn check-gate | ✅ partial | `2fc9e63` | Rungs 1 (context), 2 (escalate model), 3 (splitter), 4 (Blocked) all implemented. **Deferred:** E5.5 per-turn `cargo check` gate (needs E11 checkpoint rollback to be useful) |
+| E6 — Cross-run learning + adaptive routing | ❌ | — | `~/.arccode/stats.jsonl`, per-role lessons file, planner priming from past runs |
+| E7 — Per-task reviewer                  | ❌ | — | Parallel reviewer agent spawned per task entering Review |
+| E8 — PR-side automation                 | ❌ | — | `arccode review` on integration branch, auto-PR-body sections, conditional auto-merge |
+| E9 — Speculative dispatch + adaptive concurrency | ❌ | — | Pre-spawn most-likely-next task; rate-limit-aware concurrency cap |
+| E10 — Manager↔worker IPC                | ⚠️ stub | `2b18bbe` | `message_agent` tool dispatches to actor and logs; real stdin command channel + pivot/cancel/clarify not wired |
+| E11 — Mandatory checkpoint hygiene      | ❌ | — | Workers must `arccode checkpoint` before multi-file edits; orchestrator verifies |
+| E12 — `--watch` mode                    | ✅ partial | `3a15c71` | `arccode pilot watch <id>` ships. **Deferred:** flag wired into `pilot run` for in-terminal tail of an in-process run |
+| E13 — Role lineup                       | ✅ | `33e4ab9` | All 6 roles shipped with default prompts (developer/designer/tester/reviewer/refactorer/merge-fixer) |
+
+### M3 (autopilot tier) — ❌ Not started
+
+| Item | Status | Notes |
+| ---- | :----: | ----- |
+| J1 — Goal refinement + challenge        | ❌ | Clarify + challenge + alternatives passes before E2 |
+| J2 — Daemon mode                        | ❌ | `arccode daemon` long-running watcher; polls GitHub issues / CI / TODOs / coverage gaps |
+| J3 — Multi-channel intake               | ❌ | GitHub issue/comment, Slack, email, webhook, file-drop adapters |
+| J4 — Mid-run interjection               | ❌ | `arccode pilot tell <run> "<msg>"` / `ask`; routes through E10 IPC |
+| J5 — Proactive status reporting         | ❌ | Per-run start/mid/end, daily standup, weekly summary |
+| J6 — Real verification (run/screenshot/http) | ❌ | Acceptance `run` + `assert screenshot` + `http` kinds (sync runner covers shell/grep already) |
+| J7 — Tool synthesis                     | ❌ | `propose_tool` from workers; `tool-smith` role generates impl + test |
+| J8 — Project knowledge graph            | ❌ | `.arccode/knowledge/{architecture,conventions,decisions,glossary,hotspots}.md/json` |
+| J9 — Cost / time / risk estimation with confidence | ❌ | Replace the placeholder rate-based estimator in `approval::estimate_plan_cost_usd` with stats-backed bands + confidence |
+| J10 — Critic agent                      | ❌ | Parallel red-team agent on different model family; vetoes plan + reviews + auto-merge |
+| J11 — Sandboxed execution tiers         | ❌ | host / container / vm / replay tiers; container + microVM patch-back |
+| J12 — Skill packs                       | ❌ | `arccode-official/<pack>@<semver>` installable role + lessons + tool bundles |
+| J13 — Real-time watcher hooks           | ❌ | Filesystem + git-hook + webhook reactive subset of J2 |
+| J14 — Voice intake (opt-in)             | ❌ | whisper.cpp hotkey shim |
+| J15 — Hard escalation triggers          | ❌ | Net-negative tests, dangerous_paths without goal mention, secrets, cost ×0.8/×1.0, 3 consecutive failures, license/header edits, force-push outside `arccode/auto/*` |
+
+### R-series (production hardening) — ❌ Not started
+
+| Item | Folds into | Status | Notes |
+| ---- | :--------: | :----: | ----- |
+| R1 — Reversibility classification     | M3 | ❌ | Task model already has `reversibility` field; tier-aware enforcement (assist surfaces; copilot hard-gates `hard`; autopilot notify-only for `hard`, hard for `irreversible`) not wired |
+| R2 — Post-merge feedback loop         | M2 | ❌ | Highest-leverage R-item per plan. Webhook/poller on PR closed/merged/reverted, weighted stats (merged +1, reverted −5, hotfix-followed −2), decisions log |
+| R3 — Handoff packet                   | M2 | ❌ | `escalation.md` artifact written on J15 trip / E5 exhaustion, linked in every notification |
+| R4 — Eval / regression harness        | M2 | ❌ | Nightly 20–30 canned goals against frozen snapshot; CI gates planner-prompt / role-md / orchestrator changes on regression |
+| R5 — Notification routing & digesting | M3 | ❌ | Severity tiers (escalation / decision / progress / info); per-tier channel routing + digest mode |
+| R6 — Security pass in PR pipeline     | M2 | ❌ | gitleaks + cargo audit / npm audit + `security-review` skill + license scan before E8 auto-merge |
+
+### Cumulative metrics
+
+- Commits ahead of `main`: 12 (33e4ab9, 1466e63, 2b18bbe, d7143f9,
+  86a659d, 3a15c71, ade3984, 5584db6, 1a686fd, 0bfd84d, aa7b335,
+  2fc9e63)
+- Tests: 91 in `arccode-autonomous` + 10 in `arccode-config` = 101
+- Workspace `cargo check`: clean
+- Clippy in `arccode-autonomous`: zero warnings
+- Lines added to `crates/arccode-autonomous/`: ~10,000
+
+### Next-session priorities (suggested order)
+
+1. **R2 post-merge feedback loop** — the plan flags this as the
+   highest-leverage R-item. Without it, any E6 cross-run learning is
+   theater because the loop never sees what happened post-merge.
+2. **M2 E7 per-task reviewer** — directly cashes in on E3's acceptance
+   gating; makes human PR review a rubber stamp.
+3. **M2 E6 cross-run learning** (depends on R2) — adaptive routing +
+   per-role lessons + planner priming from past runs.
+4. **M2 E4 conflict avoidance** — runtime scheduler + merge-fixer
+   auto-spawn; static critique already half-solves it.
+5. **R6 security pass** — gates auto-merge; required before any
+   non-trivial E8 work.
+6. **J15 escalation triggers + R1 enforcement** — small, foundational,
+   makes J2 daemon mode safer to ship later.
+7. **J10 critic agent** — independent verification layer on a
+   different model family.
+8. **Then the rest of M3 J-series** — daemon (J2), intake (J3, J4,
+   J5), verification (J6), sandboxing (J11), knowledge (J8), critic
+   (J10), tool synthesis (J7), skill packs (J12), watcher (J13),
+   voice (J14, opt-in).
+9. **R3, R4, R5** alongside whichever M2/M3 work surfaces them.
+
+### Deferred items requiring user input
+
+- **Live 9-provider validation matrix** (Phase 8 item 4): code +
+  README table are in place. Pointing real API keys at Anthropic /
+  OpenAI / ChatGPT / Gemini / OpenRouter / LiteLLM / LM Studio /
+  vLLM / Ollama and running the canned `--version-only` plan needs
+  user credentials.
+- **GitHub webhook secret for R2**: post-merge feedback loop needs
+  either a polling token (cheap) or a webhook endpoint (cheaper to
+  operate; needs a deployment target).
+
+---
+
 ## Confirmed decisions (from kickoff Q&A)
 
 | Decision           | Choice                                                                 |
