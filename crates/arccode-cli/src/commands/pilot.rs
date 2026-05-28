@@ -257,3 +257,101 @@ fn open_plan_in_editor(plan: &[arccode_autonomous::planner::PlannedTask]) -> Res
 /// Trait shim — `std::io::Stdin::is_terminal` is stable since 1.70 but
 /// brought in via the `IsTerminal` trait.
 use std::io::IsTerminal;
+
+// ----------------------------------------------------------------------
+// `arccode pilot status` and `arccode pilot watch`
+// ----------------------------------------------------------------------
+
+/// One-shot dashboard print. Picks the most recently updated run unless
+/// the user names one. Exits non-zero if no runs exist under
+/// `<project>/.arccode/autonomous/`.
+pub async fn status(run_id: Option<String>) -> Result<ExitCode> {
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let runs = arccode_autonomous::dashboard::list_runs(&project.root)
+        .context("listing runs")?;
+    if runs.is_empty() {
+        eprintln!("[pilot] no runs found under {}", project.root.display());
+        return Ok(ExitCode::from(1));
+    }
+    let pick = match run_id {
+        Some(id) => runs
+            .iter()
+            .find(|r| r.run_id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no run with id {id} found"))?,
+        None => runs.into_iter().next().unwrap(),
+    };
+    let state = arccode_autonomous::dashboard::load_state(&pick.dir)?;
+    let recent = arccode_autonomous::dashboard::tail_events(&pick.dir, 12)?;
+    let view = arccode_autonomous::dashboard::render_dashboard(&state, &recent);
+    print!("{}", view.to_ascii());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Live-watch a run. Polls `<run-dir>/state.json` mtime every
+/// `interval_ms` and redraws the dashboard whenever it advances. Ctrl-C
+/// to exit.
+///
+/// We deliberately keep this lightweight (no full crossterm raw-mode
+/// initialization) so it composes with normal scrollback the way `tail
+/// -f` does. The dashboard re-renders by reprinting the box on each
+/// tick.
+pub async fn watch(run_id: Option<String>, interval_ms: u64) -> Result<ExitCode> {
+    use std::time::Duration;
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let runs = arccode_autonomous::dashboard::list_runs(&project.root)?;
+    if runs.is_empty() {
+        eprintln!("[pilot] no runs found under {}", project.root.display());
+        return Ok(ExitCode::from(1));
+    }
+    let pick = match run_id {
+        Some(id) => runs
+            .iter()
+            .find(|r| r.run_id == id)
+            .cloned()
+            .ok_or_else(|| anyhow!("no run with id {id} found"))?,
+        None => runs.into_iter().next().unwrap(),
+    };
+
+    eprintln!(
+        "[pilot] watching {} (Ctrl-C to exit)",
+        pick.dir.display()
+    );
+
+    let interval = Duration::from_millis(interval_ms.max(50));
+    let mut last_mtime = None;
+    loop {
+        let mtime = arccode_autonomous::dashboard::state_mtime(&pick.dir);
+        if mtime != last_mtime {
+            last_mtime = mtime;
+            match (
+                arccode_autonomous::dashboard::load_state(&pick.dir),
+                arccode_autonomous::dashboard::tail_events(&pick.dir, 12),
+            ) {
+                (Ok(state), Ok(recent)) => {
+                    // Clear screen between frames with the ANSI sequence;
+                    // plain enough to work on Windows console + cmd, gnome-
+                    // terminal, kitty, iTerm without dragging in crossterm
+                    // raw-mode plumbing.
+                    print!("\x1b[2J\x1b[H");
+                    let view =
+                        arccode_autonomous::dashboard::render_dashboard(&state, &recent);
+                    print!("{}", view.to_ascii());
+                    if matches!(
+                        state.status,
+                        arccode_autonomous::RunStatus::Done
+                            | arccode_autonomous::RunStatus::Failed
+                            | arccode_autonomous::RunStatus::Aborted
+                    ) {
+                        eprintln!("[pilot] run reached terminal state — exiting watch loop.");
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    eprintln!("[pilot] failed to read run state: {e}");
+                }
+            }
+        }
+        tokio::time::sleep(interval).await;
+    }
+}

@@ -164,6 +164,34 @@ pub enum Command {
     /// Pilot mode: plan a multi-task goal, delegate to worker agents in
     /// isolated worktrees, converge into a PR.
     Pilot {
+        #[command(subcommand)]
+        action: PilotAction,
+    },
+    /// Deprecated alias for `arccode pilot` — kept through M3, removed at M4.
+    #[command(hide = true)]
+    Autonomous {
+        goal: String,
+        #[arg(long)]
+        plan_only: bool,
+        #[arg(long)]
+        yes: bool,
+        #[arg(long)]
+        review: bool,
+        #[arg(long)]
+        no_pr: bool,
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        #[arg(long, value_name = "N")]
+        max_agents: Option<u32>,
+        #[arg(long, value_name = "FLOAT")]
+        max_usd: Option<f64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PilotAction {
+    /// Plan a goal, spawn workers, open a PR.
+    Run {
         /// High-level objective in natural language.
         goal: String,
         /// Capability tier override.
@@ -200,24 +228,18 @@ pub enum Command {
         #[arg(long, value_name = "CHANNEL")]
         channel: Option<String>,
     },
-    /// Deprecated alias for `arccode pilot` — kept through M3, removed at M4.
-    #[command(hide = true)]
-    Autonomous {
-        goal: String,
-        #[arg(long)]
-        plan_only: bool,
-        #[arg(long)]
-        yes: bool,
-        #[arg(long)]
-        review: bool,
-        #[arg(long)]
-        no_pr: bool,
-        #[arg(long, value_name = "REV")]
-        base: Option<String>,
-        #[arg(long, value_name = "N")]
-        max_agents: Option<u32>,
-        #[arg(long, value_name = "FLOAT")]
-        max_usd: Option<f64>,
+    /// Print the latest run's status as ASCII; exits immediately.
+    Status {
+        /// Specific run id; defaults to the most recently updated.
+        run_id: Option<String>,
+    },
+    /// Live-watch a run: redraw whenever its state.json changes.
+    Watch {
+        /// Specific run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        /// Poll interval in milliseconds.
+        #[arg(long, default_value_t = 250)]
+        interval_ms: u64,
     },
 }
 
@@ -373,41 +395,47 @@ pub async fn run() -> Result<ExitCode> {
             commands::review_multi::run(pr, local, models).await
         }
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
-        Some(Command::Pilot {
-            goal,
-            tier,
-            plan_only,
-            yes,
-            review,
-            watch,
-            no_pr,
-            base,
-            max_agents,
-            max_usd,
-            sandbox,
-            channel,
-        }) => {
-            let cfg = load_config()?;
-            commands::pilot::run(
-                cfg,
-                commands::pilot::PilotOptions {
-                    goal,
-                    tier,
-                    plan_only,
-                    yes,
-                    review,
-                    watch,
-                    no_pr,
-                    base,
-                    max_agents,
-                    max_usd,
-                    sandbox,
-                    channel,
-                    model_override: cli.model,
-                },
-            )
-            .await
-        }
+        Some(Command::Pilot { action }) => match action {
+            PilotAction::Run {
+                goal,
+                tier,
+                plan_only,
+                yes,
+                review,
+                watch,
+                no_pr,
+                base,
+                max_agents,
+                max_usd,
+                sandbox,
+                channel,
+            } => {
+                let cfg = load_config()?;
+                commands::pilot::run(
+                    cfg,
+                    commands::pilot::PilotOptions {
+                        goal,
+                        tier,
+                        plan_only,
+                        yes,
+                        review,
+                        watch,
+                        no_pr,
+                        base,
+                        max_agents,
+                        max_usd,
+                        sandbox,
+                        channel,
+                        model_override: cli.model,
+                    },
+                )
+                .await
+            }
+            PilotAction::Status { run_id } => commands::pilot::status(run_id).await,
+            PilotAction::Watch { run_id, interval_ms } => {
+                commands::pilot::watch(run_id, interval_ms).await
+            }
+        },
         Some(Command::Autonomous {
             goal,
             plan_only,

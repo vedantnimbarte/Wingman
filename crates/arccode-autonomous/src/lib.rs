@@ -6,6 +6,7 @@
 //! creation and TUI dashboard land in later phases.
 
 pub mod child_process;
+pub mod dashboard;
 pub mod manager;
 pub mod model;
 pub mod orchestrator;
