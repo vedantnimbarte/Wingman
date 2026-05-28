@@ -205,8 +205,7 @@ fn render_log_pane(recent: &[Event]) -> String {
 
 fn render_log_line(ev: &Event) -> String {
     let ts = ev.timestamp();
-    let short_ts = ts
-        .splitn(3, |c| c == 'T' || c == '+' || c == '.')
+    let short_ts = ts.split(['T', '+', '.'])
         .nth(1)
         .unwrap_or(ts);
     let short_ts = &short_ts[..short_ts.len().min(8)];
@@ -300,7 +299,7 @@ pub fn list_runs(project_root: &Path) -> Result<Vec<RunSummary>, DashboardError>
             .unwrap_or(SystemTime::UNIX_EPOCH);
         entries.push((mtime, path));
     }
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
 
     let mut out = Vec::with_capacity(entries.len());
     for (_, path) in entries {

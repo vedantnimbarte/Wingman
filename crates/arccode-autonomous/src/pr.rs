@@ -104,7 +104,7 @@ pub fn render_pr_title(state: &RunState) -> String {
     let first_line = state.goal.lines().next().unwrap_or("").trim();
     let truncated = if first_line.chars().count() > 60 {
         let mut out: String = first_line.chars().take(57).collect();
-        out.push_str("…");
+        out.push('…');
         out
     } else {
         first_line.to_string()

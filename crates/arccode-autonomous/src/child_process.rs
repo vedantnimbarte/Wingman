@@ -349,8 +349,7 @@ mod windows_impl {
     }
 
     fn io_err(label: &str) -> SupervisorError {
-        SupervisorError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        SupervisorError::Io(std::io::Error::other(
             format!("{label} failed: {}", std::io::Error::last_os_error()),
         ))
     }

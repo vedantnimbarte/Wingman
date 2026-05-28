@@ -64,6 +64,13 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         .or_else(|| opts.model_override.clone())
         .or_else(|| cfg.default_model.clone());
     let selection = runtime::resolve_selection(&cfg, planner_model.as_deref())?;
+    if let Err(why) = arccode_autonomous::provider_support::gate_run(&selection.provider_id) {
+        return Err(anyhow!(why));
+    }
+    eprintln!(
+        "{}",
+        arccode_autonomous::provider_support::support_notice(&selection.provider_id)
+    );
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
         .with_context(|| format!("building provider for {}", selection.provider_id))?;
 

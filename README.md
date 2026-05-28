@@ -142,6 +142,98 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 | `arccode-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
 | `arccode-mcp`        | MCP host scaffolding (M3).                                                                             |
 | `arccode-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
+| `arccode-autonomous` | Pilot mode (M1): multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR. |
+
+---
+
+## Pilot mode
+
+`arccode pilot run "<goal>"` plans a multi-task piece of work, spawns
+specialised worker agents in isolated git worktrees, and converges their
+output into a single PR. The full design lives in [`plan.md`](plan.md).
+
+### Capability tiers
+
+```
+assist     You approve every decision. Agent plans, you confirm, agent executes
+           one run, opens a PR, exits. No daemon, no critic, no learning.
+copilot    Default. Agent flies; you monitor and intervene at decision points.
+           Trust-tiered approval, self-healing retries, per-task reviewer,
+           real verification, PR automation, cross-run learning.
+autopilot  Agent flies and navigates. Daemon mode, multi-channel intake,
+           critic agent, knowledge graph, tool synthesis, sandboxed execution.
+```
+
+Pick a tier in `~/.arccode/config.toml`:
+
+```toml
+[pilot]
+tier                  = "copilot"
+default_model         = "anthropic/claude-opus-4-7"   # manager + reviewers
+worker_model          = "anthropic/claude-haiku-4-5"  # workers
+max_concurrent_agents = 4
+max_usd               = 10.0
+task_timeout_secs     = 1800
+```
+
+### Quick start
+
+```bash
+# One-shot: plan, approve, spawn workers, open PR
+arccode pilot run "add a --version-only flag to arccode-cli"
+
+# Plan only — write tasks.jsonl and exit
+arccode pilot run --plan-only "<goal>"
+
+# Auto-approve the plan (skip the y/e/n gate)
+arccode pilot run --yes "<goal>"
+
+# Dashboard
+arccode pilot status              # one-shot summary of the latest run
+arccode pilot watch               # live ASCII dashboard, polls state.json
+arccode pilot watch <run-id>      # specific run
+```
+
+Per-run artefacts land under `<project>/.arccode/autonomous/<run-id>/`:
+
+```
+<run-id>/
+  tasks.jsonl   # append-only event log
+  state.json    # latest snapshot (rewritten after every event)
+```
+
+### Status
+
+M1 phases 1–7 are implemented (RunStore, planner, worker subprocess
+with cross-platform supervisor, manager + orchestrator, git worktrees +
+squash-merge, gh PR creation, dashboard). Phase 8 ships cost-cap
+enforcement, the provider-support gate, and this documentation;
+end-to-end runs against the nine providers below need real API keys and
+are user-validated rather than CI-validated for now. M2 enhancements
+(E1–E13) and M3 autonomy (J1–J15) are roadmap.
+
+### Provider support for pilot mode
+
+Pilot mode requires the model to emit structured tool-use blocks. The
+table below classifies each backend; `untested` providers can still be
+used, but quality depends on the local model's tool-use training.
+
+| Provider     | Tier            | Notes                                                                  |
+| ------------ | --------------- | ---------------------------------------------------------------------- |
+| Anthropic    | `native`        | First-class tool use. Reference implementation.                        |
+| Gemini       | `native`        | `functionCall` shape; first-class.                                     |
+| OpenAI       | `openai-compat` | `tool_calls` shape; works on gpt-4o, gpt-4.1.                          |
+| ChatGPT      | `openai-compat` | OAuth-backed; same shape as OpenAI.                                    |
+| OpenRouter   | `openai-compat` | Aggregator — pass `provider/model` as model id.                        |
+| LiteLLM      | `openai-compat` | Self-hosted gateway; works for any backend that LiteLLM speaks to.     |
+| LM Studio    | `untested`      | OpenAI-compat shim; depends on the loaded model.                       |
+| vLLM         | `untested`      | Same: shape works, model has to be tool-trained.                       |
+| Ollama       | `untested`      | Same: `/v1` shim, picks up whatever model you've pulled.               |
+
+`arccode pilot run` prints a one-line support notice at startup and
+refuses to start when the planner provider is `unsupported` (no current
+backends are; the tier exists for future providers that can't emit
+tool calls at all).
 
 ---
 

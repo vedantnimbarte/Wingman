@@ -12,6 +12,7 @@ pub mod model;
 pub mod orchestrator;
 pub mod planner;
 pub mod pr;
+pub mod provider_support;
 pub mod role;
 pub mod store;
 pub mod tools;

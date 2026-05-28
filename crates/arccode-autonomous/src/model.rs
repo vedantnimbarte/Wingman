@@ -71,7 +71,9 @@ impl TaskStatus {
 /// Lifecycle of the run as a whole.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RunStatus {
+    #[default]
     Planning,
     AwaitingApproval,
     Running,
@@ -81,11 +83,6 @@ pub enum RunStatus {
     Aborted,
 }
 
-impl Default for RunStatus {
-    fn default() -> Self {
-        Self::Planning
-    }
-}
 
 /// One executable acceptance check (E3). Workers must run every check and
 /// attach results to `task_complete` before transitioning to `review`.
@@ -107,17 +104,14 @@ pub enum Acceptance {
 /// Reversibility classification (R1). Orthogonal to `dangerous_paths`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Reversibility {
+    #[default]
     Trivial,
     Hard,
     Irreversible,
 }
 
-impl Default for Reversibility {
-    fn default() -> Self {
-        Self::Trivial
-    }
-}
 
 /// A task as planned and scheduled. Persistent fields only — agent assignment
 /// lives in [`Agent`] and is keyed back here by `current_task`.

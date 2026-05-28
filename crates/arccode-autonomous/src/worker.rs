@@ -133,7 +133,7 @@ pub async fn run_worker(
 
     let child = supervisor
         .take_child()
-        .ok_or_else(|| WorkerError::EarlyExit(None))?;
+        .ok_or(WorkerError::EarlyExit(None))?;
 
     // Parse stdout NDJSON line by line. The child still owns stdout; we
     // move it out.
@@ -141,7 +141,7 @@ pub async fn run_worker(
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| WorkerError::EarlyExit(None))?;
+        .ok_or(WorkerError::EarlyExit(None))?;
     let stderr = child.stderr.take();
 
     let mut reader = BufReader::new(stdout).lines();
