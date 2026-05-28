@@ -99,7 +99,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         model: selection.model.clone(),
         max_tokens: 4096,
     };
-    let plan = plan_from_goal(&llm as &dyn PlannerLlm, &opts.goal)
+    let plan = plan_from_goal(&llm as &dyn PlannerLlm, &opts.goal, &project.root)
         .await
         .context("planner call failed")?;
 

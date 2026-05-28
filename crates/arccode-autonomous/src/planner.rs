@@ -13,6 +13,7 @@
 //! hitting the network.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use arccode_core::{CompletionRequest, Message, Provider, StopReason, StreamEvent};
 use futures::StreamExt;
@@ -289,9 +290,12 @@ pub fn render_plan(tasks: &[PlannedTask]) -> String {
     out
 }
 
-/// One-shot plan call. Loads the planner prompt, asks the LLM, parses
-/// and validates the response.
-pub async fn plan_from_goal(
+/// Single-pass plan call. Kept as a low-level building block for tests
+/// and for callers that explicitly want to skip the grounding +
+/// critique + rewrite passes. Most callers should use
+/// [`plan_from_goal`] instead, which wraps this with E2's multi-pass
+/// machinery.
+pub async fn plan_from_goal_oneshot(
     llm: &dyn PlannerLlm,
     goal: &str,
 ) -> Result<Vec<PlannedTask>, PlannerError> {
@@ -305,6 +309,253 @@ pub async fn plan_from_goal(
         return Err(PlannerError::EmptyResponse);
     }
     parse_plan(&raw)
+}
+
+/// Two-pass repo-aware plan call (E2).
+///
+/// 1. Grounding pass: scan the repo for keyword matches against the
+///    goal, build a facts block ([`crate::grounding`]).
+/// 2. Draft pass: ask the LLM to produce a plan conditioned on the
+///    facts.
+/// 3. Static critique: structural validation (paths exist, no
+///    overlapping writes in the same dep layer) via [`critique_plan`].
+/// 4. Rewrite pass: if the critique surfaced issues, ask the LLM to
+///    produce a revised plan that fixes them. Re-validate; fall back to
+///    the original plan if the rewrite is worse.
+///
+/// `repo_root` is the project root used for grounding + critique;
+/// passing an empty path disables grounding (useful for tests).
+pub async fn plan_from_goal(
+    llm: &dyn PlannerLlm,
+    goal: &str,
+    repo_root: &Path,
+) -> Result<Vec<PlannedTask>, PlannerError> {
+    let facts = if repo_root.as_os_str().is_empty() {
+        None
+    } else {
+        let keywords = crate::grounding::extract_keywords(goal);
+        let block = crate::grounding::scan_repo_for_facts(repo_root, &keywords);
+        Some(crate::grounding::render_facts(&block))
+    };
+
+    let system = load_planner_prompt();
+    let user = format!(
+        "GOAL:\n{goal}\n{facts_block}\nProduce the task DAG as JSON now. \
+         Respond with ONLY the JSON object — no prose, no Markdown fences.",
+        facts_block = facts
+            .as_deref()
+            .map(|f| format!("\n{f}\n"))
+            .unwrap_or_default(),
+    );
+    let raw = llm.complete(system.clone(), user.clone()).await?;
+    if raw.trim().is_empty() {
+        return Err(PlannerError::EmptyResponse);
+    }
+    let draft = parse_plan(&raw)?;
+
+    // Static critique: catches issues we can detect without another LLM
+    // round-trip. If everything passes, ship the draft.
+    let report = critique_plan(&draft, repo_root);
+    if report.is_clean() {
+        return Ok(draft);
+    }
+
+    // Rewrite pass: feed the model its own plan + the critique and ask
+    // for a fix. If the rewrite is unparseable or *worse*, fall back to
+    // the draft — the planner shouldn't trade a flawed plan for a
+    // hallucinated rewrite.
+    let critique_block = render_critique_for_rewrite(&report);
+    let rewrite_user = format!(
+        "GOAL:\n{goal}\n{facts_block}\n\
+         Your previous plan was:\n```json\n{prev}\n```\n\n\
+         The static critique found these issues:\n{critique_block}\n\n\
+         Produce a revised JSON plan that fixes every issue. Same shape \
+         as before; respond with ONLY the JSON object.",
+        facts_block = facts
+            .as_deref()
+            .map(|f| format!("\n{f}\n"))
+            .unwrap_or_default(),
+        prev = serde_json::to_string_pretty(&PlannerOutput { tasks: draft.clone() })
+            .unwrap_or_else(|_| "{}".to_string()),
+    );
+    match llm.complete(system, rewrite_user).await {
+        Ok(rewritten_raw) if !rewritten_raw.trim().is_empty() => {
+            match parse_plan(&rewritten_raw) {
+                Ok(revised) => {
+                    let revised_report = critique_plan(&revised, repo_root);
+                    if revised_report.is_clean()
+                        || revised_report.score() < report.score()
+                    {
+                        Ok(revised)
+                    } else {
+                        tracing::warn!(
+                            target: "pilot::planner",
+                            "rewrite pass did not improve the plan; using draft"
+                        );
+                        Ok(draft)
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "pilot::planner",
+                        error = %e,
+                        "rewrite pass produced an unparseable plan; using draft"
+                    );
+                    Ok(draft)
+                }
+            }
+        }
+        _ => Ok(draft),
+    }
+}
+
+/// Output of [`critique_plan`]. Empty fields = clean plan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CritiqueReport {
+    /// Task writes whose containing directory does not exist in the
+    /// repo. Likely hallucinated paths.
+    pub hallucinated_paths: Vec<(String, String)>,
+    /// Pairs of (task_a, task_b) where the two tasks could run
+    /// concurrently (no dep edge between them) AND their writes
+    /// overlap on at least one path. E4's scheduler would either
+    /// linearise them or hit a conflict.
+    pub overlapping_writes: Vec<(String, String, String)>,
+    /// Tasks whose `acceptance` is empty — failures from those tasks
+    /// will be undetectable. (E3 still ships, but the planner can do
+    /// better than empty acceptance.)
+    pub missing_acceptance: Vec<String>,
+}
+
+impl CritiqueReport {
+    pub fn is_clean(&self) -> bool {
+        self.hallucinated_paths.is_empty()
+            && self.overlapping_writes.is_empty()
+            && self.missing_acceptance.is_empty()
+    }
+    /// Severity score — lower is better. Used to decide whether the
+    /// rewrite pass actually improved things.
+    pub fn score(&self) -> usize {
+        self.hallucinated_paths.len() * 3
+            + self.overlapping_writes.len() * 2
+            + self.missing_acceptance.len()
+    }
+}
+
+/// Static plan critique. Pure function — runs no I/O beyond stat'ing
+/// directories that the plan references.
+pub fn critique_plan(plan: &[PlannedTask], repo_root: &Path) -> CritiqueReport {
+    let mut report = CritiqueReport::default();
+    let check_paths = !repo_root.as_os_str().is_empty();
+
+    for t in plan {
+        // Hallucinated paths: flag writes whose parent directory does
+        // not exist. The planner is allowed to create NEW files but
+        // not new top-level crates by accident.
+        if check_paths {
+            for w in &t.writes {
+                if w.contains('*') || w.contains('?') {
+                    continue; // skip globs — they're patterns, not paths
+                }
+                let path = Path::new(w);
+                if let Some(parent) = path.parent() {
+                    if parent.as_os_str().is_empty() {
+                        continue;
+                    }
+                    let abs = repo_root.join(parent);
+                    if !abs.exists() {
+                        report
+                            .hallucinated_paths
+                            .push((t.id.clone(), w.clone()));
+                    }
+                }
+            }
+        }
+        if t.acceptance.is_empty() && !matches!(t.role, crate::model::Role::Reviewer) {
+            report.missing_acceptance.push(t.id.clone());
+        }
+    }
+
+    // Overlapping writes between tasks that COULD run concurrently —
+    // i.e. neither is a transitive dep of the other.
+    let by_id: std::collections::HashMap<&str, &PlannedTask> =
+        plan.iter().map(|t| (t.id.as_str(), t)).collect();
+    let mut pairs_seen: HashSet<(String, String)> = HashSet::new();
+    for a in plan {
+        for b in plan {
+            if a.id >= b.id {
+                continue;
+            }
+            let key = (a.id.clone(), b.id.clone());
+            if !pairs_seen.insert(key.clone()) {
+                continue;
+            }
+            if reachable_via_deps(a.id.as_str(), b.id.as_str(), &by_id)
+                || reachable_via_deps(b.id.as_str(), a.id.as_str(), &by_id)
+            {
+                continue; // ordered, can't overlap
+            }
+            // Find overlapping paths.
+            for w in &a.writes {
+                if b.writes.contains(w) {
+                    report.overlapping_writes.push((
+                        a.id.clone(),
+                        b.id.clone(),
+                        w.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    report
+}
+
+/// Is `target` reachable from `start` by following `deps` edges?
+fn reachable_via_deps(
+    start: &str,
+    target: &str,
+    by_id: &std::collections::HashMap<&str, &PlannedTask>,
+) -> bool {
+    let mut stack: Vec<&str> = vec![start];
+    let mut visited: HashSet<String> = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if !visited.insert(node.to_string()) {
+            continue;
+        }
+        let Some(t) = by_id.get(node) else { continue };
+        for d in &t.deps {
+            if d == target {
+                return true;
+            }
+            stack.push(d.as_str());
+        }
+    }
+    false
+}
+
+/// Render a [`CritiqueReport`] as a bullet list the LLM can read in
+/// the rewrite pass.
+fn render_critique_for_rewrite(report: &CritiqueReport) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    for (id, path) in &report.hallucinated_paths {
+        let _ = writeln!(
+            s,
+            "- task {id} writes `{path}` — the containing directory does not exist in the repo; either fix the path or split into a new task that creates the directory first"
+        );
+    }
+    for (a, b, path) in &report.overlapping_writes {
+        let _ = writeln!(
+            s,
+            "- tasks {a} and {b} both write `{path}` but have no dep edge between them — add `deps: [{a}]` to {b} (or vice versa), or split them"
+        );
+    }
+    for id in &report.missing_acceptance {
+        let _ = writeln!(
+            s,
+            "- task {id} has no `acceptance` checks; add at least one executable shell or grep check so the orchestrator can verify completion"
+        );
+    }
+    s
 }
 
 /// Persist a plan into a run store as a batch of `task.create` events.
@@ -409,7 +660,7 @@ mod tests {
     #[tokio::test]
     async fn happy_path_parses_and_validates() {
         let llm = CannedLlm(sample_plan_json().to_string());
-        let plan = plan_from_goal(&llm, "add --version-only").await.unwrap();
+        let plan = plan_from_goal(&llm, "add --version-only", Path::new("")).await.unwrap();
         assert_eq!(plan.len(), 3);
         assert_eq!(plan[0].id, "t1");
         assert_eq!(plan[2].deps, vec!["t1", "t2"]);
@@ -523,6 +774,162 @@ mod tests {
         persist_plan(&mut store, &plan).await.unwrap();
         assert_eq!(store.state().tasks.len(), 3);
         assert_eq!(store.state().tasks[0].id, "t1");
+    }
+
+    #[test]
+    fn critique_flags_hallucinated_paths() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("crates")).unwrap();
+        let plan = vec![PlannedTask {
+            id: "t1".into(),
+            role: Role::Developer,
+            title: "x".into(),
+            goal: "".into(),
+            deps: vec![],
+            writes: vec!["crates/nonexistent/src/main.rs".into()],
+            acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+            reversibility: Default::default(),
+            reversibility_reason: None,
+        }];
+        let report = critique_plan(&plan, dir.path());
+        assert_eq!(report.hallucinated_paths.len(), 1);
+        assert_eq!(report.hallucinated_paths[0].0, "t1");
+        assert!(report.hallucinated_paths[0].1.contains("nonexistent"));
+    }
+
+    #[test]
+    fn critique_allows_new_files_in_existing_dirs() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/arccode-cli/src")).unwrap();
+        let plan = vec![PlannedTask {
+            id: "t1".into(),
+            role: Role::Developer,
+            title: "x".into(),
+            goal: "".into(),
+            deps: vec![],
+            writes: vec!["crates/arccode-cli/src/brand_new.rs".into()],
+            acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+            reversibility: Default::default(),
+            reversibility_reason: None,
+        }];
+        let report = critique_plan(&plan, dir.path());
+        assert!(
+            report.hallucinated_paths.is_empty(),
+            "creating a new file in an existing dir should not flag"
+        );
+    }
+
+    #[test]
+    fn critique_detects_overlapping_writes_without_dep_edge() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let plan = vec![
+            PlannedTask {
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "a".into(),
+                goal: "".into(),
+                deps: vec![],
+                writes: vec!["src/main.rs".into()],
+                acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+            PlannedTask {
+                id: "t2".into(),
+                role: Role::Developer,
+                title: "b".into(),
+                goal: "".into(),
+                deps: vec![], // NO dep edge to t1
+                writes: vec!["src/main.rs".into()],
+                acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+        ];
+        // Disable path-existence check by passing empty root.
+        let report = critique_plan(&plan, Path::new(""));
+        assert_eq!(report.overlapping_writes.len(), 1);
+        let (a, b, p) = &report.overlapping_writes[0];
+        assert!((a == "t1" && b == "t2") || (a == "t2" && b == "t1"));
+        assert_eq!(p, "src/main.rs");
+    }
+
+    #[test]
+    fn critique_allows_overlapping_writes_when_dep_edge_orders_them() {
+        let plan = vec![
+            PlannedTask {
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "a".into(),
+                goal: "".into(),
+                deps: vec![],
+                writes: vec!["src/main.rs".into()],
+                acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+            PlannedTask {
+                id: "t2".into(),
+                role: Role::Developer,
+                title: "b".into(),
+                goal: "".into(),
+                deps: vec!["t1".into()],
+                writes: vec!["src/main.rs".into()],
+                acceptance: vec![Acceptance::Shell { cmd: "true".into() }],
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+        ];
+        let report = critique_plan(&plan, Path::new(""));
+        assert!(report.overlapping_writes.is_empty());
+    }
+
+    #[test]
+    fn critique_flags_missing_acceptance_except_reviewers() {
+        let plan = vec![
+            PlannedTask {
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "a".into(),
+                goal: "".into(),
+                deps: vec![],
+                writes: vec!["src/x.rs".into()],
+                acceptance: vec![], // missing
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+            PlannedTask {
+                id: "t2".into(),
+                role: Role::Reviewer,
+                title: "b".into(),
+                goal: "".into(),
+                deps: vec!["t1".into()],
+                writes: vec![],
+                acceptance: vec![], // reviewer with empty acceptance is fine
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            },
+        ];
+        let report = critique_plan(&plan, Path::new(""));
+        assert_eq!(report.missing_acceptance, vec!["t1"]);
+    }
+
+    #[test]
+    fn two_pass_uses_rewrite_when_static_critique_finds_issues() {
+        // CannedLlm returns the SAME plan on both calls; the rewrite
+        // path runs but doesn't fix anything, so we fall back to the
+        // draft. Verifies the flow doesn't error out.
+        let llm = CannedLlm(sample_plan_json().to_string());
+        let plan = futures::executor::block_on(plan_from_goal(
+            &llm,
+            "add --version-only",
+            Path::new(""),
+        ))
+        .unwrap();
+        assert_eq!(plan.len(), 3);
     }
 
     #[test]

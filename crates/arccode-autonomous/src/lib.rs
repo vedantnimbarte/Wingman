@@ -9,6 +9,7 @@ pub mod acceptance;
 pub mod approval;
 pub mod child_process;
 pub mod dashboard;
+pub mod grounding;
 pub mod manager;
 pub mod model;
 pub mod orchestrator;
