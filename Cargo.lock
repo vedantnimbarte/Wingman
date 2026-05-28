@@ -133,6 +133,7 @@ dependencies = [
  "anyhow",
  "arccode-config",
  "arccode-core",
+ "arccode-tools",
  "async-trait",
  "chrono",
  "futures",

@@ -10,6 +10,7 @@ description = "Pilot mode: multi-agent orchestrator that delegates a goal to wor
 [dependencies]
 arccode-core = { workspace = true }
 arccode-config = { workspace = true }
+arccode-tools = { workspace = true }
 
 tokio = { workspace = true }
 serde = { workspace = true }

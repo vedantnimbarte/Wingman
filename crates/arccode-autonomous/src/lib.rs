@@ -6,10 +6,13 @@
 //! creation and TUI dashboard land in later phases.
 
 pub mod child_process;
+pub mod manager;
 pub mod model;
+pub mod orchestrator;
 pub mod planner;
 pub mod role;
 pub mod store;
+pub mod tools;
 pub mod worker;
 
 pub use model::{
