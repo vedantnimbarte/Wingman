@@ -14,6 +14,7 @@ pub mod role;
 pub mod store;
 pub mod tools;
 pub mod worker;
+pub mod worktree;
 
 pub use model::{
     apply, tasks_by_id, Acceptance, Agent, AgentStatus, Event, Reversibility, Role, RunState,

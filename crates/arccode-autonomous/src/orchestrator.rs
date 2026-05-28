@@ -255,6 +255,26 @@ pub struct OrchestratorConfig {
     pub task_timeout: Duration,
     pub project_root: PathBuf,
     pub run_id: String,
+    /// Base commit (resolved by the CLI) that every worker worktree branches
+    /// from. Empty disables worktree creation — useful for unit tests that
+    /// drive the fake spawner against an in-memory store.
+    pub base_commit: String,
+    /// When true, the orchestrator creates a real git worktree before
+    /// calling the spawner and removes it when the spawner finishes.
+    pub use_real_worktrees: bool,
+}
+
+impl Default for OrchestratorConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_agents: 4,
+            task_timeout: Duration::from_secs(1800),
+            project_root: PathBuf::new(),
+            run_id: String::new(),
+            base_commit: String::new(),
+            use_real_worktrees: false,
+        }
+    }
 }
 
 /// Run the orchestrator actor on the current Tokio runtime. Returns the
@@ -461,6 +481,31 @@ async fn handle_assign(
         let session_id = format!("pilot-{}-{agent_id}", cfg.run_id);
         (task, agent_id, worktree, session_id)
     };
+
+    // Optionally create a real git worktree. Disabled in unit tests so
+    // they don't have to set up a temp repo just to drive the actor.
+    if cfg.use_real_worktrees && !cfg.base_commit.is_empty() {
+        let repo_root = cfg.project_root.clone();
+        let base = cfg.base_commit.clone();
+        let run_id = cfg.run_id.clone();
+        let task_id_for_wt = task_id.to_string();
+        let worktree_for_create = worktree.clone();
+        let res = tokio::task::spawn_blocking(move || {
+            crate::worktree::create_worktree(
+                &repo_root,
+                &base,
+                &run_id,
+                &task_id_for_wt,
+                &worktree_for_create,
+            )
+        })
+        .await;
+        match res {
+            Ok(Ok(_branch)) => {}
+            Ok(Err(e)) => return Err(OrchestratorError::Spawn(e.to_string())),
+            Err(e) => return Err(OrchestratorError::Spawn(e.to_string())),
+        }
+    }
 
     // Record assignment + spawn synchronously so the manager sees the
     // state update immediately. The worker itself runs in a detached task
@@ -685,6 +730,8 @@ mod tests {
             task_timeout: Duration::from_secs(30),
             project_root: root,
             run_id: "test-run".into(),
+            base_commit: String::new(),
+            use_real_worktrees: false,
         }
     }
 
