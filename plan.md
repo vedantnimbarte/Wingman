@@ -417,6 +417,302 @@ active shows live progress without polling.
 
 ---
 
+## Enhancements — reduce developer interaction & raise throughput
+
+The phases above ship the minimum viable autonomous loop. The enhancements
+below are layered on top to cut the two remaining interaction points (plan
+approval, PR review) toward zero and to make the loop self-healing.
+
+### E1. Trust-tiered auto-approval (kills the plan-approval gate)
+
+Replace the unconditional `y / e / n` prompt with a risk classifier on the
+proposed plan. Config:
+
+```toml
+[autonomous.approval]
+auto_approve_usd        = 1.00         # est. cost ceiling for auto
+auto_approve_max_tasks  = 5
+auto_approve_globs      = ["crates/**/*.rs", "docs/**", "README.md"]
+dangerous_paths         = ["**/migrations/**", ".github/**", "**/auth/**",
+                           "**/secrets*", "Cargo.lock"]
+notify_only_window_secs = 60           # "veto in 60s" for medium-risk
+notify_channel          = "desktop"    # desktop | slack:<webhook> | none
+```
+
+Tiers:
+
+- **auto** — plan ≤ `auto_approve_max_tasks`, all writes match
+  `auto_approve_globs`, est. cost < `auto_approve_usd`, no `dangerous_paths`
+  hit. Proceeds silently.
+- **notify-only** — fires a notification with the plan summary; proceeds
+  unless vetoed within `notify_only_window_secs`.
+- **hard gate** — falls back to the existing `y / e / n` prompt.
+
+`--yes` forces auto; `--review` forces hard gate.
+
+### E2. Two-pass, repo-aware planner
+
+1. **Grounding pass** (cheap, fast model): `recall_session` + targeted
+   `grep`/`list_dir` over the goal's keywords. Produces a "facts" block:
+   real file paths, existing symbols, prior related work.
+2. **Draft pass**: planner emits a plan conditioned on the facts block.
+3. **Critique pass**: same model re-reads its own plan against a checklist:
+   - Every referenced path exists.
+   - Every `acceptance` is an executable command.
+   - Dep graph is acyclic and connected.
+   - No two tasks have overlapping `writes` (see E3).
+4. **Rewrite pass**: planner rewrites once based on the critique.
+
+Net effect: dramatically fewer hallucinated modules and untestable tasks.
+Adds ~2–3× planner tokens but the planner is a tiny fraction of total cost.
+
+### E3. Executable acceptance criteria + self-verification
+
+Schema change for tasks:
+
+```jsonc
+{
+  "ev": "task.create", "id": "t1", "role": "developer",
+  "title": "Add --version-only flag",
+  "goal": "…",
+  "writes": ["crates/arccode-cli/src/main.rs",
+             "crates/arccode-cli/src/args.rs"],
+  "acceptance": [
+    {"kind": "shell", "cmd": "cargo check -p arccode-cli"},
+    {"kind": "shell", "cmd": "cargo test -p arccode-cli version_only"},
+    {"kind": "grep",  "pattern": "version-only", "path": "crates/arccode-cli/src/args.rs"}
+  ]
+}
+```
+
+Workers must run every acceptance check and attach results to
+`task_complete` before transitioning to `review`. Failed acceptance → task
+auto-loops back into the retry ladder (E5). Green acceptance lets the
+reviewer skip re-verifying mechanical checks.
+
+### E4. Conflict avoidance via write-set scheduling + rebase-as-you-go
+
+Replace the "linearize merges at the end, halt on first conflict" strategy:
+
+1. **Write-set constraint in the scheduler**: never run two tasks whose
+   `writes` globs overlap concurrently. Planner is required to declare
+   them (E3); critique pass enforces non-overlap inside a concurrency
+   wave.
+2. **Continuous integration branch**: orchestrator merges each task into
+   `arccode/auto/<run-id>` the moment the task hits `review` + passes
+   acceptance. Later workers branch from / rebase onto the latest
+   integration tip instead of the original base commit.
+3. **Auto-merge-fixer subagent**: on conflict, spawn a dedicated worker
+   with role `merge-fixer` whose only job is to resolve the conflict and
+   re-run acceptance. Only escalate to the user if the fixer fails.
+
+This converts most "halt the run" events into transparent recoveries.
+
+### E5. Structured failure retry ladder (self-healing)
+
+Replace the flat "1 retry → user prompt" policy with:
+
+| Rung | Action                                                            |
+| ---- | ----------------------------------------------------------------- |
+| 1    | Same worker, same model, failure diff + acceptance output appended to context |
+| 2    | Fresh worker, escalate model (`router.fast_model` → `default_model`), full task history attached |
+| 3    | **Splitter call**: planner-style call that decomposes the failing task into 2–3 smaller tasks; re-enqueue |
+| 4    | Mark `blocked`, surface to user with full context                 |
+
+Between every worker turn (not just at task end), the orchestrator runs
+`cargo check` (or project-configured `[autonomous].turn_gate_cmd`) inside
+the worktree. Red turns are rolled back via the checkpoint (E11) and the
+worker is re-prompted with the failure — keeps bad turns from compounding.
+
+### E6. Cross-run learning loop
+
+Leverage existing `recall_session` / session-log infrastructure:
+
+- **Planner priming**: before E2's draft pass, fetch top-K similar past
+  runs by goal-embedding similarity; inject their plans + final outcomes
+  (merged / reverted / abandoned) as in-context examples.
+- **Per-role lessons file**: `~/.arccode/agents/<role>.lessons.md` —
+  appended to whenever a task by that role is reverted in PR review or
+  rewritten heavily by a later commit. Loaded into the role's system
+  prompt on subsequent runs.
+- **Adaptive model routing**: track first-try success rate per
+  `(role, task_kind, model)` tuple in `~/.arccode/stats.jsonl`; the
+  scheduler picks the cheapest model whose historical success rate
+  exceeds a threshold, instead of statically using `router.fast_model`
+  for all workers.
+
+### E7. Reviewer-per-task (replaces end-of-run reviewer)
+
+(Promotes Open Question #4 to a decision.)
+
+Add a status: `in_progress → review → reviewing → done | rework`.
+
+- When a worker reports `review` + green acceptance, orchestrator
+  immediately spawns a reviewer agent in parallel with the next eligible
+  worker. Reviewer has read-only tools + the diff for that one task.
+- Reviewer outcomes: `approve` → `done` + merge; `rework` → task returns
+  to `todo` with reviewer notes appended.
+- A single final reviewer still runs on the integration branch for
+  cross-cutting concerns (changelog, release notes), but per-task
+  reviewers catch issues at the cheapest possible point.
+
+This is the change that lets the human PR review become a rubber stamp.
+
+### E8. PR-side automation (so human review is a rubber stamp)
+
+Before notifying the user that the PR is ready:
+
+1. Run `arccode review` on the integration branch; post findings as
+   inline PR comments via `gh pr review --comment`.
+2. Auto-generate the PR body sections:
+   - **Summary** — from the goal + per-task outcome summaries.
+   - **Test plan** — concatenation of every task's `acceptance` commands,
+     pre-checked.
+   - **Changelog entry** — derived from squash commit messages.
+   - **Visual evidence** for TUI changes: render the affected views to
+     SVG via ratatui's test backend, attach as PR images.
+   - **What to scrutinize** — auto-flagged list of files matching
+     `dangerous_paths`, plus any task that took >1 retry rung.
+3. **Auto-merge** when: tier was `auto` (E1), CI is green, no
+   `dangerous_paths` touched, and `arccode review` finds nothing
+   severity ≥ `medium`. User is notified post-merge with a link.
+
+Config:
+
+```toml
+[autonomous.pr]
+auto_merge          = true
+auto_merge_max_severity = "low"
+require_ci_green    = true
+```
+
+### E9. Throughput: speculative execution + adaptive concurrency
+
+- **Speculative dispatch**: when a worker is mid-flight on task `t_n`,
+  pre-spawn a fast-model worker on the most-likely-next task `t_{n+1}`
+  using current state. If the manager confirms the assignment, promote;
+  otherwise discard. Hides spawn + planning latency.
+- **Idle-reviewer fan-out**: each `review` transition spawns its reviewer
+  immediately (E7), in parallel with continued worker execution.
+- **Adaptive concurrency cap**: replace static `max_concurrent_agents = 4`
+  with a controller that scales between `[min, max]` based on:
+  - per-provider rate-limit headroom (parse 429s and `Retry-After`),
+  - host CPU load,
+  - current `usd_spent / max_usd` burn rate.
+
+### E10. Manager↔worker bidirectional comms (promotes Open Q #2)
+
+Implement `message_agent` properly in Phase 4 — not Phase 4-stub. Workers
+expose a stdin command channel; manager can send:
+
+- `pivot` — append new context + revised goal mid-task.
+- `cancel` — abort cleanly, commit partial work to a side branch.
+- `clarify` — inject answer to a question the worker raised.
+
+Workers can also push `question` events the manager can answer without
+killing the task. Eliminates most "restart from scratch on drift" cases.
+
+### E11. Mandatory checkpoint hygiene (promotes Open Q #5)
+
+Worker system prompt mandates `arccode checkpoint` before any
+multi-file edit and after each acceptance-green milestone. Orchestrator
+verifies via the session log that at least one checkpoint exists before
+allowing a task to enter `review`. Rollback (E5 turn-gate) uses the
+nearest prior checkpoint.
+
+### E12. `--watch` mode (low-cost UX win)
+
+`arccode autonomous --watch "<goal>"` runs the orchestrator and tails
+the run with a minimal terminal progress UI (reuse the event stream from
+the TUI dashboard but render flat). For users who want to observe a run
+without opening the full TUI. Default behavior remains background-style
+streaming as in the current plan.
+
+### E13. Drop `designer` from v1; add `refactorer` and `merge-fixer`
+
+(Promotes Open Question #1 to a decision.)
+
+Shipped roles: `developer`, `tester`, `reviewer`, `refactorer`,
+`merge-fixer`. `designer` deferred until there's a concrete artifact
+it produces on a TUI codebase. `refactorer` exists because the splitter
+ladder (E5 rung 3) often produces "extract helper" tasks that are
+better routed to a refactor-specialized prompt than to `developer`.
+
+---
+
+## Revised defaults table
+
+These overrides replace the corresponding rows in "Opinionated defaults":
+
+| Area                  | Revised default                                                          |
+| --------------------- | ------------------------------------------------------------------------ |
+| Approval flow         | Trust-tiered (E1); hard gate only for risky plans                        |
+| Conflict strategy     | Write-set scheduling + rebase-as-you-go + auto merge-fixer (E4)          |
+| Failure policy        | 4-rung retry ladder with auto-splitting (E5); per-turn check-gate        |
+| Agent roles shipped   | `developer`, `tester`, `reviewer`, `refactorer`, `merge-fixer` (E13)     |
+| Reviewer placement    | Per-task reviewer (E7); final reviewer only for cross-cutting concerns   |
+| PR finalization       | Auto-`arccode review` + auto-generated body + conditional auto-merge (E8) |
+| Manager↔worker IPC    | Bidirectional via stdin command channel (E10)                            |
+| Checkpoint policy     | Mandatory before multi-file edits; enforced by orchestrator (E11)        |
+
+---
+
+## Revised phasing (enhancements folded in)
+
+Phases 1–7 ship as written. Insert the following before Phase 8:
+
+### Phase 7.5 — Self-healing & low-interaction core
+
+1. **E3** — `writes` + executable `acceptance` schema; worker
+   self-verification; orchestrator enforcement.
+2. **E5** — 4-rung retry ladder + per-turn check-gate + rollback to
+   nearest checkpoint.
+3. **E11** — checkpoint enforcement.
+4. **E10** — bidirectional manager↔worker IPC.
+
+**Done when:** the acceptance test (canned `--version-only` plan)
+survives one injected failure per rung without user intervention.
+
+### Phase 7.6 — Planner quality
+
+1. **E2** — two-pass, repo-aware planner.
+2. **E13** — role lineup updated.
+3. Planner emits `writes` + `acceptance` arrays (depends on E3).
+
+**Done when:** planner-emitted file paths exist in the repo 100% of the
+time across a 20-goal benchmark.
+
+### Phase 7.7 — Conflict avoidance & throughput
+
+1. **E4** — write-set scheduling + rebase-as-you-go + merge-fixer role.
+2. **E9** — speculative dispatch + adaptive concurrency.
+3. **E7** — reviewer-per-task.
+
+**Done when:** a 7-task plan with two overlapping-write tasks completes
+without halting and without manual merge intervention.
+
+### Phase 7.8 — Trust tier, PR automation, UX
+
+1. **E1** — trust-tiered approval + config.
+2. **E8** — `arccode review` on integration + auto-PR-body +
+   conditional auto-merge.
+3. **E12** — `--watch` mode.
+
+**Done when:** acceptance test runs with no user input from invocation
+through merged PR.
+
+### Phase 7.9 — Cross-run learning
+
+1. **E6** — planner priming from past runs, per-role lessons files,
+   adaptive model routing.
+
+**Done when:** a goal re-run after a revert demonstrably avoids the
+reverted approach (verify against a seeded "trap" test case).
+
+Phase 8 (cross-provider validation + CI matrix) runs last, unchanged.
+
+---
+
 ## Open questions to revisit during build
 
 These don't block writing code today, but flag them before merging:

@@ -15,6 +15,21 @@ plus a planned MCP host.
 
 ---
 
+## Quick Links
+
+- **Getting Started:** See [Installation](#installation) and [Quick Start](#quick-start) below.
+- **CLI Subcommands:** [CLI Reference](#cli-reference).
+- **Documentation:** See [docs/](docs/) for detailed guides:
+  - [docs/INDEX.md](docs/INDEX.md) — navigation guide for all technical docs.
+  - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design, crate overview, data flows.
+  - [docs/TREE-SITTER.md](docs/TREE-SITTER.md) — language-aware parsing integration.
+  - [docs/LEARNING-LOOP.md](docs/LEARNING-LOOP.md) — memories, skills, session recall.
+  - [docs/TOOLS.md](docs/TOOLS.md) — complete reference for all 20+ built-in tools.
+  - [docs/AUTONOMOUS-MODE.md](docs/AUTONOMOUS-MODE.md) — planned multi-task orchestration (M8).
+- **For Developers:** See [Development](#development) below.
+
+---
+
 ## Highlights
 
 - **Self-improving learning loop.** Persistent memories (markdown +
@@ -94,6 +109,10 @@ plus a planned MCP host.
   JSONLs for repeated tool-call sequences (e.g. `grep_tool → read_file →
   edit_file`) and writes draft skill markdown files under
   `~/.arccode/skills/proposed/` for you to review.
+- **Tree-sitter powered code understanding.** Deep language-aware parsing
+  (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
+  index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
+  so the workspace builds without the C toolchain if you don't need parsing.
 - **Multi-model code review.** `arccode review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by
@@ -122,6 +141,7 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 | `arccode-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt.               |
 | `arccode-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
 | `arccode-mcp`        | MCP host scaffolding (M3).                                                                             |
+| `arccode-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
 
 ---
 
@@ -546,7 +566,10 @@ The project is being built milestone by milestone:
   screen, slash autocomplete). *(shipped)*
 - **M6** — Self-improving learning loop (`arccode-learn`): persistent
   memories, skill usage stats with outcome scoring, cross-session recall,
-  nudges. *(shipped — current `main`)*
+  nudges. *(shipped)*
+- **M7** — Tree-sitter integration across RAG, tools, diff/review, TUI. *(shipped)*
+- **M8** — Autonomous mode (`arccode autonomous`): multi-task planning, worker
+  agents in isolated worktrees, merge + PR. *(planned)*
 - **Next** — Interactive TUI approval modal for skill/memory proposals,
   session logging from the TUI (currently headless-only), full MCP host.
 

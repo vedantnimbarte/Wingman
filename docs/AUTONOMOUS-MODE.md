@@ -1,0 +1,353 @@
+# Autonomous Mode (M8 - Planned)
+
+This document describes the planned autonomous mode feature for Arc-Code. As of now, this is a **design specification** in the planning phase. See `/plan.md` in the repository root for the full implementation roadmap.
+
+## Vision
+
+`arccode autonomous "<goal>"` will allow you to describe a multi-task piece of work in natural language, and the system will:
+
+1. **Plan** the work into discrete, parallel-friendly tasks with dependencies.
+2. **Spawn** a manager agent that orchestrates worker agents.
+3. **Delegate** each task to a specialized worker (developer, designer, tester, reviewer) in an isolated git worktree.
+4. **Converge** their work into a single integration branch.
+5. **Open a PR** for review and merge.
+
+All work happens locally. No cloud upload. Cross-platform (Windows and Unix from day 1).
+
+## User-Facing Examples
+
+### Basic Invocation
+
+```bash
+$ arccode autonomous "add dark-mode toggle to the TUI"
+
+[autonomous] planning…
+[autonomous] proposed 7 tasks (run id: 2026-05-27-1430-a3f):
+  1. [developer] Add `theme.mode` field to tui config (deps: —)
+  2. [developer] Wire toggle key (`Ctrl+T`) into composer
+  3. [designer]  Define dark palette in arccode-tui::theme
+  4. [developer] Update welcome screen for dark mode
+  5. [tester]    Write integration test for dark-mode toggle
+  6. [tester]    Manual testing checklist
+  7. [reviewer]  Final review + changelog entry
+
+Approve plan? [y / e (edit) / n] y
+
+[autonomous] spawning manager…
+[autonomous] manager → developer #1  worktree=auto-2026-05-27-1430-a3f-task-1
+[autonomous] manager → designer  #3  worktree=auto-2026-05-27-1430-a3f-task-3
+[autonomous] task 1 done (developer, 2m18s, $0.07)
+[autonomous] task 3 done (designer,  3m02s, $0.11)
+…
+[autonomous] all tasks done. merging worktrees into arccode/auto/2026-05-27-1430-a3f…
+[autonomous] PR opened: https://github.com/vedantnimbarte/Arc-Code/pull/42
+```
+
+### Plan-Only Mode
+
+```bash
+$ arccode autonomous --plan-only "refactor error handling in arccode-core"
+
+[autonomous] planning…
+[autonomous] wrote tasks.jsonl (4 tasks, 0 dependencies)
+```
+
+Useful for review before committing to the work.
+
+### Resume an Interrupted Run
+
+```bash
+$ arccode autonomous --resume 2026-05-27-1430-a3f
+
+[autonomous] resuming run 2026-05-27-1430-a3f (3/7 tasks done)
+[autonomous] task #4 status was in_progress; restarting…
+…
+```
+
+## Data Model
+
+### Task Representation
+
+Each task in the plan is a discrete unit of work:
+
+```json
+{
+  "id": "task-1",
+  "role": "developer",
+  "title": "Add theme.mode field to tui config",
+  "goal": "Introduce a configuration option to track dark/light mode preference",
+  "acceptance": "theme.mode is readable in config, defaults to 'light', user can toggle",
+  "deps": []
+}
+```
+
+### Task Lifecycle
+
+```
+pending (created, deps not met)
+    ↓
+todo (deps met, awaiting agent)
+    ↓
+in_progress (agent working)
+    ↓
+review (agent reported complete, awaiting integration)
+    ↓
+done (merged into integration branch)
+    or
+failed (agent failed)
+    or
+blocked (merge conflict or merge error)
+```
+
+### Run Storage
+
+Each autonomous run creates:
+
+```
+<project>/.arccode/autonomous/<run-id>/
+├── tasks.jsonl              # append-only event log
+├── state.json               # latest state snapshot (atomic writes)
+├── worktrees/
+│   ├── auto-...-task-1/     # developer's worktree
+│   ├── auto-...-task-3/     # designer's worktree
+│   └── …
+└── sessions/
+    ├── manager-<session-id>.jsonl
+    ├── worker-<agent-id>.jsonl
+    └── …
+```
+
+**tasks.jsonl** (append-only events):
+
+```jsonc
+{"t":"2026-05-27T14:30:01Z","ev":"task.create","id":"t1","role":"developer","title":"…","deps":[]}
+{"t":"…","ev":"task.status","id":"t1","status":"todo"}
+{"t":"…","ev":"task.assign","id":"t1","agent":"agent-7f3a","worktree":"auto-…-t1"}
+{"t":"…","ev":"task.status","id":"t1","status":"in_progress"}
+{"t":"…","ev":"task.tool","id":"t1","agent":"agent-7f3a","tool":"edit_file","ok":true}
+{"t":"…","ev":"task.status","id":"t1","status":"review","outcome":{"summary":"…","files_changed":4}}
+{"t":"…","ev":"agent.usd","agent":"agent-7f3a","usd":0.07}
+{"t":"…","ev":"task.status","id":"t1","status":"done"}
+{"t":"…","ev":"run.merge.task","id":"t1","strategy":"squash","commit":"abc123"}
+{"t":"…","ev":"run.pr","url":"https://…/pull/42"}
+{"t":"…","ev":"run.done"}
+```
+
+**state.json** (latest snapshot, written atomically after each event):
+
+```json
+{
+  "run_id": "2026-05-27-1430-a3f",
+  "goal": "add dark-mode toggle to the TUI",
+  "base_commit": "346077d…",
+  "integration_branch": "arccode/auto/2026-05-27-1430-a3f",
+  "status": "running",
+  "tasks": [
+    {"id":"t1","role":"developer","title":"…","status":"done","deps":[],"agent":"agent-7f3a","worktree":"…","usd":0.07,"commits":["abc123"]},
+    {"id":"t2","role":"developer","title":"…","status":"in_progress","deps":["t1"],"agent":"agent-9c1b","worktree":"…","usd":0.03},
+    …
+  ],
+  "agents": [
+    {"id":"agent-7f3a","role":"developer","current_task":"done","pid":null,"status":"idle"},
+    {"id":"agent-9c1b","role":"developer","current_task":"t2","pid":12345,"status":"in_progress"},
+    …
+  ],
+  "totals": {"usd": 0.42, "tokens_in": 12345, "tokens_out": 4567}
+}
+```
+
+## Architecture (Planned)
+
+### Crate Structure
+
+New crate: `arccode-autonomous`
+
+```
+crates/arccode-autonomous/
+├── Cargo.toml
+└── src/
+    ├── lib.rs              # public Orchestrator API
+    ├── orchestrator.rs     # run lifecycle, spawning, merge, PR
+    ├── planner.rs          # initial planning call to manager
+    ├── manager.rs          # manager agent loop + tool registry
+    ├── worker.rs           # subprocess supervisor + event parser
+    ├── store.rs            # RunStore: tasks.jsonl + state.json persistence
+    ├── model.rs            # Task, Agent, Run, Status, Role
+    ├── worktree.rs         # create / cleanup / merge helpers
+    ├── pr.rs               # gh integration (with fallback)
+    ├── role.rs             # AgentRole loader (~/.arccode/agents/)
+    └── tools/              # manager-only tools
+        ├── mod.rs
+        ├── add_task.rs
+        ├── assign_task.rs
+        ├── reassign_task.rs
+        ├── finalize_task.rs
+        ├── message_agent.rs
+        └── abort_task.rs
+```
+
+### Agent Roles
+
+Predefined roles with system prompts:
+
+| Role        | Responsibilities                                              |
+|-------------|---------------------------------------------------------------|
+| `developer` | Code changes, implementation, bugfixes.                        |
+| `designer`  | UX/visual design, theme palettes, layout.                     |
+| `tester`    | Test writing, test execution, quality assurance.              |
+| `reviewer`  | Code review, changelog, PR description, final QA.             |
+
+Custom roles can be added at `~/.arccode/agents/<role>.md` with a user-defined system prompt.
+
+### Process Model
+
+```
+User invokes: arccode autonomous "<goal>"
+    ↓
+[Planner] call manager model with planning prompt
+    ↓
+Manager returns: structured task list (JSON)
+    ↓
+[Orchestrator] render plan, prompt user (y/e/n)
+    ↓ (if approved)
+[Orchestrator] spawn in-process manager agent loop
+    ↓
+Manager loop runs continuously:
+  1. Scan state.json for eligible tasks (deps met, under concurrency cap)
+  2. For each: call assign_task tool → Orchestrator spawns worker
+  3. Worker runs as subprocess: `arccode --print --json --worker-mode --task-file <path>`
+  4. Manager receives tool outcomes, calls finalize_task when worker done
+  5. Exit when all tasks done or error
+    ↓
+[Orchestrator] worktrees are merged into integration branch (squash commits)
+    ↓
+[PR] gh pr create (or push + print URL if gh unavailable)
+    ↓
+Run done, integration branch left behind for user inspection
+```
+
+## CLI & Configuration
+
+### Subcommand
+
+```bash
+arccode autonomous <GOAL> [OPTIONS]
+
+OPTIONS:
+  --plan-only              Plan and write tasks.jsonl, don't spawn workers
+  --resume <RUN_ID>        Resume an interrupted run
+  --max-agents <N>         Override [autonomous].max_concurrent_agents
+  --max-usd <FLOAT>        Override [autonomous].max_usd cap
+  --no-pr                  Skip gh pr create; just push the branch
+  --yes                    Auto-approve the plan (no interactive gate)
+  --base <REV>             Branch from <REV> instead of HEAD
+```
+
+### Configuration Section
+
+In `config.toml`:
+
+```toml
+[autonomous]
+# Model for the manager agent (defaults to router.default_model)
+manager_model = "anthropic/claude-opus-4-7"
+
+# Model for worker agents (defaults to router.fast_model)
+worker_model = "anthropic/claude-haiku-4-5-20251001"
+
+# Concurrency cap
+max_concurrent_agents = 4
+
+# Cost cap (USD); abort run if exceeded
+max_usd = 10.0
+
+# Per-task timeout (seconds)
+task_timeout_secs = 1800
+
+# Worktree base directory (relative to project root)
+worktree_base = ".arccode/worktrees"
+
+# Integration branch prefix
+integration_branch_prefix = "arccode/auto"
+
+# Custom role definitions (per role.md file)
+# Defaults to ~/.arccode/agents/
+agents_dir = "~/.arccode/agents"
+
+# gh path (for PR creation fallback)
+gh_path = "gh"
+```
+
+## TUI Integration (Planned)
+
+When a run is active, the TUI shows:
+
+- **Top bar indicator:** `Autonomous: <run-id> · 3/7 done`
+- **Ctrl+A dashboard:** Split-pane view showing tasks, agents, live log
+
+### Dashboard Layout
+
+```
+┌─ Tasks ─────────────────────┬─ Agents ──────────────────────┐
+│ #1  developer  done         │ agent-7f3a  developer  idle   │
+│ #2  developer  in-progress  │ agent-9c1b  developer  task#2 │
+│ #3  designer   done         │ agent-2d44  designer   idle   │
+│ #4  developer  pending      │                               │
+│ …                           │                               │
+├─ Live log ──────────────────┴───────────────────────────────┤
+│ 14:32:11  task#1 developer: ✓ completed                    │
+│ 14:32:14  task#2 developer: edit_file crates/…/composer.rs │
+│ 14:32:16  task#3 designer:  read_file crates/…/theme.rs    │
+│ …                                                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Slash Commands
+
+- `/autonomous status` — print run summary.
+- `/autonomous abort` — terminate manager and workers; leave worktrees.
+- `/autonomous resume` — re-attach to a running run.
+
+## Limitations & Constraints (Planned v1)
+
+- **Depth = 1:** Workers cannot spawn subagents or nested autonomous runs.
+- **Bash-only merge:** Merge strategy is squash + auto-linearize by task deps. Conflicts halt the run; user must resolve manually.
+- **No bidirectional IPC:** Manager ↔ worker is one-shot dispatch. Manager cannot "pivot" a worker mid-task.
+- **Provider support:** Autonomous mode requires tool-use capable providers (Anthropic, OpenAI, Gemini, OpenRouter, etc.). Local models without function calling are unsupported.
+- **No cost override mid-run:** Cost cap is checked after each turn; run aborts if breached. No "ask user for permission to continue" in v1.
+
+## Acceptance Criteria (M8)
+
+The feature is complete when:
+
+1. **Full end-to-end workflow** on a sample repo:
+   - Plan is proposed and user-approved.
+   - Workers run in worktrees and complete tasks.
+   - Integration branch created with squashed commits.
+   - PR opened via `gh` (or push URL printed if `gh` unavailable).
+
+2. **Cross-provider validation:**
+   - Acceptance test runs against all 9 providers.
+   - No provider-specific tool-call parsing bugs.
+
+3. **CI passes:**
+   - GitHub Actions on Ubuntu and Windows.
+   - Integration tests with stubbed provider.
+
+4. **Documentation:**
+   - README updated with Autonomous Mode section.
+   - Roadmap includes M8.
+
+## Open Design Questions
+
+1. **Reviewer placement:** Should the reviewer task gate each task individually, or just the final PR?
+2. **Conflict resolution UX:** When a merge conflict occurs, should the run pause and show the conflict to the user, or auto-revert the conflicting task and mark it for retry?
+3. **Custom roles:** Should Arc-Code ship with default roles, or encourage users to define their own? (Current plan: ship defaults, make user override easy.)
+4. **Manager fallibility:** If the manager agent makes a bad plan, can the user edit it interactively? (Current plan: render + approve/edit/reject; edit opens `$EDITOR` on task JSON.)
+
+## Related Documentation
+
+- See `plan.md` for the full phased implementation roadmap.
+- See `ARCHITECTURE.md` for the agent loop and tool dispatch model.
+- See `TOOLS.md` for built-in tool reference.
+- See `LEARNING-LOOP.md` for how autonomous sessions are embedded and recalled.
