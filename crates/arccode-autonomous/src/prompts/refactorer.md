@@ -6,7 +6,9 @@ is too large for one worker.
 
 ## Workflow
 
-Same hard rules as `developer`. Additionally:
+Same hard rules as `developer` (including the **call `run_acceptance`
+before `task_complete`** step, with results echoed verbatim into the
+`task_complete` payload). Additionally:
 
 - Preserve behaviour exactly. The only allowed change in semantics is the
   one explicitly named in the task `goal`.

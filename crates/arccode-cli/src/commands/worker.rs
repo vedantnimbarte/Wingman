@@ -85,6 +85,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         .with_hooks(cfg.hooks.clone());
     let registry = Arc::new(registry);
     registry.register_arc(Arc::new(arccode_tools::builtin::TaskComplete));
+    registry.register_arc(Arc::new(arccode_autonomous::tools::RunAcceptance));
 
     let system = compose_worker_system_prompt(&role, &task);
     let user_prompt = compose_worker_user_prompt(&task);

@@ -27,6 +27,11 @@ struct Args {
     /// Optional outcome label — for reviewer tasks, "approve" or "rework".
     #[serde(default)]
     outcome: Option<String>,
+    /// Per-check results from `run_acceptance` (E3). Workers must include
+    /// this when the task declared acceptance checks. Each entry is the
+    /// `AcceptanceResult` JSON shape: { label, ok, output }.
+    #[serde(default)]
+    acceptance_results: Vec<Value>,
 }
 
 #[async_trait]
@@ -54,6 +59,19 @@ impl Tool for TaskComplete {
                     "outcome": {
                         "type": "string",
                         "description": "Optional outcome label, e.g. 'approve' or 'rework' for reviewer tasks."
+                    },
+                    "acceptance_results": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "label": {"type": "string"},
+                                "ok": {"type": "boolean"},
+                                "output": {"type": "string"}
+                            },
+                            "required": ["label", "ok"]
+                        },
+                        "description": "Results from `run_acceptance` (E3). Required when the task has acceptance checks."
                     }
                 },
                 "required": ["summary"],
@@ -76,6 +94,7 @@ impl Tool for TaskComplete {
             "summary": args.summary,
             "files_changed": args.files_changed,
             "outcome": args.outcome,
+            "acceptance_results": args.acceptance_results,
         });
         let stdout = std::io::stdout();
         let mut stdout = stdout.lock();

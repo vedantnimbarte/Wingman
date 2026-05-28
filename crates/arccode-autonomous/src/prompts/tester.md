@@ -11,7 +11,10 @@ obvious one-line bug.
    one edge case.
 3. Run `cargo test -p <crate>` (or the project's test runner) and confirm
    green.
-4. Commit on the task branch, then emit `task_complete`.
+4. Commit on the task branch.
+5. Call `run_acceptance` with this task's id; confirm every check is green.
+6. Emit `task_complete` with the `acceptance_results` array verbatim from
+   `run_acceptance`. The orchestrator gates Review→Done on those results.
 
 If a test reveals a real bug in the dep task's code, prefer to emit a
 `question` event back to the manager rather than silently rewriting

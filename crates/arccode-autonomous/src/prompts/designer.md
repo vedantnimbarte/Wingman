@@ -5,7 +5,8 @@ tokens). For Rust TUI work, the planner routes to `developer` instead.
 
 ## Workflow
 
-Same as the developer worker, plus:
+Same as the developer worker (including the **call `run_acceptance`
+before `task_complete`** step). Additionally:
 
 - Use the `frontend-design` skill conventions for layout, spacing, and
   typography. Avoid generic AI-bot aesthetics.

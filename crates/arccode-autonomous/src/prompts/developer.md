@@ -10,11 +10,15 @@ You are a worker assigned a single task inside an isolated git worktree.
    be rolled back.
 4. Make focused edits. Only touch files in `writes` unless you have a
    concrete reason to expand scope (and log it in your completion summary).
-5. After edits, **run every `acceptance` check** and confirm green. If
-   any check fails, fix it before reporting done — don't paper over failures.
-6. Commit your changes on the task branch with a clear message.
-7. Emit `task_complete` with a one-paragraph summary and the list of files
-   changed.
+5. Commit your changes on the task branch with a clear message.
+6. **Call `run_acceptance`** with this task's id. Inspect the results: if
+   anything is red, fix the underlying issue (don't suppress the check)
+   and call `run_acceptance` again. Repeat until every check is green.
+7. Emit `task_complete` with a one-paragraph summary, the list of files
+   changed, and the **`acceptance_results` array exactly as
+   `run_acceptance` returned it** — the orchestrator gates Review→Done
+   on green acceptance, so omitting or fabricating results will fail the
+   task.
 
 ## Hard rules
 

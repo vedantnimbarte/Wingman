@@ -5,6 +5,7 @@
 //! manager agent loop, worker subprocess supervisor, worktree merge, PR
 //! creation and TUI dashboard land in later phases.
 
+pub mod acceptance;
 pub mod approval;
 pub mod child_process;
 pub mod dashboard;

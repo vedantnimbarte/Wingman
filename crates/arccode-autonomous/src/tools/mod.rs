@@ -13,6 +13,7 @@ mod finalize_task;
 mod abort_task;
 mod message_agent;
 mod reassign_task;
+mod run_acceptance;
 
 pub use add_task::AddTask;
 pub use assign_task::AssignTask;
@@ -20,3 +21,4 @@ pub use finalize_task::FinalizeTask;
 pub use abort_task::AbortTask;
 pub use message_agent::MessageAgent;
 pub use reassign_task::ReassignTask;
+pub use run_acceptance::RunAcceptance;

@@ -160,6 +160,7 @@ pub async fn run_worker(
 
     let parse_loop = async {
         let mut outcome: Option<TaskOutcome> = None;
+        let mut acceptance: Vec<crate::acceptance::AcceptanceResult> = Vec::new();
         while let Some(line) = reader.next_line().await? {
             let line = line.trim();
             if line.is_empty() {
@@ -186,18 +187,22 @@ pub async fn run_worker(
                         })
                         .await;
                 }
-                WorkerLine::TaskComplete(o) => {
+                WorkerLine::TaskComplete {
+                    outcome: o,
+                    acceptance: a,
+                } => {
                     outcome = Some(o);
+                    acceptance = a;
                 }
                 WorkerLine::Unknown => {
                     tracing::debug!(target: "pilot::worker", "unrecognised worker line: {line}");
                 }
             }
         }
-        Ok::<Option<TaskOutcome>, WorkerError>(outcome)
+        Ok::<(Option<TaskOutcome>, Vec<crate::acceptance::AcceptanceResult>), WorkerError>((outcome, acceptance))
     };
 
-    let outcome = match timeout(spec.timeout, parse_loop).await {
+    let (outcome, acceptance) = match timeout(spec.timeout, parse_loop).await {
         Ok(r) => r?,
         Err(_) => {
             supervisor
@@ -211,10 +216,24 @@ pub async fn run_worker(
     let status = child.wait().await?;
     let exit_code = status.code();
 
-    let final_status = match (&outcome, status.success()) {
-        (Some(_), true) => TaskStatus::Review,
-        (_, _) => TaskStatus::Failed,
-    };
+    // E3 gate: if the task declared acceptance checks, the worker MUST
+    // have returned green results in order to move to Review. Otherwise
+    // the task lands in Failed for the retry watchdog to pick up.
+    let final_status = compute_final_status(
+        &outcome,
+        status.success(),
+        &spec.task.acceptance,
+        &acceptance,
+    );
+    let acceptance_green = matches!(final_status, TaskStatus::Review);
+    if !acceptance_green {
+        tracing::warn!(
+            target: "pilot::worker",
+            task = %spec.task.id,
+            summary = %crate::acceptance::summarize(&acceptance),
+            "acceptance checks failed; gating to Failed (E3)"
+        );
+    }
 
     let _ = store
         .append(Event::TaskStatus {
@@ -252,8 +271,43 @@ pub async fn run_worker(
 enum WorkerLine {
     AgentEvent(arccode_core::AgentEvent),
     WorkerStart { _model: String },
-    TaskComplete(TaskOutcome),
+    /// Carries both the outcome AND the acceptance results so the worker
+    /// supervisor can gate the Review transition (E3) on green checks.
+    TaskComplete {
+        outcome: TaskOutcome,
+        acceptance: Vec<crate::acceptance::AcceptanceResult>,
+    },
     Unknown,
+}
+
+/// E3 status-gate function. Pure so the green/red transition is unit-testable.
+///
+/// Rules:
+/// - Worker has to report `task_complete` (outcome.is_some()).
+/// - Subprocess has to exit cleanly (status.success()).
+/// - If the task declared acceptance checks, every result must be green.
+///   No declared checks → vacuously green.
+/// - Any failure routes to Failed so the retry watchdog (Phase 8.1) can
+///   pick the task up.
+pub fn compute_final_status(
+    outcome: &Option<TaskOutcome>,
+    process_ok: bool,
+    declared: &[crate::model::Acceptance],
+    results: &[crate::acceptance::AcceptanceResult],
+) -> TaskStatus {
+    if outcome.is_none() || !process_ok {
+        return TaskStatus::Failed;
+    }
+    let acceptance_green = if declared.is_empty() {
+        true
+    } else {
+        crate::acceptance::all_green(results)
+    };
+    if acceptance_green {
+        TaskStatus::Review
+    } else {
+        TaskStatus::Failed
+    }
 }
 
 fn parse_line(line: &str) -> WorkerLine {
@@ -286,10 +340,17 @@ fn parse_line(line: &str) -> WorkerLine {
                                 .collect()
                         })
                         .unwrap_or_default();
-                    WorkerLine::TaskComplete(TaskOutcome {
-                        summary,
-                        files_changed,
-                    })
+                    let acceptance: Vec<crate::acceptance::AcceptanceResult> = v
+                        .get("acceptance_results")
+                        .and_then(|x| serde_json::from_value(x.clone()).ok())
+                        .unwrap_or_default();
+                    WorkerLine::TaskComplete {
+                        outcome: TaskOutcome {
+                            summary,
+                            files_changed,
+                        },
+                        acceptance,
+                    }
                 }
                 _ => WorkerLine::Unknown,
             };
@@ -397,7 +458,7 @@ pub async fn drive_stdout_for_test(
                     })
                     .await;
             }
-            WorkerLine::TaskComplete(o) => {
+            WorkerLine::TaskComplete { outcome: o, .. } => {
                 outcome = Some(o);
             }
             WorkerLine::Unknown => {}
@@ -550,15 +611,93 @@ mod tests {
     fn parse_line_recognises_worker_start_and_task_complete() {
         let line = r#"{"event":"task_complete","summary":"done","files_changed":["a.rs"]}"#;
         match parse_line(line) {
-            WorkerLine::TaskComplete(o) => {
+            WorkerLine::TaskComplete { outcome: o, acceptance } => {
                 assert_eq!(o.summary, "done");
                 assert_eq!(o.files_changed, vec!["a.rs"]);
+                assert!(acceptance.is_empty(), "no acceptance_results in this payload");
             }
             _ => panic!("expected TaskComplete"),
         }
 
         let line = r#"{"event":"worker_start","model":"x"}"#;
         matches!(parse_line(line), WorkerLine::WorkerStart { .. });
+    }
+
+    #[test]
+    fn compute_final_status_routes_correctly_for_each_signal() {
+        use crate::acceptance::AcceptanceResult;
+        use crate::model::Acceptance;
+
+        let ok_outcome = Some(TaskOutcome {
+            summary: "done".into(),
+            files_changed: vec![],
+        });
+
+        // No outcome → Failed.
+        assert_eq!(
+            compute_final_status(&None, true, &[], &[]),
+            TaskStatus::Failed
+        );
+        // Outcome + non-zero exit → Failed.
+        assert_eq!(
+            compute_final_status(&ok_outcome, false, &[], &[]),
+            TaskStatus::Failed
+        );
+        // Outcome + zero exit + no declared checks → Review.
+        assert_eq!(
+            compute_final_status(&ok_outcome, true, &[], &[]),
+            TaskStatus::Review
+        );
+        // Declared checks, all green → Review.
+        let declared = vec![Acceptance::Shell {
+            cmd: "true".into(),
+        }];
+        let green = vec![AcceptanceResult::ok("shell: true", "")];
+        assert_eq!(
+            compute_final_status(&ok_outcome, true, &declared, &green),
+            TaskStatus::Review
+        );
+        // Declared checks, one red → Failed (E3 gate).
+        let red = vec![
+            AcceptanceResult::ok("shell: true", ""),
+            AcceptanceResult::fail("shell: cargo test", "exit 1"),
+        ];
+        assert_eq!(
+            compute_final_status(&ok_outcome, true, &declared, &red),
+            TaskStatus::Failed
+        );
+        // Declared checks, results empty → Failed (worker fabricated /
+        // forgot to call run_acceptance).
+        assert_eq!(
+            compute_final_status(&ok_outcome, true, &declared, &[]),
+            TaskStatus::Failed
+        );
+    }
+
+    #[test]
+    fn parse_line_extracts_acceptance_results() {
+        let line = r#"{
+            "event":"task_complete",
+            "summary":"done",
+            "files_changed":["a.rs"],
+            "acceptance_results":[
+                {"label":"shell: cargo check","ok":true,"output":""},
+                {"label":"grep: foo in a.rs","ok":false,"output":"pattern foo not found in a.rs"}
+            ]
+        }"#;
+        match parse_line(line) {
+            WorkerLine::TaskComplete {
+                outcome,
+                acceptance,
+            } => {
+                assert_eq!(outcome.summary, "done");
+                assert_eq!(acceptance.len(), 2);
+                assert!(acceptance[0].ok);
+                assert!(!acceptance[1].ok);
+                assert!(acceptance[1].output.contains("not found"));
+            }
+            other => panic!("expected TaskComplete with acceptance, got {other:?}"),
+        }
     }
 
     #[test]
@@ -577,7 +716,7 @@ mod tests {
             match self {
                 WorkerLine::AgentEvent(_) => write!(f, "AgentEvent"),
                 WorkerLine::WorkerStart { .. } => write!(f, "WorkerStart"),
-                WorkerLine::TaskComplete(_) => write!(f, "TaskComplete"),
+                WorkerLine::TaskComplete { .. } => write!(f, "TaskComplete"),
                 WorkerLine::Unknown => write!(f, "Unknown"),
             }
         }
