@@ -1115,6 +1115,51 @@ impl Config {
                     ..Default::default()
                 },
             ),
+            (
+                "bedrock".to_string(),
+                ProviderConfig {
+                    // Long-term Bedrock API key. Generate from AWS console
+                    // (Bedrock → API keys). For SigV4 auth, leave this and
+                    // rely on standard AWS env vars / shared config.
+                    api_key: Some("${AWS_BEARER_TOKEN_BEDROCK}".into()),
+                    // Region must match the bearer token's region.
+                    base_url: Some(
+                        "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1".into(),
+                    ),
+                    model: Some(
+                        "us.anthropic.claude-3-5-sonnet-20241022-v2:0".into(),
+                    ),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vertex".to_string(),
+                ProviderConfig {
+                    // Short-lived access token; refresh with
+                    //   gcloud auth print-access-token
+                    api_key: Some("${GOOGLE_VERTEX_TOKEN}".into()),
+                    base_url: Some(
+                        "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR-PROJECT/locations/us-central1/endpoints/openapi".into(),
+                    ),
+                    model: Some("google/gemini-1.5-pro-002".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "watsonx".to_string(),
+                ProviderConfig {
+                    // IBM Cloud API key — adapter exchanges it for an IAM
+                    // access token automatically. To use a pre-obtained
+                    // token instead, set WATSONX_ACCESS_TOKEN in env.
+                    api_key: Some("${WATSONX_API_KEY}".into()),
+                    base_url: Some("https://us-south.ml.cloud.ibm.com".into()),
+                    model: Some("ibm/granite-3-8b-instruct".into()),
+                    // project_id is required and must be set out-of-band
+                    // (via `[providers.watsonx] project_id = "…"` in the
+                    // config or `WATSONX_PROJECT_ID` env var).
+                    ..Default::default()
+                },
+            ),
         ]
         .into_iter()
         .collect();

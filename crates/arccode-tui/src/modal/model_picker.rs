@@ -540,6 +540,35 @@ fn catalog() -> Vec<ModelChoice> {
         ),
         ("mancer", &["weaver", "weaver-alpha", "mythomax-l2-13b"]),
         ("reka", &["reka-core", "reka-flash", "reka-edge"]),
+        (
+            "bedrock",
+            &[
+                "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+                "us.anthropic.claude-3-5-haiku-20241022-v1:0",
+                "us.meta.llama3-3-70b-instruct-v1:0",
+                "us.amazon.nova-pro-v1:0",
+                "mistral.mistral-large-2407-v1:0",
+            ],
+        ),
+        (
+            "vertex",
+            &[
+                "google/gemini-1.5-pro-002",
+                "google/gemini-1.5-flash-002",
+                "google/gemini-2.0-flash-exp",
+                "anthropic/claude-3-5-sonnet-v2@20241022",
+                "meta/llama-3.1-70b-instruct-maas",
+            ],
+        ),
+        (
+            "watsonx",
+            &[
+                "ibm/granite-3-8b-instruct",
+                "ibm/granite-3-2b-instruct",
+                "meta-llama/llama-3-3-70b-instruct",
+                "mistralai/mistral-large",
+            ],
+        ),
         ("gpt4all", &["local-model"]),
         ("jan", &["local-model"]),
         ("koboldcpp", &["local-model"]),

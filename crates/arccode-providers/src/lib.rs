@@ -13,6 +13,7 @@ pub mod cohere;
 pub mod gemini;
 pub mod openai_compat;
 pub mod probe;
+pub mod watsonx;
 
 pub use anthropic::AnthropicProvider;
 pub use chatgpt::ChatGptProvider;
@@ -20,3 +21,4 @@ pub use cohere::CohereProvider;
 pub use gemini::GeminiProvider;
 pub use openai_compat::{OpenAiCompatProvider, Variant as OpenAiVariant};
 pub use probe::probe;
+pub use watsonx::{WatsonxCredential, WatsonxProvider};

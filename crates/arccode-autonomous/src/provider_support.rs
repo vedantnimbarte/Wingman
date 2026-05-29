@@ -136,6 +136,12 @@ pub fn classify(provider_id: &str) -> ProviderSupport {
         "localai" | "local_ai" => ProviderSupport::Untested,
         "aphrodite" => ProviderSupport::Untested,
         "mistralrs" | "mistral_rs" => ProviderSupport::Untested,
+        // Wave 4: enterprise clouds. Bedrock/Vertex via OpenAI-compat
+        // surfaces; the underlying Claude/Gemini/Llama/Nova/Mistral models
+        // all support tool_calls. Watsonx has its own native adapter.
+        "bedrock" | "aws_bedrock" | "aws-bedrock" => ProviderSupport::Compat,
+        "vertex" | "vertex_ai" | "vertexai" | "gcp_vertex" => ProviderSupport::Compat,
+        "watsonx" => ProviderSupport::Native,
         _ => ProviderSupport::Untested,
     }
 }
@@ -263,6 +269,15 @@ mod tests {
         for id in ["cloudflare", "vercel", "aimlapi", "openpipe"] {
             assert_eq!(classify(id), ProviderSupport::Compat, "{id}");
         }
+    }
+
+    #[test]
+    fn wave4_enterprise_clouds_classified() {
+        assert_eq!(classify("bedrock"), ProviderSupport::Compat);
+        assert_eq!(classify("aws_bedrock"), ProviderSupport::Compat);
+        assert_eq!(classify("vertex"), ProviderSupport::Compat);
+        assert_eq!(classify("vertex_ai"), ProviderSupport::Compat);
+        assert_eq!(classify("watsonx"), ProviderSupport::Native);
     }
 
     #[test]

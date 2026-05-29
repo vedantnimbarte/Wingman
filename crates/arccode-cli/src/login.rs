@@ -9,7 +9,7 @@ use arccode_config::{global_config_path, secrets, Config};
 use arccode_core::Provider;
 use arccode_providers::{
     probe, AnthropicProvider, ChatGptProvider, CohereProvider, GeminiProvider, OpenAiCompatProvider,
-    OpenAiVariant,
+    OpenAiVariant, WatsonxCredential, WatsonxProvider,
 };
 use arccode_tui::modal::{LoginPayload, LoginTask};
 use std::sync::Arc;
@@ -102,6 +102,22 @@ fn build_provider(p: &LoginPayload) -> Result<Arc<dyn Provider>, String> {
             }
             Ok(Arc::new(prov))
         }
+        "watsonx" => {
+            // Wizard probe: the user gave us an API key; we still need a
+            // project id to talk to watsonx. Read it from the env (the
+            // commit step is what persists it to config).
+            let project_id = std::env::var("WATSONX_PROJECT_ID").map_err(|_| {
+                "watsonx requires WATSONX_PROJECT_ID env var to be set during the login probe"
+                    .to_string()
+            })?;
+            let key = api_key.ok_or("watsonx requires an API key")?;
+            let mut prov = WatsonxProvider::new(WatsonxCredential::ApiKey(key), project_id)
+                .map_err(mk_err)?;
+            if let Some(url) = base_url {
+                prov = prov.with_base_url(url);
+            }
+            Ok(Arc::new(prov))
+        }
         id => {
             let variant = openai_variant(id).ok_or_else(|| format!("unknown provider '{id}'"))?;
             let mut prov = OpenAiCompatProvider::new(variant, api_key).map_err(mk_err)?;
@@ -181,6 +197,8 @@ fn openai_variant(id: &str) -> Option<OpenAiVariant> {
         "friendli" | "friendliai" => OpenAiVariant::Friendli,
         "mancer" => OpenAiVariant::Mancer,
         "reka" => OpenAiVariant::Reka,
+        "bedrock" | "aws_bedrock" | "aws-bedrock" => OpenAiVariant::Bedrock,
+        "vertex" | "vertex_ai" | "vertexai" | "gcp_vertex" => OpenAiVariant::Vertex,
         _ => return None,
     })
 }

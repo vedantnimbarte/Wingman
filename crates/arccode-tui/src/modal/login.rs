@@ -597,6 +597,33 @@ pub const PROVIDERS: &[ProviderSpec] = &[
         needs_oauth: false,
         default_base_url: Some("http://localhost:5000/v1"),
     },
+    // Wave 4: enterprise clouds.
+    ProviderSpec {
+        id: "bedrock",
+        label: "AWS Bedrock (API key)",
+        default_model: "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+        needs_key: true,
+        needs_oauth: false,
+        default_base_url: Some("https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"),
+    },
+    ProviderSpec {
+        id: "vertex",
+        label: "GCP Vertex AI (access token)",
+        default_model: "google/gemini-1.5-pro-002",
+        needs_key: true,
+        needs_oauth: false,
+        default_base_url: Some(
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR-PROJECT/locations/us-central1/endpoints/openapi",
+        ),
+    },
+    ProviderSpec {
+        id: "watsonx",
+        label: "IBM watsonx.ai",
+        default_model: "ibm/granite-3-8b-instruct",
+        needs_key: true,
+        needs_oauth: false,
+        default_base_url: Some("https://us-south.ml.cloud.ibm.com"),
+    },
 ];
 
 #[derive(Debug, Clone, Copy)]

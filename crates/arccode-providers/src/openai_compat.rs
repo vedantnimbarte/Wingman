@@ -107,6 +107,9 @@ pub enum Variant {
     Friendli,
     Mancer,
     Reka,
+    // Wave 4: enterprise clouds via OpenAI-compat surfaces.
+    Bedrock,
+    Vertex,
 }
 
 impl Variant {
@@ -178,6 +181,8 @@ impl Variant {
             Variant::Friendli => "friendli",
             Variant::Mancer => "mancer",
             Variant::Reka => "reka",
+            Variant::Bedrock => "bedrock",
+            Variant::Vertex => "vertex",
         }
     }
 
@@ -260,6 +265,18 @@ impl Variant {
             Variant::Friendli => "https://inference.friendli.ai/v1",
             Variant::Mancer => "https://neuro.mancer.tech/oai/v1",
             Variant::Reka => "https://api.reka.ai/v1",
+            // Bedrock OpenAI-compat endpoint (released 2024). User must
+            // override the region. Auth: AWS_BEARER_TOKEN_BEDROCK (long-term
+            // Bedrock API key generated from the AWS console). The SigV4
+            // path against `/model/<id>/invoke-with-response-stream` would
+            // need a dedicated adapter — not done in this provider.
+            Variant::Bedrock => "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+            // Vertex AI's OpenAI-compatible endpoint. User must override
+            // base_url with their project_id + region. Auth: bearer access
+            // token from `gcloud auth print-access-token` (expires hourly).
+            Variant::Vertex => {
+                "https://us-central1-aiplatform.googleapis.com/v1/projects/REPLACE-PROJECT/locations/us-central1/endpoints/openapi"
+            }
         }
     }
 
@@ -319,6 +336,8 @@ impl Variant {
                 | Variant::Friendli
                 | Variant::Mancer
                 | Variant::Reka
+                | Variant::Bedrock
+                | Variant::Vertex
         )
     }
 
@@ -393,6 +412,8 @@ impl Provider for OpenAiCompatProvider {
                     | Variant::Vercel
                     | Variant::AimlApi
                     | Variant::Reka
+                    | Variant::Bedrock
+                    | Variant::Vertex
             ),
             cache_kind: CacheKind::Automatic,
         }
@@ -765,6 +786,8 @@ mod tests {
             Variant::Friendli,
             Variant::Mancer,
             Variant::Reka,
+            Variant::Bedrock,
+            Variant::Vertex,
         ];
         let mut seen = std::collections::HashSet::new();
         for v in all {
@@ -826,6 +849,8 @@ mod tests {
             Variant::Friendli,
             Variant::Mancer,
             Variant::Reka,
+            Variant::Bedrock,
+            Variant::Vertex,
         ] {
             assert!(v.requires_api_key(), "{} should require api key", v.id());
         }

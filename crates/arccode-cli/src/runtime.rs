@@ -12,7 +12,7 @@ use arccode_learn::{
 };
 use arccode_providers::{
     AnthropicProvider, ChatGptProvider, CohereProvider, GeminiProvider, OpenAiCompatProvider,
-    OpenAiVariant,
+    OpenAiVariant, WatsonxCredential, WatsonxProvider,
 };
 use arccode_rag::{Embedder, HashEmbedder, IndexStore, Indexer};
 use arccode_skills::Skill;
@@ -97,6 +97,41 @@ pub fn build_provider(cfg: &Config, provider_id: &str) -> Result<Arc<dyn Provide
             let mut p = CohereProvider::new(key)?;
             if let Some(url) = &pc.base_url {
                 p = p.with_base_url(url);
+            }
+            Ok(Arc::new(p))
+        }
+        "watsonx" => {
+            // Project id: from [providers.watsonx.project_id] in extras, or
+            // `WATSONX_PROJECT_ID` env, or fail with a clear error.
+            let project_id = pc
+                .extra
+                .get("project_id")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .or_else(|| std::env::var("WATSONX_PROJECT_ID").ok())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "watsonx requires a project_id — set `[providers.watsonx] project_id = \"…\"` \
+                         or the `WATSONX_PROJECT_ID` env var"
+                    )
+                })?;
+            // Credential: prefer pre-obtained access token, else API key.
+            let credential = if let Ok(t) = std::env::var("WATSONX_ACCESS_TOKEN") {
+                if !t.trim().is_empty() {
+                    WatsonxCredential::AccessToken(t)
+                } else {
+                    let key = resolve_api_key(pc.api_key.as_deref(), "WATSONX_API_KEY")?;
+                    WatsonxCredential::ApiKey(key)
+                }
+            } else {
+                let key = resolve_api_key(pc.api_key.as_deref(), "WATSONX_API_KEY")?;
+                WatsonxCredential::ApiKey(key)
+            };
+            let mut p = WatsonxProvider::new(credential, project_id)?;
+            if let Some(url) = &pc.base_url {
+                p = p.with_base_url(url);
+            }
+            if let Some(iam) = pc.extra.get("iam_url").and_then(|v| v.as_str()) {
+                p = p.with_iam_url(iam);
             }
             Ok(Arc::new(p))
         }
@@ -237,6 +272,8 @@ fn openai_variant(id: &str) -> Option<OpenAiVariant> {
         "friendli" | "friendliai" => OpenAiVariant::Friendli,
         "mancer" => OpenAiVariant::Mancer,
         "reka" => OpenAiVariant::Reka,
+        "bedrock" | "aws_bedrock" | "aws-bedrock" => OpenAiVariant::Bedrock,
+        "vertex" | "vertex_ai" | "vertexai" | "gcp_vertex" => OpenAiVariant::Vertex,
         _ => return None,
     })
 }
@@ -298,6 +335,15 @@ fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -
         OpenAiVariant::Friendli => "FRIENDLI_TOKEN",
         OpenAiVariant::Mancer => "MANCER_API_KEY",
         OpenAiVariant::Reka => "REKA_API_KEY",
+        // Bedrock: long-term API key from the AWS console (Bedrock → API
+        // keys). For SigV4 auth against the non-OpenAI surface the user
+        // should configure AWS CLI normally; that path will require a
+        // dedicated native adapter.
+        OpenAiVariant::Bedrock => "AWS_BEARER_TOKEN_BEDROCK",
+        // Vertex: short-lived access token. `gcloud auth print-access-token`
+        // is the common way to populate it. Service-account JWT signing is
+        // out of scope for the OpenAI-compat path.
+        OpenAiVariant::Vertex => "GOOGLE_VERTEX_TOKEN",
         OpenAiVariant::LmStudio
         | OpenAiVariant::Vllm
         | OpenAiVariant::Ollama

@@ -2,7 +2,7 @@
 
 `arccode` is a multi-provider, terminal-first **self-improving** coding agent
 written in Rust. It runs as a TUI for interactive sessions and as a headless
-one-shot (`--print "prompt"`) for scripting, talks to 70+ LLM providers behind
+one-shot (`--print "prompt"`) for scripting, talks to 73+ LLM providers behind
 a single streaming interface, ships a built-in tool layer for reading,
 searching, and editing the project tree, and learns from every conversation:
 it builds a persistent model of you and your projects, creates and refines
@@ -38,7 +38,7 @@ plus a planned MCP host.
   the existing RAG pipeline, and quiet-session nudges that ask the agent to
   consider persisting something when it's been a while since a save. See
   [Self-improving loop](#self-improving-loop) below.
-- **70+ providers, one shape.** Anthropic is the reference implementation
+- **73+ providers, one shape.** Anthropic is the reference implementation
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
   adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.
   Gemini and ChatGPT (OAuth) have their own adapters. All speak the same
@@ -133,7 +133,7 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 | `arccode-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode.                          |
 | `arccode-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
 | `arccode-config`     | TOML config loading, layered merge, env-var resolution, permission model.                              |
-| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, OpenAI-compatible (66 variants). |
+| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
 | `arccode-tools`      | Built-in tool implementations (`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir`, `run_shell`) and the `ToolRegistry`. |
 | `arccode-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands.                       |
 | `arccode-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`.                                   |
@@ -243,6 +243,9 @@ used, but quality depends on the local model's tool-use training.
 | Ollama       | `untested`      | Same: `/v1` shim, picks up whatever model you've pulled.               |
 | llama.cpp    | `untested`      | `./server`'s `/v1` shim; depends on the loaded gguf.                   |
 | HF TGI       | `untested`      | Text Generation Inference; OpenAI-compat endpoint on `:3000/v1`.       |
+| AWS Bedrock  | `openai-compat` | Via Bedrock OpenAI surface + API key; Claude/Llama/Nova/Mistral.       |
+| GCP Vertex AI| `openai-compat` | Via Vertex OpenAPI endpoint + `gcloud auth print-access-token`.        |
+| IBM watsonx  | `native`        | Granite + hosted Llama; adapter handles IAM token exchange.            |
 | Cohere       | `native`        | Command-R/A; native `/v2/chat` adapter with tool calls.                |
 | Anyscale     | `openai-compat` | Endpoints hosting Llama 3.1/3.3 + Mixtral.                             |
 | Lepton AI    | `openai-compat` | OSS + custom fine-tunes.                                               |
@@ -348,23 +351,32 @@ tool calls at all).
 | LocalAI            | `localai`   | (none — local)           | `http://localhost:8080/v1`                        |
 | Aphrodite Engine   | `aphrodite` | (none — local)           | `http://localhost:2242/v1`                        |
 | Mistral.rs server  | `mistralrs` | (none — local)           | `http://localhost:1234/v1`                        |
+| AWS Bedrock        | `bedrock`   | `AWS_BEARER_TOKEN_BEDROCK`| `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` |
+| GCP Vertex AI      | `vertex`    | `GOOGLE_VERTEX_TOKEN`    | (set to your project/region OpenAPI URL)          |
+| IBM watsonx.ai     | `watsonx`   | `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` | `https://<region>.ml.cloud.ibm.com` |
 
 All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
 `OpenAiCompatProvider` adapter (`crates/arccode-providers/src/openai_compat.rs`).
 Add a new hosted OpenAI-shape clone by extending its `Variant` enum and the
 mapper functions in `runtime.rs` + `login.rs`.
 
-**Planned but not yet implemented** (require non-trivial signing or
-service-account auth — tracked as separate work):
+**Notes on the enterprise providers (Bedrock / Vertex / watsonx):**
 
-- **AWS Bedrock** — SigV4-signed Converse API; would unlock Claude-on-AWS,
-  Llama-on-Bedrock, Nova, Mistral, Cohere via one credential.
-- **Google Vertex AI** — OAuth2 service-account; would unlock Gemini-on-Vertex
-  and Claude-on-Vertex for GCP-only enterprises.
-- **IBM watsonx.ai** — IAM-token auth; Granite + hosted Llama.
-- **AI21 Jamba** (native) — has an OpenAI-compat endpoint we'll likely add
-  as a Variant before doing the native adapter.
-- **Reka** — partner inference; usually accessed via OpenRouter today.
+- **AWS Bedrock** ships via the OpenAI-compat surface released in 2024 —
+  set `AWS_BEARER_TOKEN_BEDROCK` (long-term API key generated from the
+  AWS console) and adjust the region in `base_url`. The SigV4 path
+  against `/model/<id>/invoke-with-response-stream` (with the AWS Event
+  Stream binary framing) is **not** implemented; if your AWS setup
+  doesn't permit Bedrock API keys, that adapter is the follow-up work.
+- **GCP Vertex AI** uses the OpenAPI endpoint with an OAuth2 access
+  token. Populate `GOOGLE_VERTEX_TOKEN` with the output of
+  `gcloud auth print-access-token` (refresh hourly) and set `base_url`
+  to your project + region. Service-account JWT signing is the
+  follow-up work for unattended use.
+- **IBM watsonx.ai** is a native adapter (`watsonx.rs`) — provide
+  `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` and the adapter exchanges
+  the API key for an IAM token internally (cached for ~1h). Pass
+  `WATSONX_ACCESS_TOKEN` instead if you've already minted one.
 
 ---
 
