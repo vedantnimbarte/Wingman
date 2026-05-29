@@ -291,8 +291,15 @@ mod tests {
     use arccode_config::PermissionMode;
 
     fn tmp_dir() -> PathBuf {
+        // pid + nanos alone isn't unique enough: macOS Apple Silicon's
+        // CLOCK_REALTIME has ~250ns granularity, so two parallel tokio
+        // tests can grab the same timestamp and collide on a single dir.
+        // The atomic counter guarantees uniqueness within the process.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "arccode-patch-{}-{}",
+            "arccode-patch-{}-{}-{n}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -335,8 +342,12 @@ mod tests {
             a_path = a.display()
         );
         let out = ApplyPatch.run(json!({"patch": patch}), &ctx).await;
-        assert!(out.is_error);
-        assert!(out.content.contains("matches 2"));
+        assert!(out.is_error, "expected error outcome, got ok: {}", out.content);
+        assert!(
+            out.content.contains("matches 2"),
+            "expected error to mention 'matches 2'; got: {}",
+            out.content,
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

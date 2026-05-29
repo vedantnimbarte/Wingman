@@ -130,8 +130,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_dir() -> PathBuf {
+        // pid + nanos can collide between parallel tokio tests on macOS
+        // Apple Silicon (CLOCK_REALTIME has ~250ns granularity). Add an
+        // atomic counter to guarantee uniqueness within the process.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let p = std::env::temp_dir().join(format!(
-            "arccode-edit-{}-{}",
+            "arccode-edit-{}-{}-{n}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
