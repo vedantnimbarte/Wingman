@@ -17,6 +17,9 @@ const TARGETS: &[(&str, &str)] = &[
     ("jan", "http://127.0.0.1:1337/v1/models"),
     ("koboldcpp", "http://127.0.0.1:5001/v1/models"),
     ("oobabooga", "http://127.0.0.1:5000/v1/models"),
+    ("aphrodite", "http://127.0.0.1:2242/v1/models"),
+    // LocalAI / mlx-lm / Mistral.rs all default to ports that clash with
+    // earlier entries; the user picks one and overrides via base_url.
 ];
 
 pub async fn run() -> Result<ExitCode> {

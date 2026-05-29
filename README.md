@@ -2,7 +2,7 @@
 
 `arccode` is a multi-provider, terminal-first **self-improving** coding agent
 written in Rust. It runs as a TUI for interactive sessions and as a headless
-one-shot (`--print "prompt"`) for scripting, talks to 45+ LLM providers behind
+one-shot (`--print "prompt"`) for scripting, talks to 70+ LLM providers behind
 a single streaming interface, ships a built-in tool layer for reading,
 searching, and editing the project tree, and learns from every conversation:
 it builds a persistent model of you and your projects, creates and refines
@@ -38,7 +38,7 @@ plus a planned MCP host.
   the existing RAG pipeline, and quiet-session nudges that ask the agent to
   consider persisting something when it's been a while since a save. See
   [Self-improving loop](#self-improving-loop) below.
-- **45+ providers, one shape.** Anthropic is the reference implementation
+- **70+ providers, one shape.** Anthropic is the reference implementation
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
   adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.
   Gemini and ChatGPT (OAuth) have their own adapters. All speak the same
@@ -133,7 +133,7 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 | `arccode-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode.                          |
 | `arccode-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
 | `arccode-config`     | TOML config loading, layered merge, env-var resolution, permission model.                              |
-| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, OpenAI-compatible (40 variants). |
+| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, OpenAI-compatible (66 variants). |
 | `arccode-tools`      | Built-in tool implementations (`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir`, `run_shell`) and the `ToolRegistry`. |
 | `arccode-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands.                       |
 | `arccode-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`.                                   |
@@ -324,6 +324,30 @@ tool calls at all).
 | Jan / Cortex       | `jan`       | (none — local)           | `http://localhost:1337/v1`                        |
 | KoboldCpp          | `koboldcpp` | (none — local)           | `http://localhost:5001/v1`                        |
 | Oobabooga          | `oobabooga` | (none — local)           | `http://localhost:5000/v1`                        |
+| Alibaba Qwen       | `qwen`      | `DASHSCOPE_API_KEY`      | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
+| Zhipu GLM          | `zhipu`     | `ZHIPU_API_KEY`          | `https://open.bigmodel.cn/api/paas/v4`            |
+| Moonshot Kimi      | `moonshot`  | `MOONSHOT_API_KEY`       | `https://api.moonshot.cn/v1`                      |
+| MiniMax            | `minimax`   | `MINIMAX_API_KEY`        | `https://api.minimaxi.com/v1`                     |
+| Yi (01.AI)         | `yi`        | `YI_API_KEY`             | `https://api.lingyiwanwu.com/v1`                  |
+| Baichuan           | `baichuan`  | `BAICHUAN_API_KEY`       | `https://api.baichuan-ai.com/v1`                  |
+| Tencent Hunyuan    | `hunyuan`   | `HUNYUAN_API_KEY`        | `https://api.hunyuan.cloud.tencent.com/v1`        |
+| ByteDance Doubao   | `doubao`    | `ARK_API_KEY`            | `https://ark.cn-beijing.volces.com/api/v3`        |
+| SiliconFlow        | `siliconflow`| `SILICONFLOW_API_KEY`   | `https://api.siliconflow.cn/v1`                   |
+| Cloudflare Workers | `cloudflare`| `CLOUDFLARE_API_TOKEN`   | (set to your account-id URL)                      |
+| Vercel AI Gateway  | `vercel`    | `VERCEL_AI_GATEWAY_KEY`  | `https://gateway.ai.vercel.com/v1`                |
+| AIMLAPI            | `aimlapi`   | `AIMLAPI_KEY`            | `https://api.aimlapi.com/v1`                      |
+| OpenPipe           | `openpipe`  | `OPENPIPE_API_KEY`       | `https://api.openpipe.ai/api/v1`                  |
+| Targon             | `targon`    | `TARGON_API_KEY`         | `https://api.targon.com/v1`                       |
+| Pollinations       | `pollinations`| (none — free tier)     | `https://text.pollinations.ai/openai/v1`          |
+| AI21 Jamba         | `ai21`      | `AI21_API_KEY`           | `https://api.ai21.com/studio/v1`                  |
+| Z.ai (GLM coding)  | `zai`       | `ZAI_API_KEY`            | `https://api.z.ai/api/coding/paas/v4`             |
+| Friendli AI        | `friendli`  | `FRIENDLI_TOKEN`         | `https://inference.friendli.ai/v1`                |
+| Mancer             | `mancer`    | `MANCER_API_KEY`         | `https://neuro.mancer.tech/oai/v1`                |
+| Reka               | `reka`      | `REKA_API_KEY`           | `https://api.reka.ai/v1`                          |
+| mlx-lm-server      | `mlx`       | (none — local)           | `http://localhost:8080/v1`                        |
+| LocalAI            | `localai`   | (none — local)           | `http://localhost:8080/v1`                        |
+| Aphrodite Engine   | `aphrodite` | (none — local)           | `http://localhost:2242/v1`                        |
+| Mistral.rs server  | `mistralrs` | (none — local)           | `http://localhost:1234/v1`                        |
 
 All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
 `OpenAiCompatProvider` adapter (`crates/arccode-providers/src/openai_compat.rs`).

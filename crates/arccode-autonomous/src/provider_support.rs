@@ -105,6 +105,37 @@ pub fn classify(provider_id: &str) -> ProviderSupport {
         "jan" | "janai" => ProviderSupport::Untested,
         "koboldcpp" | "kobold" => ProviderSupport::Untested,
         "oobabooga" | "ooba" | "textgenwebui" => ProviderSupport::Untested,
+        // Wave 3 Chinese clouds. Qwen, GLM, Moonshot, Doubao, MiniMax all
+        // ship documented OpenAI-style tool_calls support.
+        "qwen" | "dashscope" | "alibaba" => ProviderSupport::Compat,
+        "zhipu" | "glm" | "bigmodel" => ProviderSupport::Compat,
+        "moonshot" | "kimi" => ProviderSupport::Compat,
+        "minimax" => ProviderSupport::Compat,
+        "doubao" | "volcengine" | "bytedance" | "ark" => ProviderSupport::Compat,
+        "siliconflow" | "silicon" => ProviderSupport::Compat,
+        // Untested: tool-use is model-dependent on these.
+        "yi" | "lingyiwanwu" | "01ai" => ProviderSupport::Untested,
+        "baichuan" => ProviderSupport::Untested,
+        "hunyuan" | "tencent" => ProviderSupport::Untested,
+        // Aggregators: gateways pass-through to OpenAI/Anthropic shape so
+        // their support tracks the underlying model.
+        "cloudflare" | "workersai" | "workers_ai" => ProviderSupport::Compat,
+        "vercel" | "vercel_gateway" => ProviderSupport::Compat,
+        "aimlapi" | "aiml" => ProviderSupport::Compat,
+        "openpipe" => ProviderSupport::Compat,
+        "targon" => ProviderSupport::Untested,
+        "pollinations" => ProviderSupport::Untested,
+        // Other hosted.
+        "ai21" | "jamba" => ProviderSupport::Compat,
+        "zai" | "z_ai" | "z-ai" => ProviderSupport::Compat,
+        "friendli" | "friendliai" => ProviderSupport::Compat,
+        "reka" => ProviderSupport::Compat,
+        "mancer" => ProviderSupport::Untested,
+        // Wave 3 local runtimes.
+        "mlx" | "mlx_lm" | "mlxlm" => ProviderSupport::Untested,
+        "localai" | "local_ai" => ProviderSupport::Untested,
+        "aphrodite" => ProviderSupport::Untested,
+        "mistralrs" | "mistral_rs" => ProviderSupport::Untested,
         _ => ProviderSupport::Untested,
     }
 }
@@ -215,6 +246,30 @@ mod tests {
     #[test]
     fn cohere_is_native() {
         assert_eq!(classify("cohere"), ProviderSupport::Native);
+    }
+
+    #[test]
+    fn wave3_chinese_clouds_classified() {
+        for id in ["qwen", "zhipu", "moonshot", "minimax", "doubao", "siliconflow"] {
+            assert_eq!(classify(id), ProviderSupport::Compat, "{id}");
+        }
+        for id in ["yi", "baichuan", "hunyuan"] {
+            assert_eq!(classify(id), ProviderSupport::Untested, "{id}");
+        }
+    }
+
+    #[test]
+    fn wave3_aggregators_classified() {
+        for id in ["cloudflare", "vercel", "aimlapi", "openpipe"] {
+            assert_eq!(classify(id), ProviderSupport::Compat, "{id}");
+        }
+    }
+
+    #[test]
+    fn wave3_other_hosted_classified() {
+        for id in ["ai21", "zai", "friendli", "reka"] {
+            assert_eq!(classify(id), ProviderSupport::Compat, "{id}");
+        }
     }
 
     #[test]

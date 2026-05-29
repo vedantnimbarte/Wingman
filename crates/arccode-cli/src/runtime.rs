@@ -213,6 +213,30 @@ fn openai_variant(id: &str) -> Option<OpenAiVariant> {
         "jan" | "janai" => OpenAiVariant::Jan,
         "koboldcpp" | "kobold" => OpenAiVariant::KoboldCpp,
         "oobabooga" | "ooba" | "textgenwebui" => OpenAiVariant::Oobabooga,
+        "qwen" | "dashscope" | "alibaba" => OpenAiVariant::DashScope,
+        "zhipu" | "glm" | "bigmodel" => OpenAiVariant::Zhipu,
+        "moonshot" | "kimi" => OpenAiVariant::Moonshot,
+        "minimax" => OpenAiVariant::MiniMax,
+        "yi" | "lingyiwanwu" | "01ai" => OpenAiVariant::Yi,
+        "baichuan" => OpenAiVariant::Baichuan,
+        "hunyuan" | "tencent" => OpenAiVariant::Hunyuan,
+        "doubao" | "volcengine" | "bytedance" | "ark" => OpenAiVariant::Doubao,
+        "siliconflow" | "silicon" => OpenAiVariant::SiliconFlow,
+        "cloudflare" | "workersai" | "workers_ai" => OpenAiVariant::Cloudflare,
+        "vercel" | "vercel_gateway" => OpenAiVariant::Vercel,
+        "aimlapi" | "aiml" => OpenAiVariant::AimlApi,
+        "openpipe" => OpenAiVariant::OpenPipe,
+        "targon" => OpenAiVariant::Targon,
+        "pollinations" => OpenAiVariant::Pollinations,
+        "mlx" | "mlx_lm" | "mlxlm" => OpenAiVariant::MlxLm,
+        "localai" | "local_ai" => OpenAiVariant::LocalAi,
+        "aphrodite" => OpenAiVariant::Aphrodite,
+        "mistralrs" | "mistral_rs" => OpenAiVariant::MistralRs,
+        "ai21" | "jamba" => OpenAiVariant::Ai21,
+        "zai" | "z_ai" | "z-ai" => OpenAiVariant::Zai,
+        "friendli" | "friendliai" => OpenAiVariant::Friendli,
+        "mancer" => OpenAiVariant::Mancer,
+        "reka" => OpenAiVariant::Reka,
         _ => return None,
     })
 }
@@ -255,6 +279,25 @@ fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -
         OpenAiVariant::Snowflake => "SNOWFLAKE_API_KEY",
         OpenAiVariant::Databricks => "DATABRICKS_TOKEN",
         OpenAiVariant::Writer => "WRITER_API_KEY",
+        OpenAiVariant::DashScope => "DASHSCOPE_API_KEY",
+        OpenAiVariant::Zhipu => "ZHIPU_API_KEY",
+        OpenAiVariant::Moonshot => "MOONSHOT_API_KEY",
+        OpenAiVariant::MiniMax => "MINIMAX_API_KEY",
+        OpenAiVariant::Yi => "YI_API_KEY",
+        OpenAiVariant::Baichuan => "BAICHUAN_API_KEY",
+        OpenAiVariant::Hunyuan => "HUNYUAN_API_KEY",
+        OpenAiVariant::Doubao => "ARK_API_KEY",
+        OpenAiVariant::SiliconFlow => "SILICONFLOW_API_KEY",
+        OpenAiVariant::Cloudflare => "CLOUDFLARE_API_TOKEN",
+        OpenAiVariant::Vercel => "VERCEL_AI_GATEWAY_KEY",
+        OpenAiVariant::AimlApi => "AIMLAPI_KEY",
+        OpenAiVariant::OpenPipe => "OPENPIPE_API_KEY",
+        OpenAiVariant::Targon => "TARGON_API_KEY",
+        OpenAiVariant::Ai21 => "AI21_API_KEY",
+        OpenAiVariant::Zai => "ZAI_API_KEY",
+        OpenAiVariant::Friendli => "FRIENDLI_TOKEN",
+        OpenAiVariant::Mancer => "MANCER_API_KEY",
+        OpenAiVariant::Reka => "REKA_API_KEY",
         OpenAiVariant::LmStudio
         | OpenAiVariant::Vllm
         | OpenAiVariant::Ollama
@@ -263,7 +306,12 @@ fn resolve_optional_api_key(from_config: Option<&str>, variant: OpenAiVariant) -
         | OpenAiVariant::Gpt4All
         | OpenAiVariant::Jan
         | OpenAiVariant::KoboldCpp
-        | OpenAiVariant::Oobabooga => return None,
+        | OpenAiVariant::Oobabooga
+        | OpenAiVariant::Pollinations
+        | OpenAiVariant::MlxLm
+        | OpenAiVariant::LocalAi
+        | OpenAiVariant::Aphrodite
+        | OpenAiVariant::MistralRs => return None,
     };
     std::env::var(env_name).ok()
 }

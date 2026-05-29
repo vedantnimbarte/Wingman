@@ -79,6 +79,34 @@ pub enum Variant {
     Jan,
     KoboldCpp,
     Oobabooga,
+    // Wave 3: Chinese hosted clouds (all OpenAI-shape).
+    DashScope,
+    Zhipu,
+    Moonshot,
+    MiniMax,
+    Yi,
+    Baichuan,
+    Hunyuan,
+    Doubao,
+    SiliconFlow,
+    // Wave 3: aggregators / gateways.
+    Cloudflare,
+    Vercel,
+    AimlApi,
+    OpenPipe,
+    Targon,
+    Pollinations,
+    // Wave 3: local runtimes.
+    MlxLm,
+    LocalAi,
+    Aphrodite,
+    MistralRs,
+    // Wave 3: other hosted.
+    Ai21,
+    Zai,
+    Friendli,
+    Mancer,
+    Reka,
 }
 
 impl Variant {
@@ -126,6 +154,30 @@ impl Variant {
             Variant::Jan => "jan",
             Variant::KoboldCpp => "koboldcpp",
             Variant::Oobabooga => "oobabooga",
+            Variant::DashScope => "qwen",
+            Variant::Zhipu => "zhipu",
+            Variant::Moonshot => "moonshot",
+            Variant::MiniMax => "minimax",
+            Variant::Yi => "yi",
+            Variant::Baichuan => "baichuan",
+            Variant::Hunyuan => "hunyuan",
+            Variant::Doubao => "doubao",
+            Variant::SiliconFlow => "siliconflow",
+            Variant::Cloudflare => "cloudflare",
+            Variant::Vercel => "vercel",
+            Variant::AimlApi => "aimlapi",
+            Variant::OpenPipe => "openpipe",
+            Variant::Targon => "targon",
+            Variant::Pollinations => "pollinations",
+            Variant::MlxLm => "mlx",
+            Variant::LocalAi => "localai",
+            Variant::Aphrodite => "aphrodite",
+            Variant::MistralRs => "mistralrs",
+            Variant::Ai21 => "ai21",
+            Variant::Zai => "zai",
+            Variant::Friendli => "friendli",
+            Variant::Mancer => "mancer",
+            Variant::Reka => "reka",
         }
     }
 
@@ -179,6 +231,35 @@ impl Variant {
             Variant::Jan => "http://localhost:1337/v1",
             Variant::KoboldCpp => "http://localhost:5001/v1",
             Variant::Oobabooga => "http://localhost:5000/v1",
+            // Alibaba DashScope international endpoint; users in mainland China
+            // may override with the regional one (.aliyuncs.com without "intl").
+            Variant::DashScope => "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            Variant::Zhipu => "https://open.bigmodel.cn/api/paas/v4",
+            Variant::Moonshot => "https://api.moonshot.cn/v1",
+            Variant::MiniMax => "https://api.minimaxi.com/v1",
+            Variant::Yi => "https://api.lingyiwanwu.com/v1",
+            Variant::Baichuan => "https://api.baichuan-ai.com/v1",
+            Variant::Hunyuan => "https://api.hunyuan.cloud.tencent.com/v1",
+            Variant::Doubao => "https://ark.cn-beijing.volces.com/api/v3",
+            Variant::SiliconFlow => "https://api.siliconflow.cn/v1",
+            // Cloudflare requires an account id in the path; user must override.
+            Variant::Cloudflare => {
+                "https://api.cloudflare.com/client/v4/accounts/REPLACE-ME/ai/v1"
+            }
+            Variant::Vercel => "https://gateway.ai.vercel.com/v1",
+            Variant::AimlApi => "https://api.aimlapi.com/v1",
+            Variant::OpenPipe => "https://api.openpipe.ai/api/v1",
+            Variant::Targon => "https://api.targon.com/v1",
+            Variant::Pollinations => "https://text.pollinations.ai/openai/v1",
+            Variant::MlxLm => "http://localhost:8080/v1",
+            Variant::LocalAi => "http://localhost:8080/v1",
+            Variant::Aphrodite => "http://localhost:2242/v1",
+            Variant::MistralRs => "http://localhost:1234/v1",
+            Variant::Ai21 => "https://api.ai21.com/studio/v1",
+            Variant::Zai => "https://api.z.ai/api/coding/paas/v4",
+            Variant::Friendli => "https://inference.friendli.ai/v1",
+            Variant::Mancer => "https://neuro.mancer.tech/oai/v1",
+            Variant::Reka => "https://api.reka.ai/v1",
         }
     }
 
@@ -219,6 +300,25 @@ impl Variant {
                 | Variant::Snowflake
                 | Variant::Databricks
                 | Variant::Writer
+                | Variant::DashScope
+                | Variant::Zhipu
+                | Variant::Moonshot
+                | Variant::MiniMax
+                | Variant::Yi
+                | Variant::Baichuan
+                | Variant::Hunyuan
+                | Variant::Doubao
+                | Variant::SiliconFlow
+                | Variant::Cloudflare
+                | Variant::Vercel
+                | Variant::AimlApi
+                | Variant::OpenPipe
+                | Variant::Targon
+                | Variant::Ai21
+                | Variant::Zai
+                | Variant::Friendli
+                | Variant::Mancer
+                | Variant::Reka
         )
     }
 
@@ -284,6 +384,15 @@ impl Provider for OpenAiCompatProvider {
                     | Variant::NvidiaNim
                     | Variant::DeepInfra
                     | Variant::Novita
+                    | Variant::DashScope
+                    | Variant::Zhipu
+                    | Variant::MiniMax
+                    | Variant::Doubao
+                    | Variant::SiliconFlow
+                    | Variant::Cloudflare
+                    | Variant::Vercel
+                    | Variant::AimlApi
+                    | Variant::Reka
             ),
             cache_kind: CacheKind::Automatic,
         }
@@ -632,6 +741,30 @@ mod tests {
             Variant::Jan,
             Variant::KoboldCpp,
             Variant::Oobabooga,
+            Variant::DashScope,
+            Variant::Zhipu,
+            Variant::Moonshot,
+            Variant::MiniMax,
+            Variant::Yi,
+            Variant::Baichuan,
+            Variant::Hunyuan,
+            Variant::Doubao,
+            Variant::SiliconFlow,
+            Variant::Cloudflare,
+            Variant::Vercel,
+            Variant::AimlApi,
+            Variant::OpenPipe,
+            Variant::Targon,
+            Variant::Pollinations,
+            Variant::MlxLm,
+            Variant::LocalAi,
+            Variant::Aphrodite,
+            Variant::MistralRs,
+            Variant::Ai21,
+            Variant::Zai,
+            Variant::Friendli,
+            Variant::Mancer,
+            Variant::Reka,
         ];
         let mut seen = std::collections::HashSet::new();
         for v in all {
@@ -674,6 +807,25 @@ mod tests {
             Variant::Snowflake,
             Variant::Databricks,
             Variant::Writer,
+            Variant::DashScope,
+            Variant::Zhipu,
+            Variant::Moonshot,
+            Variant::MiniMax,
+            Variant::Yi,
+            Variant::Baichuan,
+            Variant::Hunyuan,
+            Variant::Doubao,
+            Variant::SiliconFlow,
+            Variant::Cloudflare,
+            Variant::Vercel,
+            Variant::AimlApi,
+            Variant::OpenPipe,
+            Variant::Targon,
+            Variant::Ai21,
+            Variant::Zai,
+            Variant::Friendli,
+            Variant::Mancer,
+            Variant::Reka,
         ] {
             assert!(v.requires_api_key(), "{} should require api key", v.id());
         }
@@ -692,6 +844,11 @@ mod tests {
             Variant::Jan,
             Variant::KoboldCpp,
             Variant::Oobabooga,
+            Variant::Pollinations,
+            Variant::MlxLm,
+            Variant::LocalAi,
+            Variant::Aphrodite,
+            Variant::MistralRs,
         ] {
             assert!(!v.requires_api_key(), "{} should not require api key", v.id());
         }

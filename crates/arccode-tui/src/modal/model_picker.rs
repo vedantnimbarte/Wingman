@@ -433,6 +433,113 @@ fn catalog() -> Vec<ModelChoice> {
                 "command-light",
             ],
         ),
+        (
+            "qwen",
+            &[
+                "qwen-max",
+                "qwen-plus",
+                "qwen-turbo",
+                "qwen2.5-coder-32b-instruct",
+                "qwen-vl-max",
+            ],
+        ),
+        (
+            "zhipu",
+            &["glm-4-plus", "glm-4-flash", "glm-4v-plus", "codegeex-4"],
+        ),
+        (
+            "moonshot",
+            &[
+                "moonshot-v1-128k",
+                "moonshot-v1-32k",
+                "moonshot-v1-8k",
+            ],
+        ),
+        (
+            "minimax",
+            &["abab6.5s-chat", "abab6.5-chat", "MiniMax-Text-01"],
+        ),
+        ("yi", &["yi-large", "yi-lightning", "yi-medium-200k"]),
+        (
+            "baichuan",
+            &["Baichuan4-Turbo", "Baichuan4", "Baichuan3-Turbo"],
+        ),
+        (
+            "hunyuan",
+            &["hunyuan-pro", "hunyuan-standard", "hunyuan-turbo"],
+        ),
+        (
+            "doubao",
+            &[
+                "doubao-pro-32k",
+                "doubao-pro-128k",
+                "doubao-1-5-pro-32k",
+                "doubao-1-5-vision-pro-32k",
+            ],
+        ),
+        (
+            "siliconflow",
+            &[
+                "Qwen/Qwen2.5-72B-Instruct",
+                "deepseek-ai/DeepSeek-V3",
+                "Qwen/Qwen2.5-Coder-32B-Instruct",
+            ],
+        ),
+        (
+            "cloudflare",
+            &[
+                "@cf/meta/llama-3.1-70b-instruct",
+                "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                "@cf/qwen/qwen2.5-coder-32b-instruct",
+            ],
+        ),
+        (
+            "vercel",
+            &[
+                "openai/gpt-4o",
+                "anthropic/claude-3.5-sonnet",
+                "xai/grok-2",
+            ],
+        ),
+        (
+            "aimlapi",
+            &[
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                "deepseek-ai/DeepSeek-V3",
+                "Qwen/Qwen2.5-Coder-32B-Instruct",
+            ],
+        ),
+        (
+            "openpipe",
+            &["openpipe:meta-llama-3.1-70b", "openpipe:mistral-7b"],
+        ),
+        (
+            "targon",
+            &[
+                "NousResearch/Hermes-3-Llama-3.1-70B",
+                "meta-llama/Meta-Llama-3.1-70B-Instruct",
+            ],
+        ),
+        ("pollinations", &["openai", "mistral", "qwen-coder"]),
+        ("mlx", &["local-model"]),
+        ("localai", &["local-model"]),
+        ("aphrodite", &["local-model"]),
+        ("mistralrs", &["local-model"]),
+        (
+            "ai21",
+            &["jamba-1.5-large", "jamba-1.5-mini", "jamba-instruct"],
+        ),
+        ("zai", &["glm-4-plus", "glm-4-flash", "codegeex-4"]),
+        (
+            "friendli",
+            &[
+                "meta-llama-3.1-70b-instruct",
+                "meta-llama-3.1-8b-instruct",
+                "mixtral-8x7b-instruct-v0-1",
+            ],
+        ),
+        ("mancer", &["weaver", "weaver-alpha", "mythomax-l2-13b"]),
+        ("reka", &["reka-core", "reka-flash", "reka-edge"]),
         ("gpt4all", &["local-model"]),
         ("jan", &["local-model"]),
         ("koboldcpp", &["local-model"]),

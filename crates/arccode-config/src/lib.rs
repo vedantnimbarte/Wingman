@@ -920,6 +920,201 @@ impl Config {
                     ..Default::default()
                 },
             ),
+            (
+                "qwen".to_string(),
+                ProviderConfig {
+                    api_key: Some("${DASHSCOPE_API_KEY}".into()),
+                    model: Some("qwen-max".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zhipu".to_string(),
+                ProviderConfig {
+                    api_key: Some("${ZHIPU_API_KEY}".into()),
+                    model: Some("glm-4-plus".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "moonshot".to_string(),
+                ProviderConfig {
+                    api_key: Some("${MOONSHOT_API_KEY}".into()),
+                    model: Some("moonshot-v1-128k".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "minimax".to_string(),
+                ProviderConfig {
+                    api_key: Some("${MINIMAX_API_KEY}".into()),
+                    model: Some("abab6.5s-chat".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "yi".to_string(),
+                ProviderConfig {
+                    api_key: Some("${YI_API_KEY}".into()),
+                    model: Some("yi-large".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "baichuan".to_string(),
+                ProviderConfig {
+                    api_key: Some("${BAICHUAN_API_KEY}".into()),
+                    model: Some("Baichuan4-Turbo".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "hunyuan".to_string(),
+                ProviderConfig {
+                    api_key: Some("${HUNYUAN_API_KEY}".into()),
+                    model: Some("hunyuan-pro".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "doubao".to_string(),
+                ProviderConfig {
+                    api_key: Some("${ARK_API_KEY}".into()),
+                    model: Some("doubao-pro-32k".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "siliconflow".to_string(),
+                ProviderConfig {
+                    api_key: Some("${SILICONFLOW_API_KEY}".into()),
+                    model: Some("Qwen/Qwen2.5-72B-Instruct".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "cloudflare".to_string(),
+                ProviderConfig {
+                    api_key: Some("${CLOUDFLARE_API_TOKEN}".into()),
+                    base_url: Some(
+                        "https://api.cloudflare.com/client/v4/accounts/YOUR-ACCOUNT-ID/ai/v1"
+                            .into(),
+                    ),
+                    model: Some("@cf/meta/llama-3.1-70b-instruct".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "vercel".to_string(),
+                ProviderConfig {
+                    api_key: Some("${VERCEL_AI_GATEWAY_KEY}".into()),
+                    model: Some("openai/gpt-4o".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "aimlapi".to_string(),
+                ProviderConfig {
+                    api_key: Some("${AIMLAPI_KEY}".into()),
+                    model: Some("meta-llama/Llama-3.3-70B-Instruct-Turbo".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "openpipe".to_string(),
+                ProviderConfig {
+                    api_key: Some("${OPENPIPE_API_KEY}".into()),
+                    model: Some("openpipe:meta-llama-3.1-70b".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "targon".to_string(),
+                ProviderConfig {
+                    api_key: Some("${TARGON_API_KEY}".into()),
+                    model: Some("NousResearch/Hermes-3-Llama-3.1-70B".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pollinations".to_string(),
+                ProviderConfig {
+                    model: Some("openai".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "ai21".to_string(),
+                ProviderConfig {
+                    api_key: Some("${AI21_API_KEY}".into()),
+                    model: Some("jamba-1.5-large".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "zai".to_string(),
+                ProviderConfig {
+                    api_key: Some("${ZAI_API_KEY}".into()),
+                    model: Some("glm-4-plus".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "friendli".to_string(),
+                ProviderConfig {
+                    api_key: Some("${FRIENDLI_TOKEN}".into()),
+                    model: Some("meta-llama-3.1-70b-instruct".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mancer".to_string(),
+                ProviderConfig {
+                    api_key: Some("${MANCER_API_KEY}".into()),
+                    model: Some("weaver".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "reka".to_string(),
+                ProviderConfig {
+                    api_key: Some("${REKA_API_KEY}".into()),
+                    model: Some("reka-core".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mlx".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:8080/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "localai".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:8080/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "aphrodite".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:2242/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
+            (
+                "mistralrs".to_string(),
+                ProviderConfig {
+                    base_url: Some("http://localhost:1234/v1".into()),
+                    model: Some("local-model".into()),
+                    ..Default::default()
+                },
+            ),
         ]
         .into_iter()
         .collect();
