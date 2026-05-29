@@ -25,7 +25,11 @@ the diff. Do not restate the diff. If you have no findings, output\n\
 exactly: ok|-:-|no findings.\n\n\
 DIFF:\n";
 
-pub async fn run(pr: Option<String>, local_base: Option<String>, models_csv: String) -> Result<ExitCode> {
+pub async fn run(
+    pr: Option<String>,
+    local_base: Option<String>,
+    models_csv: String,
+) -> Result<ExitCode> {
     let models: Vec<String> = models_csv
         .split(',')
         .map(|s| s.trim().to_string())
@@ -128,10 +132,7 @@ fn parse_finding(line: &str) -> Option<Finding> {
         return None;
     }
     let sev = parts[0].trim().to_ascii_lowercase();
-    if !matches!(
-        sev.as_str(),
-        "blocker" | "major" | "minor" | "nit" | "ok"
-    ) {
+    if !matches!(sev.as_str(), "blocker" | "major" | "minor" | "nit" | "ok") {
         return None;
     }
     let loc = parts[1].trim();
@@ -185,7 +186,7 @@ fn print_merged(
     }
     println!("| sev     | file:line                                  | reviewers | message");
     println!("| ------- | ------------------------------------------ | --------- | -------");
-    for (_, (f, reviewers)) in merged {
+    for (f, reviewers) in merged.values() {
         let loc = if f.line == "-" {
             f.file.clone()
         } else {

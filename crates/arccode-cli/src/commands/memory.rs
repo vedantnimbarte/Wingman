@@ -141,8 +141,8 @@ fn collect_pack(src: &Path) -> Result<BTreeMap<String, String>> {
     for entry in walk_md(src) {
         let rel = entry.strip_prefix(src).unwrap_or(&entry);
         let key = rel.to_string_lossy().replace('\\', "/");
-        let content = std::fs::read_to_string(&entry)
-            .with_context(|| format!("read {}", entry.display()))?;
+        let content =
+            std::fs::read_to_string(&entry).with_context(|| format!("read {}", entry.display()))?;
         pack.insert(key, content);
     }
     Ok(pack)
@@ -190,9 +190,7 @@ fn walk_md(src: &Path) -> Vec<PathBuf> {
 fn copy_dir(src: &Path, dest: &Path, only_md: bool) -> Result<usize> {
     let mut n = 0;
     for entry in walk_md(src) {
-        if only_md
-            && entry.extension().and_then(|s| s.to_str()) != Some("md")
-        {
+        if only_md && entry.extension().and_then(|s| s.to_str()) != Some("md") {
             continue;
         }
         let rel = entry.strip_prefix(src).unwrap_or(&entry);

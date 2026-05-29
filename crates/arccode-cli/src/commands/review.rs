@@ -10,8 +10,7 @@ use arccode_config::{global_config_path, Config, ProjectPaths};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 
-const DEFAULT_TEMPLATE: &str =
-    "Review the following diff. For each finding, output:\n\
+const DEFAULT_TEMPLATE: &str = "Review the following diff. For each finding, output:\n\
      - severity: blocker | major | minor | nit\n\
      - file:line\n\
      - 1-2 sentence explanation\n\
@@ -40,8 +39,9 @@ pub async fn run(
     }
 
     let template = match template {
-        Some(path) => std::fs::read_to_string(&path)
-            .with_context(|| format!("reading template {path}"))?,
+        Some(path) => {
+            std::fs::read_to_string(&path).with_context(|| format!("reading template {path}"))?
+        }
         None => DEFAULT_TEMPLATE.to_string(),
     };
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

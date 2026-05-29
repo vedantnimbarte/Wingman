@@ -25,10 +25,7 @@ pub async fn probe(provider: &dyn Provider, model: &str) -> Result<(), String> {
     };
 
     let fut = async move {
-        let mut stream = provider
-            .complete(req)
-            .await
-            .map_err(|e| format!("{e}"))?;
+        let mut stream = provider.complete(req).await.map_err(|e| format!("{e}"))?;
         match stream.next().await {
             Some(Ok(_)) => Ok(()),
             Some(Err(e)) => Err(format!("{e}")),

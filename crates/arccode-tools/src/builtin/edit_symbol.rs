@@ -74,7 +74,12 @@ impl Tool for EditSymbol {
                 Ok(s) => s,
                 Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
             };
-            let updated = match arccode_ts::replace_function_body(lang, &original, &args.name, &args.new_body) {
+            let updated = match arccode_ts::replace_function_body(
+                lang,
+                &original,
+                &args.name,
+                &args.new_body,
+            ) {
                 Some(s) => s,
                 None => {
                     return ToolOutcome::err(format!(
@@ -131,7 +136,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "arccode-edit-symbol-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.rs");

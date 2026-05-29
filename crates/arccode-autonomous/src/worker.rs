@@ -112,9 +112,9 @@ pub async fn run_worker(
         .arg("--worktree")
         .arg(&spec.worktree)
         .arg("--print") // signal headless to suppress TUI init
-        .arg("noop")    // headless --print needs a prompt; the worker-mode
-                        // entry runs before headless is invoked, so the
-                        // value is never read
+        .arg("noop") // headless --print needs a prompt; the worker-mode
+        // entry runs before headless is invoked, so the
+        // value is never read
         .arg("--json")
         .current_dir(&spec.worktree);
 
@@ -138,10 +138,7 @@ pub async fn run_worker(
     // Parse stdout NDJSON line by line. The child still owns stdout; we
     // move it out.
     let mut child = child;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(WorkerError::EarlyExit(None))?;
+    let stdout = child.stdout.take().ok_or(WorkerError::EarlyExit(None))?;
     let stderr = child.stderr.take();
 
     let mut reader = BufReader::new(stdout).lines();
@@ -199,16 +196,19 @@ pub async fn run_worker(
                 }
             }
         }
-        Ok::<(Option<TaskOutcome>, Vec<crate::acceptance::AcceptanceResult>), WorkerError>((outcome, acceptance))
+        Ok::<
+            (
+                Option<TaskOutcome>,
+                Vec<crate::acceptance::AcceptanceResult>,
+            ),
+            WorkerError,
+        >((outcome, acceptance))
     };
 
     let (outcome, acceptance) = match timeout(spec.timeout, parse_loop).await {
         Ok(r) => r?,
         Err(_) => {
-            supervisor
-                .terminate(Duration::from_secs(2))
-                .await
-                .ok();
+            supervisor.terminate(Duration::from_secs(2)).await.ok();
             return Err(WorkerError::Timeout(spec.timeout));
         }
     };
@@ -270,7 +270,9 @@ pub async fn run_worker(
 /// One parsed line from the worker's stdout.
 enum WorkerLine {
     AgentEvent(arccode_core::AgentEvent),
-    WorkerStart { _model: String },
+    WorkerStart {
+        _model: String,
+    },
     /// Carries both the outcome AND the acceptance results so the worker
     /// supervisor can gate the Review transition (E3) on green checks.
     TaskComplete {
@@ -572,7 +574,10 @@ mod tests {
         // Outcome captured from the task_complete marker.
         let outcome = outcome.expect("worker reported task_complete");
         assert!(outcome.summary.contains("--version-only"));
-        assert_eq!(outcome.files_changed, vec!["crates/arccode-cli/src/args.rs"]);
+        assert_eq!(
+            outcome.files_changed,
+            vec!["crates/arccode-cli/src/args.rs"]
+        );
 
         // The task moved through in_progress → review.
         let task = store.state().task("t1").expect("task t1 in state");
@@ -599,8 +604,7 @@ mod tests {
         // expected event.
         let log = std::fs::read_to_string(store.log_path()).unwrap();
         assert!(
-            log.contains(r#""ev":"task.tool""#)
-                && log.contains(r#""tool":"edit_file""#),
+            log.contains(r#""ev":"task.tool""#) && log.contains(r#""tool":"edit_file""#),
             "tasks.jsonl missing task.tool event:\n{log}"
         );
         // And task_complete propagated via the final task.status event.
@@ -611,10 +615,16 @@ mod tests {
     fn parse_line_recognises_worker_start_and_task_complete() {
         let line = r#"{"event":"task_complete","summary":"done","files_changed":["a.rs"]}"#;
         match parse_line(line) {
-            WorkerLine::TaskComplete { outcome: o, acceptance } => {
+            WorkerLine::TaskComplete {
+                outcome: o,
+                acceptance,
+            } => {
                 assert_eq!(o.summary, "done");
                 assert_eq!(o.files_changed, vec!["a.rs"]);
-                assert!(acceptance.is_empty(), "no acceptance_results in this payload");
+                assert!(
+                    acceptance.is_empty(),
+                    "no acceptance_results in this payload"
+                );
             }
             _ => panic!("expected TaskComplete"),
         }
@@ -649,9 +659,7 @@ mod tests {
             TaskStatus::Review
         );
         // Declared checks, all green → Review.
-        let declared = vec![Acceptance::Shell {
-            cmd: "true".into(),
-        }];
+        let declared = vec![Acceptance::Shell { cmd: "true".into() }];
         let green = vec![AcceptanceResult::ok("shell: true", "")];
         assert_eq!(
             compute_final_status(&ok_outcome, true, &declared, &green),

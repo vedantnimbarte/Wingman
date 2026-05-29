@@ -187,7 +187,10 @@ pub async fn refresh_chatgpt_token_if_needed() {
     if !crate::oauth::token_is_expiring(&access, 300) {
         return;
     }
-    let refresh = match arccode_config::secrets::load("chatgpt_refresh").ok().flatten() {
+    let refresh = match arccode_config::secrets::load("chatgpt_refresh")
+        .ok()
+        .flatten()
+    {
         Some(r) => r,
         None => return,
     };
@@ -446,10 +449,8 @@ pub async fn build_registry_with_learn(
             let emb = embedder.clone();
             let root = paths.root.clone();
             tokio::spawn(async move {
-                match arccode_learn::session_index::backfill_project_sessions(
-                    &root, &store, &*emb,
-                )
-                .await
+                match arccode_learn::session_index::backfill_project_sessions(&root, &store, &*emb)
+                    .await
                 {
                     Ok(n) if n > 0 => {
                         tracing::info!("backfilled {n} session(s) into sessions.db")
@@ -609,10 +610,7 @@ pub async fn build_agent_registry_learn(
 
     // Build the learn hook first so we can hand its memory/stats handles to
     // the tool registry (some tools need to read/write them).
-    let session_id = format!(
-        "session-{}",
-        chrono_like_now()
-    );
+    let session_id = format!("session-{}", chrono_like_now());
     let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
     let learn = match LearnHandles::build(learn_cfg) {
         Ok(h) => Some(Arc::new(h)),
@@ -630,8 +628,8 @@ pub async fn build_agent_registry_learn(
     {
         let cfg_for_runner = cfg.clone();
         let mode_for_runner = mode;
-        let runner: arccode_tools::builtin::SubagentRunner = Arc::new(
-            move |spec: arccode_tools::builtin::SubagentSpec| {
+        let runner: arccode_tools::builtin::SubagentRunner =
+            Arc::new(move |spec: arccode_tools::builtin::SubagentSpec| {
                 let cfg = cfg_for_runner.clone();
                 let mode = mode_for_runner;
                 Box::pin(async move {
@@ -644,8 +642,8 @@ pub async fn build_agent_registry_learn(
                     } else {
                         resolve_selection(&cfg, None).map_err(|e| e.to_string())?
                     };
-                    let provider = build_provider(&cfg, &sel.provider_id)
-                        .map_err(|e| e.to_string())?;
+                    let provider =
+                        build_provider(&cfg, &sel.provider_id).map_err(|e| e.to_string())?;
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let paths = ProjectPaths::discover(&cwd);
                     let ctx = ToolCtx::new_with_config(
@@ -685,8 +683,7 @@ pub async fn build_agent_registry_learn(
                     }
                     Ok(out)
                 })
-            },
-        );
+            });
         registry.register_arc(Arc::new(arccode_tools::builtin::SpawnSubagent::new(runner)));
     }
 
@@ -736,7 +733,7 @@ pub fn build_system_prompt(mode: PermissionMode) -> String {
 
 /// Compose the full system prompt, including memory index + available skills
 /// + recall/save hints. Memory bodies are NOT included inline — the agent
-/// uses `recall_memory` to fetch them on demand.
+///   uses `recall_memory` to fetch them on demand.
 pub fn build_system_prompt_full(
     mode: PermissionMode,
     memory: &MemoryStore,

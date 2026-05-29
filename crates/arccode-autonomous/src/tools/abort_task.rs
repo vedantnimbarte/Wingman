@@ -28,11 +28,10 @@ impl Tool for AbortTask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "abort_task".into(),
-            description:
-                "Terminate the worker assigned to this task (tree-kill) and mark the \
+            description: "Terminate the worker assigned to this task (tree-kill) and mark the \
                  task `failed`. Use when a worker is stuck or has drifted past the \
                  goal beyond what reassign can recover from."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

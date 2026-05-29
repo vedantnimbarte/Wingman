@@ -44,11 +44,10 @@ impl Tool for AddTask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "add_task".into(),
-            description:
-                "Append a new task to the running pilot DAG. Use this when re-planning \
+            description: "Append a new task to the running pilot DAG. Use this when re-planning \
                  mid-run (E5 splitter, surprises from a worker's review). Returns the new \
                  task id."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

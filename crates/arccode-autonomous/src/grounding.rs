@@ -80,12 +80,11 @@ pub fn extract_keywords(goal: &str) -> Vec<String> {
 }
 
 const STOPWORDS: &[&str] = &[
-    "the", "and", "for", "with", "from", "into", "that", "this", "but",
-    "you", "your", "our", "are", "was", "were", "has", "have", "had",
-    "will", "would", "should", "could", "can", "may", "must", "just",
-    "also", "use", "using", "used", "add", "make", "build", "create",
-    "new", "old", "any", "all", "some", "more", "less", "than",
-    "let", "let's", "lets", "want", "need", "make", "code",
+    "the", "and", "for", "with", "from", "into", "that", "this", "but", "you", "your", "our",
+    "are", "was", "were", "has", "have", "had", "will", "would", "should", "could", "can", "may",
+    "must", "just", "also", "use", "using", "used", "add", "make", "build", "create", "new", "old",
+    "any", "all", "some", "more", "less", "than", "let", "let's", "lets", "want", "need", "make",
+    "code",
 ];
 
 /// Walk the repo, grep for keyword matches, return the facts block.
@@ -239,13 +238,9 @@ fn walk_files(root: &Path, visit: &mut dyn FnMut(&Path, &Path) -> bool) {
 }
 
 const BINARY_EXTS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "svg",
-    "pdf", "zip", "gz", "tar", "tgz", "xz", "7z",
-    "exe", "dll", "so", "dylib", "a", "o", "obj", "lib",
-    "wasm", "class",
-    "ttf", "otf", "woff", "woff2",
-    "mp3", "mp4", "mov", "wav", "ogg", "flac",
-    "db", "sqlite",
+    "png", "jpg", "jpeg", "gif", "webp", "ico", "bmp", "svg", "pdf", "zip", "gz", "tar", "tgz",
+    "xz", "7z", "exe", "dll", "so", "dylib", "a", "o", "obj", "lib", "wasm", "class", "ttf", "otf",
+    "woff", "woff2", "mp3", "mp4", "mov", "wav", "ogg", "flac", "db", "sqlite",
 ];
 
 /// Render the [`FactsBlock`] as a markdown-ish block ready to inject
@@ -295,9 +290,8 @@ mod tests {
 
     #[test]
     fn extract_keywords_caps_at_eight() {
-        let kws = extract_keywords(
-            "one two three four five six seven eight nine ten eleven twelve",
-        );
+        let kws =
+            extract_keywords("one two three four five six seven eight nine ten eleven twelve");
         assert!(kws.len() <= 8);
     }
 
@@ -330,11 +324,7 @@ mod tests {
         .unwrap();
         let facts = scan_repo_for_facts(dir.path(), &["version-only".to_string()]);
         assert!(!facts.keyword_hits.is_empty(), "expected keyword hits");
-        let paths: Vec<&str> = facts
-            .keyword_hits
-            .iter()
-            .map(|h| h.path.as_str())
-            .collect();
+        let paths: Vec<&str> = facts.keyword_hits.iter().map(|h| h.path.as_str()).collect();
         assert!(
             paths.iter().any(|p| p.contains("main.rs"))
                 || paths.iter().any(|p| p.contains("README.md")),

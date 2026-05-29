@@ -39,15 +39,11 @@ impl SkillsView {
 
     pub fn handle_key(&mut self, k: KeyEvent) -> ModalOutcome {
         match k.code {
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.skills.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Down if self.selected + 1 < self.skills.len() => {
+                self.selected += 1;
             }
             KeyCode::Enter => {
                 if self.skills.is_empty() {
@@ -92,7 +88,7 @@ impl SkillsView {
             .render(chunks[0], buf);
         } else {
             let height = chunks[0].height as usize;
-            let visible = height.max(1).min(VISIBLE_ROWS);
+            let visible = height.clamp(1, VISIBLE_ROWS);
             let start = self.selected.saturating_sub(visible.saturating_sub(1));
             let end = (start + visible).min(self.skills.len());
             let items: Vec<ListItem> = self.skills[start..end]
@@ -102,16 +98,15 @@ impl SkillsView {
                     let i = start + off;
                     let marker = if i == self.selected { "› " } else { "  " };
                     let style = if i == self.selected {
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     };
                     let line = Line::from(vec![
                         Span::styled(format!("{marker}{:<24}", s.name), style),
-                        Span::styled(
-                            s.description.clone(),
-                            Style::default().fg(Color::Gray),
-                        ),
+                        Span::styled(s.description.clone(), Style::default().fg(Color::Gray)),
                         Span::raw("  "),
                         Span::styled(
                             format!("[{}]", s.source.label()),
@@ -146,7 +141,10 @@ impl SkillsView {
         let preview_block = Block::default()
             .borders(Borders::TOP)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(" preview ", Style::default().fg(Color::DarkGray)));
+            .title(Span::styled(
+                " preview ",
+                Style::default().fg(Color::DarkGray),
+            ));
         Paragraph::new(preview)
             .block(preview_block)
             .style(Style::default().fg(Color::Gray))

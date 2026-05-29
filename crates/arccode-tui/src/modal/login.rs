@@ -668,7 +668,9 @@ pub enum LoginTask {
     Commit(LoginPayload),
     /// Perform the ChatGPT OAuth browser login and store both tokens in the
     /// keychain.  Reports `Ok(())` on success.
-    OAuthLogin { provider_id: String },
+    OAuthLogin {
+        provider_id: String,
+    },
 }
 
 #[derive(Debug)]
@@ -930,7 +932,9 @@ impl LoginWizard {
                     .map(|(i, p)| {
                         let marker = if i == self.provider_idx { "› " } else { "  " };
                         let style = if i == self.provider_idx {
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default()
                         };

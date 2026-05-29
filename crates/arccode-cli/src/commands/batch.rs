@@ -23,7 +23,8 @@ pub async fn run(cfg: Config, opts: BatchOptions) -> Result<ExitCode> {
     let sel = resolve_selection(&cfg, opts.model_override.as_deref())?;
     let mut agent = build_agent(&cfg, &sel, mode).await?;
 
-    let content = tokio::fs::read_to_string(&opts.file).await
+    let content = tokio::fs::read_to_string(&opts.file)
+        .await
         .map_err(|e| anyhow::anyhow!("cannot read batch file '{}': {e}", opts.file))?;
 
     for (i, line) in content.lines().enumerate() {
@@ -34,7 +35,8 @@ pub async fn run(cfg: Config, opts: BatchOptions) -> Result<ExitCode> {
 
         let prompt = if line.starts_with('{') {
             match serde_json::from_str::<serde_json::Value>(line) {
-                Ok(v) => v.get("prompt")
+                Ok(v) => v
+                    .get("prompt")
                     .and_then(|p| p.as_str())
                     .unwrap_or(line)
                     .to_string(),
@@ -50,7 +52,10 @@ pub async fn run(cfg: Config, opts: BatchOptions) -> Result<ExitCode> {
         };
 
         if opts.json {
-            println!("{}", serde_json::json!({"type": "prompt_start", "index": i, "prompt": prompt}));
+            println!(
+                "{}",
+                serde_json::json!({"type": "prompt_start", "index": i, "prompt": prompt})
+            );
         } else {
             eprintln!("\n--- prompt {} ---\n{}", i + 1, prompt);
         }
@@ -63,13 +68,9 @@ pub async fn run(cfg: Config, opts: BatchOptions) -> Result<ExitCode> {
                 match &event {
                     AgentEvent::TextDelta { text } => print!("{text}"),
                     AgentEvent::ToolStart { name, .. } => eprint!("\n[tool: {name}] "),
-                    AgentEvent::ToolResult { is_error, .. } => {
-                        if *is_error { eprint!("[error] "); }
-                    }
-                    AgentEvent::Stop { reason } => {
-                        if !matches!(reason, AgentStop::EndTurn) {
-                            eprintln!("\n(stop: {reason:?})");
-                        }
+                    AgentEvent::ToolResult { is_error: true, .. } => eprint!("[error] "),
+                    AgentEvent::Stop { reason } if !matches!(reason, AgentStop::EndTurn) => {
+                        eprintln!("\n(stop: {reason:?})");
                     }
                     AgentEvent::Error { message } => eprintln!("\nerror: {message}"),
                     _ => {}

@@ -206,7 +206,7 @@ fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {
             } else {
                 // Closing fence — flush the buffered block, then the fence line.
                 lines.extend(render_code_block(
-                    code_buf.drain(..).collect(),
+                    std::mem::take(&mut code_buf),
                     current_lang.take().unwrap_or_default(),
                     code_color,
                 ));
@@ -309,10 +309,7 @@ fn highlight_body_to_lines(
             }
         }
     }
-    lines
-        .into_iter()
-        .map(Line::from)
-        .collect()
+    lines.into_iter().map(Line::from).collect()
 }
 
 #[cfg(feature = "treesitter")]
@@ -329,9 +326,7 @@ fn scope_style(name: &str, fallback: Color) -> Style {
         "variable.builtin" | "variable.parameter" => Color::LightBlue,
         "property" | "attribute" => Color::LightCyan,
         "label" | "tag" => Color::LightYellow,
-        "operator" | "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => {
-            Color::Gray
-        }
+        "operator" | "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => Color::Gray,
         _ => fallback,
     };
     let mut s = Style::default().fg(color);

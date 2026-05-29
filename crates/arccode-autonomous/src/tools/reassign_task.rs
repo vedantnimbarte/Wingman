@@ -28,11 +28,10 @@ impl Tool for ReassignTask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "reassign_task".into(),
-            description:
-                "Abort the current worker (if any), reset the task to `todo`, and \
+            description: "Abort the current worker (if any), reset the task to `todo`, and \
                  spawn a fresh worker. Rung-2 retry: same task, new worker, escalated \
                  model context if the manager passes one in the next task assignment."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -50,10 +49,9 @@ impl Tool for ReassignTask {
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
         match self.handle.reassign(&args.task_id).await {
-            Ok(agent_id) => ToolOutcome::ok(format!(
-                "reassigned task {} to {agent_id}",
-                args.task_id
-            )),
+            Ok(agent_id) => {
+                ToolOutcome::ok(format!("reassigned task {} to {agent_id}", args.task_id))
+            }
             Err(e) => ToolOutcome::err(e.to_string()),
         }
     }

@@ -57,7 +57,11 @@ impl<'a> Widget for StatusView<'a> {
         } else {
             s.provider.clone()
         };
-        let dot_color = if s.connected { Color::Green } else { Color::Red };
+        let dot_color = if s.connected {
+            Color::Green
+        } else {
+            Color::Red
+        };
         let mut spans = vec![
             Span::styled("● ", Style::default().fg(dot_color)),
             Span::styled(
@@ -105,10 +109,7 @@ impl<'a> Widget for StatusView<'a> {
                 ));
             } else if !s.usage.is_empty() {
                 // Provider with no pricing data (e.g. local model)
-                spans.push(Span::styled(
-                    "local",
-                    Style::default().fg(Color::DarkGray),
-                ));
+                spans.push(Span::styled("local", Style::default().fg(Color::DarkGray)));
             }
         }
         Paragraph::new(Line::from(spans))

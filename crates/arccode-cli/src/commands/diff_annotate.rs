@@ -30,13 +30,19 @@ pub fn annotate(project_root: &Path, fd: &FileDiff) -> FileAnnotation {
     {
         let target = pick_target_path(project_root, fd);
         let Some(target) = target else {
-            return FileAnnotation { hunks: vec![None; fd.hunks.len()] };
+            return FileAnnotation {
+                hunks: vec![None; fd.hunks.len()],
+            };
         };
         let Some(lang) = arccode_ts::Language::from_path(&target) else {
-            return FileAnnotation { hunks: vec![None; fd.hunks.len()] };
+            return FileAnnotation {
+                hunks: vec![None; fd.hunks.len()],
+            };
         };
         let Ok(content) = std::fs::read_to_string(&target) else {
-            return FileAnnotation { hunks: vec![None; fd.hunks.len()] };
+            return FileAnnotation {
+                hunks: vec![None; fd.hunks.len()],
+            };
         };
         let hunks = fd
             .hunks
@@ -58,7 +64,9 @@ pub fn annotate(project_root: &Path, fd: &FileDiff) -> FileAnnotation {
     #[cfg(not(feature = "treesitter"))]
     {
         let _ = project_root;
-        FileAnnotation { hunks: vec![None; fd.hunks.len()] }
+        FileAnnotation {
+            hunks: vec![None; fd.hunks.len()],
+        }
     }
 }
 

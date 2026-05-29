@@ -140,7 +140,9 @@ impl McpRegistry {
     /// Disconnect without forgetting the config entry.
     pub async fn disconnect(&self, name: &str) -> Result<(), String> {
         let mut guard = self.inner.lock().await;
-        let entry = guard.get_mut(name).ok_or_else(|| format!("no server '{name}'"))?;
+        let entry = guard
+            .get_mut(name)
+            .ok_or_else(|| format!("no server '{name}'"))?;
         for t in entry.tool_names.drain(..) {
             self.tools.unregister(&t);
         }

@@ -69,15 +69,11 @@ impl ModelPicker {
                 self.query.pop();
                 self.rerank();
             }
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.ranked.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Down if self.selected + 1 < self.ranked.len() => {
+                self.selected += 1;
             }
             KeyCode::Enter => {
                 if self.ranked.is_empty() {
@@ -110,7 +106,7 @@ impl ModelPicker {
                 pattern.score(needle, &mut matcher).map(|s| (i, s))
             })
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
         self.ranked = scored.into_iter().map(|(i, _)| i).collect();
     }
 
@@ -146,7 +142,7 @@ impl ModelPicker {
         .render(chunks[0], buf);
 
         let height = chunks[1].height as usize;
-        let visible = height.max(1).min(VISIBLE_ROWS);
+        let visible = height.clamp(1, VISIBLE_ROWS);
         let start = self.selected.saturating_sub(visible.saturating_sub(1));
         let end = (start + visible).min(self.ranked.len());
         let items: Vec<ListItem> = self.ranked[start..end]
@@ -160,7 +156,9 @@ impl ModelPicker {
                     Span::styled(
                         format!("{marker}{:<12}", entry.provider_id),
                         if i == self.selected {
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Cyan)
                         },
@@ -168,7 +166,9 @@ impl ModelPicker {
                     Span::styled(
                         entry.model.clone(),
                         if i == self.selected {
-                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(Color::Gray)
                         },
@@ -204,10 +204,7 @@ fn catalog() -> Vec<ModelChoice> {
                 "claude-haiku-4-5-20251001",
             ],
         ),
-        (
-            "openai",
-            &["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o4-mini"],
-        ),
+        ("openai", &["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o4-mini"]),
         (
             "openrouter",
             &[
@@ -265,18 +262,12 @@ fn catalog() -> Vec<ModelChoice> {
                 "Qwen/Qwen2.5-Coder-32B-Instruct",
             ],
         ),
-        (
-            "perplexity",
-            &["sonar-pro", "sonar", "sonar-reasoning-pro"],
-        ),
+        ("perplexity", &["sonar-pro", "sonar", "sonar-reasoning-pro"]),
         (
             "xai",
             &["grok-2-latest", "grok-2-vision-latest", "grok-beta"],
         ),
-        (
-            "deepseek",
-            &["deepseek-chat", "deepseek-reasoner"],
-        ),
+        ("deepseek", &["deepseek-chat", "deepseek-reasoner"]),
         (
             "mistral",
             &[
@@ -373,10 +364,7 @@ fn catalog() -> Vec<ModelChoice> {
         ),
         (
             "octoai",
-            &[
-                "meta-llama-3.1-70b-instruct",
-                "meta-llama-3.1-8b-instruct",
-            ],
+            &["meta-llama-3.1-70b-instruct", "meta-llama-3.1-8b-instruct"],
         ),
         (
             "nvidia",
@@ -420,10 +408,7 @@ fn catalog() -> Vec<ModelChoice> {
                 "databricks-dbrx-instruct",
             ],
         ),
-        (
-            "writer",
-            &["palmyra-x5", "palmyra-x4", "palmyra-creative"],
-        ),
+        ("writer", &["palmyra-x5", "palmyra-x4", "palmyra-creative"]),
         (
             "cohere",
             &[
@@ -449,11 +434,7 @@ fn catalog() -> Vec<ModelChoice> {
         ),
         (
             "moonshot",
-            &[
-                "moonshot-v1-128k",
-                "moonshot-v1-32k",
-                "moonshot-v1-8k",
-            ],
+            &["moonshot-v1-128k", "moonshot-v1-32k", "moonshot-v1-8k"],
         ),
         (
             "minimax",
@@ -495,11 +476,7 @@ fn catalog() -> Vec<ModelChoice> {
         ),
         (
             "vercel",
-            &[
-                "openai/gpt-4o",
-                "anthropic/claude-3.5-sonnet",
-                "xai/grok-2",
-            ],
+            &["openai/gpt-4o", "anthropic/claude-3.5-sonnet", "xai/grok-2"],
         ),
         (
             "aimlapi",

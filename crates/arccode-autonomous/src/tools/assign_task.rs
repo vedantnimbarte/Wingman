@@ -28,12 +28,11 @@ impl Tool for AssignTask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "assign_task".into(),
-            description:
-                "Spawn a worker for the named task. The orchestrator creates a worktree, \
+            description: "Spawn a worker for the named task. The orchestrator creates a worktree, \
                  writes task.assign + agent.spawn events, and drives the worker to \
                  completion in the background. Use this when the task is `todo` and all \
                  deps are `done`. Returns the new agent id."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -51,10 +50,9 @@ impl Tool for AssignTask {
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
         match self.handle.assign_task(&args.task_id).await {
-            Ok(agent_id) => ToolOutcome::ok(format!(
-                "assigned task {} to {agent_id}",
-                args.task_id
-            )),
+            Ok(agent_id) => {
+                ToolOutcome::ok(format!("assigned task {} to {agent_id}", args.task_id))
+            }
             Err(e) => ToolOutcome::err(e.to_string()),
         }
     }

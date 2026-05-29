@@ -60,7 +60,10 @@ impl Default for ExtractConfig {
 /// sequences sorted by frequency (descending).
 pub fn extract_from_dir(sessions_dir: &Path, cfg: &ExtractConfig) -> Vec<ExtractedPattern> {
     let mut per_session: Vec<SessionMeta> = Vec::new();
-    for path in list_sessions(sessions_dir).into_iter().take(cfg.session_scan_limit) {
+    for path in list_sessions(sessions_dir)
+        .into_iter()
+        .take(cfg.session_scan_limit)
+    {
         if let Ok(records) = load_session(&path) {
             let meta = session_meta(&records);
             if !meta.sequence.is_empty() {
@@ -130,7 +133,9 @@ fn dedupe_subpatterns(input: Vec<ExtractedPattern>) -> Vec<ExtractedPattern> {
     let mut out: Vec<ExtractedPattern> = Vec::new();
     'next: for p in input {
         for existing in &out {
-            if existing.occurrences >= p.occurrences && is_contiguous_sub(&p.sequence, &existing.sequence) {
+            if existing.occurrences >= p.occurrences
+                && is_contiguous_sub(&p.sequence, &existing.sequence)
+            {
                 continue 'next;
             }
         }
@@ -174,10 +179,8 @@ fn session_meta(records: &[SessionRecord]) -> SessionMeta {
     let mut out = SessionMeta::default();
     for r in records {
         match r {
-            SessionRecord::User { text, .. } => {
-                if out.first_user_prompt.is_none() {
-                    out.first_user_prompt = Some(text.clone());
-                }
+            SessionRecord::User { text, .. } if out.first_user_prompt.is_none() => {
+                out.first_user_prompt = Some(text.clone());
             }
             SessionRecord::Assistant { blocks, .. } => {
                 for b in blocks {
@@ -209,7 +212,9 @@ fn derive_ast_hint(tool_name: &str, input: &serde_json::Value) -> Vec<String> {
             .map(|s| s.to_string()),
         _ => None,
     };
-    let Some(path) = target_path else { return Vec::new() };
+    let Some(path) = target_path else {
+        return Vec::new();
+    };
     let p = std::path::Path::new(&path);
 
     #[cfg(feature = "treesitter")]
@@ -251,7 +256,7 @@ fn derive_ast_hint(tool_name: &str, input: &serde_json::Value) -> Vec<String> {
 
         // Fallback: just record the language touched, without a kind. That
         // alone is still useful ("user often edits rust files").
-        return vec![format!("{lang_label}:*")];
+        vec![format!("{lang_label}:*")]
     }
     #[cfg(not(feature = "treesitter"))]
     {
@@ -370,7 +375,12 @@ mod tests {
 
     #[test]
     fn contiguous_sub_works() {
-        let big = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let big = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
         let small = vec!["b".to_string(), "c".to_string()];
         assert!(is_contiguous_sub(&small, &big));
         let nope = vec!["b".to_string(), "d".to_string()];

@@ -29,12 +29,11 @@ impl Tool for MessageAgent {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "message_agent".into(),
-            description:
-                "Send a mid-run message to a worker over its stdin command channel \
+            description: "Send a mid-run message to a worker over its stdin command channel \
                  (E10). Supported message kinds: `pivot` (revise goal), `cancel` \
                  (clean abort), `clarify` (answer a worker's question). Phase 4 logs \
                  the message; Phase 7.5 wires the actual stdin channel."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

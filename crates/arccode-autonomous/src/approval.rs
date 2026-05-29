@@ -82,7 +82,10 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
             reason: "--review forced hard gate".into(),
             estimated_usd: estimate_plan_cost_usd(inputs.plan),
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
-            out_of_allowlist: writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs),
+            out_of_allowlist: writes_outside_allowlist(
+                inputs.plan,
+                &inputs.config.auto_approve_globs,
+            ),
         };
     }
     if inputs.tier == PilotTier::Assist {
@@ -91,7 +94,10 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
             reason: "assist tier always uses hard gate".into(),
             estimated_usd: estimate_plan_cost_usd(inputs.plan),
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
-            out_of_allowlist: writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs),
+            out_of_allowlist: writes_outside_allowlist(
+                inputs.plan,
+                &inputs.config.auto_approve_globs,
+            ),
         };
     }
     if inputs.force_auto {
@@ -102,15 +108,17 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
             reason: "--yes forced auto-approve".into(),
             estimated_usd: estimate_plan_cost_usd(inputs.plan),
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
-            out_of_allowlist: writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs),
+            out_of_allowlist: writes_outside_allowlist(
+                inputs.plan,
+                &inputs.config.auto_approve_globs,
+            ),
         };
     }
 
     // Compute the signals.
     let estimated_usd = estimate_plan_cost_usd(inputs.plan);
     let dangerous_hits = matches_globs(inputs.plan, &inputs.config.dangerous_paths);
-    let out_of_allowlist =
-        writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs);
+    let out_of_allowlist = writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs);
     let task_count = inputs.plan.len() as u32;
 
     // Decision tree.
@@ -261,7 +269,7 @@ fn build_globset(patterns: &[String]) -> Option<GlobSet> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Role, Reversibility};
+    use crate::model::{Reversibility, Role};
     use arccode_config::PilotApprovalConfig;
 
     fn task(id: &str, role: Role, writes: Vec<&str>) -> PlannedTask {
@@ -309,7 +317,11 @@ mod tests {
     #[test]
     fn writes_outside_allowlist_finds_strays() {
         let plan = vec![
-            task("t1", Role::Developer, vec!["crates/arccode-cli/src/main.rs"]),
+            task(
+                "t1",
+                Role::Developer,
+                vec!["crates/arccode-cli/src/main.rs"],
+            ),
             task("t2", Role::Developer, vec!["/etc/passwd"]),
             task("t3", Role::Developer, vec!["docs/README.md"]),
         ];
@@ -390,7 +402,11 @@ mod tests {
     #[test]
     fn small_cheap_allowlisted_plan_is_auto() {
         let plan = vec![
-            task("t1", Role::Developer, vec!["crates/arccode-cli/src/args.rs"]),
+            task(
+                "t1",
+                Role::Developer,
+                vec!["crates/arccode-cli/src/args.rs"],
+            ),
             task("t2", Role::Tester, vec!["crates/arccode-cli/tests/x.rs"]),
         ];
         let report = classify(ClassifyInputs {

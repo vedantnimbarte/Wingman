@@ -29,14 +29,21 @@ impl ToolCtx {
         project_root: PathBuf,
         extra_denylist: Vec<String>,
     ) -> Self {
-        Self { mode, cwd, project_root, extra_denylist }
+        Self {
+            mode,
+            cwd,
+            project_root,
+            extra_denylist,
+        }
     }
 
     /// Returns `true` if the given shell command matches any entry in the
     /// project-level denylist (substring match). Always-deny takes precedence
     /// over the permission mode.
     pub fn is_shell_denied(&self, command: &str) -> bool {
-        self.extra_denylist.iter().any(|pattern| command.contains(pattern.as_str()))
+        self.extra_denylist
+            .iter()
+            .any(|pattern| command.contains(pattern.as_str()))
     }
 
     /// Resolve a tool-supplied path against the cwd. Returns canonicalized

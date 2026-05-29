@@ -54,7 +54,12 @@ impl<'a> Widget for WelcomeView<'a> {
         // Centre the card.
         let x = area.x + area.width.saturating_sub(card_w) / 2;
         let y = area.y + area.height.saturating_sub(card_h) / 2;
-        let card = Rect { x, y, width: card_w, height: card_h };
+        let card = Rect {
+            x,
+            y,
+            width: card_w,
+            height: card_h,
+        };
 
         Clear.render(card, buf);
         let outer = Block::default()
@@ -88,7 +93,10 @@ impl<'a> Widget for WelcomeView<'a> {
             if i >= chunks[0].height as usize {
                 break;
             }
-            let row = Rect { y: chunks[0].y + i as u16, ..chunks[0] };
+            let row = Rect {
+                y: chunks[0].y + i as u16,
+                ..chunks[0]
+            };
             Paragraph::new(Line::from(Span::styled(
                 *line,
                 Style::default()
@@ -126,10 +134,7 @@ impl<'a> Widget for WelcomeView<'a> {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!("  {}", s.model),
-                    Style::default().fg(Color::White),
-                ),
+                Span::styled(format!("  {}", s.model), Style::default().fg(Color::White)),
             )
         };
 

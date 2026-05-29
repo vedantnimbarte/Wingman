@@ -27,10 +27,7 @@ async fn list(limit: usize) -> Result<ExitCode> {
         .filter_map(|e| {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                e.metadata()
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .map(|t| (t, p))
+                e.metadata().and_then(|m| m.modified()).ok().map(|t| (t, p))
             } else {
                 None
             }

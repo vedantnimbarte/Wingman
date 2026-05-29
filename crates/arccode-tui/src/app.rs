@@ -28,18 +28,19 @@ use ratatui::{
 };
 
 use crate::modal::{
-    ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask,
-    McpView, ModalOutcome, ModalTask, ModelPicker, ParamsModal, SessionEntry, SessionPicker,
-    SkillsView, UsageView,
+    ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
+    ModalOutcome, ModalTask, ModelPicker, ParamsModal, SessionEntry, SessionPicker, SkillsView,
+    UsageView,
 };
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
-    composer::ComposerView, slash_suggest::SlashSuggest, status::StatusView,
+    composer::ComposerView,
     file_tree::{FileTree, FileTreeView},
+    slash_suggest::SlashSuggest,
+    status::StatusView,
     transcript::TranscriptView,
     welcome::WelcomeView,
-    Composer, StatusLine, Transcript,
-    TranscriptItem,
+    Composer, StatusLine, Transcript, TranscriptItem,
 };
 
 /// Closure passed in by the CLI/runtime that knows how to construct a
@@ -63,18 +64,15 @@ pub type AgentBuilder = Arc<
 /// async work (probe a freshly-entered key, persist credentials, etc.)
 /// without the TUI crate having to depend on `arccode-providers` or
 /// `arccode-config`.
-pub type LoginRunner = Arc<
-    dyn Fn(LoginTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync,
->;
+pub type LoginRunner =
+    Arc<dyn Fn(LoginTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync>;
 
 /// Optional callback to clear a stored credential. Used by `/logout`.
-pub type LogoutRunner =
-    Arc<dyn Fn(String) -> std::result::Result<(), String> + Send + Sync>;
+pub type LogoutRunner = Arc<dyn Fn(String) -> std::result::Result<(), String> + Send + Sync>;
 
 /// Runs one MCP server-management task on behalf of the modal.
-pub type McpRunner = Arc<
-    dyn Fn(McpTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync,
->;
+pub type McpRunner =
+    Arc<dyn Fn(McpTask) -> BoxFuture<'static, std::result::Result<(), String>> + Send + Sync>;
 
 /// Returns the current set of MCP server summaries for display.
 pub type McpListRunner = Arc<dyn Fn() -> BoxFuture<'static, Vec<McpServerSummary>> + Send + Sync>;
@@ -200,7 +198,11 @@ fn parse_slash(line: &str) -> Cmd {
         "/recall" => Cmd::Recall(arg.to_string()),
         "/learn" => Cmd::Learn(arg.to_string()),
         "/mcp" => Cmd::Mcp,
-        "/export" => Cmd::Export(if arg.is_empty() { "md".into() } else { arg.to_string() }),
+        "/export" => Cmd::Export(if arg.is_empty() {
+            "md".into()
+        } else {
+            arg.to_string()
+        }),
         "/params" => Cmd::Params,
         "/resume" => Cmd::Resume,
         "/find" if !arg.is_empty() => Cmd::Find(arg.to_string()),
@@ -224,13 +226,20 @@ fn parse_slash(line: &str) -> Cmd {
 }
 
 fn load_user_command(name: &str) -> Option<String> {
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return None;
     }
     // Project-local first, then global.
     if let Ok(cwd) = std::env::current_dir() {
         let project = arccode_config::ProjectPaths::discover(&cwd);
-        let p = project.root.join(".arccode").join("commands").join(format!("{name}.md"));
+        let p = project
+            .root
+            .join(".arccode")
+            .join("commands")
+            .join(format!("{name}.md"));
         if let Ok(text) = std::fs::read_to_string(&p) {
             return Some(text);
         }
@@ -409,8 +418,11 @@ async fn run_modal_task(
                         // persisted. If this fails the modal stays open in
                         // error state so the user can fix and retry.
                         let payload = payload_after.expect("commit task carries payload");
-                        match (ctx.agent_builder)(payload.provider_id.clone(), payload.model.clone())
-                            .await
+                        match (ctx.agent_builder)(
+                            payload.provider_id.clone(),
+                            payload.model.clone(),
+                        )
+                        .await
                         {
                             Ok(new_agent) => {
                                 *agent = Some(new_agent);
@@ -703,9 +715,9 @@ async fn idle_step(
                                         "exported to {}",
                                         p.display()
                                     ))),
-                                    Err(e) => ui.transcript.push(TranscriptItem::Error(format!(
-                                        "/export: {e}"
-                                    ))),
+                                    Err(e) => ui
+                                        .transcript
+                                        .push(TranscriptItem::Error(format!("/export: {e}"))),
                                 }
                             }
                             Cmd::Params => {
@@ -721,8 +733,7 @@ async fn idle_step(
                                 }
                             }
                             Cmd::Resume => {
-                                let sessions_dir =
-                                    project_root.join(".arccode").join("sessions");
+                                let sessions_dir = project_root.join(".arccode").join("sessions");
                                 let paths = arccode_session::list_sessions(&sessions_dir);
                                 let entries: Vec<SessionEntry> = paths
                                     .into_iter()
@@ -754,9 +765,8 @@ async fn idle_step(
                                 ui.modal = ActiveModal::SessionPicker(SessionPicker::new(entries));
                             }
                             Cmd::Memory(arg) => {
-                                let store = arccode_learn::memory::MemoryStore::new(
-                                    project_root.clone(),
-                                );
+                                let store =
+                                    arccode_learn::memory::MemoryStore::new(project_root.clone());
                                 if let Some(name) = arg.strip_prefix("forget ") {
                                     match store.forget(name.trim()) {
                                         Ok(true) => ui.transcript.push(TranscriptItem::System(
@@ -831,7 +841,11 @@ async fn idle_step(
                                         out.push_str("skill stats:\n");
                                         for r in sum {
                                             let pct = (r.correction_rate() * 100.0) as u32;
-                                            let flag = if r.needs_rewrite() { " (needs rewrite)" } else { "" };
+                                            let flag = if r.needs_rewrite() {
+                                                " (needs rewrite)"
+                                            } else {
+                                                ""
+                                            };
                                             out.push_str(&format!(
                                                 "  {:<28} ok={:<4} corrected={:<4} unclear={:<4} ({pct}% corrected){flag}\n",
                                                 r.skill_name,
@@ -872,8 +886,10 @@ async fn idle_step(
                                 };
                                 match arg.as_str() {
                                     "" | "status" => {
-                                        let quiet = stats.counter_get("sessions_without_save").unwrap_or(0);
-                                        let total_skills = stats.summary().map(|v| v.len()).unwrap_or(0);
+                                        let quiet =
+                                            stats.counter_get("sessions_without_save").unwrap_or(0);
+                                        let total_skills =
+                                            stats.summary().map(|v| v.len()).unwrap_or(0);
                                         let store = arccode_learn::memory::MemoryStore::new(
                                             project_root.clone(),
                                         );
@@ -900,39 +916,36 @@ async fn idle_step(
                                     }
                                 }
                             }
-                            Cmd::SkillsNew(name) => {
-                                match arccode_skills::new_global_path(&name) {
-                                    Ok(path) => {
-                                        if !path.exists() {
-                                            if let Err(e) = std::fs::write(
-                                                &path,
-                                                arccode_skills::starter_template(&name),
-                                            ) {
-                                                ui.transcript.push(TranscriptItem::Error(
-                                                    format!("/skills new: write failed: {e}"),
-                                                ));
-                                                draw(terminal, ui)?;
-                                                continue;
-                                            }
-                                        }
-                                        if let Err(e) = launch_editor(terminal, &path) {
+                            Cmd::SkillsNew(name) => match arccode_skills::new_global_path(&name) {
+                                Ok(path) => {
+                                    if !path.exists() {
+                                        if let Err(e) = std::fs::write(
+                                            &path,
+                                            arccode_skills::starter_template(&name),
+                                        ) {
                                             ui.transcript.push(TranscriptItem::Error(format!(
-                                                "/skills new: editor: {e}"
+                                                "/skills new: write failed: {e}"
                                             )));
-                                        } else {
-                                            ui.transcript.push(TranscriptItem::System(format!(
-                                                "skill saved at {}",
-                                                path.display()
-                                            )));
+                                            draw(terminal, ui)?;
+                                            continue;
                                         }
                                     }
-                                    Err(e) => {
+                                    if let Err(e) = launch_editor(terminal, &path) {
                                         ui.transcript.push(TranscriptItem::Error(format!(
-                                            "/skills new: {e}"
+                                            "/skills new: editor: {e}"
+                                        )));
+                                    } else {
+                                        ui.transcript.push(TranscriptItem::System(format!(
+                                            "skill saved at {}",
+                                            path.display()
                                         )));
                                     }
                                 }
-                            }
+                                Err(e) => {
+                                    ui.transcript
+                                        .push(TranscriptItem::Error(format!("/skills new: {e}")));
+                                }
+                            },
                             Cmd::Find(q) => {
                                 let n = ui.transcript.search_set(&q);
                                 ui.transcript.push(TranscriptItem::System(format!(
@@ -1243,30 +1256,48 @@ fn export_transcript(
     let path = dir.join(format!("{ts}.{ext}"));
 
     if format == "json" {
-        let items: Vec<serde_json::Value> = transcript.items.iter().map(|item| {
-            match item {
+        let items: Vec<serde_json::Value> = transcript
+            .items
+            .iter()
+            .map(|item| match item {
                 TranscriptItem::UserPrompt(s) => serde_json::json!({"role": "user", "content": s}),
-                TranscriptItem::AssistantText(s) => serde_json::json!({"role": "assistant", "content": s}),
-                TranscriptItem::ToolCall { name, summary } => serde_json::json!({"role": "tool_call", "name": name, "summary": summary}),
-                TranscriptItem::ToolResult { ok, summary } => serde_json::json!({"role": "tool_result", "ok": ok, "summary": summary}),
+                TranscriptItem::AssistantText(s) => {
+                    serde_json::json!({"role": "assistant", "content": s})
+                }
+                TranscriptItem::ToolCall { name, summary } => {
+                    serde_json::json!({"role": "tool_call", "name": name, "summary": summary})
+                }
+                TranscriptItem::ToolResult { ok, summary } => {
+                    serde_json::json!({"role": "tool_result", "ok": ok, "summary": summary})
+                }
                 TranscriptItem::System(s) => serde_json::json!({"role": "system", "content": s}),
                 TranscriptItem::Error(s) => serde_json::json!({"role": "error", "content": s}),
-            }
-        }).collect();
+            })
+            .collect();
         std::fs::write(&path, serde_json::to_string_pretty(&items)?)?;
     } else {
         let mut md = String::new();
         for item in &transcript.items {
             match item {
-                TranscriptItem::UserPrompt(s) => { md.push_str(&format!("**You:** {s}\n\n")); }
-                TranscriptItem::AssistantText(s) => { md.push_str(&format!("{s}\n\n")); }
-                TranscriptItem::ToolCall { name, summary } => { md.push_str(&format!("> `{name}` {summary}\n")); }
+                TranscriptItem::UserPrompt(s) => {
+                    md.push_str(&format!("**You:** {s}\n\n"));
+                }
+                TranscriptItem::AssistantText(s) => {
+                    md.push_str(&format!("{s}\n\n"));
+                }
+                TranscriptItem::ToolCall { name, summary } => {
+                    md.push_str(&format!("> `{name}` {summary}\n"));
+                }
                 TranscriptItem::ToolResult { ok, summary } => {
                     let glyph = if *ok { "✓" } else { "✗" };
                     md.push_str(&format!("> {glyph} {summary}\n\n"));
                 }
-                TranscriptItem::System(s) => { md.push_str(&format!("*{s}*\n")); }
-                TranscriptItem::Error(s) => { md.push_str(&format!("**Error:** {s}\n\n")); }
+                TranscriptItem::System(s) => {
+                    md.push_str(&format!("*{s}*\n"));
+                }
+                TranscriptItem::Error(s) => {
+                    md.push_str(&format!("**Error:** {s}\n\n"));
+                }
             }
         }
         std::fs::write(&path, md)?;

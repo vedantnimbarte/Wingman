@@ -60,7 +60,12 @@ pub async fn run(file: Option<String>, patch: Option<String>) -> Result<ExitCode
                 continue;
             }
         };
-        println!("\n=== {} → {} ({} hunk(s)) ===", fd.old_path, fd.new_path, fd.hunks.len());
+        println!(
+            "\n=== {} → {} ({} hunk(s)) ===",
+            fd.old_path,
+            fd.new_path,
+            fd.hunks.len()
+        );
         let original = if path.exists() {
             std::fs::read_to_string(&path).unwrap_or_default()
         } else {
@@ -124,14 +129,16 @@ pub async fn run(file: Option<String>, patch: Option<String>) -> Result<ExitCode
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&path, body)
-                .with_context(|| format!("write {}", path.display()))?;
+            std::fs::write(&path, body).with_context(|| format!("write {}", path.display()))?;
             println!("→ wrote {}", path.display());
             written_files += 1;
         } else if quit {
             println!("(quitting without writing changes for {})", path.display());
         } else {
-            println!("(no hunks accepted for {} — file untouched)", path.display());
+            println!(
+                "(no hunks accepted for {} — file untouched)",
+                path.display()
+            );
         }
     }
 
@@ -286,10 +293,8 @@ pub fn parse_unified_diff(text: &str) -> Vec<FileDiff> {
         if let Some(h) = current_hunk.as_mut() {
             if line.starts_with('+') || line.starts_with('-') || line.starts_with(' ') {
                 h.raw.push(line.to_string());
-                if line.starts_with('+') {
-                    h.new_block.push(line[1..].to_string());
-                } else if line.starts_with(' ') {
-                    h.new_block.push(line[1..].to_string());
+                if let Some(rest) = line.strip_prefix('+').or_else(|| line.strip_prefix(' ')) {
+                    h.new_block.push(rest.to_string());
                 }
                 // '-' lines are dropped from new_block by design.
             }
@@ -377,7 +382,10 @@ mod tests {
         let h = &f.hunks[0];
         assert_eq!(h.old_start, 1);
         assert_eq!(h.old_len, 2);
-        assert_eq!(h.new_block, vec!["new".to_string(), "unchanged".to_string()]);
+        assert_eq!(
+            h.new_block,
+            vec!["new".to_string(), "unchanged".to_string()]
+        );
     }
 
     #[test]

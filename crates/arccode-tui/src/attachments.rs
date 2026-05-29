@@ -87,13 +87,8 @@ pub fn expand(prompt: &str, root: &Path) -> ExpandResult {
                 Ok(bytes) => {
                     let media_type = ext_to_media_type(&ext);
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(token);
-                    result
-                        .prompt
-                        .push_str(&format!("[IMAGE: {filename}]"));
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or(token);
+                    result.prompt.push_str(&format!("[IMAGE: {filename}]"));
                     result.images.push(ImageAttachment {
                         path: token.to_string(),
                         media_type: media_type.to_string(),
@@ -112,19 +107,14 @@ pub fn expand(prompt: &str, root: &Path) -> ExpandResult {
             // --- Text attachment ---
             match std::fs::read_to_string(&path) {
                 Ok(contents) => {
-                    let filename = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(token);
-                    result.prompt.push_str(&format!(
-                        "```{filename}\n{contents}\n```"
-                    ));
+                    let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or(token);
+                    result
+                        .prompt
+                        .push_str(&format!("```{filename}\n{contents}\n```"));
                     result.attached += 1;
                 }
                 Err(e) => {
-                    result
-                        .warnings
-                        .push(format!("@{token}: {e}"));
+                    result.warnings.push(format!("@{token}: {e}"));
                     result.prompt.push('@');
                     result.prompt.push_str(token);
                 }

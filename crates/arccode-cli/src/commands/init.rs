@@ -30,8 +30,7 @@ pub async fn run(force: bool) -> Result<ExitCode> {
     let summary = scan(&project.root)?;
     let body = render(&summary);
 
-    std::fs::write(&out_path, body)
-        .with_context(|| format!("writing {}", out_path.display()))?;
+    std::fs::write(&out_path, body).with_context(|| format!("writing {}", out_path.display()))?;
     println!("Wrote {}", out_path.display());
     Ok(ExitCode::SUCCESS)
 }

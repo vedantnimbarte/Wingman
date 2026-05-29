@@ -17,9 +17,8 @@ use crate::Result;
 pub fn open_global_store(embedder: &dyn Embedder) -> Result<Arc<IndexStore>> {
     let dir = arccode_config::ensure_global_dir()?;
     let path = dir.join("sessions.db");
-    let store = IndexStore::open(&path, embedder.id(), embedder.dim()).map_err(|e| {
-        crate::LearnError::Other(format!("could not open sessions.db: {e}"))
-    })?;
+    let store = IndexStore::open(&path, embedder.id(), embedder.dim())
+        .map_err(|e| crate::LearnError::Other(format!("could not open sessions.db: {e}")))?;
     Ok(Arc::new(store))
 }
 
@@ -36,8 +35,9 @@ pub fn chunk_session(session_path: &std::path::Path, cap_chars: usize) -> Result
         .unwrap_or("session")
         .to_string();
 
-    let records = load_session(session_path)
-        .map_err(|e| crate::LearnError::Other(format!("read session {}: {e}", session_path.display())))?;
+    let records = load_session(session_path).map_err(|e| {
+        crate::LearnError::Other(format!("read session {}: {e}", session_path.display()))
+    })?;
 
     let chunk_path = format!("session:{session_id}");
     let mut chunks: Vec<Chunk> = Vec::new();
@@ -88,9 +88,7 @@ pub fn chunk_session(session_path: &std::path::Path, cap_chars: usize) -> Result
                 }
                 ("ASSIST", s)
             }
-            SessionRecord::ToolResult { output, .. } => {
-                ("TOOL", truncate(output, 200))
-            }
+            SessionRecord::ToolResult { output, .. } => ("TOOL", truncate(output, 200)),
             _ => continue,
         };
         if body.trim().is_empty() {
@@ -103,15 +101,33 @@ pub fn chunk_session(session_path: &std::path::Path, cap_chars: usize) -> Result
         // start a new chunk so chunks roughly align to threads of work.
         let is_new_prompt = matches!(rec, SessionRecord::User { .. });
         if is_new_prompt && current.len() >= cap_chars / 2 {
-            flush(&mut current, &mut line_start, &mut line_cursor, &mut chunks, &chunk_path);
+            flush(
+                &mut current,
+                &mut line_start,
+                &mut line_cursor,
+                &mut chunks,
+                &chunk_path,
+            );
         }
         current.push_str(&entry);
         if current.len() >= cap_chars {
-            flush(&mut current, &mut line_start, &mut line_cursor, &mut chunks, &chunk_path);
+            flush(
+                &mut current,
+                &mut line_start,
+                &mut line_cursor,
+                &mut chunks,
+                &chunk_path,
+            );
         }
     }
     if !current.trim().is_empty() {
-        flush(&mut current, &mut line_start, &mut line_cursor, &mut chunks, &chunk_path);
+        flush(
+            &mut current,
+            &mut line_start,
+            &mut line_cursor,
+            &mut chunks,
+            &chunk_path,
+        );
     }
     Ok(chunks)
 }
@@ -311,7 +327,9 @@ mod tests {
         let store_path = dir.join("sessions.db");
         let store = IndexStore::open(&store_path, embedder.id(), embedder.dim()).unwrap();
 
-        let n = index_session_into(&store, &embedder, &session).await.unwrap();
+        let n = index_session_into(&store, &embedder, &session)
+            .await
+            .unwrap();
         assert!(n >= 1);
 
         let hits = search_sessions(&store, &embedder, "cache disable loop", 5)

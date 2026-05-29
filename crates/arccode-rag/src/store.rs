@@ -68,8 +68,7 @@ impl IndexStore {
             .optional()?;
         let existing_dim: Option<i64> = conn
             .query_row("SELECT value FROM meta WHERE key = 'dim'", [], |r| {
-                r.get::<_, String>(0)
-                    .map(|s| s.parse::<i64>().unwrap_or(0))
+                r.get::<_, String>(0).map(|s| s.parse::<i64>().unwrap_or(0))
             })
             .optional()?;
 
@@ -227,9 +226,8 @@ impl IndexStore {
             return Ok(Vec::new());
         }
         let conn = self.db.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT path, start_line, end_line, content, embedding, symbol FROM chunks",
-        )?;
+        let mut stmt = conn
+            .prepare("SELECT path, start_line, end_line, content, embedding, symbol FROM chunks")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, String>(0)?,

@@ -99,20 +99,15 @@ struct Hit {
 }
 
 fn parse_ddg(html: &str, limit: usize) -> Vec<Hit> {
-    let result_re =
-        Regex::new(r#"(?is)<a\s+rel="nofollow"\s+class="result__a"\s+href="([^"]+)"[^>]*>(.*?)</a>"#)
-            .unwrap();
-    let snippet_re =
-        Regex::new(r#"(?is)<a\s+class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+    let result_re = Regex::new(
+        r#"(?is)<a\s+rel="nofollow"\s+class="result__a"\s+href="([^"]+)"[^>]*>(.*?)</a>"#,
+    )
+    .unwrap();
+    let snippet_re = Regex::new(r#"(?is)<a\s+class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
 
     let titles: Vec<(String, String)> = result_re
         .captures_iter(html)
-        .map(|c| {
-            (
-                clean_url(&c[1]),
-                strip_tags(&c[2]),
-            )
-        })
+        .map(|c| (clean_url(&c[1]), strip_tags(&c[2])))
         .collect();
     let snippets: Vec<String> = snippet_re
         .captures_iter(html)

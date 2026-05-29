@@ -83,9 +83,7 @@ impl Tool for InvokeSkill {
 
         ToolOutcome::ok(format!(
             "# Skill: {} ({})\n{}\n\n(Apply the above instructions for the rest of this turn.)",
-            skill.name,
-            skill.description,
-            skill.body
+            skill.name, skill.description, skill.body
         ))
     }
 }

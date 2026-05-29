@@ -64,10 +64,11 @@ impl SupervisedCommand {
     pub fn spawn(mut self) -> Result<Supervisor, SupervisorError> {
         #[cfg(unix)]
         {
-            use std::os::unix::process::CommandExt;
             // SAFETY: setsid is async-signal-safe and is the standard
             // mechanism for putting a child in its own process group. The
             // closure runs post-fork / pre-exec in the child.
+            // Note: tokio::process::Command exposes `pre_exec` as an
+            // inherent method on Unix, so no `CommandExt` import is needed.
             unsafe {
                 self.cmd.pre_exec(|| match nix::unistd::setsid() {
                     Ok(_) => Ok(()),
@@ -245,12 +246,13 @@ mod windows_impl {
     use super::SupervisorError;
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-        TerminateJobObject, JobObjectExtendedLimitInformation,
-        JOBOBJECT_BASIC_LIMIT_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_LIMIT_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, PROCESS_SET_QUOTA};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
 
     /// RAII wrapper around a Job Object handle; closes on drop.
     pub struct JobHandle(HANDLE);
@@ -343,15 +345,16 @@ mod windows_impl {
         }
         match cmd.status() {
             Ok(_) => Ok(()), // Non-zero exit usually means the process is
-                              // already gone; treat as success.
+            // already gone; treat as success.
             Err(e) => Err(SupervisorError::Io(e)),
         }
     }
 
     fn io_err(label: &str) -> SupervisorError {
-        SupervisorError::Io(std::io::Error::other(
-            format!("{label} failed: {}", std::io::Error::last_os_error()),
-        ))
+        SupervisorError::Io(std::io::Error::other(format!(
+            "{label} failed: {}",
+            std::io::Error::last_os_error()
+        )))
     }
 }
 

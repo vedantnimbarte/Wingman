@@ -84,11 +84,7 @@ impl Tool for WebFetch {
         let slice = &bytes[..bytes.len().min(MAX_BYTES)];
         let text = String::from_utf8_lossy(slice).into_owned();
 
-        let body = if args.raw {
-            text
-        } else {
-            strip_html(&text)
-        };
+        let body = if args.raw { text } else { strip_html(&text) };
 
         let header = format!(
             "url: {final_url}\nstatus: {status}{trunc}\n---\n",

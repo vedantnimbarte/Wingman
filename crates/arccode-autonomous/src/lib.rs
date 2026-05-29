@@ -32,7 +32,10 @@ pub use store::{RunStore, StoreError};
 /// Build the conventional run directory under a project root:
 /// `<project>/.arccode/autonomous/<run-id>/`.
 pub fn run_dir(project_root: &std::path::Path, run_id: &str) -> std::path::PathBuf {
-    project_root.join(".arccode").join("autonomous").join(run_id)
+    project_root
+        .join(".arccode")
+        .join("autonomous")
+        .join(run_id)
 }
 
 /// Build the conventional worker worktree path:

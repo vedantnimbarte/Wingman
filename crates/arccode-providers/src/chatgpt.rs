@@ -69,10 +69,7 @@ impl Provider for ChatGptProvider {
             .post(CODEX_URL)
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
-            .header(
-                "authorization",
-                format!("Bearer {}", self.access_token),
-            )
+            .header("authorization", format!("Bearer {}", self.access_token))
             .json(&body)
             .send()
             .await
@@ -101,8 +98,7 @@ impl Provider for ChatGptProvider {
             name: String,
             args: String,
         }
-        let mut fn_accs: std::collections::HashMap<u32, FnAcc> =
-            std::collections::HashMap::new();
+        let mut fn_accs: std::collections::HashMap<u32, FnAcc> = std::collections::HashMap::new();
 
         let stream = async_stream::try_stream! {
             while let Some(item) = events.next().await {
@@ -259,14 +255,8 @@ impl Provider for ChatGptProvider {
 }
 
 fn parse_usage(v: &Value) -> Option<Usage> {
-    let input = v
-        .get("input_tokens")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
-    let output = v
-        .get("output_tokens")
-        .and_then(|x| x.as_u64())
-        .unwrap_or(0) as u32;
+    let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     Some(Usage {
         input_tokens: input,
         output_tokens: output,

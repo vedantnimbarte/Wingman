@@ -68,7 +68,8 @@ impl FilePicker {
     /// Returns all checked paths, or the single highlighted path if none checked.
     pub fn take_selected_all(&mut self) -> Vec<String> {
         if !self.checked.is_empty() {
-            let mut result: Vec<String> = self.checked
+            let mut result: Vec<String> = self
+                .checked
                 .iter()
                 .filter_map(|&i| self.entries.get(i).cloned())
                 .collect();
@@ -98,15 +99,11 @@ impl FilePicker {
                 self.query.pop();
                 self.rerank();
             }
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.ranked.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Down if self.selected + 1 < self.ranked.len() => {
+                self.selected += 1;
             }
             KeyCode::Enter => {
                 if self.ranked.is_empty() {
@@ -138,7 +135,7 @@ impl FilePicker {
                 pattern.score(needle, &mut matcher).map(|s| (i, s))
             })
             .collect();
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
         self.ranked = scored.into_iter().map(|(i, _)| i).collect();
     }
 
@@ -176,7 +173,7 @@ impl FilePicker {
         // Render a window around the selected entry so navigation past the
         // bottom keeps the cursor visible.
         let height = chunks[1].height as usize;
-        let visible = height.max(1).min(VISIBLE_ROWS);
+        let visible = height.clamp(1, VISIBLE_ROWS);
         let start = self.selected.saturating_sub(visible.saturating_sub(1));
         let end = (start + visible).min(self.ranked.len());
         let items: Vec<ListItem> = self.ranked[start..end]
@@ -187,13 +184,15 @@ impl FilePicker {
                 let entry = &self.entries[idx];
                 let is_checked = self.checked.contains(&idx);
                 let marker = match (i == self.selected, is_checked) {
-                    (true, true)   => "›☑ ",
-                    (true, false)  => "›  ",
-                    (false, true)  => " ☑ ",
+                    (true, true) => "›☑ ",
+                    (true, false) => "›  ",
+                    (false, true) => " ☑ ",
                     (false, false) => "   ",
                 };
                 let style = if i == self.selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };

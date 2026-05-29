@@ -266,9 +266,7 @@ async fn connect_http(name: &str, cfg: &McpServerConfig) -> Result<McpServer, Mc
         serde_json::from_str(&text).map_err(|e| McpError::Http(e.to_string()))?;
 
     if let Some(err) = val.get("error") {
-        return Err(McpError::Rpc(format!(
-            "tools/list error for {name}: {err}"
-        )));
+        return Err(McpError::Rpc(format!("tools/list error for {name}: {err}")));
     }
 
     let result = val.get("result").unwrap_or(&serde_json::Value::Null);

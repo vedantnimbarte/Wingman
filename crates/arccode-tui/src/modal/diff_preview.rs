@@ -64,7 +64,9 @@ impl DiffPreviewModal {
             .border_style(Style::default().fg(Color::Yellow))
             .title(Span::styled(
                 format!(" Diff preview: {} ", self.path),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(rect);
         block.render(rect, buf);
@@ -75,17 +77,30 @@ impl DiffPreviewModal {
             .split(inner);
 
         // Render diff with colored lines
-        let lines: Vec<Line> = self.diff.lines().map(|line| {
-            if line.starts_with('+') && !line.starts_with("+++") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Green)))
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red)))
-            } else if line.starts_with("@@") {
-                Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Cyan)))
-            } else {
-                Line::from(Span::raw(line.to_string()))
-            }
-        }).collect();
+        let lines: Vec<Line> = self
+            .diff
+            .lines()
+            .map(|line| {
+                if line.starts_with('+') && !line.starts_with("+++") {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Green),
+                    ))
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Red),
+                    ))
+                } else if line.starts_with("@@") {
+                    Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::Cyan),
+                    ))
+                } else {
+                    Line::from(Span::raw(line.to_string()))
+                }
+            })
+            .collect();
 
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -93,9 +108,21 @@ impl DiffPreviewModal {
             .render(chunks[0], buf);
 
         Paragraph::new(Line::from(vec![
-            Span::styled(" y ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " y ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Apply  "),
-            Span::styled(" n ", Style::default().fg(Color::Black).bg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " n ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" Reject  "),
             Span::styled(" ↑↓ ", Style::default().fg(Color::DarkGray)),
             Span::raw("Scroll"),

@@ -126,12 +126,7 @@ fn load_one(path: &Path, source: SkillSource) -> Result<Skill, SkillError> {
         .and_then(|s| s.to_str())
         .unwrap_or("unnamed")
         .to_string();
-    let name = fm
-        .get("name")
-        .cloned()
-        .unwrap_or(stem)
-        .trim()
-        .to_string();
+    let name = fm.get("name").cloned().unwrap_or(stem).trim().to_string();
     let description = fm
         .get("description")
         .cloned()
@@ -152,7 +147,10 @@ fn load_one(path: &Path, source: SkillSource) -> Result<Skill, SkillError> {
 /// content is treated as body.
 fn split_frontmatter(text: &str) -> (&str, &str) {
     let trimmed = text.trim_start_matches('\u{FEFF}'); // BOM guard
-    if let Some(rest) = trimmed.strip_prefix("---\n").or_else(|| trimmed.strip_prefix("---\r\n")) {
+    if let Some(rest) = trimmed
+        .strip_prefix("---\n")
+        .or_else(|| trimmed.strip_prefix("---\r\n"))
+    {
         if let Some(end) = find_closing_fence(rest) {
             let (front, after) = rest.split_at(end.0);
             // Skip the closing fence and its newline.

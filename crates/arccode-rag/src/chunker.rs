@@ -181,10 +181,7 @@ mod tests {
         let src = "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n";
         let chunks = c.chunk("file.rs", src);
         // Each fn becomes its own semantic chunk with the symbol tagged.
-        let named: Vec<&str> = chunks
-            .iter()
-            .filter_map(|c| c.symbol.as_deref())
-            .collect();
+        let named: Vec<&str> = chunks.iter().filter_map(|c| c.symbol.as_deref()).collect();
         assert!(named.iter().any(|s| s.starts_with("fn:alpha")));
         assert!(named.iter().any(|s| s.starts_with("fn:beta")));
         assert!(named.iter().any(|s| s.starts_with("fn:gamma")));

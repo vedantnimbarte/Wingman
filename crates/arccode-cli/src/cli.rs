@@ -395,9 +395,11 @@ pub async fn run() -> Result<ExitCode> {
             MemoryAction::Import { path, force } => commands::memory::import(path, force).await,
             MemoryAction::Diff { a, b } => commands::memory::diff(a, b).await,
         },
-        Some(Command::Review { pr, local, template }) => {
-            commands::review::run(pr, local, template).await
-        }
+        Some(Command::Review {
+            pr,
+            local,
+            template,
+        }) => commands::review::run(pr, local, template).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
@@ -444,9 +446,10 @@ pub async fn run() -> Result<ExitCode> {
                 .await
             }
             PilotAction::Status { run_id } => commands::pilot::status(run_id).await,
-            PilotAction::Watch { run_id, interval_ms } => {
-                commands::pilot::watch(run_id, interval_ms).await
-            }
+            PilotAction::Watch {
+                run_id,
+                interval_ms,
+            } => commands::pilot::watch(run_id, interval_ms).await,
             PilotAction::Resume { run_id, no_pr } => {
                 let cfg = load_config()?;
                 commands::pilot::resume(cfg, run_id, no_pr, cli.model).await
@@ -502,22 +505,22 @@ pub async fn run() -> Result<ExitCode> {
             // we still open the TUI — the user can run /login to set one up.
             let (selection, agent) =
                 match crate::runtime::resolve_selection(&cfg, cli.model.as_deref()) {
-                    Ok(sel) => match crate::runtime::build_agent_and_registry(&cfg, &sel, mode)
-                        .await
-                    {
-                        Ok((a, registry)) => {
-                            let mcp = std::sync::Arc::new(crate::mcp_registry::McpRegistry::new(
-                                registry,
-                            ));
-                            mcp.seed(&cfg.mcp).await;
-                            *mcp_handle.lock().expect("mcp_handle poisoned") = Some(mcp);
-                            (Some(sel), Some(a))
+                    Ok(sel) => {
+                        match crate::runtime::build_agent_and_registry(&cfg, &sel, mode).await {
+                            Ok((a, registry)) => {
+                                let mcp = std::sync::Arc::new(
+                                    crate::mcp_registry::McpRegistry::new(registry),
+                                );
+                                mcp.seed(&cfg.mcp).await;
+                                *mcp_handle.lock().expect("mcp_handle poisoned") = Some(mcp);
+                                (Some(sel), Some(a))
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to build agent at startup: {e}");
+                                (Some(sel), None)
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!("failed to build agent at startup: {e}");
-                            (Some(sel), None)
-                        }
-                    },
+                    }
                     Err(e) => {
                         tracing::info!("no provider configured: {e}");
                         (None, None)
@@ -557,9 +560,8 @@ pub async fn run() -> Result<ExitCode> {
                             crate::runtime::build_agent_and_registry(&cfg, &sel, mode)
                                 .await
                                 .map_err(|e| e.to_string())?;
-                        let mcp = std::sync::Arc::new(crate::mcp_registry::McpRegistry::new(
-                            registry,
-                        ));
+                        let mcp =
+                            std::sync::Arc::new(crate::mcp_registry::McpRegistry::new(registry));
                         mcp.seed(&cfg.mcp).await;
                         *mcp_slot.lock().expect("mcp_handle poisoned") = Some(mcp);
                         Ok(agent)
@@ -568,13 +570,12 @@ pub async fn run() -> Result<ExitCode> {
 
             // Login-task runner: probes a freshly-entered key, persists
             // credentials, or runs the ChatGPT OAuth browser flow.
-            let login_runner: arccode_tui::LoginRunner = std::sync::Arc::new(
-                move |task: arccode_tui::modal::LoginTask| {
+            let login_runner: arccode_tui::LoginRunner =
+                std::sync::Arc::new(move |task: arccode_tui::modal::LoginTask| {
                     Box::pin(async move {
                         // OAuthLogin is handled here rather than in login.rs
                         // because it needs async I/O (network + local server).
-                        if let arccode_tui::modal::LoginTask::OAuthLogin { ref provider_id } =
-                            task
+                        if let arccode_tui::modal::LoginTask::OAuthLogin { ref provider_id } = task
                         {
                             if provider_id == "chatgpt" {
                                 return run_chatgpt_oauth().await;
@@ -582,8 +583,7 @@ pub async fn run() -> Result<ExitCode> {
                         }
                         crate::login::run_login_task(task).await
                     })
-                },
-            );
+                });
 
             // Logout: clear a provider's keyring entry. Sync — the keyring
             // call is fast and blocking.

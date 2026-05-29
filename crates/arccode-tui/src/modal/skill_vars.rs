@@ -60,10 +60,8 @@ impl SkillVarsModal {
                     return ModalOutcome::Close;
                 }
             }
-            KeyCode::Tab => {
-                if self.current + 1 < self.vars.len() {
-                    self.current += 1;
-                }
+            KeyCode::Tab if self.current + 1 < self.vars.len() => {
+                self.current += 1;
             }
             KeyCode::Backspace => {
                 if let Some(v) = self.values.get_mut(&var) {
@@ -83,23 +81,34 @@ impl SkillVarsModal {
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
         let height = (self.vars.len() as u16 * 3 + 5).min(area.height.saturating_sub(4));
         let rect = centered_rect(area, 60, 70);
-        let rect = Rect { height: height.min(rect.height), ..rect };
+        let rect = Rect {
+            height: height.min(rect.height),
+            ..rect
+        };
         Clear.render(rect, buf);
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow))
             .title(Span::styled(
                 " Skill Variables ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(rect);
         block.render(rect, buf);
 
-        let mut constraints: Vec<Constraint> = self.vars.iter().flat_map(|_| [
-            Constraint::Length(1), // label
-            Constraint::Length(1), // input
-            Constraint::Length(1), // spacer
-        ]).collect();
+        let mut constraints: Vec<Constraint> = self
+            .vars
+            .iter()
+            .flat_map(|_| {
+                [
+                    Constraint::Length(1), // label
+                    Constraint::Length(1), // input
+                    Constraint::Length(1), // spacer
+                ]
+            })
+            .collect();
         constraints.push(Constraint::Min(1));
 
         let chunks = Layout::default()
@@ -115,7 +124,9 @@ impl SkillVarsModal {
             }
             let is_active = i == self.current;
             let label_style = if is_active {
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };

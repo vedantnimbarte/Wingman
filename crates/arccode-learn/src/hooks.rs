@@ -92,7 +92,9 @@ impl LearnHook {
     /// negation heuristics.
     fn score_pending_outcome(&self, history: &[Message]) {
         let mut signals = self.signals.lock().unwrap();
-        let Some(row_id) = signals.pending_skill_row else { return };
+        let Some(row_id) = signals.pending_skill_row else {
+            return;
+        };
         // Find the latest user turn that arrived *after* the invoke (we
         // record the invoke at assistant turn k, so the next user turn is
         // the response we're judging).
@@ -109,7 +111,9 @@ impl LearnHook {
         if let Some(text) = last_user_text {
             let outcome = match looks_like_correction(&text) {
                 Some(sig) => {
-                    let _ = self.stats.set_outcome(row_id, Outcome::Corrected, Some(sig));
+                    let _ = self
+                        .stats
+                        .set_outcome(row_id, Outcome::Corrected, Some(sig));
                     Outcome::Corrected
                 }
                 None => {
@@ -145,10 +149,7 @@ impl LearningHook for LearnHook {
         let mut hints: Vec<String> = Vec::new();
 
         // Quiet-session nudge.
-        let quiet = self
-            .stats
-            .counter_get("sessions_without_save")
-            .unwrap_or(0);
+        let quiet = self.stats.counter_get("sessions_without_save").unwrap_or(0);
         if quiet >= self.cfg.nudge_after_n_quiet {
             hints.push(proposal::nudge_line().to_string());
         }

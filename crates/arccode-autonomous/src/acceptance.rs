@@ -142,10 +142,7 @@ fn run_shell(cmd: &str, cwd: &Path) -> AcceptanceResult {
                         .code()
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "signal".to_string());
-                    return AcceptanceResult::fail(
-                        label,
-                        format!("exit {code}\n{tail}"),
-                    );
+                    return AcceptanceResult::fail(label, format!("exit {code}\n{tail}"));
                 }
             }
             Ok(None) => {
@@ -171,7 +168,9 @@ fn run_grep(pattern: &str, path: &str, cwd: &Path) -> AcceptanceResult {
     let full = cwd.join(path);
     let body = match std::fs::read_to_string(&full) {
         Ok(b) => b,
-        Err(e) => return AcceptanceResult::fail(label, format!("read {} failed: {e}", full.display())),
+        Err(e) => {
+            return AcceptanceResult::fail(label, format!("read {} failed: {e}", full.display()))
+        }
     };
     // Plain substring match; the planner uses grep checks as cheap
     // "did the string land in the file?" probes, not full regexes.
@@ -260,9 +259,7 @@ mod tests {
     fn shell_check_passes_for_zero_exit() {
         let dir = tempdir().unwrap();
         let cmd = if cfg!(windows) { "exit 0" } else { "true" };
-        let checks = vec![Acceptance::Shell {
-            cmd: cmd.into(),
-        }];
+        let checks = vec![Acceptance::Shell { cmd: cmd.into() }];
         let results = run_acceptance_checks(&checks, dir.path());
         assert!(results[0].ok, "expected ok, got {:?}", results[0]);
     }
@@ -271,9 +268,7 @@ mod tests {
     fn shell_check_fails_for_nonzero_exit() {
         let dir = tempdir().unwrap();
         let cmd = if cfg!(windows) { "exit 1" } else { "false" };
-        let checks = vec![Acceptance::Shell {
-            cmd: cmd.into(),
-        }];
+        let checks = vec![Acceptance::Shell { cmd: cmd.into() }];
         let results = run_acceptance_checks(&checks, dir.path());
         assert!(!results[0].ok);
         assert!(results[0].output.contains("exit"));

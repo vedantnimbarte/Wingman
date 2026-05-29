@@ -8,8 +8,8 @@
 use arccode_config::{global_config_path, secrets, Config};
 use arccode_core::Provider;
 use arccode_providers::{
-    probe, AnthropicProvider, ChatGptProvider, CohereProvider, GeminiProvider, OpenAiCompatProvider,
-    OpenAiVariant, WatsonxCredential, WatsonxProvider,
+    probe, AnthropicProvider, ChatGptProvider, CohereProvider, GeminiProvider,
+    OpenAiCompatProvider, OpenAiVariant, WatsonxCredential, WatsonxProvider,
 };
 use arccode_tui::modal::{LoginPayload, LoginTask};
 use std::sync::Arc;
@@ -20,9 +20,9 @@ pub async fn run_login_task(task: LoginTask) -> Result<(), String> {
         LoginTask::Probe(payload) => probe_payload(&payload).await,
         LoginTask::Commit(payload) => commit_payload(&payload).await,
         // OAuthLogin is fully handled in cli.rs's login_runner before reaching here.
-        LoginTask::OAuthLogin { provider_id } => {
-            Err(format!("unexpected OAuthLogin for '{provider_id}' in login task runner"))
-        }
+        LoginTask::OAuthLogin { provider_id } => Err(format!(
+            "unexpected OAuthLogin for '{provider_id}' in login task runner"
+        )),
     }
 }
 
@@ -40,11 +40,8 @@ async fn commit_payload(p: &LoginPayload) -> Result<(), String> {
     // 2. Determine whether a keyring marker should be written to the config.
     //    For chatgpt the tokens are written directly by the OAuth runner, so
     //    `api_key` is None in the payload — but the keychain entry exists.
-    let with_keyring = p.api_key.is_some()
-        || secrets::load(&p.provider_id)
-            .ok()
-            .flatten()
-            .is_some();
+    let with_keyring =
+        p.api_key.is_some() || secrets::load(&p.provider_id).ok().flatten().is_some();
 
     // 3. Update the global config file to point at this provider+model and
     //    record either the keyring marker (for providers with a key) or the
@@ -111,8 +108,8 @@ fn build_provider(p: &LoginPayload) -> Result<Arc<dyn Provider>, String> {
                     .to_string()
             })?;
             let key = api_key.ok_or("watsonx requires an API key")?;
-            let mut prov = WatsonxProvider::new(WatsonxCredential::ApiKey(key), project_id)
-                .map_err(mk_err)?;
+            let mut prov =
+                WatsonxProvider::new(WatsonxCredential::ApiKey(key), project_id).map_err(mk_err)?;
             if let Some(url) = base_url {
                 prov = prov.with_base_url(url);
             }
@@ -202,4 +199,3 @@ fn openai_variant(id: &str) -> Option<OpenAiVariant> {
         _ => return None,
     })
 }
-

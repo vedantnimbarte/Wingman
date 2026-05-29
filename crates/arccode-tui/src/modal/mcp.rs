@@ -138,15 +138,11 @@ impl McpView {
 
     fn handle_list(&mut self, k: KeyEvent) -> ModalOutcome {
         match k.code {
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.servers.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Down if self.selected + 1 < self.servers.len() => {
+                self.selected += 1;
             }
             KeyCode::Char('n') | KeyCode::Char('N') => {
                 self.mode = Mode::Add;
@@ -203,11 +199,7 @@ impl McpView {
                         self.pending = Some(McpTask::Add(McpAddPayload {
                             name: self.name.trim().to_string(),
                             command: self.command.trim().to_string(),
-                            args: self
-                                .args
-                                .split_whitespace()
-                                .map(str::to_string)
-                                .collect(),
+                            args: self.args.split_whitespace().map(str::to_string).collect(),
                         }));
                     }
                 }
@@ -277,7 +269,9 @@ impl McpView {
             .map(|(i, s)| {
                 let status = if s.connected { "● live" } else { "○ idle" };
                 let style = if i == self.selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default()
                 };
@@ -308,7 +302,9 @@ impl McpView {
             let active = field == self.add_field;
             let arrow = if active { "› " } else { "  " };
             let label_style = if active {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
@@ -349,7 +345,9 @@ impl McpView {
             ))
         } else {
             let hint = match self.mode {
-                Mode::List => "↑/↓ select · n new · c connect · d disconnect · r remove · Esc close",
+                Mode::List => {
+                    "↑/↓ select · n new · c connect · d disconnect · r remove · Esc close"
+                }
                 Mode::Add => "Tab/↑↓ next field · Enter advance / submit · Esc back",
             };
             Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))

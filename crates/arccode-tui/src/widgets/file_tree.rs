@@ -87,9 +87,7 @@ impl FileTree {
     /// Returns Some(path) if the user picked a file; descends into a
     /// directory and returns None.
     pub fn enter(&mut self) -> Option<PathBuf> {
-        let Some(e) = self.entries.get(self.selected).cloned() else {
-            return None;
-        };
+        let e = self.entries.get(self.selected).cloned()?;
         if e.is_dir {
             if e.name == ".." {
                 if let Some(parent) = self.cwd.parent() {
@@ -127,7 +125,11 @@ impl<'a> Widget for FileTreeView<'a> {
             .strip_prefix(&self.tree.root)
             .map(|r| r.to_string_lossy().into_owned())
             .unwrap_or_else(|_| "/".into());
-        let title = if rel.is_empty() { "./".to_string() } else { format!("./{rel}") };
+        let title = if rel.is_empty() {
+            "./".to_string()
+        } else {
+            format!("./{rel}")
+        };
         let items: Vec<ListItem> = self
             .tree
             .entries

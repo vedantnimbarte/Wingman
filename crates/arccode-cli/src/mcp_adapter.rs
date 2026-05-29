@@ -32,4 +32,3 @@ impl Tool for McpToolAdapter {
         self.inner.run(args).await
     }
 }
-

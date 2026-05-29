@@ -79,7 +79,8 @@ fn config_for(lang: Language) -> Option<HighlightConfiguration> {
             "",
         ),
     };
-    let mut cfg = HighlightConfiguration::new(ts_lang, lang.label(), highlights, injections, locals).ok()?;
+    let mut cfg =
+        HighlightConfiguration::new(ts_lang, lang.label(), highlights, injections, locals).ok()?;
     cfg.configure(HIGHLIGHT_NAMES);
     Some(cfg)
 }
@@ -97,12 +98,22 @@ pub struct Span {
 /// single plain-text span on parser failure.
 pub fn highlight(lang: Language, src: &str) -> Vec<Span> {
     let Some(cfg) = config_for(lang) else {
-        return vec![Span { start_byte: 0, end_byte: src.len(), scope: None }];
+        return vec![Span {
+            start_byte: 0,
+            end_byte: src.len(),
+            scope: None,
+        }];
     };
     let mut highlighter = Highlighter::new();
     let events = match highlighter.highlight(&cfg, src.as_bytes(), None, |_| None) {
         Ok(it) => it,
-        Err(_) => return vec![Span { start_byte: 0, end_byte: src.len(), scope: None }],
+        Err(_) => {
+            return vec![Span {
+                start_byte: 0,
+                end_byte: src.len(),
+                scope: None,
+            }]
+        }
     };
     let mut out = Vec::new();
     let mut scope_stack: Vec<usize> = Vec::new();
@@ -125,7 +136,11 @@ pub fn highlight(lang: Language, src: &str) -> Vec<Span> {
         }
     }
     if out.is_empty() {
-        out.push(Span { start_byte: 0, end_byte: src.len(), scope: None });
+        out.push(Span {
+            start_byte: 0,
+            end_byte: src.len(),
+            scope: None,
+        });
     }
     out
 }

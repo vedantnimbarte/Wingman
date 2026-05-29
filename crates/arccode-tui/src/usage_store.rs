@@ -73,8 +73,7 @@ fn file_path() -> Option<PathBuf> {
 }
 
 fn atomic_write_json(path: &Path, data: &BTreeMap<String, Usage>) -> std::io::Result<()> {
-    let text = serde_json::to_string_pretty(data)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let text = serde_json::to_string_pretty(data).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)?;

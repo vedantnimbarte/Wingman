@@ -76,10 +76,7 @@ pub fn render_pr_body(state: &RunState) -> String {
     }
     let _ = writeln!(s);
 
-    if state.totals.usd > 0.0
-        || state.totals.tokens_in > 0
-        || state.totals.tokens_out > 0
-    {
+    if state.totals.usd > 0.0 || state.totals.tokens_in > 0 || state.totals.tokens_out > 0 {
         let _ = writeln!(
             s,
             "## Run cost\n\n- total: ${:.2}\n- tokens: in={} out={}\n",
@@ -181,7 +178,15 @@ pub async fn open_pull_request(
             .map(|o| o.success())
             .unwrap_or(false);
         if auth {
-            create_via_gh(runner, gh, repo_root, base_branch, integration_branch, &title, &body)?
+            create_via_gh(
+                runner,
+                gh,
+                repo_root,
+                base_branch,
+                integration_branch,
+                &title,
+                &body,
+            )?
         } else {
             tracing::info!(target: "pilot::pr", "gh present but not authenticated; falling back to push");
             fallback_push(runner, repo_root, integration_branch, base_branch)?
@@ -213,12 +218,7 @@ fn create_via_gh(
     // ref is reachable on the remote.
     let push = runner.run(
         "git",
-        &[
-            "push",
-            "-u",
-            "origin",
-            integration_branch,
-        ],
+        &["push", "-u", "origin", integration_branch],
         repo_root,
     )?;
     if !push.success() {
@@ -414,7 +414,11 @@ mod tests {
         let title = render_pr_title(&s);
         // 60 char goal cap + prefix overhead.
         assert!(title.chars().count() <= 90);
-        assert!(title.contains("…") || !title.contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(
+            title.contains("…")
+                || !title
+                    .contains("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
     }
 
     #[test]
@@ -563,12 +567,7 @@ mod tests {
         runner.respond("gh", &["auth", "status"], ok("logged in"));
         runner.respond(
             "git",
-            &[
-                "push",
-                "-u",
-                "origin",
-                "arccode/auto/2026-05-27-1430-abc",
-            ],
+            &["push", "-u", "origin", "arccode/auto/2026-05-27-1430-abc"],
             ok(""),
         );
         // gh prints the URL on stdout when it succeeds.
@@ -609,7 +608,10 @@ mod tests {
         assert!(log.contains(r#""ev":"run.pr""#));
         assert!(log.contains(r#""ev":"run.done""#));
         assert!(log.contains("https://github.com/vedant/arccode/pull/42"));
-        assert_eq!(store.state().pr_url.as_deref(), Some("https://github.com/vedant/arccode/pull/42"));
+        assert_eq!(
+            store.state().pr_url.as_deref(),
+            Some("https://github.com/vedant/arccode/pull/42")
+        );
     }
 
     /// gh missing → push fallback. The remote URL is derived from `git
@@ -618,15 +620,9 @@ mod tests {
     #[tokio::test]
     async fn gh_missing_path_falls_back_to_push_and_compare_url() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = RunStore::create(
-            dir.path(),
-            "r1",
-            "a goal",
-            "abc12345",
-            "arccode/auto/r1",
-        )
-        .await
-        .unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "a goal", "abc12345", "arccode/auto/r1")
+            .await
+            .unwrap();
         let state = store.state().clone();
 
         let runner = MockCommandRunner::new();
@@ -640,11 +636,7 @@ mod tests {
                 stderr: "gh: command not found".into(),
             },
         );
-        runner.respond(
-            "git",
-            &["push", "-u", "origin", "arccode/auto/r1"],
-            ok(""),
-        );
+        runner.respond("git", &["push", "-u", "origin", "arccode/auto/r1"], ok(""));
         runner.respond(
             "git",
             &["remote", "get-url", "origin"],
@@ -669,7 +661,9 @@ mod tests {
 
         let calls = runner.calls();
         assert!(
-            calls.iter().any(|(p, a)| p == "git" && a == &["push", "-u", "origin", "arccode/auto/r1"]),
+            calls
+                .iter()
+                .any(|(p, a)| p == "git" && a == &["push", "-u", "origin", "arccode/auto/r1"]),
             "git push not invoked in fallback path: {calls:?}"
         );
     }

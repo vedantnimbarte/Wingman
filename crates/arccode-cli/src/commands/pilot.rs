@@ -84,7 +84,10 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
 
     eprintln!(
         "[pilot] run {run_id} · tier={} · planner={}/{} · base={}",
-        pilot.tier, selection.provider_id, selection.model, &base_commit[..8.min(base_commit.len())]
+        pilot.tier,
+        selection.provider_id,
+        selection.model,
+        &base_commit[..8.min(base_commit.len())]
     );
     eprintln!("[pilot] planning…");
 
@@ -103,21 +106,23 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         .await
         .context("planner call failed")?;
 
-    eprintln!("[pilot] proposed {} task(s) (run id: {run_id}).", plan.len());
+    eprintln!(
+        "[pilot] proposed {} task(s) (run id: {run_id}).",
+        plan.len()
+    );
     eprint!("\n{}", render_plan(&plan));
 
     // E1 trust-tiered approval. Classifier decides whether to proceed
     // silently (auto), surface a veto window (notify-only), or fall
     // back to the y/e/n prompt (hard).
-    let report = arccode_autonomous::approval::classify(
-        arccode_autonomous::approval::ClassifyInputs {
+    let report =
+        arccode_autonomous::approval::classify(arccode_autonomous::approval::ClassifyInputs {
             plan: &plan,
             config: &pilot.approval,
             tier: pilot.tier,
             force_auto: opts.yes,
             force_hard: opts.review,
-        },
-    );
+        });
     eprintln!(
         "[pilot] approval: {} (est. ${:.2}) — {}",
         report.tier, report.estimated_usd, report.reason
@@ -136,9 +141,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         }
         arccode_autonomous::approval::ApprovalTier::Hard => {
             if !std::io::stdin().is_terminal() {
-                eprintln!(
-                    "[pilot] hard-gate required and no TTY — refusing to auto-approve plan."
-                );
+                eprintln!("[pilot] hard-gate required and no TTY — refusing to auto-approve plan.");
                 false
             } else {
                 prompt_for_approval(&plan, &opts.goal)?
@@ -166,8 +169,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    let base_branch =
-        std::env::var("ARCCODE_PILOT_BASE_BRANCH").unwrap_or_else(|_| "main".into());
+    let base_branch = std::env::var("ARCCODE_PILOT_BASE_BRANCH").unwrap_or_else(|_| "main".into());
     let orch_cfg = arccode_autonomous::orchestrator::OrchestratorConfig {
         max_concurrent_agents: pilot.max_concurrent_agents,
         task_timeout: std::time::Duration::from_secs(pilot.task_timeout_secs),
@@ -193,7 +195,10 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         max_ticks: 64,
     };
 
-    eprintln!("[pilot] driving manager loop ({} ticks max)…", inputs.max_ticks);
+    eprintln!(
+        "[pilot] driving manager loop ({} ticks max)…",
+        inputs.max_ticks
+    );
     let outcome = arccode_autonomous::pipeline::run_to_completion(store, inputs)
         .await
         .context("pipeline run_to_completion")?;
@@ -483,61 +488,61 @@ fn build_real_worker_spawner(
     let arccode_bin = std::env::current_exe().context("locating arccode binary")?;
     let worker_model = worker_model.to_string();
     let manager_model = manager_model.to_string();
-    Ok(std::sync::Arc::new(move |ctx: arccode_autonomous::orchestrator::SpawnContext| {
-        let arccode_bin = arccode_bin.clone();
-        let worker_model = worker_model.clone();
-        let manager_model = manager_model.clone();
-        Box::pin(async move {
-            // E5 rung 2: escalate to the manager model when the
-            // orchestrator flagged this attempt as needing it.
-            let model = if ctx.escalate_model {
-                Some(manager_model)
-            } else {
-                Some(worker_model)
-            };
-            // Splice prior-failure history into the task's goal so the
-            // next worker sees what went wrong. Cheap context augment;
-            // E11 checkpoint integration is the heavier sibling.
-            let mut task = ctx.task.clone();
-            if !ctx.failure_history.is_empty() {
-                task.goal.push_str(
-                    "\n\n## Prior attempts on this task failed:\n",
-                );
-                for f in &ctx.failure_history {
-                    task.goal.push_str(&format!("- {f}\n"));
-                }
-                task.goal.push_str(
-                    "Read the failure context, fix the underlying issue, \
+    Ok(std::sync::Arc::new(
+        move |ctx: arccode_autonomous::orchestrator::SpawnContext| {
+            let arccode_bin = arccode_bin.clone();
+            let worker_model = worker_model.clone();
+            let manager_model = manager_model.clone();
+            Box::pin(async move {
+                // E5 rung 2: escalate to the manager model when the
+                // orchestrator flagged this attempt as needing it.
+                let model = if ctx.escalate_model {
+                    Some(manager_model)
+                } else {
+                    Some(worker_model)
+                };
+                // Splice prior-failure history into the task's goal so the
+                // next worker sees what went wrong. Cheap context augment;
+                // E11 checkpoint integration is the heavier sibling.
+                let mut task = ctx.task.clone();
+                if !ctx.failure_history.is_empty() {
+                    task.goal
+                        .push_str("\n\n## Prior attempts on this task failed:\n");
+                    for f in &ctx.failure_history {
+                        task.goal.push_str(&format!("- {f}\n"));
+                    }
+                    task.goal.push_str(
+                        "Read the failure context, fix the underlying issue, \
                      and re-run `run_acceptance` until every check is green \
                      before reporting `task_complete`.\n",
-                );
-            }
-            let spec = arccode_autonomous::worker::WorkerSpec {
-                arccode_bin,
-                role: task.role.clone(),
-                task,
-                worktree: ctx.worktree.clone(),
-                session_id: ctx.session_id.clone(),
-                model,
-                timeout: std::time::Duration::from_secs(1800),
-            };
-            let mut store_guard = ctx.store.lock().await;
-            let result = arccode_autonomous::worker::run_worker(
-                &mut *store_guard,
-                &ctx.agent_id,
-                spec,
-            )
-            .await
-            .map_err(|e| {
-                arccode_autonomous::orchestrator::OrchestratorError::Spawn(e.to_string())
-            })?;
-            Ok(arccode_autonomous::orchestrator::WorkerSpawnResult {
-                agent_id: ctx.agent_id,
-                status: result.status,
-                outcome: result.outcome,
+                    );
+                }
+                let spec = arccode_autonomous::worker::WorkerSpec {
+                    arccode_bin,
+                    role: task.role.clone(),
+                    task,
+                    worktree: ctx.worktree.clone(),
+                    session_id: ctx.session_id.clone(),
+                    model,
+                    timeout: std::time::Duration::from_secs(1800),
+                };
+                let mut store_guard = ctx.store.lock().await;
+                let result =
+                    arccode_autonomous::worker::run_worker(&mut store_guard, &ctx.agent_id, spec)
+                        .await
+                        .map_err(|e| {
+                            arccode_autonomous::orchestrator::OrchestratorError::Spawn(
+                                e.to_string(),
+                            )
+                        })?;
+                Ok(arccode_autonomous::orchestrator::WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: result.status,
+                    outcome: result.outcome,
+                })
             })
-        })
-    }))
+        },
+    ))
 }
 
 // ----------------------------------------------------------------------
@@ -549,8 +554,7 @@ fn build_real_worker_spawner(
 /// `<project>/.arccode/autonomous/`.
 pub async fn status(run_id: Option<String>) -> Result<ExitCode> {
     let project = ProjectPaths::discover(&std::env::current_dir()?);
-    let runs = arccode_autonomous::dashboard::list_runs(&project.root)
-        .context("listing runs")?;
+    let runs = arccode_autonomous::dashboard::list_runs(&project.root).context("listing runs")?;
     if runs.is_empty() {
         eprintln!("[pilot] no runs found under {}", project.root.display());
         return Ok(ExitCode::from(1));
@@ -595,10 +599,7 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64) -> Result<ExitCode>
         None => runs.into_iter().next().unwrap(),
     };
 
-    eprintln!(
-        "[pilot] watching {} (Ctrl-C to exit)",
-        pick.dir.display()
-    );
+    eprintln!("[pilot] watching {} (Ctrl-C to exit)", pick.dir.display());
 
     let interval = Duration::from_millis(interval_ms.max(50));
     let mut last_mtime = None;
@@ -616,8 +617,7 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64) -> Result<ExitCode>
                     // terminal, kitty, iTerm without dragging in crossterm
                     // raw-mode plumbing.
                     print!("\x1b[2J\x1b[H");
-                    let view =
-                        arccode_autonomous::dashboard::render_dashboard(&state, &recent);
+                    let view = arccode_autonomous::dashboard::render_dashboard(&state, &recent);
                     print!("{}", view.to_ascii());
                     if matches!(
                         state.status,

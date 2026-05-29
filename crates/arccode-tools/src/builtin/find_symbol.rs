@@ -84,14 +84,16 @@ impl Tool for FindSymbol {
                     let Some(lang) = arccode_ts::Language::from_path(path) else {
                         continue;
                     };
-                    if let Some(rel) = path.strip_prefix(&root).ok() {
+                    if let Ok(rel) = path.strip_prefix(&root) {
                         let rel_str = rel.to_string_lossy().replace('\\', "/");
                         if let Some(m) = &matcher {
                             if !m.is_match(&rel_str) {
                                 continue;
                             }
                         }
-                        let Ok(bytes) = std::fs::read(path) else { continue };
+                        let Ok(bytes) = std::fs::read(path) else {
+                            continue;
+                        };
                         if bytes.iter().take(8192).any(|&b| b == 0) {
                             continue;
                         }

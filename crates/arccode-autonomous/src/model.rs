@@ -83,7 +83,6 @@ pub enum RunStatus {
     Aborted,
 }
 
-
 /// One executable acceptance check (E3). Workers must run every check and
 /// attach results to `task_complete` before transitioning to `review`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +110,6 @@ pub enum Reversibility {
     Hard,
     Irreversible,
 }
-
 
 /// A task as planned and scheduled. Persistent fields only — agent assignment
 /// lives in [`Agent`] and is keyed back here by `current_task`.

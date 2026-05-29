@@ -241,10 +241,9 @@ mod tests {
     #[tokio::test]
     async fn create_appends_run_start() {
         let dir = tempdir().unwrap();
-        let store =
-            RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
-                .await
-                .unwrap();
+        let store = RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
+            .await
+            .unwrap();
         assert_eq!(store.state().run_id, "r1");
         assert_eq!(store.state().goal, "goal");
         assert_eq!(store.state().base_commit, "deadbeef");
@@ -257,10 +256,9 @@ mod tests {
     async fn append_then_reload_yields_same_state() {
         let dir = tempdir().unwrap();
 
-        let mut store =
-            RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
-                .await
-                .unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
+            .await
+            .unwrap();
 
         store
             .append(Event::TaskCreate {
@@ -336,10 +334,7 @@ mod tests {
         assert_eq!(t.id, "t1");
         assert_eq!(t.status, TaskStatus::InProgress);
         assert_eq!(t.agent.as_deref(), Some("agent-1"));
-        assert_eq!(
-            t.worktree.as_deref(),
-            Some(".arccode/worktrees/auto-r1-t1")
-        );
+        assert_eq!(t.worktree.as_deref(), Some(".arccode/worktrees/auto-r1-t1"));
         assert!((t.usd - 0.07).abs() < 1e-9);
         assert_eq!(s.agents.len(), 1);
         assert_eq!(s.agents[0].id, "agent-1");
@@ -354,14 +349,11 @@ mod tests {
     #[tokio::test]
     async fn run_done_event_marks_status() {
         let dir = tempdir().unwrap();
-        let mut store =
-            RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
-                .await
-                .unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
+            .await
+            .unwrap();
         store
-            .append(Event::RunDone {
-                t: RunStore::now(),
-                })
+            .append(Event::RunDone { t: RunStore::now() })
             .await
             .unwrap();
         assert_eq!(store.state().status, RunStatus::Done);
@@ -370,10 +362,9 @@ mod tests {
     #[tokio::test]
     async fn subscribe_receives_events() {
         let dir = tempdir().unwrap();
-        let mut store =
-            RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
-                .await
-                .unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "goal", "deadbeef", "arccode/auto/r1")
+            .await
+            .unwrap();
         let mut rx = store.subscribe();
         store
             .append(Event::TaskCreate {

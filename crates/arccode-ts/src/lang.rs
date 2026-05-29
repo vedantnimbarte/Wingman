@@ -52,10 +52,22 @@ mod tests {
 
     #[test]
     fn detects_common_extensions() {
-        assert_eq!(Language::from_path(&PathBuf::from("a.rs")), Some(Language::Rust));
-        assert_eq!(Language::from_path(&PathBuf::from("a.PY")), Some(Language::Python));
-        assert_eq!(Language::from_path(&PathBuf::from("a.tsx")), Some(Language::Tsx));
-        assert_eq!(Language::from_path(&PathBuf::from("a.cjs")), Some(Language::JavaScript));
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.rs")),
+            Some(Language::Rust)
+        );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.PY")),
+            Some(Language::Python)
+        );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.tsx")),
+            Some(Language::Tsx)
+        );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.cjs")),
+            Some(Language::JavaScript)
+        );
         assert_eq!(Language::from_path(&PathBuf::from("a.unknown")), None);
         assert_eq!(Language::from_path(&PathBuf::from("noext")), None);
     }

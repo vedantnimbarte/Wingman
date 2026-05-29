@@ -35,9 +35,18 @@ struct Args {
 }
 
 enum Op {
-    Update { path: PathBuf, old: String, new: String },
-    Add { path: PathBuf, content: String },
-    Delete { path: PathBuf },
+    Update {
+        path: PathBuf,
+        old: String,
+        new: String,
+    },
+    Add {
+        path: PathBuf,
+        content: String,
+    },
+    Delete {
+        path: PathBuf,
+    },
 }
 
 #[async_trait]
@@ -97,9 +106,7 @@ impl Tool for ApplyPatch {
                     }
                     let original = match tokio::fs::read_to_string(path).await {
                         Ok(s) => s,
-                        Err(e) => {
-                            return ToolOutcome::err(format!("read {}: {e}", path.display()))
-                        }
+                        Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
                     };
                     let n = original.matches(old.as_str()).count();
                     if n == 0 {

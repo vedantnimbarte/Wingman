@@ -271,7 +271,12 @@ fn load_one(path: &Path, scope: MemoryScope) -> Result<Memory> {
         .unwrap_or("unnamed")
         .to_string();
     let name = fm.get("name").cloned().unwrap_or(stem).trim().to_string();
-    let description = fm.get("description").cloned().unwrap_or_default().trim().to_string();
+    let description = fm
+        .get("description")
+        .cloned()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     let mtype = fm
         .get("type")
         .and_then(|s| MemoryType::parse(s))

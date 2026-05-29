@@ -2,20 +2,18 @@
 //!
 //! Four cooperating pieces:
 //!
-//! - [`memory`]         — persistent user/project/feedback/reference memories,
-//!                        stored as markdown with frontmatter under
-//!                        `~/.arccode/memory/` (global) or
-//!                        `<project>/.arccode/memory/` (project-scoped).
-//! - [`stats`]          — SQLite-backed skill usage tracking at
-//!                        `~/.arccode/learn.db`. Records each invoke + outcome
-//!                        ('success' | 'corrected' | 'unclear') so the engine
-//!                        can surface skills that need a rewrite.
-//! - [`session_index`]  — embeds finished sessions into the RAG store so the
-//!                        agent can recall "have we discussed this before?"
-//!                        across projects.
-//! - [`hooks`]          — the [`LearningHook`] impl that wires all of the
-//!                        above into the agent loop's before/after-turn hook
-//!                        points.
+//! - [`memory`] — persistent user/project/feedback/reference memories,
+//!   stored as markdown with frontmatter under `~/.arccode/memory/`
+//!   (global) or `<project>/.arccode/memory/` (project-scoped).
+//! - [`stats`] — SQLite-backed skill usage tracking at
+//!   `~/.arccode/learn.db`. Records each invoke + outcome
+//!   ('success' | 'corrected' | 'unclear') so the engine can surface
+//!   skills that need a rewrite.
+//! - [`session_index`] — embeds finished sessions into the RAG store so
+//!   the agent can recall "have we discussed this before?" across
+//!   projects.
+//! - [`hooks`] — the [`LearningHook`] impl that wires all of the above
+//!   into the agent loop's before/after-turn hook points.
 
 pub mod extract;
 pub mod hooks;

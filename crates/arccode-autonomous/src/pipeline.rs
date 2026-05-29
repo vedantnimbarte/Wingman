@@ -163,7 +163,9 @@ pub async fn run_to_completion(
     let _removed = worktree::cleanup_worktrees(&project_root, &run_id);
 
     if inputs.no_pr {
-        store.append(crate::Event::RunDone { t: RunStore::now() }).await?;
+        store
+            .append(crate::Event::RunDone { t: RunStore::now() })
+            .await?;
         return Ok(PipelineOutcome {
             merged: merge_outcome,
             pr: None,
@@ -281,11 +283,17 @@ mod tests {
         let mut latest: HashMap<String, String> = HashMap::new();
         for msg in req.messages.iter().rev() {
             for b in msg.content.iter() {
-                let ContentBlock::Text { text } = b else { continue };
+                let ContentBlock::Text { text } = b else {
+                    continue;
+                };
                 for line in text.lines() {
                     let trimmed = line.trim_start();
-                    let Some(rest) = trimmed.strip_prefix("- ") else { continue };
-                    let Some(id) = rest.split_whitespace().next() else { continue };
+                    let Some(rest) = trimmed.strip_prefix("- ") else {
+                        continue;
+                    };
+                    let Some(id) = rest.split_whitespace().next() else {
+                        continue;
+                    };
                     if !id.starts_with('t') {
                         continue;
                     }
@@ -295,7 +303,13 @@ mod tests {
                     for piece in rest.split_whitespace() {
                         if matches!(
                             piece,
-                            "Pending" | "Todo" | "InProgress" | "Review" | "Done" | "Failed" | "Blocked"
+                            "Pending"
+                                | "Todo"
+                                | "InProgress"
+                                | "Review"
+                                | "Done"
+                                | "Failed"
+                                | "Blocked"
                         ) {
                             latest.insert(id.to_string(), piece.to_string());
                             break;
@@ -320,7 +334,10 @@ mod tests {
                 cache_kind: arccode_core::CacheKind::None,
             }
         }
-        async fn complete(&self, req: CompletionRequest) -> arccode_core::Result<ProviderEventStream> {
+        async fn complete(
+            &self,
+            req: CompletionRequest,
+        ) -> arccode_core::Result<ProviderEventStream> {
             use futures::stream;
             let mut n = self.call_count.lock().unwrap();
             *n += 1;
@@ -448,7 +465,11 @@ mod tests {
 
         // Initialise a real git repo so worktree::merge_integration has
         // something to work with.
-        if std::process::Command::new("git").arg("--version").output().is_err() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
             eprintln!("skipping: git not on PATH");
             return;
         }
@@ -465,10 +486,7 @@ mod tests {
             .arg("init")
             .output();
         std::fs::write(project_root.join("seed.txt"), b"seed\n").unwrap();
-        for args in [
-            vec!["add", "-A"],
-            vec!["commit", "-m", "seed"],
-        ] {
+        for args in [vec!["add", "-A"], vec!["commit", "-m", "seed"]] {
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&project_root)
@@ -576,7 +594,10 @@ mod tests {
                 "task {id} not Done"
             );
         }
-        assert_eq!(state.pr_url.as_deref(), Some("https://github.com/test/repo/pull/1"));
+        assert_eq!(
+            state.pr_url.as_deref(),
+            Some("https://github.com/test/repo/pull/1")
+        );
         assert!(matches!(state.status, RunStatus::Done));
     }
 

@@ -44,8 +44,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     // tool calls (edit_file, run_shell, etc.) then resolve against the
     // worker's isolated branch.
     if let Some(ref wt) = opts.worktree {
-        std::env::set_current_dir(wt)
-            .with_context(|| format!("cd into worktree {wt}"))?;
+        std::env::set_current_dir(wt).with_context(|| format!("cd into worktree {wt}"))?;
     }
 
     // Parse the task spec.

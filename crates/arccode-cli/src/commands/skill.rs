@@ -36,11 +36,13 @@ pub async fn extract(min: usize, force: bool) -> Result<ExitCode> {
         .join("proposed");
     let written = write_drafts(&proposed_dir, &patterns, force)?;
     if written.is_empty() {
-        println!(
-            "\n(no drafts written — all candidates already exist; pass --force to overwrite)"
-        );
+        println!("\n(no drafts written — all candidates already exist; pass --force to overwrite)");
     } else {
-        println!("\nwrote {} draft(s) to {}", written.len(), proposed_dir.display());
+        println!(
+            "\nwrote {} draft(s) to {}",
+            written.len(),
+            proposed_dir.display()
+        );
         println!("review and move into ~/.arccode/skills/ to promote.");
     }
     Ok(ExitCode::SUCCESS)

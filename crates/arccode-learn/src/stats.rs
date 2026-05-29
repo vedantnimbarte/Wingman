@@ -123,7 +123,12 @@ impl StatsStore {
 
     /// Manually log a final outcome without first calling `record_invoke`.
     /// Used by `/skill rate <name> good|bad`.
-    pub fn record_manual(&self, skill_name: &str, session_id: &str, outcome: Outcome) -> Result<()> {
+    pub fn record_manual(
+        &self,
+        skill_name: &str,
+        session_id: &str,
+        outcome: Outcome,
+    ) -> Result<()> {
         let ts = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -284,12 +289,7 @@ pub fn looks_like_correction(text: &str) -> Option<&'static str> {
         "incorrect",
         "not what i",
     ];
-    for s in SIGNALS {
-        if lower.starts_with(s) {
-            return Some(s);
-        }
-    }
-    None
+    SIGNALS.iter().copied().find(|s| lower.starts_with(s))
 }
 
 #[cfg(test)]
@@ -326,11 +326,17 @@ mod tests {
         let a = store.record_invoke("foo", "s").unwrap();
         store.set_outcome(a, Outcome::Success, None).unwrap();
         let b = store.record_invoke("foo", "s").unwrap();
-        store.set_outcome(b, Outcome::Corrected, Some("no,")).unwrap();
+        store
+            .set_outcome(b, Outcome::Corrected, Some("no,"))
+            .unwrap();
         let c = store.record_invoke("foo", "s").unwrap();
-        store.set_outcome(c, Outcome::Corrected, Some("wrong,")).unwrap();
+        store
+            .set_outcome(c, Outcome::Corrected, Some("wrong,"))
+            .unwrap();
         let d = store.record_invoke("foo", "s").unwrap();
-        store.set_outcome(d, Outcome::Corrected, Some("don't")).unwrap();
+        store
+            .set_outcome(d, Outcome::Corrected, Some("don't"))
+            .unwrap();
         let sum = store.summary().unwrap();
         assert_eq!(sum.len(), 1);
         assert_eq!(sum[0].success, 1);

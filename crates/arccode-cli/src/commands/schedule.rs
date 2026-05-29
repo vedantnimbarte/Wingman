@@ -30,7 +30,11 @@ pub async fn run(all: bool) -> Result<ExitCode> {
         if !due {
             continue;
         }
-        println!("→ running task '{}' (last ran {}s ago)", task.id, now - last);
+        println!(
+            "→ running task '{}' (last ran {}s ago)",
+            task.id,
+            now - last
+        );
         match fire(&cfg, task).await {
             Ok(_) => {
                 state.insert(task.id.clone(), now);

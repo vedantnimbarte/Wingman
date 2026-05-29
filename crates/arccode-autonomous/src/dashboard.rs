@@ -174,10 +174,7 @@ fn render_agents_pane(state: &RunState) -> String {
             .as_deref()
             .map(|t| format!("task={t}"))
             .unwrap_or_else(|| "idle".to_string());
-        let pid = a
-            .pid
-            .map(|p| format!(" pid={p}"))
-            .unwrap_or_default();
+        let pid = a.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
         let _ = writeln!(
             s,
             "{badge} {id} [{role}] {task}{pid}",
@@ -194,7 +191,14 @@ fn render_agents_pane(state: &RunState) -> String {
 fn render_log_pane(recent: &[Event]) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    for ev in recent.iter().rev().take(12).collect::<Vec<_>>().iter().rev() {
+    for ev in recent
+        .iter()
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .iter()
+        .rev()
+    {
         let _ = writeln!(s, "{}", render_log_line(ev));
     }
     if s.is_empty() {
@@ -205,9 +209,7 @@ fn render_log_pane(recent: &[Event]) -> String {
 
 fn render_log_line(ev: &Event) -> String {
     let ts = ev.timestamp();
-    let short_ts = ts.split(['T', '+', '.'])
-        .nth(1)
-        .unwrap_or(ts);
+    let short_ts = ts.split(['T', '+', '.']).nth(1).unwrap_or(ts);
     let short_ts = &short_ts[..short_ts.len().min(8)];
     match ev {
         Event::RunStart { run_id, .. } => format!("{short_ts}  run.start  {run_id}"),
@@ -220,7 +222,9 @@ fn render_log_line(ev: &Event) -> String {
         Event::TaskStatus { id, status, .. } => {
             format!("{short_ts}  task.status  {id} → {status:?}")
         }
-        Event::TaskTool { id, agent, tool, .. } => {
+        Event::TaskTool {
+            id, agent, tool, ..
+        } => {
             format!("{short_ts}  task.tool    {id} [{agent}] {tool}")
         }
         Event::TaskCommit { id, sha, .. } => {
@@ -238,7 +242,10 @@ fn render_log_line(ev: &Event) -> String {
         Event::RunStatusEv { status, .. } => format!("{short_ts}  run.status   {status:?}"),
         Event::RunMergeStart { branch, .. } => format!("{short_ts}  run.merge.start {branch}"),
         Event::RunMergeTask { id, commit, .. } => {
-            format!("{short_ts}  run.merge    {id} → {}", &commit[..commit.len().min(8)])
+            format!(
+                "{short_ts}  run.merge    {id} → {}",
+                &commit[..commit.len().min(8)]
+            )
         }
         Event::RunPr { url, .. } => format!("{short_ts}  run.pr       {url}"),
         Event::RunDone { .. } => format!("{short_ts}  run.done"),
@@ -305,7 +312,9 @@ pub fn list_runs(project_root: &Path) -> Result<Vec<RunSummary>, DashboardError>
     for (_, path) in entries {
         match read_run_summary(&path) {
             Ok(summary) => out.push(summary),
-            Err(e) => tracing::debug!(target: "pilot::dashboard", "skipping {}: {e}", path.display()),
+            Err(e) => {
+                tracing::debug!(target: "pilot::dashboard", "skipping {}: {e}", path.display())
+            }
         }
     }
     Ok(out)

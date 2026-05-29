@@ -124,8 +124,7 @@ impl<'p> PlannerLlm for ProviderLlm<'p> {
 /// but we don't fail the whole run over a stray code fence.
 pub fn parse_plan(raw: &str) -> Result<Vec<PlannedTask>, PlannerError> {
     let json_str = extract_json_object(raw).unwrap_or_else(|| raw.to_string());
-    let parsed: PlannerOutput =
-        serde_json::from_str(&json_str).map_err(PlannerError::BadJson)?;
+    let parsed: PlannerOutput = serde_json::from_str(&json_str).map_err(PlannerError::BadJson)?;
     validate_plan(&parsed.tasks)?;
     Ok(parsed.tasks)
 }
@@ -136,9 +135,7 @@ pub fn parse_plan(raw: &str) -> Result<Vec<PlannedTask>, PlannerError> {
 /// hit at run time).
 pub fn validate_plan(tasks: &[PlannedTask]) -> Result<(), PlannerError> {
     if tasks.is_empty() {
-        return Err(PlannerError::BadPlan(
-            "planner produced zero tasks".into(),
-        ));
+        return Err(PlannerError::BadPlan("planner produced zero tasks".into()));
     }
     let mut seen = HashSet::new();
     for t in tasks {
@@ -375,36 +372,34 @@ pub async fn plan_from_goal(
             .as_deref()
             .map(|f| format!("\n{f}\n"))
             .unwrap_or_default(),
-        prev = serde_json::to_string_pretty(&PlannerOutput { tasks: draft.clone() })
-            .unwrap_or_else(|_| "{}".to_string()),
+        prev = serde_json::to_string_pretty(&PlannerOutput {
+            tasks: draft.clone()
+        })
+        .unwrap_or_else(|_| "{}".to_string()),
     );
     match llm.complete(system, rewrite_user).await {
-        Ok(rewritten_raw) if !rewritten_raw.trim().is_empty() => {
-            match parse_plan(&rewritten_raw) {
-                Ok(revised) => {
-                    let revised_report = critique_plan(&revised, repo_root);
-                    if revised_report.is_clean()
-                        || revised_report.score() < report.score()
-                    {
-                        Ok(revised)
-                    } else {
-                        tracing::warn!(
-                            target: "pilot::planner",
-                            "rewrite pass did not improve the plan; using draft"
-                        );
-                        Ok(draft)
-                    }
-                }
-                Err(e) => {
+        Ok(rewritten_raw) if !rewritten_raw.trim().is_empty() => match parse_plan(&rewritten_raw) {
+            Ok(revised) => {
+                let revised_report = critique_plan(&revised, repo_root);
+                if revised_report.is_clean() || revised_report.score() < report.score() {
+                    Ok(revised)
+                } else {
                     tracing::warn!(
                         target: "pilot::planner",
-                        error = %e,
-                        "rewrite pass produced an unparseable plan; using draft"
+                        "rewrite pass did not improve the plan; using draft"
                     );
                     Ok(draft)
                 }
             }
-        }
+            Err(e) => {
+                tracing::warn!(
+                    target: "pilot::planner",
+                    error = %e,
+                    "rewrite pass produced an unparseable plan; using draft"
+                );
+                Ok(draft)
+            }
+        },
         _ => Ok(draft),
     }
 }
@@ -463,9 +458,7 @@ pub fn critique_plan(plan: &[PlannedTask], repo_root: &Path) -> CritiqueReport {
                     }
                     let abs = repo_root.join(parent);
                     if !abs.exists() {
-                        report
-                            .hallucinated_paths
-                            .push((t.id.clone(), w.clone()));
+                        report.hallucinated_paths.push((t.id.clone(), w.clone()));
                     }
                 }
             }
@@ -497,11 +490,9 @@ pub fn critique_plan(plan: &[PlannedTask], repo_root: &Path) -> CritiqueReport {
             // Find overlapping paths.
             for w in &a.writes {
                 if b.writes.contains(w) {
-                    report.overlapping_writes.push((
-                        a.id.clone(),
-                        b.id.clone(),
-                        w.clone(),
-                    ));
+                    report
+                        .overlapping_writes
+                        .push((a.id.clone(), b.id.clone(), w.clone()));
                 }
             }
         }
@@ -559,10 +550,7 @@ fn render_critique_for_rewrite(report: &CritiqueReport) -> String {
 }
 
 /// Persist a plan into a run store as a batch of `task.create` events.
-pub async fn persist_plan(
-    store: &mut RunStore,
-    plan: &[PlannedTask],
-) -> Result<(), PlannerError> {
+pub async fn persist_plan(store: &mut RunStore, plan: &[PlannedTask]) -> Result<(), PlannerError> {
     for t in plan {
         store.append(create_event_from_planned(t)).await?;
     }
@@ -660,7 +648,9 @@ mod tests {
     #[tokio::test]
     async fn happy_path_parses_and_validates() {
         let llm = CannedLlm(sample_plan_json().to_string());
-        let plan = plan_from_goal(&llm, "add --version-only", Path::new("")).await.unwrap();
+        let plan = plan_from_goal(&llm, "add --version-only", Path::new(""))
+            .await
+            .unwrap();
         assert_eq!(plan.len(), 3);
         assert_eq!(plan[0].id, "t1");
         assert_eq!(plan[2].deps, vec!["t1", "t2"]);
@@ -923,12 +913,9 @@ mod tests {
         // path runs but doesn't fix anything, so we fall back to the
         // draft. Verifies the flow doesn't error out.
         let llm = CannedLlm(sample_plan_json().to_string());
-        let plan = futures::executor::block_on(plan_from_goal(
-            &llm,
-            "add --version-only",
-            Path::new(""),
-        ))
-        .unwrap();
+        let plan =
+            futures::executor::block_on(plan_from_goal(&llm, "add --version-only", Path::new("")))
+                .unwrap();
         assert_eq!(plan.len(), 3);
     }
 

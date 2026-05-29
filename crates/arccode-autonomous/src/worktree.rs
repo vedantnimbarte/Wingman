@@ -195,10 +195,8 @@ pub fn commit_residual_changes(
 pub fn topo_sort_tasks(tasks: &[Task]) -> Result<Vec<String>, WorktreeError> {
     // Kahn's algorithm so the order is deterministic.
     let by_id: BTreeMap<&str, &Task> = tasks.iter().map(|t| (t.id.as_str(), t)).collect();
-    let mut indeg: HashMap<String, usize> = tasks
-        .iter()
-        .map(|t| (t.id.clone(), t.deps.len()))
-        .collect();
+    let mut indeg: HashMap<String, usize> =
+        tasks.iter().map(|t| (t.id.clone(), t.deps.len())).collect();
     let mut ready: VecDeque<String> = tasks
         .iter()
         .filter(|t| t.deps.is_empty())
@@ -305,8 +303,16 @@ pub fn merge_integration(
             .arg(&branch)
             .output()?;
         if !squash.status.success() {
+            // Capture stderr up-front so a non-conflict failure (e.g. a
+            // refusal to merge unrelated histories, or a worktree lock)
+            // surfaces a useful diagnostic instead of being misreported
+            // as an empty Conflict.
+            let squash_stderr = String::from_utf8_lossy(&squash.stderr).trim().to_string();
             // Detect conflict markers in the index. `git diff --name-only
-            // --diff-filter=U` returns the list of unmerged paths.
+            // --diff-filter=U` returns the list of unmerged paths. On
+            // Windows we've seen the squash exit non-zero before the
+            // index is populated with conflict entries, so also fall back
+            // to scraping `CONFLICT (…): … <path>` lines out of stderr.
             let conflicts = Command::new("git")
                 .arg("-C")
                 .arg(repo_root)
@@ -314,11 +320,23 @@ pub fn merge_integration(
                 .arg("--name-only")
                 .arg("--diff-filter=U")
                 .output()?;
-            let files: Vec<String> = String::from_utf8_lossy(&conflicts.stdout)
+            let mut files: Vec<String> = String::from_utf8_lossy(&conflicts.stdout)
                 .lines()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect();
+            if files.is_empty() {
+                for line in squash_stderr.lines() {
+                    if let Some(rest) = line.strip_prefix("CONFLICT") {
+                        if let Some(idx) = rest.rfind(' ') {
+                            let candidate = rest[idx + 1..].trim().to_string();
+                            if !candidate.is_empty() && !files.contains(&candidate) {
+                                files.push(candidate);
+                            }
+                        }
+                    }
+                }
+            }
             // Reset the index so the next attempt isn't poisoned.
             let _ = Command::new("git")
                 .arg("-C")
@@ -332,6 +350,14 @@ pub fn merge_integration(
                 .arg("reset")
                 .arg("--hard")
                 .output();
+            if files.is_empty() {
+                // Not a content conflict — return the raw git error so the
+                // caller can see what actually broke (e.g. lock contention,
+                // unrelated histories, missing ref).
+                return Err(WorktreeError::Git(format!(
+                    "git merge --squash {branch} failed for {task_id} with no conflict files: {squash_stderr}"
+                )));
+            }
             return Err(WorktreeError::Conflict {
                 task_id: task_id.clone(),
                 files,
@@ -349,8 +375,8 @@ pub fn merge_integration(
             .arg(repo_root)
             .arg("commit")
             .arg("--allow-empty") // squash-merging an already-merged branch
-                                  // can produce an empty diff; we still want a
-                                  // commit so the run history is one-per-task
+            // can produce an empty diff; we still want a
+            // commit so the run history is one-per-task
             .arg("-m")
             .arg(&message)
             .env("GIT_AUTHOR_NAME", "arccode pilot")
@@ -439,11 +465,7 @@ mod tests {
 
     #[test]
     fn topo_sort_breaks_ties_deterministically() {
-        let tasks = vec![
-            t("a", vec![]),
-            t("c", vec!["a"]),
-            t("b", vec!["a"]),
-        ];
+        let tasks = vec![t("a", vec![]), t("c", vec!["a"]), t("b", vec!["a"])];
         let order = topo_sort_tasks(&tasks).unwrap();
         // ties broken by id sort
         assert_eq!(order, vec!["a", "b", "c"]);
@@ -504,6 +526,12 @@ mod tests {
             // Older git: fall back to init then rename.
             git(&root, &["init"]);
         }
+        // Neutralise Windows defaults that bleed in from the global
+        // config (GH Actions Windows runners ship with autocrlf=true).
+        // Without this, the squash-merge tests can hit spurious
+        // line-ending differences that read as conflicts.
+        git(&root, &["config", "core.autocrlf", "false"]);
+        git(&root, &["config", "core.eol", "lf"]);
         std::fs::write(root.join("seed.txt"), b"hello\n").unwrap();
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-m", "seed"]);
@@ -574,13 +602,18 @@ mod tests {
         // Verify 3 commits on top of base.
         let log = git(
             &repo,
-            &["log", "--format=%s", &format!("{base}..arccode/auto/test-run-5")],
+            &[
+                "log",
+                "--format=%s",
+                &format!("{base}..arccode/auto/test-run-5"),
+            ],
         );
-        let subjects: Vec<&str> = std::str::from_utf8(&log.stdout)
-            .unwrap()
-            .lines()
-            .collect();
-        assert_eq!(subjects.len(), 3, "expected 3 squash commits; got {subjects:?}");
+        let subjects: Vec<&str> = std::str::from_utf8(&log.stdout).unwrap().lines().collect();
+        assert_eq!(
+            subjects.len(),
+            3,
+            "expected 3 squash commits; got {subjects:?}"
+        );
         // Newest-first order: t3, t2, t1.
         assert!(subjects[0].starts_with("Add t3"));
         assert!(subjects[1].starts_with("Add t2"));
@@ -645,12 +678,18 @@ mod tests {
             create_worktree(&repo, &base, run_id, id, &wt_path).unwrap();
             std::fs::write(wt_path.join("shared.txt"), body.as_bytes()).unwrap();
             git(&wt_path, &["add", "-A"]);
-            git(&wt_path, &["commit", "-m", &format!("touch shared from {id}")]);
+            git(
+                &wt_path,
+                &["commit", "-m", &format!("touch shared from {id}")],
+            );
         }
 
         match merge_integration(&repo, &base, "arccode/auto/conflict-test", &state) {
             Err(WorktreeError::Conflict { task_id, files }) => {
-                assert_eq!(task_id, "t2", "second task should be the one that conflicts");
+                assert_eq!(
+                    task_id, "t2",
+                    "second task should be the one that conflicts"
+                );
                 assert!(
                     files.iter().any(|f| f.ends_with("shared.txt")),
                     "expected shared.txt in conflict list, got {files:?}"

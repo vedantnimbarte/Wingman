@@ -39,11 +39,10 @@ impl Tool for TaskComplete {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "task_complete".into(),
-            description:
-                "Terminal call for a pilot-mode worker. Reports the final summary of \
+            description: "Terminal call for a pilot-mode worker. Reports the final summary of \
                  the task and the files changed. After this call, end your turn — \
                  the orchestrator takes over."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

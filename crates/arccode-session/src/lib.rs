@@ -284,7 +284,10 @@ pub fn records_to_messages(records: &[SessionRecord]) -> Vec<Message> {
 /// Extract `(provider, model)` from the first `SessionStart` record in the slice.
 pub fn session_meta(records: &[SessionRecord]) -> Option<(String, String)> {
     for record in records {
-        if let SessionRecord::SessionStart { provider, model, .. } = record {
+        if let SessionRecord::SessionStart {
+            provider, model, ..
+        } = record
+        {
             return Some((provider.clone(), model.clone()));
         }
     }

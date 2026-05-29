@@ -28,9 +28,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::model::{
-    AgentStatus, Event, Reversibility, Role, Task, TaskOutcome, TaskStatus,
-};
+use crate::model::{AgentStatus, Event, Reversibility, Role, Task, TaskOutcome, TaskStatus};
 use crate::store::{RunStore, StoreError};
 
 #[derive(Debug, Error)]
@@ -73,9 +71,9 @@ pub struct WorkerSpawnResult {
 pub type WorkerSpawner = Arc<
     dyn Fn(
             SpawnContext,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<WorkerSpawnResult, OrchestratorError>> + Send>,
-        > + Send
+        )
+            -> Pin<Box<dyn Future<Output = Result<WorkerSpawnResult, OrchestratorError>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -88,9 +86,9 @@ pub type TaskSplitter = Arc<
     dyn Fn(
             Task,
             Vec<String>,
-        ) -> Pin<
-            Box<dyn Future<Output = Result<Vec<NewTaskSpec>, OrchestratorError>> + Send>,
-        > + Send
+        )
+            -> Pin<Box<dyn Future<Output = Result<Vec<NewTaskSpec>, OrchestratorError>> + Send>>
+        + Send
         + Sync,
 >;
 
@@ -187,7 +185,10 @@ impl OrchestratorHandle {
         rx.await.map_err(|_| OrchestratorError::Shutdown)?
     }
 
-    pub async fn assign_task(&self, task_id: impl Into<String>) -> Result<String, OrchestratorError> {
+    pub async fn assign_task(
+        &self,
+        task_id: impl Into<String>,
+    ) -> Result<String, OrchestratorError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(OrchestratorCommand::AssignTask {
@@ -216,10 +217,7 @@ impl OrchestratorHandle {
         rx.await.map_err(|_| OrchestratorError::Shutdown)?
     }
 
-    pub async fn abort_task(
-        &self,
-        task_id: impl Into<String>,
-    ) -> Result<(), OrchestratorError> {
+    pub async fn abort_task(&self, task_id: impl Into<String>) -> Result<(), OrchestratorError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(OrchestratorCommand::AbortTask {
@@ -248,10 +246,7 @@ impl OrchestratorHandle {
         rx.await.map_err(|_| OrchestratorError::Shutdown)?
     }
 
-    pub async fn reassign(
-        &self,
-        task_id: impl Into<String>,
-    ) -> Result<String, OrchestratorError> {
+    pub async fn reassign(&self, task_id: impl Into<String>) -> Result<String, OrchestratorError> {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(OrchestratorCommand::Reassign {
@@ -418,10 +413,7 @@ async fn budget_watchdog(
                     for id in task_ids {
                         let (reply, _) = oneshot::channel();
                         let _ = orch
-                            .send(OrchestratorCommand::AbortTask {
-                                task_id: id,
-                                reply,
-                            })
+                            .send(OrchestratorCommand::AbortTask { task_id: id, reply })
                             .await;
                     }
                     return;
@@ -450,10 +442,7 @@ async fn retry_watchdog(
             }) => {
                 let (reply, _) = oneshot::channel();
                 let _ = orch
-                    .send(OrchestratorCommand::Reassign {
-                        task_id: id,
-                        reply,
-                    })
+                    .send(OrchestratorCommand::Reassign { task_id: id, reply })
                     .await;
             }
             Ok(_) => continue,
@@ -658,9 +647,7 @@ async fn handle_assign(
             .filter(|t| t.status == TaskStatus::InProgress)
             .count() as u32;
         if live >= cfg.max_concurrent_agents {
-            return Err(OrchestratorError::ConcurrencyCap(
-                cfg.max_concurrent_agents,
-            ));
+            return Err(OrchestratorError::ConcurrencyCap(cfg.max_concurrent_agents));
         }
 
         let n = *next_agent_seq;
@@ -738,6 +725,7 @@ async fn handle_assign(
     Ok(agent_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_reassign(
     store: &Arc<Mutex<RunStore>>,
     cfg: &OrchestratorConfig,
@@ -854,7 +842,16 @@ async fn handle_reassign(
             })
             .await?;
     }
-    handle_assign(store, cfg, spawner, active, task_id, next_agent_seq, retries).await
+    handle_assign(
+        store,
+        cfg,
+        spawner,
+        active,
+        task_id,
+        next_agent_seq,
+        retries,
+    )
+    .await
 }
 
 /// Like handle_abort but doesn't emit Failed/Aborted events — used from
@@ -867,10 +864,7 @@ async fn quiet_kill_active_for_task(
 ) -> Result<(), OrchestratorError> {
     let agent_id = {
         let store_g = store.lock().await;
-        store_g
-            .state()
-            .task(task_id)
-            .and_then(|t| t.agent.clone())
+        store_g.state().task(task_id).and_then(|t| t.agent.clone())
     };
     if let Some(agent_id) = agent_id {
         if let Some(handle) = active.lock().await.remove(&agent_id) {
@@ -1261,7 +1255,7 @@ mod tests {
             run_id: "test-run".into(),
             base_commit: String::new(),
             use_real_worktrees: false,
-            max_usd: 0.0, // disabled in unit tests
+            max_usd: 0.0,            // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
         }
     }
@@ -1321,13 +1315,15 @@ mod tests {
         .await
         .unwrap();
 
-        let (handle, join) =
-            spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
 
         // Seed the DAG.
         handle.add_task(dev_task("t1", vec![])).await.unwrap();
         handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
-        handle.add_task(dev_task("t3", vec!["t1", "t2"])).await.unwrap();
+        handle
+            .add_task(dev_task("t3", vec!["t1", "t2"]))
+            .await
+            .unwrap();
 
         // t2 and t3 cannot start yet — t1 isn't done.
         match handle.assign_task("t2").await {
@@ -1404,8 +1400,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let (handle, join) =
-            spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
         match handle.assign_task("nope").await {
             Err(OrchestratorError::UnknownTask(id)) => assert_eq!(id, "nope"),
             other => panic!("expected UnknownTask, got {other:?}"),
@@ -1438,11 +1433,9 @@ mod tests {
         // The watchdog's reassign happens between the first Failed and
         // the second InProgress — by the time we see Review the retry
         // already happened. Confirm the run-store recorded the round trip.
-        let log = std::fs::read_to_string(
-            dir.path()
-                .join(".arccode/autonomous/test-run/tasks.jsonl"),
-        )
-        .unwrap();
+        let log =
+            std::fs::read_to_string(dir.path().join(".arccode/autonomous/test-run/tasks.jsonl"))
+                .unwrap();
         let failed_count = log.matches(r#""status":"failed""#).count();
         let review_count = log.matches(r#""status":"review""#).count();
         assert!(
@@ -1453,7 +1446,10 @@ mod tests {
             review_count >= 1,
             "expected at least one Review transition after retry; log:\n{log}"
         );
-        handle.finalize_task("t1", Some("sha-1".into())).await.unwrap();
+        handle
+            .finalize_task("t1", Some("sha-1".into()))
+            .await
+            .unwrap();
         let state = handle.snapshot().await.unwrap();
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
         handle.shutdown().await;
@@ -1720,7 +1716,10 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let state = handle.snapshot().await.unwrap();
-        assert_eq!(state.task("t1").map(|t| t.status), Some(TaskStatus::Blocked));
+        assert_eq!(
+            state.task("t1").map(|t| t.status),
+            Some(TaskStatus::Blocked)
+        );
         handle.shutdown().await;
         let _ = join.await;
     }
@@ -1779,14 +1778,17 @@ mod tests {
         // Inject a fake agent + usd event into the store to push us over.
         let snapshot = handle.snapshot().await.unwrap();
         let _ = snapshot; // not strictly needed; just confirms snapshot works
-        // We bypass the actor: manipulate through the snapshot path. The
-        // cleanest way to push totals up here is via the spawner taking a
-        // real run-through that records spending. Easier: assign and let
-        // the fake spawner run; then attempt a second assignment after
-        // bumping max_usd.
+                          // We bypass the actor: manipulate through the snapshot path. The
+                          // cleanest way to push totals up here is via the spawner taking a
+                          // real run-through that records spending. Easier: assign and let
+                          // the fake spawner run; then attempt a second assignment after
+                          // bumping max_usd.
         let _agent_a = handle.assign_task("t1").await.unwrap();
         wait_for_review(&handle, "t1").await;
-        handle.finalize_task("t1", Some("sha-1".into())).await.unwrap();
+        handle
+            .finalize_task("t1", Some("sha-1".into()))
+            .await
+            .unwrap();
 
         // Now lower the cap below totals and try to assign another task.
         // We can't mutate cfg after spawn, so simulate by spending more.
@@ -1839,7 +1841,10 @@ mod tests {
         handle.add_task(dev_task("t1", vec![])).await.unwrap();
         match handle.assign_task("t1").await {
             Err(OrchestratorError::CostCap { spent, cap }) => {
-                assert!((spent - 5.00).abs() < 1e-9, "spent should reflect pre-seeded $5: got {spent}");
+                assert!(
+                    (spent - 5.00).abs() < 1e-9,
+                    "spent should reflect pre-seeded $5: got {spent}"
+                );
                 assert!((cap - 1.00).abs() < 1e-9);
             }
             other => panic!("expected CostCap, got {other:?}"),
@@ -1860,8 +1865,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let (handle, join) =
-            spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
         handle.add_task(dev_task("t1", vec![])).await.unwrap();
         match handle.finalize_task("t1", None).await {
             Err(OrchestratorError::BadTransition(_, status, _)) => {

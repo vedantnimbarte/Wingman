@@ -65,7 +65,14 @@ pub fn extract_symbols(lang: Language, src: &str) -> Vec<Symbol> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    walk_symbols(lang, src, tree.root_node(), &mut out, /*depth=*/ 0, /*in_container=*/ false);
+    walk_symbols(
+        lang,
+        src,
+        tree.root_node(),
+        &mut out,
+        /*depth=*/ 0,
+        /*in_container=*/ false,
+    );
     out
 }
 
@@ -115,11 +122,7 @@ fn descends_into(lang: Language, kind: &str) -> bool {
     match lang {
         Language::Rust => matches!(
             kind,
-            "impl_item"
-                | "mod_item"
-                | "trait_item"
-                | "source_file"
-                | "declaration_list"
+            "impl_item" | "mod_item" | "trait_item" | "source_file" | "declaration_list"
         ),
         Language::Python => matches!(
             kind,
@@ -164,8 +167,13 @@ fn first_line_of(src: &str, node: &Node) -> String {
     let start = node.start_byte().min(bytes.len());
     let end = node.end_byte().min(bytes.len());
     let slice = &bytes[start..end];
-    let line_end = slice.iter().position(|&b| b == b'\n').unwrap_or(slice.len());
-    String::from_utf8_lossy(&slice[..line_end]).trim_end().to_string()
+    let line_end = slice
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(slice.len());
+    String::from_utf8_lossy(&slice[..line_end])
+        .trim_end()
+        .to_string()
 }
 
 fn child_text<'a>(src: &'a str, node: &Node, field: &str) -> Option<&'a str> {
@@ -277,8 +285,9 @@ pub fn semantic_chunks(lang: Language, src: &str) -> Vec<SemanticChunk> {
         // Pre-symbol gap (use statements, comments, etc.) → its own chunk
         // when non-trivial.
         if sym.start_byte > cursor_byte {
-            let gap_text = String::from_utf8_lossy(&bytes[cursor_byte..sym.start_byte]).into_owned();
-            if gap_text.trim_start().len() > 0 {
+            let gap_text =
+                String::from_utf8_lossy(&bytes[cursor_byte..sym.start_byte]).into_owned();
+            if !gap_text.trim_start().is_empty() {
                 let gap_end_line = sym.start_line.saturating_sub(1).max(cursor_line);
                 out.push(SemanticChunk {
                     start_line: cursor_line,
@@ -338,7 +347,7 @@ pub fn semantic_chunks(lang: Language, src: &str) -> Vec<SemanticChunk> {
     // Trailing gap.
     if cursor_byte < bytes.len() {
         let gap_text = String::from_utf8_lossy(&bytes[cursor_byte..]).into_owned();
-        if gap_text.trim().len() > 0 {
+        if !gap_text.trim().is_empty() {
             let total_lines = src.lines().count() as u32;
             out.push(SemanticChunk {
                 start_line: cursor_line,
@@ -369,7 +378,7 @@ pub fn outline(lang: Language, src: &str) -> Option<String> {
     // Track open-ended container spans for indent depth.
     let mut stack: Vec<(usize, usize)> = Vec::new(); // (start_byte, end_byte)
     for sym in &sorted {
-        while stack.last().map_or(false, |&(_, end)| sym.start_byte >= end) {
+        while stack.last().is_some_and(|&(_, end)| sym.start_byte >= end) {
             stack.pop();
         }
         let indent = "  ".repeat(stack.len());
@@ -501,7 +510,9 @@ pub struct ParserPool {
 
 impl ParserPool {
     pub const fn new() -> Self {
-        Self { pool: Mutex::new(Vec::new()) }
+        Self {
+            pool: Mutex::new(Vec::new()),
+        }
     }
 
     /// Borrow a parser, parse, return the tree. The parser is returned to
@@ -548,10 +559,18 @@ mod tests {
         "#;
         let syms = extract_symbols(Language::Rust, src);
         let names: Vec<_> = syms.iter().map(|s| (s.kind, s.name.as_str())).collect();
-        assert!(names.iter().any(|(k, n)| matches!(k, SymbolKind::Function) && *n == "add"));
-        assert!(names.iter().any(|(k, n)| matches!(k, SymbolKind::Struct) && *n == "Foo"));
-        assert!(names.iter().any(|(k, n)| matches!(k, SymbolKind::Impl) && *n == "Foo"));
-        assert!(names.iter().any(|(k, n)| matches!(k, SymbolKind::Method) && *n == "bar"));
+        assert!(names
+            .iter()
+            .any(|(k, n)| matches!(k, SymbolKind::Function) && *n == "add"));
+        assert!(names
+            .iter()
+            .any(|(k, n)| matches!(k, SymbolKind::Struct) && *n == "Foo"));
+        assert!(names
+            .iter()
+            .any(|(k, n)| matches!(k, SymbolKind::Impl) && *n == "Foo"));
+        assert!(names
+            .iter()
+            .any(|(k, n)| matches!(k, SymbolKind::Method) && *n == "bar"));
     }
 
     #[test]
@@ -592,7 +611,8 @@ mod tests {
     #[test]
     fn replaces_function_body_in_python() {
         let src = "def add(a, b):\n    return a + b\n";
-        let out = replace_function_body(Language::Python, src, "add", "    return a - b\n").unwrap();
+        let out =
+            replace_function_body(Language::Python, src, "add", "    return a - b\n").unwrap();
         assert!(out.contains("return a - b"));
         assert!(!out.contains("return a + b"));
     }

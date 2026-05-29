@@ -175,19 +175,26 @@ impl SlashSuggest {
                 let cmd = &CATALOG[idx];
                 let selected = row == self.selected;
                 let marker_style = if selected {
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Cyan)
                 };
                 let name_style = if selected {
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::Gray)
                 };
                 let desc_style = Style::default().fg(Color::DarkGray);
                 let marker = if selected { "› " } else { "  " };
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{marker}{:<14}", cmd.name), name_style.patch(marker_style)),
+                    Span::styled(
+                        format!("{marker}{:<14}", cmd.name),
+                        name_style.patch(marker_style),
+                    ),
                     Span::styled(cmd.description, desc_style),
                 ]))
             })
@@ -228,11 +235,7 @@ mod tests {
     fn prefix_filters() {
         let mut s = SlashSuggest::default();
         s.update("/lo");
-        let names: Vec<_> = s
-            .matches
-            .iter()
-            .map(|&i| CATALOG[i].name)
-            .collect();
+        let names: Vec<_> = s.matches.iter().map(|&i| CATALOG[i].name).collect();
         assert!(names.contains(&"/login"));
         assert!(names.contains(&"/logout"));
         assert!(!names.contains(&"/clear"));

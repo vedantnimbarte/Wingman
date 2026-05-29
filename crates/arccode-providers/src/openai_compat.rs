@@ -875,7 +875,11 @@ mod tests {
             Variant::Aphrodite,
             Variant::MistralRs,
         ] {
-            assert!(!v.requires_api_key(), "{} should not require api key", v.id());
+            assert!(
+                !v.requires_api_key(),
+                "{} should not require api key",
+                v.id()
+            );
         }
     }
 

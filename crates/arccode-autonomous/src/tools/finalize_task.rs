@@ -33,11 +33,10 @@ impl Tool for FinalizeTask {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "finalize_task".into(),
-            description:
-                "Mark a task in `review` as `done` after it has been squash-merged into \
+            description: "Mark a task in `review` as `done` after it has been squash-merged into \
                  the integration branch. Pass the merge commit sha so the run log can \
                  record it."
-                    .into(),
+                .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -55,7 +54,11 @@ impl Tool for FinalizeTask {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
-        match self.handle.finalize_task(&args.task_id, args.merge_commit).await {
+        match self
+            .handle
+            .finalize_task(&args.task_id, args.merge_commit)
+            .await
+        {
             Ok(()) => ToolOutcome::ok(format!("finalized task {}", args.task_id)),
             Err(e) => ToolOutcome::err(e.to_string()),
         }

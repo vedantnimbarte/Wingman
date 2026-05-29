@@ -101,10 +101,7 @@ impl UsageView {
                         .add_modifier(Modifier::BOLD),
                 )
             } else {
-                Span::styled(
-                    format!(" {label} "),
-                    Style::default().fg(Color::DarkGray),
-                )
+                Span::styled(format!(" {label} "), Style::default().fg(Color::DarkGray))
             }
         };
         let line = Line::from(vec![
@@ -134,12 +131,7 @@ impl UsageView {
         }
 
         let header = Row::new(vec![
-            "model",
-            "input",
-            "output",
-            "cache rd",
-            "cache wr",
-            "cost",
+            "model", "input", "output", "cache rd", "cache wr", "cost",
         ])
         .style(
             Style::default()

@@ -256,7 +256,14 @@ mod tests {
 
     #[test]
     fn wave3_chinese_clouds_classified() {
-        for id in ["qwen", "zhipu", "moonshot", "minimax", "doubao", "siliconflow"] {
+        for id in [
+            "qwen",
+            "zhipu",
+            "moonshot",
+            "minimax",
+            "doubao",
+            "siliconflow",
+        ] {
             assert_eq!(classify(id), ProviderSupport::Compat, "{id}");
         }
         for id in ["yi", "baichuan", "hunyuan"] {

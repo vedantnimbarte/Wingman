@@ -19,8 +19,8 @@ enum Field {
 
 #[derive(Debug)]
 pub struct ParamsModal {
-    pub temperature: String,   // String so user can type a float
-    pub max_tokens: String,    // String so user can type an int
+    pub temperature: String, // String so user can type a float
+    pub max_tokens: String,  // String so user can type an int
     active_field: Field,
     pub committed: bool,
 }
@@ -70,18 +70,18 @@ impl ParamsModal {
                 }
                 self.active_field = Field::MaxTokens;
             }
-            KeyCode::Backspace => {
-                match self.active_field {
-                    Field::Temperature => { self.temperature.pop(); }
-                    Field::MaxTokens => { self.max_tokens.pop(); }
+            KeyCode::Backspace => match self.active_field {
+                Field::Temperature => {
+                    self.temperature.pop();
                 }
-            }
-            KeyCode::Char(c) => {
-                match self.active_field {
-                    Field::Temperature => self.temperature.push(c),
-                    Field::MaxTokens => self.max_tokens.push(c),
+                Field::MaxTokens => {
+                    self.max_tokens.pop();
                 }
-            }
+            },
+            KeyCode::Char(c) => match self.active_field {
+                Field::Temperature => self.temperature.push(c),
+                Field::MaxTokens => self.max_tokens.push(c),
+            },
             _ => {}
         }
         ModalOutcome::Continue
@@ -95,7 +95,9 @@ impl ParamsModal {
             .border_style(Style::default().fg(Color::Magenta))
             .title(Span::styled(
                 " Model Parameters ",
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(rect);
         block.render(rect, buf);
@@ -113,12 +115,17 @@ impl ParamsModal {
             .split(inner);
 
         let temp_style = if self.active_field == Field::Temperature {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-        Paragraph::new(Line::from(Span::styled("temperature (0.0–1.0, blank = default):", Style::default().fg(Color::DarkGray))))
-            .render(chunks[0], buf);
+        Paragraph::new(Line::from(Span::styled(
+            "temperature (0.0–1.0, blank = default):",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .render(chunks[0], buf);
         Paragraph::new(Line::from(vec![
             Span::styled(&self.temperature, temp_style),
             Span::raw("▏"),
@@ -126,12 +133,17 @@ impl ParamsModal {
         .render(chunks[1], buf);
 
         let tok_style = if self.active_field == Field::MaxTokens {
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-        Paragraph::new(Line::from(Span::styled("max_tokens:", Style::default().fg(Color::DarkGray))))
-            .render(chunks[2], buf);
+        Paragraph::new(Line::from(Span::styled(
+            "max_tokens:",
+            Style::default().fg(Color::DarkGray),
+        )))
+        .render(chunks[2], buf);
         Paragraph::new(Line::from(vec![
             Span::styled(&self.max_tokens, tok_style),
             Span::raw("▏"),

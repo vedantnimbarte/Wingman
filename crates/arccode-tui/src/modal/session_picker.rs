@@ -30,7 +30,10 @@ pub struct SessionPicker {
 
 impl SessionPicker {
     pub fn new(sessions: Vec<SessionEntry>) -> Self {
-        Self { sessions, selected: 0 }
+        Self {
+            sessions,
+            selected: 0,
+        }
     }
 
     pub fn take_selected(&mut self) -> Option<SessionEntry> {
@@ -39,15 +42,11 @@ impl SessionPicker {
 
     pub fn handle_key(&mut self, k: KeyEvent) -> ModalOutcome {
         match k.code {
-            KeyCode::Up => {
-                if self.selected > 0 {
-                    self.selected -= 1;
-                }
+            KeyCode::Up if self.selected > 0 => {
+                self.selected -= 1;
             }
-            KeyCode::Down => {
-                if self.selected + 1 < self.sessions.len() {
-                    self.selected += 1;
-                }
+            KeyCode::Down if self.selected + 1 < self.sessions.len() => {
+                self.selected += 1;
             }
             KeyCode::Enter => {
                 if self.sessions.is_empty() {
@@ -68,14 +67,15 @@ impl SessionPicker {
             .border_style(Style::default().fg(Color::Cyan))
             .title(Span::styled(
                 " Resume Session ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(rect);
         block.render(rect, buf);
 
         if self.sessions.is_empty() {
-            Paragraph::new("No saved sessions found.")
-                .render(inner, buf);
+            Paragraph::new("No saved sessions found.").render(inner, buf);
             return;
         }
 
@@ -84,21 +84,29 @@ impl SessionPicker {
             .constraints([Constraint::Min(3), Constraint::Length(1)])
             .split(inner);
 
-        let items: Vec<ListItem> = self.sessions.iter().enumerate().map(|(i, s)| {
-            let marker = if i == self.selected { "› " } else { "  " };
-            let style = if i == self.selected {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let label = format!("{}{} ({}/{})", marker, s.label, s.provider, s.model);
-            ListItem::new(Line::from(Span::styled(label, style)))
-        }).collect();
+        let items: Vec<ListItem> = self
+            .sessions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let marker = if i == self.selected { "› " } else { "  " };
+                let style = if i == self.selected {
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let label = format!("{}{} ({}/{})", marker, s.label, s.provider, s.model);
+                ListItem::new(Line::from(Span::styled(label, style)))
+            })
+            .collect();
         List::new(items).render(chunks[0], buf);
 
         Paragraph::new(Line::from(Span::styled(
             "↑/↓ navigate · Enter resume · Esc cancel",
             Style::default().fg(Color::DarkGray),
-        ))).render(chunks[1], buf);
+        )))
+        .render(chunks[1], buf);
     }
 }
