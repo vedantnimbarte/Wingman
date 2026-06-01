@@ -155,6 +155,32 @@ pub fn pick_model<'a>(
     candidates.last().map(String::as_str)
 }
 
+/// E6 convenience wrapper used by the live worker spawner: choose a worker
+/// model for `role`, preferring the cheaper `cheap` model but escalating to
+/// the more capable `capable` model when `cheap`'s blended success rate for
+/// this role is below `threshold` (after at least `min_samples` attempts).
+///
+/// With no history, returns `cheap` (explore the cheap model first). When
+/// `cheap == capable` (no distinct worker model configured) there's only
+/// one candidate and the result is always that model.
+pub fn route_model(
+    agg: &Aggregates,
+    role: &str,
+    cheap: &str,
+    capable: &str,
+    threshold: f64,
+    min_samples: u32,
+) -> String {
+    let candidates = if cheap == capable {
+        vec![cheap.to_string()]
+    } else {
+        vec![cheap.to_string(), capable.to_string()]
+    };
+    pick_model(&candidates, agg, role, threshold, min_samples)
+        .map(str::to_string)
+        .unwrap_or_else(|| cheap.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // stats.jsonl I/O
 // ---------------------------------------------------------------------------
@@ -382,6 +408,41 @@ mod tests {
     #[test]
     fn pick_model_empty_candidates_is_none() {
         assert_eq!(pick_model(&[], &Aggregates::default(), "x", 0.5, 1), None);
+    }
+
+    #[test]
+    fn route_model_explores_cheap_without_history() {
+        let agg = Aggregates::default();
+        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "haiku");
+    }
+
+    #[test]
+    fn route_model_escalates_when_cheap_proven_bad() {
+        // Cheap model fails every first try with enough samples → escalate.
+        let records = vec![
+            rec("r1", "developer", "haiku", false, None),
+            rec("r2", "developer", "haiku", false, None),
+            rec("r3", "developer", "haiku", false, None),
+        ];
+        let agg = aggregate(records);
+        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "opus");
+    }
+
+    #[test]
+    fn route_model_keeps_cheap_when_proven_good() {
+        let records = vec![
+            rec("r1", "developer", "haiku", true, None),
+            rec("r2", "developer", "haiku", true, None),
+            rec("r3", "developer", "haiku", true, None),
+        ];
+        let agg = aggregate(records);
+        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "haiku");
+    }
+
+    #[test]
+    fn route_model_single_candidate_when_cheap_equals_capable() {
+        let agg = Aggregates::default();
+        assert_eq!(route_model(&agg, "developer", "opus", "opus", 0.7, 3), "opus");
     }
 
     #[test]

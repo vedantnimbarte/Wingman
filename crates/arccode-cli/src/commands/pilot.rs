@@ -18,6 +18,28 @@ use arccode_config::{Config, ProjectPaths};
 
 use crate::runtime;
 
+/// E6 adaptive-routing thresholds: a role's cheap-model blended success
+/// rate must clear this (after `ROUTE_MIN_SAMPLES` attempts) to keep being
+/// routed to the cheap model; otherwise it escalates to the capable model.
+const ROUTE_SUCCESS_THRESHOLD: f64 = 0.7;
+const ROUTE_MIN_SAMPLES: u32 = 3;
+
+/// Load the E6 cross-run stats and aggregate them for adaptive routing.
+/// Returns `None` when there's no stats file or it's empty, so a fresh
+/// install routes purely on the configured worker model.
+fn load_routing_aggregates(
+    stats_path: Option<&std::path::Path>,
+) -> Option<std::sync::Arc<arccode_autonomous::learning::Aggregates>> {
+    let path = stats_path?;
+    let records = arccode_autonomous::learning::load_stats(path).ok()?;
+    if records.is_empty() {
+        return None;
+    }
+    Some(std::sync::Arc::new(
+        arccode_autonomous::learning::aggregate(records),
+    ))
+}
+
 /// Options forwarded from the clap subcommand.
 pub struct PilotOptions {
     pub goal: String,
@@ -204,12 +226,17 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         max_usd: pilot.max_usd,
         max_retries_per_task: 1,
     };
+    let stats_path = arccode_config::global_dir()
+        .ok()
+        .map(|g| g.join("stats.jsonl"));
+    let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = arccode_autonomous::pipeline::PipelineInputs {
         provider,
         manager_model: selection.model.clone(),
         worker_spawner: build_real_worker_spawner(
             pilot.worker_model.as_deref().unwrap_or(&selection.model),
             &selection.model,
+            routing,
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -222,9 +249,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             .worker_model
             .clone()
             .unwrap_or_else(|| selection.model.clone()),
-        stats_path: arccode_config::global_dir()
-            .ok()
-            .map(|g| g.join("stats.jsonl")),
+        stats_path,
         auto_approved: effective_tier == arccode_autonomous::approval::ApprovalTier::Auto,
         pr_config: pilot.pr.clone(),
         security_config: pilot.security.clone(),
@@ -504,6 +529,10 @@ pub async fn resume(
         max_usd: cfg.pilot.max_usd,
         max_retries_per_task: 1,
     };
+    let stats_path = arccode_config::global_dir()
+        .ok()
+        .map(|g| g.join("stats.jsonl"));
+    let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = arccode_autonomous::pipeline::PipelineInputs {
         provider,
         manager_model: selection.model.clone(),
@@ -513,6 +542,7 @@ pub async fn resume(
                 .as_deref()
                 .unwrap_or(&selection.model),
             &selection.model,
+            routing,
         )?,
         base_branch,
         project_root: project.root,
@@ -526,9 +556,7 @@ pub async fn resume(
             .worker_model
             .clone()
             .unwrap_or_else(|| selection.model.clone()),
-        stats_path: arccode_config::global_dir()
-            .ok()
-            .map(|g| g.join("stats.jsonl")),
+        stats_path,
         // Resumed runs don't re-run the approval gate; be conservative and
         // don't auto-merge unless the operator re-approves.
         auto_approved: false,
@@ -566,9 +594,16 @@ pub async fn resume(
 ///
 /// `manager_model` is the bigger model the orchestrator escalates to on
 /// rung 2 of the E5 retry ladder. `worker_model` is the cheaper default.
+///
+/// `routing` carries the E6 cross-run stats (aggregated from
+/// `stats.jsonl`). When present, the base (non-escalated) worker model is
+/// chosen adaptively per role: a role whose cheap-model history is below
+/// threshold is dispatched straight to the capable model instead of
+/// burning a first attempt that history says will fail.
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
+    routing: Option<std::sync::Arc<arccode_autonomous::learning::Aggregates>>,
 ) -> Result<arccode_autonomous::orchestrator::WorkerSpawner> {
     let arccode_bin = std::env::current_exe().context("locating arccode binary")?;
     let worker_model = worker_model.to_string();
@@ -578,11 +613,22 @@ fn build_real_worker_spawner(
             let arccode_bin = arccode_bin.clone();
             let worker_model = worker_model.clone();
             let manager_model = manager_model.clone();
+            let routing = routing.clone();
             Box::pin(async move {
                 // E5 rung 2: escalate to the manager model when the
-                // orchestrator flagged this attempt as needing it.
+                // orchestrator flagged this attempt as needing it. Otherwise
+                // E6 adaptive routing picks the base model per role.
                 let model = if ctx.escalate_model {
                     Some(manager_model)
+                } else if let Some(agg) = &routing {
+                    Some(arccode_autonomous::learning::route_model(
+                        agg,
+                        ctx.task.role.as_str(),
+                        &worker_model,
+                        &manager_model,
+                        ROUTE_SUCCESS_THRESHOLD,
+                        ROUTE_MIN_SAMPLES,
+                    ))
                 } else {
                     Some(worker_model)
                 };
