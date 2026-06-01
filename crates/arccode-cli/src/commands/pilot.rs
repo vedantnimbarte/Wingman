@@ -47,7 +47,7 @@ pub struct PilotOptions {
     pub plan_only: bool,
     pub yes: bool,
     pub review: bool,
-    #[allow(dead_code)] // reserved for in-terminal tail of an in-process run (Phase 7.8 / E12)
+    /// E12 — tail the in-process run with a compact progress line.
     pub watch: bool,
     pub no_pr: bool,
     pub base: Option<String>,
@@ -300,9 +300,20 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         "[pilot] driving manager loop ({} ticks max)…",
         inputs.max_ticks
     );
-    let outcome = arccode_autonomous::pipeline::run_to_completion(store, inputs)
+    // E12 — `--watch` tails the in-process run with a compact, in-place
+    // progress line. The pipeline future and the tail loop share one task
+    // (via select!), so there are no Send bounds to satisfy and the tail
+    // stops the instant the pipeline returns.
+    let outcome = if opts.watch {
+        run_with_watch(
+            arccode_autonomous::pipeline::run_to_completion(store, inputs),
+            &run_path,
+        )
         .await
-        .context("pipeline run_to_completion")?;
+    } else {
+        arccode_autonomous::pipeline::run_to_completion(store, inputs).await
+    }
+    .context("pipeline run_to_completion")?;
     // J5 — push a proactive status report (routed by R5). Best-effort: a
     // notification failure must not change the run's exit status.
     if let Ok(final_store) = RunStore::load(&run_path).await {
@@ -329,6 +340,57 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         eprintln!("[pilot] integration branch ready; PR step skipped (--no-pr).");
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// E12 — drive the pipeline future while tailing the run with a compact,
+/// in-place progress line. The future and the tail share one task (via
+/// `select!`), so the tail stops the moment the pipeline returns and there
+/// are no `Send` bounds to satisfy.
+async fn run_with_watch<F>(
+    fut: F,
+    run_path: &std::path::Path,
+) -> Result<
+    arccode_autonomous::pipeline::PipelineOutcome,
+    arccode_autonomous::pipeline::PipelineError,
+>
+where
+    F: std::future::Future<
+        Output = Result<
+            arccode_autonomous::pipeline::PipelineOutcome,
+            arccode_autonomous::pipeline::PipelineError,
+        >,
+    >,
+{
+    use std::time::Duration;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            res = &mut fut => {
+                eprintln!(); // end the in-place progress line
+                return res;
+            }
+            _ = tokio::time::sleep(Duration::from_millis(750)) => {
+                if let Ok(state) = arccode_autonomous::dashboard::load_state(run_path) {
+                    let total = state.tasks.len();
+                    let done = state
+                        .tasks
+                        .iter()
+                        .filter(|t| t.status == arccode_autonomous::TaskStatus::Done)
+                        .count();
+                    let running = state
+                        .tasks
+                        .iter()
+                        .filter(|t| t.status == arccode_autonomous::TaskStatus::InProgress)
+                        .count();
+                    eprint!(
+                        "\r[pilot watch] {done}/{total} done · {running} running · ${:.2}   ",
+                        state.totals.usd
+                    );
+                    std::io::stderr().flush().ok();
+                }
+            }
+        }
+    }
 }
 
 /// J5 + R5 — emit a proactive status report for a finished run, routed by
