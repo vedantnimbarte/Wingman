@@ -327,6 +327,20 @@ pub async fn plan_from_goal(
     goal: &str,
     repo_root: &Path,
 ) -> Result<Vec<PlannedTask>, PlannerError> {
+    plan_from_goal_with_priming(llm, goal, repo_root, None).await
+}
+
+/// Like [`plan_from_goal`], but injects an optional E6 priming block
+/// (rendered from past similar runs by [`crate::learning::render_priming`])
+/// ahead of the grounding facts so the draft pass can condition on what
+/// worked or got reverted before. `priming = None` is identical to
+/// [`plan_from_goal`].
+pub async fn plan_from_goal_with_priming(
+    llm: &dyn PlannerLlm,
+    goal: &str,
+    repo_root: &Path,
+    priming: Option<&str>,
+) -> Result<Vec<PlannedTask>, PlannerError> {
     let facts = if repo_root.as_os_str().is_empty() {
         None
     } else {
@@ -335,9 +349,13 @@ pub async fn plan_from_goal(
         Some(crate::grounding::render_facts(&block))
     };
 
+    let priming_block = priming
+        .filter(|p| !p.trim().is_empty())
+        .map(|p| format!("\n{p}\n"))
+        .unwrap_or_default();
     let system = load_planner_prompt();
     let user = format!(
-        "GOAL:\n{goal}\n{facts_block}\nProduce the task DAG as JSON now. \
+        "GOAL:\n{goal}\n{priming_block}{facts_block}\nProduce the task DAG as JSON now. \
          Respond with ONLY the JSON object — no prose, no Markdown fences.",
         facts_block = facts
             .as_deref()

@@ -309,6 +309,49 @@ pub fn rank_similar_runs<'a>(goal: &str, past: &'a [StatRecord], k: usize) -> Ve
     scored.into_iter().take(k).map(|(_, r)| r).collect()
 }
 
+/// E6 planner priming: render the top-`k` most similar past runs (by goal
+/// similarity) with their observed outcomes as an in-context block the
+/// planner can condition on before its draft pass. Dedupes by `run_id`
+/// (stats are per-task, so one run yields many records) and biases the
+/// planner toward approaches that merged and away from ones that were
+/// reverted. Returns `None` when nothing is similar enough.
+pub fn render_priming(goal: &str, past: &[StatRecord], k: usize) -> Option<String> {
+    if k == 0 {
+        return None;
+    }
+    // Over-fetch: rank_similar_runs returns per-task records, so we need
+    // more than `k` to end up with `k` distinct runs after deduping.
+    let similar = rank_similar_runs(goal, past, k.saturating_mul(4).max(8));
+    let mut seen = BTreeSet::new();
+    let mut lines = Vec::new();
+    for r in similar {
+        if r.goal.trim().is_empty() || !seen.insert(r.run_id.clone()) {
+            continue;
+        }
+        let outcome = match r.pr_outcome {
+            Some(PrOutcomeKind::Merged) => "merged (a good sign)",
+            Some(PrOutcomeKind::Reverted) => "reverted — avoid repeating that approach",
+            Some(PrOutcomeKind::HotfixFollowed) => "merged but needed a hotfix — be careful",
+            Some(PrOutcomeKind::Closed) => "closed without merging",
+            None if r.first_try_ok => "completed cleanly",
+            None => "struggled (took retries)",
+        };
+        lines.push(format!("- \"{}\" → {}", r.goal.trim(), outcome));
+        if lines.len() >= k {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "PAST SIMILAR RUNS (learn from these outcomes — prefer approaches that merged, \
+             avoid ones that were reverted):\n{}",
+            lines.join("\n")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +534,51 @@ mod tests {
         assert_eq!(ranked.len(), 2);
         // r1 and r3 both share "mode toggle settings"; r2 (database) is dropped.
         assert!(ranked.iter().all(|r| r.run_id != "r2"));
+    }
+
+    #[test]
+    fn render_priming_biases_toward_merged_and_against_reverted() {
+        let past = vec![
+            StatRecord {
+                goal: "add dark mode toggle to settings".into(),
+                ..rec("r1", "developer", "m", true, Some(PrOutcomeKind::Merged))
+            },
+            StatRecord {
+                goal: "add light mode toggle to settings panel".into(),
+                ..rec("r2", "developer", "m", false, Some(PrOutcomeKind::Reverted))
+            },
+            StatRecord {
+                goal: "migrate database schema for billing".into(),
+                ..rec("r3", "developer", "m", true, Some(PrOutcomeKind::Merged))
+            },
+        ];
+        let block = render_priming("add a mode toggle to settings", &past, 5).unwrap();
+        assert!(block.contains("dark mode toggle"));
+        assert!(block.contains("merged"));
+        assert!(block.contains("light mode toggle"));
+        assert!(block.contains("avoid"));
+        // The unrelated database run is dropped (zero similarity).
+        assert!(!block.contains("billing"));
+    }
+
+    #[test]
+    fn render_priming_dedupes_by_run_id() {
+        // Two per-task records from the same run + goal → one line.
+        let past = vec![
+            StatRecord { goal: "add export button".into(), ..rec("r1", "developer", "m", true, Some(PrOutcomeKind::Merged)) },
+            StatRecord { goal: "add export button".into(), ..rec("r1", "tester", "m", true, Some(PrOutcomeKind::Merged)) },
+        ];
+        let block = render_priming("add export button to toolbar", &past, 5).unwrap();
+        assert_eq!(block.matches("export button").count(), 1);
+    }
+
+    #[test]
+    fn render_priming_none_when_nothing_similar() {
+        let past = vec![StatRecord {
+            goal: "unrelated database migration".into(),
+            ..rec("r1", "developer", "m", true, None)
+        }];
+        assert!(render_priming("style the landing page header", &past, 5).is_none());
     }
 
     #[test]

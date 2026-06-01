@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use anyhow::{anyhow, Context, Result};
 use arccode_autonomous::{
     integration_branch,
-    planner::{parse_plan, persist_plan, plan_from_goal, render_plan, PlannerLlm, ProviderLlm},
+    planner::{parse_plan, persist_plan, render_plan, PlannerLlm, ProviderLlm},
     run_dir, RunStore,
 };
 use arccode_config::{Config, ProjectPaths};
@@ -124,9 +124,26 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         model: selection.model.clone(),
         max_tokens: 4096,
     };
-    let plan = plan_from_goal(&llm as &dyn PlannerLlm, &opts.goal, &project.root)
-        .await
-        .context("planner call failed")?;
+    // E6 — prime the planner with the most similar past runs and their
+    // outcomes (merged / reverted), so the draft pass can lean toward what
+    // worked. Best-effort: no stats file → no priming.
+    let priming = arccode_config::global_dir()
+        .ok()
+        .map(|g| g.join("stats.jsonl"))
+        .and_then(|p| arccode_autonomous::learning::load_stats(&p).ok())
+        .filter(|records| !records.is_empty())
+        .and_then(|records| arccode_autonomous::learning::render_priming(&opts.goal, &records, 5));
+    if priming.is_some() {
+        eprintln!("[pilot] priming planner with similar past runs (E6).");
+    }
+    let plan = arccode_autonomous::planner::plan_from_goal_with_priming(
+        &llm as &dyn PlannerLlm,
+        &opts.goal,
+        &project.root,
+        priming.as_deref(),
+    )
+    .await
+    .context("planner call failed")?;
 
     eprintln!(
         "[pilot] proposed {} task(s) (run id: {run_id}).",
