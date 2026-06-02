@@ -194,8 +194,28 @@ pub async fn run_to_completion(
         );
         // R3 — write a handoff packet so the user has a single
         // openable artifact explaining where the run blocked and how to
-        // resume, instead of just a log line.
-        let packet = write_escalation_packet(&project_root, &run_id, &final_state, inputs.tier);
+        // resume, instead of just a log line. Surface any static J15
+        // triggers (dangerous-path-without-goal-mention, secrets,
+        // license-header edits) in the packet so the human page lands with
+        // the actual escalation reasons, not just "a task failed". The diff
+        // checks degrade gracefully when the integration branch was never
+        // built (collect_diff_lines returns empty), so the dangerous-path
+        // check over the run's recorded writes still fires.
+        let escalation_triggers = detect_escalation_triggers(
+            inputs.command_runner.as_ref(),
+            &project_root,
+            &final_state.base_commit,
+            &integration_branch,
+            &final_state,
+            &inputs.dangerous_paths,
+        );
+        let packet = write_escalation_packet(
+            &project_root,
+            &run_id,
+            &final_state,
+            inputs.tier,
+            &escalation_triggers,
+        );
         return Ok(PipelineOutcome {
             merged: None,
             pr: None,
@@ -206,7 +226,7 @@ pub async fn run_to_completion(
             reviews: Vec::new(),
             critic_vetoed: false,
             sandbox_tiers,
-            escalation_triggers: Vec::new(),
+            escalation_triggers,
         });
     }
 
@@ -796,6 +816,7 @@ fn write_escalation_packet(
     run_id: &str,
     state: &crate::model::RunState,
     tier: arccode_config::PilotTier,
+    triggers: &[crate::escalation::EscalationTrigger],
 ) -> Option<PathBuf> {
     let blocked_task = state
         .tasks
@@ -805,7 +826,7 @@ fn write_escalation_packet(
         state,
         tier,
         blocked_task,
-        triggers: &[],
+        triggers,
         attempts: &[],
         why_stuck: None,
         suggested_next: None,
@@ -1276,6 +1297,7 @@ mod tests {
             run_id,
             &state,
             arccode_config::PilotTier::Copilot,
+            &[],
         )
         .expect("packet written");
 
@@ -1285,6 +1307,53 @@ mod tests {
         assert!(body.contains("blocked at task #t1"));
         assert!(body.contains("the hard part"));
         assert!(body.contains("arccode pilot resume blocked-run"));
+    }
+
+    /// R3 wiring: detected J15 triggers are rendered into the packet's
+    /// "Escalation triggers" section, so the human page names the reason.
+    #[tokio::test]
+    async fn blocked_run_packet_lists_escalation_triggers() {
+        let dir = tempdir().unwrap();
+        let project_root = dir.path().to_path_buf();
+        let run_id = "triggered-run";
+
+        let mut state = crate::model::RunState::new(
+            run_id,
+            "tidy up the codebase",
+            "abc123",
+            crate::integration_branch(run_id),
+        );
+        // A task that wrote a dangerous path the goal never mentioned.
+        let mut t1 = Task::new("t1", Role::Developer, "touch auth");
+        t1.status = TaskStatus::Blocked;
+        t1.writes = vec!["crates/auth/src/token.rs".to_string()];
+        state.tasks.push(t1);
+
+        let triggers = detect_escalation_triggers(
+            &RecordingRunner::new(),
+            &project_root,
+            &state.base_commit,
+            &crate::integration_branch(run_id),
+            &state,
+            &["**/auth/**".to_string()],
+        );
+        assert!(
+            !triggers.is_empty(),
+            "expected a dangerous-path trigger from the auth write"
+        );
+
+        let path = write_escalation_packet(
+            &project_root,
+            run_id,
+            &state,
+            arccode_config::PilotTier::Copilot,
+            &triggers,
+        )
+        .expect("packet written");
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("## Escalation triggers"));
+        assert!(body.to_lowercase().contains("auth"));
     }
 
     /// Recording CommandRunner: captures every invocation; all succeed.
