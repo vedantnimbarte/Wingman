@@ -204,17 +204,19 @@ pub fn estimate_plan_cost_usd(plan: &[PlannedTask]) -> f64 {
 /// Return every write-path in the plan that matches any of the named
 /// globs. Patterns that fail to compile are skipped with a warning.
 pub fn matches_globs(plan: &[PlannedTask], patterns: &[String]) -> Vec<String> {
+    let paths: Vec<String> = plan.iter().flat_map(|t| t.writes.iter().cloned()).collect();
+    paths_matching(&paths, patterns)
+}
+
+/// Return every entry in `paths` that matches any of the named globs,
+/// sorted + deduped. Shared by [`matches_globs`] and the J15 dangerous-path
+/// escalation check (which works over a run's recorded writes, not a
+/// [`PlannedTask`] list). Patterns that fail to compile are skipped.
+pub fn paths_matching(paths: &[String], patterns: &[String]) -> Vec<String> {
     let Some(set) = build_globset(patterns) else {
         return Vec::new();
     };
-    let mut hits = Vec::new();
-    for t in plan {
-        for w in &t.writes {
-            if set.is_match(w) {
-                hits.push(w.clone());
-            }
-        }
-    }
+    let mut hits: Vec<String> = paths.iter().filter(|p| set.is_match(p)).cloned().collect();
     hits.sort();
     hits.dedup();
     hits
