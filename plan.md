@@ -16,6 +16,29 @@ This builds on existing pieces:
 
 ---
 
+## Implementation status (Session 4 — as of 2026-06-02)
+
+> **Session 4 update (2026-06-02):** completed **J15 hard escalation
+> triggers**, the last fully-unstarted logic item. `escalation.rs` already
+> shipped the numeric/runtime triggers (`check_runtime`); this session added
+> the four missing static detectors — dangerous-path-without-goal-mention
+> (`dangerous_path_triggers` + `goal_mentions_path`), secrets
+> (`secret_triggers`, reusing `security::scan_secrets`), license-header edits
+> (`license_header_triggers`), and force-push-outside-namespace
+> (`force_push_trigger` / `is_pilot_namespace`) — plus an
+> `EscalationTrigger::blocks_auto_merge` classifier (everything blocks except
+> the 0.8× cost *warning*). Added `approval::paths_matching` (path-based glob
+> matcher, shared with `matches_globs`). **Wired live:**
+> `pipeline::detect_escalation_triggers` runs the plan+diff checks on the PR
+> path and feeds `dangerous_paths_touched` + a blocking-trigger veto into the
+> E8 auto-merge gate (`decide_and_maybe_merge` now takes the real signal
+> instead of a hardcoded `false`); results surface in
+> `PipelineOutcome.escalation_triggers`. **425 tests** green in
+> `arccode-autonomous` (+12); `cargo clippy` and `cargo check --workspace`
+> clean. **Deferred:** `check_runtime` wiring (needs test-count + prior-run
+> telemetry), live force-push hook, and folding static triggers into the R3
+> blocked-run escalation packet.
+
 ## Implementation status (Session 3 — as of 2026-06-01)
 
 > **Session 3 update (2026-06-01):** landed a round of **live
@@ -171,7 +194,7 @@ Items are tagged with the git commit that landed them.
 | J12 — Skill packs                       | ✅ logic | `skillpack.rs`: parse `owner/name@semver`, `SemVer::satisfies` caret rules, `PackManifest`, install-path resolution. **Deferred:** the git/local fetcher + installer |
 | J13 — Real-time watcher hooks           | ✅ logic | `watcher.rs`: `react` maps watch events → fixer-run / auto-merge / triage / research / propose. **Deferred:** the fs-watch + git-hook + webhook listeners |
 | J14 — Voice intake (opt-in)             | ✅ logic + transcribe | `voice.rs`: `transcript_to_goal` (gated) + `whisper_argv` + `transcribe_file` (runs whisper.cpp on a clip, tested). **Deferred:** the actual mic capture + hotkey (needs audio hardware) |
-| J15 — Hard escalation triggers          | ❌ | Net-negative tests, dangerous_paths without goal mention, secrets, cost ×0.8/×1.0, 3 consecutive failures, license/header edits, force-push outside `arccode/auto/*` |
+| J15 — Hard escalation triggers          | ✅ **wired** | `escalation.rs`: `check_runtime` already covered the numeric triggers (net-negative tests, cost ×0.8/×1.0, 3 consecutive failures, R1 irreversible). **Session 4** added the static detectors — `dangerous_path_triggers` (dangerous_paths hit the goal never mentions, via `goal_mentions_path`), `secret_triggers` (reuses `security::scan_secrets`), `license_header_triggers`, `force_push_trigger` (`is_pilot_namespace` guard) — plus `EscalationTrigger::blocks_auto_merge`. **Live:** `pipeline::detect_escalation_triggers` runs the plan+diff checks on the PR path and feeds `dangerous_paths_touched` + a blocking-trigger veto into the E8 auto-merge gate; surfaced in `PipelineOutcome.escalation_triggers`. **Deferred:** wiring `check_runtime` (needs test-count + prior-run-outcome telemetry) and force-push detection into the live git path; folding static triggers into the blocked-run escalation packet (R3) |
 
 ### R-series (production hardening) — ❌ Not started
 
