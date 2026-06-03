@@ -161,6 +161,38 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         patch: Option<String>,
     },
+    /// Authenticate a provider non-interactively: probe the key and store it
+    /// in the OS keyring + config. The TUI `/login` wizard equivalent.
+    Login {
+        /// Provider id (e.g. anthropic, openai, gemini). Omit with --list.
+        provider: Option<String>,
+        /// API key. If omitted, read from the provider's env var, else prompt.
+        #[arg(long, value_name = "KEY")]
+        api_key: Option<String>,
+        /// Model id to record as this provider's default.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+        /// Base URL override (for local servers / proxies).
+        #[arg(long, value_name = "URL")]
+        base_url: Option<String>,
+        /// Force the browser OAuth flow (chatgpt).
+        #[arg(long)]
+        oauth: bool,
+        /// Skip the live connectivity test before saving.
+        #[arg(long)]
+        no_probe: bool,
+        /// Register the provider without making it the default selection.
+        #[arg(long)]
+        no_default: bool,
+        /// List the known provider ids and exit.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Remove a provider's stored credential from the OS keyring.
+    Logout {
+        /// Provider id whose keyring entry to delete.
+        provider: String,
+    },
     /// Pilot mode: plan a multi-task goal, delegate to worker agents in
     /// isolated worktrees, converge into a PR.
     Pilot {
@@ -407,6 +439,29 @@ pub async fn run() -> Result<ExitCode> {
             local,
             template,
         }) => commands::review::run(pr, local, template).await,
+        Some(Command::Login {
+            provider,
+            api_key,
+            model,
+            base_url,
+            oauth,
+            no_probe,
+            no_default,
+            list,
+        }) => {
+            commands::login::run(commands::login::LoginOptions {
+                provider,
+                api_key,
+                model,
+                base_url,
+                oauth,
+                no_probe,
+                no_default,
+                list,
+            })
+            .await
+        }
+        Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
