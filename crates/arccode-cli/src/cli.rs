@@ -129,6 +129,9 @@ pub enum Command {
     /// Probe localhost for running Ollama / LM Studio / vLLM and print
     /// discovered models.
     Discover,
+    /// Show what Arc-Code knows about this project: memories, skills,
+    /// model routing, the verification gate, and index freshness.
+    Knows,
     /// Run any [[schedule]] entries whose cadence is due.
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
@@ -463,6 +466,7 @@ pub async fn run() -> Result<ExitCode> {
         }
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
+        Some(Command::Knows) => commands::knows::run(load_config()?).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,

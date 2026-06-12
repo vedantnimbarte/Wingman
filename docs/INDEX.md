@@ -36,6 +36,10 @@ Welcome to Arc-Code's technical documentation. This index guides you to the righ
   - Best for: Understanding the vision, data model, architecture, TUI integration.
   - Read this if: You're interested in the roadmap or contributing to autonomous mode.
 
+- **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
+  - Best for: Understanding how Arc-Code plans to beat Claude Code/Codex on speed, trust, and retention.
+  - Read this if: You're prioritizing single-agent features or positioning the product.
+
 ## Using Arc-Code
 
 ### Command Reference
@@ -49,6 +53,7 @@ Key commands:
 - `arccode review <pr#>` — code review.
 - `arccode session list` — browse past sessions.
 - `arccode memory list` — view memories.
+- `arccode knows` — show what Arc-Code knows about this project (memories, skills, routing, turn gate, index freshness).
 - `arccode skill extract` — mine skills from sessions.
 - `arccode discover` — find local LLMs.
 
@@ -213,7 +218,8 @@ docs/
 ├── TREE-SITTER.md           (language parsing integration)
 ├── LEARNING-LOOP.md         (memories, skills, session recall)
 ├── TOOLS.md                 (complete tool reference)
-└── AUTONOMOUS-MODE.md       (planned multi-task orchestration)
+├── AUTONOMOUS-MODE.md       (planned multi-task orchestration)
+└── DIFFERENTIATION.md       (single-agent differentiation roadmap)
 
 ../README.md                 (main project overview)
 ../plan.md                   (M8 implementation plan)

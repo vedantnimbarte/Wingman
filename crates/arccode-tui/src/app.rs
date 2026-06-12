@@ -1127,6 +1127,14 @@ fn apply_event(event: &AgentEvent, transcript: &mut Transcript, status: &mut Sta
             });
         }
         AgentEvent::Usage { usage } => status.merge_usage(usage),
+        AgentEvent::Verification { passed, summary } => {
+            let mark = if *passed { "✓ verified" } else { "✗ verification failed" };
+            let first_line = summary.lines().next().unwrap_or("").to_string();
+            transcript.push(TranscriptItem::System(format!(
+                "{mark} — {}",
+                truncate(first_line, 120)
+            )));
+        }
         AgentEvent::TurnComplete => {}
         AgentEvent::Stop { reason } => {
             if !matches!(reason, AgentStop::EndTurn) {

@@ -5,7 +5,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use arccode_config::{secrets, Config, PermissionMode, ProjectPaths};
-use arccode_core::{AgentConfig, AgentLoop, Compactor, Provider, ToolOutputBudget};
+use arccode_core::{
+    AgentConfig, AgentLoop, Compactor, GateReport, Provider, ToolOutputBudget, TurnGate,
+};
 use arccode_learn::{
     hooks::{LearnConfig, LearnHandles},
     memory::MemoryStore,
@@ -556,6 +558,97 @@ fn model_cache_dir() -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(".arccode/models"))
 }
 
+/// Post-edit verification gate that shells out to a check command in the
+/// project root (e.g. `cargo check`). Fail-open: if the command can't even
+/// spawn (toolchain missing), the gate passes with a note rather than
+/// trapping the agent in a retry loop it can't fix.
+pub struct ShellTurnGate {
+    cmd: String,
+    cwd: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for ShellTurnGate {
+    fn label(&self) -> String {
+        self.cmd.clone()
+    }
+
+    async fn check(&self) -> GateReport {
+        let output = if cfg!(windows) {
+            tokio::process::Command::new("cmd")
+                .args(["/C", &self.cmd])
+                .current_dir(&self.cwd)
+                .output()
+                .await
+        } else {
+            tokio::process::Command::new("sh")
+                .args(["-c", &self.cmd])
+                .current_dir(&self.cwd)
+                .output()
+                .await
+        };
+        match output {
+            Ok(o) => {
+                let passed = o.status.success();
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                let body = if stderr.trim().is_empty() { stdout } else { stderr };
+                // Keep the receipt small: last 40 lines is enough for the
+                // model (and the user) to see what broke.
+                let lines: Vec<&str> = body.lines().collect();
+                let tail = if lines.len() > 40 {
+                    format!(
+                        "… ({} lines omitted)\n{}",
+                        lines.len() - 40,
+                        lines[lines.len() - 40..].join("\n")
+                    )
+                } else {
+                    lines.join("\n")
+                };
+                let mark = if passed { "✓ passed" } else { "✗ failed" };
+                GateReport {
+                    passed,
+                    summary: format!("$ {}\n{mark}\n{tail}", self.cmd).trim_end().to_string(),
+                }
+            }
+            Err(e) => GateReport {
+                passed: true,
+                summary: format!("$ {}\n⚠ gate skipped (could not run: {e})", self.cmd),
+            },
+        }
+    }
+}
+
+/// Pick a check command from the project type. Conservative: only commands
+/// whose project marker file exists, cheapest reasonable check per ecosystem.
+pub fn detect_turn_gate_cmd(root: &std::path::Path) -> Option<String> {
+    if root.join("Cargo.toml").exists() {
+        Some("cargo check --workspace --quiet".into())
+    } else if root.join("tsconfig.json").exists() {
+        Some("npx tsc --noEmit".into())
+    } else if root.join("go.mod").exists() {
+        Some("go build ./...".into())
+    } else if root.join("pyproject.toml").exists() || root.join("setup.py").exists() {
+        Some("python -m compileall -q .".into())
+    } else {
+        None
+    }
+}
+
+/// Resolve `[verify].turn_gate` ("auto" / "off" / explicit command) into a
+/// gate instance, or `None` when gating is off or undetectable.
+pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn TurnGate>> {
+    let cmd = match cfg.verify.turn_gate.trim() {
+        "off" | "" => return None,
+        "auto" => detect_turn_gate_cmd(root)?,
+        explicit => explicit.to_string(),
+    };
+    Some(Arc::new(ShellTurnGate {
+        cmd,
+        cwd: root.to_path_buf(),
+    }))
+}
+
 pub async fn build_agent(
     cfg: &Config,
     selection: &Selection,
@@ -655,11 +748,29 @@ pub async fn build_agent_registry_learn(
                 let cfg = cfg_for_runner.clone();
                 let mode = mode_for_runner;
                 Box::pin(async move {
+                    // Model resolution: explicit override > task-class routing
+                    // ([router.classes], e.g. search/summarize → fast_model) >
+                    // the session's default selection.
                     let sel = if spec.model.contains('/') {
                         let (p, m) = spec.model.split_once('/').unwrap();
                         Selection {
                             provider_id: p.to_string(),
                             model: m.to_string(),
+                        }
+                    } else if let Some((p, m)) = cfg
+                        .router
+                        .resolve_class(&spec.task_class)
+                        .as_deref()
+                        .and_then(|s| s.split_once('/'))
+                        .map(|(p, m)| (p.to_string(), m.to_string()))
+                    {
+                        tracing::info!(
+                            "routing subagent (class '{}') to {p}/{m}",
+                            spec.task_class
+                        );
+                        Selection {
+                            provider_id: p,
+                            model: m,
                         }
                     } else {
                         resolve_selection(&cfg, None).map_err(|e| e.to_string())?
@@ -728,6 +839,8 @@ pub async fn build_agent_registry_learn(
         learning: learn
             .as_ref()
             .map(|l| l.hook.clone() as Arc<dyn arccode_core::LearningHook>),
+        gate: build_turn_gate(cfg, &paths.root),
+        gate_max_retries: cfg.verify.max_retries as usize,
         ..Default::default()
     };
     let agent = AgentLoop::new(provider, registry.clone(), agent_cfg);

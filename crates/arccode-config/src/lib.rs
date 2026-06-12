@@ -158,6 +158,10 @@ pub struct Config {
     /// on load with a one-time warning.
     #[serde(default, alias = "autonomous")]
     pub pilot: PilotConfig,
+
+    /// Post-edit verification (turn gate + receipts).
+    #[serde(default)]
+    pub verify: VerifyConfig,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -318,6 +322,60 @@ pub struct RouterConfig {
     /// Each entry is `provider/model_id`.
     #[serde(default)]
     pub fallback_models: Vec<String>,
+    /// Task-class routing. Maps a task class (e.g. "search", "summarize",
+    /// "codegen") to either the literal string "fast" (use `fast_model`),
+    /// "default" (use the session model), or an explicit `provider/model_id`.
+    /// Classes not listed here use the session model.
+    ///
+    /// ```toml
+    /// [router.classes]
+    /// search    = "fast"
+    /// summarize = "fast"
+    /// codegen   = "default"
+    /// ```
+    #[serde(default)]
+    pub classes: BTreeMap<String, String>,
+}
+
+impl RouterConfig {
+    /// Resolve a task class to a `provider/model_id` spec, or `None` when the
+    /// session's default model should be used. Unknown classes and classes
+    /// mapped to "default" return `None`; "fast" resolves through
+    /// `fast_model` (and returns `None` if no fast model is configured).
+    pub fn resolve_class(&self, class: &str) -> Option<String> {
+        if class.is_empty() {
+            return None;
+        }
+        match self.classes.get(class).map(String::as_str) {
+            Some("fast") => self.fast_model.clone(),
+            Some("default") | None => None,
+            Some(explicit) => Some(explicit.to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct VerifyConfig {
+    /// Post-edit turn gate. Run after a turn in which mutating tools
+    /// executed, before the agent is allowed to stop:
+    /// - "auto": detect a check command from the project type
+    ///   (Cargo.toml → `cargo check`, tsconfig.json → `tsc --noEmit`, …)
+    /// - "off": never gate
+    /// - anything else: the exact shell command to run
+    pub turn_gate: String,
+    /// How many gate failures are fed back to the model for self-correction
+    /// before the stop is accepted anyway (with a failing receipt).
+    pub max_retries: u32,
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            turn_gate: "auto".into(),
+            max_retries: 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1758,5 +1816,59 @@ mod tests {
             Some("resolved-secret"),
         );
         std::env::remove_var("ARCCODE_TEST_KEY_42");
+    }
+
+    #[test]
+    fn router_resolve_class() {
+        let text = r#"
+            [router]
+            fast_model = "anthropic/claude-haiku-4-5-20251001"
+
+            [router.classes]
+            search    = "fast"
+            summarize = "fast"
+            codegen   = "default"
+            review    = "openrouter/qwen-coder"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        let r = &cfg.router;
+        assert_eq!(
+            r.resolve_class("search").as_deref(),
+            Some("anthropic/claude-haiku-4-5-20251001")
+        );
+        assert_eq!(
+            r.resolve_class("review").as_deref(),
+            Some("openrouter/qwen-coder")
+        );
+        // "default", unknown classes, and the empty class use the session model.
+        assert_eq!(r.resolve_class("codegen"), None);
+        assert_eq!(r.resolve_class("reason"), None);
+        assert_eq!(r.resolve_class(""), None);
+    }
+
+    #[test]
+    fn router_class_fast_without_fast_model_falls_back() {
+        let text = r#"
+            [router.classes]
+            search = "fast"
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    #[test]
+    fn verify_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.verify.turn_gate, "auto");
+        assert_eq!(cfg.verify.max_retries, 2);
+
+        let text = r#"
+            [verify]
+            turn_gate = "off"
+            max_retries = 1
+        "#;
+        let cfg: Config = toml::from_str(text).unwrap();
+        assert_eq!(cfg.verify.turn_gate, "off");
+        assert_eq!(cfg.verify.max_retries, 1);
     }
 }

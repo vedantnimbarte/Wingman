@@ -53,6 +53,26 @@ pub trait LearningHook: Send + Sync {
 pub struct NoopLearningHook;
 impl LearningHook for NoopLearningHook {}
 
+/// Result of one post-edit verification run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateReport {
+    pub passed: bool,
+    /// Human-readable receipt: command, status, tail of output.
+    pub summary: String,
+}
+
+/// Post-edit verification gate. When configured on [`AgentConfig`], the loop
+/// runs it before accepting an `EndTurn` stop for any user turn in which a
+/// mutating tool executed. A failing report is fed back to the model (bounded
+/// by `gate_max_retries`) so it can self-correct instead of claiming "done"
+/// with broken code.
+#[async_trait]
+pub trait TurnGate: Send + Sync {
+    /// Short label shown in receipts (typically the command line).
+    fn label(&self) -> String;
+    async fn check(&self) -> GateReport;
+}
+
 #[derive(Debug, Clone)]
 pub struct ToolOutcome {
     pub content: String,
@@ -97,6 +117,9 @@ pub enum AgentEvent {
     TurnComplete,
     /// The whole user-turn finished.
     Stop { reason: AgentStop },
+    /// Result of the post-edit verification gate. Emitted before `Stop`
+    /// whenever a gate is configured and mutating tools ran this user turn.
+    Verification { passed: bool, summary: String },
     /// Recoverable error surfaced to the UI.
     Error { message: String },
 }
@@ -129,6 +152,13 @@ pub struct AgentConfig {
     /// after_stop; lets `arccode-learn` inject memory + nudges into the
     /// system prompt and track skill usage outcomes.
     pub learning: Option<Arc<dyn LearningHook>>,
+    /// Optional post-edit verification gate (see [`TurnGate`]).
+    pub gate: Option<Arc<dyn TurnGate>>,
+    /// Gate failures fed back to the model before stopping anyway.
+    pub gate_max_retries: usize,
+    /// Tool names that count as "mutating" for gate purposes. A successful
+    /// call to any of these arms the gate for the rest of the user turn.
+    pub mutating_tools: Vec<String>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -143,6 +173,9 @@ impl std::fmt::Debug for AgentConfig {
             .field("tool_output_budget", &self.tool_output_budget)
             .field("compactor", &self.compactor)
             .field("learning", &self.learning.as_ref().map(|_| "<hook>"))
+            .field("gate", &self.gate.as_ref().map(|g| g.label()))
+            .field("gate_max_retries", &self.gate_max_retries)
+            .field("mutating_tools", &self.mutating_tools)
             .finish()
     }
 }
@@ -159,6 +192,15 @@ impl Default for AgentConfig {
             tool_output_budget: ToolOutputBudget::default(),
             compactor: Compactor::default(),
             learning: None,
+            gate: None,
+            gate_max_retries: 2,
+            mutating_tools: vec![
+                "write_file".into(),
+                "edit_file".into(),
+                "apply_patch".into(),
+                "edit_symbol".into(),
+                "run_shell".into(),
+            ],
         }
     }
 }
@@ -264,6 +306,10 @@ impl AgentLoop {
 
         let stream = async_stream::stream! {
             let specs = tools.specs();
+            // Armed when a mutating tool succeeds this user turn; checked by
+            // the verification gate before an EndTurn stop is accepted.
+            let mut mutated = false;
+            let mut gate_attempts: usize = 0;
             for turn in 0..config.max_turns {
                 // Compaction pass — fold the oldest non-recap span into a single
                 // recap message when we cross the trigger budget.
@@ -383,35 +429,48 @@ impl AgentLoop {
                     })
                     .collect();
 
-                match stop_reason {
-                    StopReason::EndTurn => {
-                        // If the model said end_turn but emitted tool calls anyway,
-                        // run them and keep going — this is a provider quirk we
-                        // observed with some non-Anthropic backends.
-                        if tool_calls.is_empty() {
-                            if let Some(hook) = &config.learning {
-                                hook.after_stop(history);
+                // If the model said end_turn but emitted tool calls anyway,
+                // run them and keep going — this is a provider quirk we
+                // observed with some non-Anthropic backends.
+                let stop_now = match stop_reason {
+                    StopReason::MaxTokens => Some(AgentStop::MaxTokens),
+                    _ if tool_calls.is_empty() => Some(AgentStop::EndTurn),
+                    _ => None,
+                };
+
+                if let Some(reason) = stop_now {
+                    // Post-edit verification: when mutating tools ran this
+                    // user turn, the gate must pass before an EndTurn stop is
+                    // accepted. Failures are fed back to the model (bounded by
+                    // gate_max_retries) so it self-corrects instead of
+                    // claiming "done" with broken code.
+                    if reason == AgentStop::EndTurn && mutated {
+                        if let Some(gate) = &config.gate {
+                            let report = gate.check().await;
+                            yield AgentEvent::Verification {
+                                passed: report.passed,
+                                summary: report.summary.clone(),
+                            };
+                            if !report.passed
+                                && gate_attempts < config.gate_max_retries
+                                && turn + 1 < config.max_turns
+                            {
+                                gate_attempts += 1;
+                                history.push(Message::user_text(format!(
+                                    "[arccode verify] Turn gate failed after your edits \
+                                     ({}). Fix the issues, then end the turn again.\n\n{}",
+                                    gate.label(),
+                                    report.summary,
+                                )));
+                                continue;
                             }
-                            yield AgentEvent::Stop { reason: AgentStop::EndTurn };
-                            return;
                         }
                     }
-                    StopReason::MaxTokens => {
-                        if let Some(hook) = &config.learning {
-                            hook.after_stop(history);
-                        }
-                        yield AgentEvent::Stop { reason: AgentStop::MaxTokens };
-                        return;
+                    if let Some(hook) = &config.learning {
+                        hook.after_stop(history);
                     }
-                    StopReason::ToolUse | StopReason::StopSequence | StopReason::Other => {
-                        if tool_calls.is_empty() {
-                            if let Some(hook) = &config.learning {
-                                hook.after_stop(history);
-                            }
-                            yield AgentEvent::Stop { reason: AgentStop::EndTurn };
-                            return;
-                        }
-                    }
+                    yield AgentEvent::Stop { reason };
+                    return;
                 }
 
                 // Dispatch tools and append their results as a user-role message.
@@ -426,6 +485,9 @@ impl AgentLoop {
                         tool_cache.insert(cache_key, fresh.clone());
                         fresh
                     };
+                    if !outcome.is_error && config.mutating_tools.iter().any(|t| t == &name) {
+                        mutated = true;
+                    }
                     let truncated = config.tool_output_budget.trim(&outcome.content);
                     // UIs see the *full* output so the user can scroll/copy;
                     // the *model* only sees the truncated version below.
@@ -453,5 +515,243 @@ impl AgentLoop {
         };
 
         Box::pin(stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ProviderCapabilities, ProviderEventStream};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /// Provider that replays a scripted sequence of responses, one per
+    /// `complete` call.
+    struct ScriptedProvider {
+        responses: Mutex<VecDeque<Vec<StreamEvent>>>,
+    }
+
+    impl ScriptedProvider {
+        fn new(responses: Vec<Vec<StreamEvent>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for ScriptedProvider {
+        fn id(&self) -> &str {
+            "scripted"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                cache_kind: crate::CacheKind::None,
+            }
+        }
+        async fn complete(&self, _req: CompletionRequest) -> crate::Result<ProviderEventStream> {
+            let events = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("provider called more times than scripted");
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    struct OkDispatcher;
+    #[async_trait]
+    impl ToolDispatcher for OkDispatcher {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn dispatch(&self, _name: &str, _args: serde_json::Value) -> ToolOutcome {
+            ToolOutcome::ok("ok")
+        }
+    }
+
+    /// Gate that fails the first `fail_first` checks, then passes. Counts calls.
+    struct CountingGate {
+        fail_first: usize,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl TurnGate for CountingGate {
+        fn label(&self) -> String {
+            "test-gate".into()
+        }
+        async fn check(&self) -> GateReport {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            GateReport {
+                passed: n >= self.fail_first,
+                summary: format!("check #{}", n + 1),
+            }
+        }
+    }
+
+    fn tool_use_response() -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::ToolUse {
+                block: ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "write_file".into(),
+                    input: serde_json::json!({"path": "x.rs", "content": "fn main() {}"}),
+                },
+            },
+            StreamEvent::Stop {
+                reason: StopReason::ToolUse,
+            },
+        ]
+    }
+
+    fn end_turn_response(text: &str) -> Vec<StreamEvent> {
+        vec![
+            StreamEvent::TextDelta { text: text.into() },
+            StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            },
+        ]
+    }
+
+    async fn collect_events(agent: &mut AgentLoop) -> Vec<AgentEvent> {
+        let mut out = Vec::new();
+        let mut stream = agent.run("do something".into());
+        while let Some(ev) = stream.next().await {
+            out.push(ev);
+        }
+        out
+    }
+
+    fn agent_with_gate(
+        responses: Vec<Vec<StreamEvent>>,
+        gate: Arc<CountingGate>,
+    ) -> AgentLoop {
+        AgentLoop::new(
+            Arc::new(ScriptedProvider::new(responses)),
+            Arc::new(OkDispatcher),
+            AgentConfig {
+                model: "scripted/test".into(),
+                gate: Some(gate),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn gate_runs_once_and_passes_after_mutation() {
+        let gate = Arc::new(CountingGate {
+            fail_first: 0,
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = agent_with_gate(
+            vec![tool_use_response(), end_turn_response("done")],
+            gate.clone(),
+        );
+        let events = collect_events(&mut agent).await;
+
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        assert!(events.iter().any(
+            |e| matches!(e, AgentEvent::Verification { passed: true, .. })
+        ));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Stop {
+                reason: AgentStop::EndTurn
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_failure_feeds_back_then_stop_on_pass() {
+        let gate = Arc::new(CountingGate {
+            fail_first: 1,
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = agent_with_gate(
+            vec![
+                tool_use_response(),
+                end_turn_response("done (broken)"),
+                end_turn_response("done (fixed)"),
+            ],
+            gate.clone(),
+        );
+        let events = collect_events(&mut agent).await;
+
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+        let verifications: Vec<bool> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::Verification { passed, .. } => Some(*passed),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(verifications, vec![false, true]);
+        // The failure was fed back to the model as a user message.
+        assert!(agent.history().iter().any(|m| {
+            m.role == Role::User
+                && m.content.iter().any(|b| matches!(
+                    b,
+                    ContentBlock::Text { text } if text.contains("[arccode verify]")
+                ))
+        }));
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Stop {
+                reason: AgentStop::EndTurn
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_retries_exhausted_stops_with_failing_receipt() {
+        let gate = Arc::new(CountingGate {
+            fail_first: usize::MAX,
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = AgentLoop::new(
+            Arc::new(ScriptedProvider::new(vec![
+                tool_use_response(),
+                end_turn_response("a"),
+                end_turn_response("b"),
+            ])),
+            Arc::new(OkDispatcher),
+            AgentConfig {
+                model: "scripted/test".into(),
+                gate: Some(gate.clone()),
+                gate_max_retries: 1,
+                ..Default::default()
+            },
+        );
+        let events = collect_events(&mut agent).await;
+
+        // One failure fed back, second failure accepted: stop anyway.
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::Stop {
+                reason: AgentStop::EndTurn
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_not_run_without_mutation() {
+        let gate = Arc::new(CountingGate {
+            fail_first: 0,
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = agent_with_gate(vec![end_turn_response("pure chat")], gate.clone());
+        let events = collect_events(&mut agent).await;
+
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 0);
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Verification { .. })));
     }
 }

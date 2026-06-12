@@ -26,6 +26,10 @@ pub struct SubagentSpec {
     /// Override the model for this subagent (`provider/model`). Empty = use
     /// the parent's selection.
     pub model: String,
+    /// Task class for router-based model selection ("search", "summarize",
+    /// "codegen", "reason"). Empty = unclassified; the runner may route
+    /// classified subagents to a cheaper/faster model via `[router.classes]`.
+    pub task_class: String,
 }
 
 pub struct SpawnSubagent {
@@ -49,6 +53,9 @@ struct Args {
     /// Optional model override (`provider/model`) for the subagent.
     #[serde(default)]
     model: String,
+    /// Optional task class used for model routing.
+    #[serde(default)]
+    task_class: String,
 }
 
 #[async_trait]
@@ -68,7 +75,8 @@ impl Tool for SpawnSubagent {
                 "properties": {
                     "task": { "type": "string", "description": "The exact sub-task prompt." },
                     "description": { "type": "string", "description": "Short orientation for the subagent." },
-                    "model": { "type": "string", "description": "Override `provider/model` for the subagent. Empty = inherit." }
+                    "model": { "type": "string", "description": "Override `provider/model` for the subagent. Empty = inherit." },
+                    "task_class": { "type": "string", "description": "Task class for model routing: 'search' or 'summarize' for lookup/condense work (may use a faster model), 'codegen' or 'reason' for work needing the strongest model. Empty = inherit the session model." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -85,6 +93,7 @@ impl Tool for SpawnSubagent {
             task: args.task,
             description: args.description,
             model: args.model,
+            task_class: args.task_class,
         };
         match (self.runner)(spec).await {
             Ok(text) => ToolOutcome::ok(text),

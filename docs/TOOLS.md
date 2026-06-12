@@ -609,11 +609,19 @@ Run an isolated inner agent on a sub-task. Depth capped at 1.
 {
   "tool": "spawn_subagent",
   "args": {
-    "goal": "Fix the failing test in test_edit_file",
-    "system_prompt_override": "You are a testing expert. Be concise."
+    "task": "Fix the failing test in test_edit_file",
+    "description": "You are a testing expert. Be concise.",
+    "model": "",
+    "task_class": "search"
   }
 }
 ```
+
+`task_class` (optional) drives model routing: classified subagents
+(`search`, `summarize`, `codegen`, `reason`) resolve their model through
+`[router.classes]` in config, so lookup/condense work can run on a cheaper,
+faster model while the parent session keeps the strongest one. An explicit
+`model` override always wins; empty class inherits the session model.
 
 **Returns:**
 ```

@@ -104,6 +104,10 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
                     )
                     .ok();
                 }
+                AgentEvent::Verification { passed, summary } => {
+                    let mark = if *passed { "✓" } else { "✗" };
+                    writeln!(stderr, "\n[verify {mark}] {summary}").ok();
+                }
                 AgentEvent::TurnComplete => {}
                 AgentEvent::Stop { .. } => {
                     writeln!(stdout).ok();
