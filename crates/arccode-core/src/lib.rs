@@ -16,8 +16,8 @@ pub mod tool;
 pub mod usage;
 
 pub use agent::{
-    AgentConfig, AgentEvent, AgentLoop, AgentStop, LearningHook, NoopLearningHook, ToolDispatcher,
-    ToolOutcome,
+    AgentConfig, AgentEvent, AgentLoop, AgentStop, GateReport, LearningHook, NoopLearningHook,
+    ToolDispatcher, ToolOutcome, TurnGate,
 };
 pub use error::{ArccodeError, Result};
 pub use message::{ContentBlock, Message, Role};
