@@ -7,6 +7,7 @@ pub mod diff_annotate;
 pub mod discover;
 pub mod headless;
 pub mod init;
+pub mod knows;
 pub mod login;
 pub mod memory;
 pub mod pilot;
