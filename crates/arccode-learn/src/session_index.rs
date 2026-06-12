@@ -94,6 +94,9 @@ pub fn chunk_session(session_path: &std::path::Path, cap_chars: usize) -> Result
         if body.trim().is_empty() {
             continue;
         }
+        // Scrub credentials before anything reaches the embedding store —
+        // sessions outlive transcripts once embedded into sessions.db.
+        let body = crate::redact::redact_secrets(&body);
         let entry = format!("{label}: {}\n", body.trim());
         line_cursor = line_cursor.saturating_add(entry.matches('\n').count() as u32);
 

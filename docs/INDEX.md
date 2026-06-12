@@ -54,6 +54,10 @@ Key commands:
 - `arccode session list` — browse past sessions.
 - `arccode memory list` — view memories.
 - `arccode knows` — show what Arc-Code knows about this project (memories, skills, routing, turn gate, index freshness).
+- `arccode stats` — usage and learning metrics (`--json` for machines).
+- `arccode skill install <url|path>` — install a shared skill.
+- `arccode mcp-serve` — serve Arc-Code's tools to MCP hosts over stdio.
+- `arccode --print "<prompt>" --dry-run` — run headless in a shadow worktree and print the diff.
 - `arccode skill extract` — mine skills from sessions.
 - `arccode discover` — find local LLMs.
 

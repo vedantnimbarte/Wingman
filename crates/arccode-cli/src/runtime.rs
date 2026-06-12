@@ -841,6 +841,8 @@ pub async fn build_agent_registry_learn(
             .map(|l| l.hook.clone() as Arc<dyn arccode_core::LearningHook>),
         gate: build_turn_gate(cfg, &paths.root),
         gate_max_retries: cfg.verify.max_retries as usize,
+        budget_usd: (cfg.budget.max_usd_per_session > 0.0)
+            .then_some(cfg.budget.max_usd_per_session),
         ..Default::default()
     };
     let agent = AgentLoop::new(provider, registry.clone(), agent_cfg);

@@ -19,6 +19,7 @@ pub mod extract;
 pub mod hooks;
 pub mod memory;
 pub mod proposal;
+pub mod redact;
 pub mod session_index;
 pub mod stats;
 

@@ -33,6 +33,12 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Dry run: execute the `--print` session in a fresh detached git
+    /// worktree and print the resulting diff instead of touching the
+    /// working tree.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Run as a pilot-mode worker subprocess: load the role's system prompt,
     /// read the task spec from `--task-file`, run the agent loop with the
     /// task as the user prompt, emit a final `task_complete` event. Hidden
@@ -132,6 +138,21 @@ pub enum Command {
     /// Show what Arc-Code knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Usage and learning metrics: sessions, skill outcome scores,
+    /// memory growth, routing and budget setup.
+    Stats {
+        /// Emit machine-readable JSON instead of the human summary.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Serve Arc-Code's tools as an MCP server over stdio, so MCP hosts
+    /// (Claude Desktop, editors, other agents) can call them.
+    McpServe {
+        /// Permission mode for served tools (default read-only; the
+        /// project policy ceiling still applies).
+        #[arg(long, value_name = "MODE")]
+        mode: Option<String>,
+    },
     /// Run any [[schedule]] entries whose cadence is due.
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
@@ -309,6 +330,22 @@ pub enum SkillAction {
         #[arg(long)]
         force: bool,
     },
+    /// Install a shared skill from an https URL (raw markdown) or a local
+    /// .md file into the skill library.
+    Install {
+        /// https URL or local path of the skill markdown.
+        source: String,
+        /// Override the skill name (default: frontmatter name or file stem).
+        #[arg(long)]
+        name: Option<String>,
+        /// Install into the project's .arccode/skills instead of the
+        /// global library.
+        #[arg(long)]
+        project: bool,
+        /// Overwrite an existing skill with the same name.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -416,6 +453,7 @@ pub async fn run() -> Result<ExitCode> {
             json: cli.json,
             mode_override,
             model_override: cli.model,
+            worktree: cli.dry_run,
         };
         return commands::headless::run(cfg, opts).await;
     }
@@ -467,9 +505,19 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Stats { json }) => commands::stats::run(load_config()?, json).await,
+        Some(Command::McpServe { mode }) => {
+            commands::mcp_serve::run(load_config()?, parse_mode(mode.as_deref())?).await
+        }
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
+            SkillAction::Install {
+                source,
+                name,
+                project,
+                force,
+            } => commands::skill::install(source, name, project, force).await,
         },
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
@@ -562,7 +610,7 @@ pub async fn run() -> Result<ExitCode> {
         None => {
             let cfg = load_config()?;
             let mode_override = parse_mode(cli.mode.as_deref())?;
-            let mode = mode_override.unwrap_or(cfg.permission_mode);
+            let mode = cfg.clamp_mode(mode_override.unwrap_or(cfg.permission_mode));
 
             // Shared, replaceable MCP registry handle. Filled at startup
             // (if there's an agent), or by the agent_builder after /login.
@@ -749,11 +797,17 @@ fn load_config() -> Result<Config> {
     let global = global_config_path()?;
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let project_file = if project.config_file.exists() {
-        Some(project.config_file)
+        Some(project.config_file.clone())
     } else {
         None
     };
-    Ok(Config::load(Some(&global), project_file.as_deref())?)
+    let mut cfg = Config::load(Some(&global), project_file.as_deref())?;
+    // Project policy (committed .arccode/policy.toml) tightens the merged
+    // config last so neither personal config nor flags can relax it.
+    if let Some(policy) = arccode_config::load_policy(&project.dir)? {
+        cfg.apply_policy(&policy);
+    }
+    Ok(cfg)
 }
 
 /// Run the ChatGPT OAuth PKCE flow and store the resulting tokens in the

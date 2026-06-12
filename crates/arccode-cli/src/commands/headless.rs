@@ -17,10 +17,19 @@ pub struct HeadlessOptions {
     pub json: bool,
     pub mode_override: Option<PermissionMode>,
     pub model_override: Option<String>,
+    /// Run the session in a freshly created detached git worktree and
+    /// print the resulting diff at the end — the working tree the user
+    /// invoked from is never touched.
+    pub worktree: bool,
 }
 
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
-    let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
+    let dry_run_worktree = if opts.worktree {
+        Some(enter_dry_run_worktree()?)
+    } else {
+        None
+    };
+    let mode = cfg.clamp_mode(opts.mode_override.unwrap_or(cfg.permission_mode));
     let selection = runtime::resolve_selection(&cfg, opts.model_override.as_deref())?;
     let mut agent = runtime::build_agent_with_fallback(&cfg, &selection, mode).await?;
 
@@ -148,7 +157,88 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         });
     }
 
+    if let Some(wt) = dry_run_worktree {
+        report_dry_run(&wt);
+    }
+
     Ok(exit)
+}
+
+/// Create a detached worktree at HEAD under `.arccode/worktrees/` and make
+/// it the process working directory, so every relative path the session
+/// touches lands in the isolated copy.
+fn enter_dry_run_worktree() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let paths = ProjectPaths::discover(&cwd);
+    let wt_root = paths.dir.join("worktrees");
+    std::fs::create_dir_all(&wt_root).ok();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let dest = wt_root.join(format!("dryrun-{stamp}"));
+
+    let out = std::process::Command::new("git")
+        .args([
+            "worktree",
+            "add",
+            "--detach",
+            dest.to_str().unwrap_or_default(),
+            "HEAD",
+        ])
+        .current_dir(&paths.root)
+        .output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "could not create dry-run worktree: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    std::env::set_current_dir(&dest)?;
+    eprintln!("[dry-run] session sandboxed in {}", dest.display());
+    Ok(dest)
+}
+
+/// Print the diff the session produced in the worktree and how to apply or
+/// discard it. The worktree is left in place for inspection.
+fn report_dry_run(wt: &std::path::Path) {
+    let diff = std::process::Command::new("git")
+        .args(["diff"])
+        .current_dir(wt)
+        .output();
+    let status = std::process::Command::new("git")
+        .args(["status", "--short"])
+        .current_dir(wt)
+        .output();
+
+    eprintln!("\n[dry-run] proposed changes (sandbox: {}):", wt.display());
+    let mut any = false;
+    if let Ok(o) = status {
+        let s = String::from_utf8_lossy(&o.stdout);
+        if !s.trim().is_empty() {
+            eprintln!("{}", s.trim_end());
+            any = true;
+        }
+    }
+    if let Ok(o) = diff {
+        let s = String::from_utf8_lossy(&o.stdout);
+        if !s.trim().is_empty() {
+            println!("{s}");
+            any = true;
+        }
+    }
+    if !any {
+        eprintln!("(no changes were made)");
+    } else {
+        eprintln!(
+            "[dry-run] apply with:   git -C \"{}\" diff | git apply",
+            wt.display()
+        );
+        eprintln!(
+            "[dry-run] discard with: git worktree remove --force \"{}\"",
+            wt.display()
+        );
+    }
 }
 
 fn chrono_rfc3339() -> String {

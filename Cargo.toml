@@ -39,7 +39,7 @@ arccode-learn = { path = "crates/arccode-learn", version = "0.0.1" }
 arccode-ts = { path = "crates/arccode-ts", version = "0.0.1", default-features = false }
 arccode-autonomous = { path = "crates/arccode-autonomous", version = "0.0.1" }
 
-tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
+tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "io-std", "process", "signal", "sync", "time"] }
 async-trait = "0.1"
 futures = "0.3"
 

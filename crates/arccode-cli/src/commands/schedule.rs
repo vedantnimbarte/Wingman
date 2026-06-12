@@ -62,6 +62,7 @@ async fn fire(cfg: &Config, task: &ScheduledTask) -> Result<()> {
         prompt: task.prompt.clone(),
         json: false,
         mode_override: None,
+        worktree: false,
         model_override: task.model.clone(),
     };
     let code = crate::commands::headless::run(cfg.clone(), opts).await?;

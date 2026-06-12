@@ -1,0 +1,80 @@
+name: "Arc-Code Review"
+description: >-
+  Run Arc-Code's AI code review on a pull request, fully inside your own
+  runner — no code leaves your CI environment except the model API calls
+  you configure.
+author: "Arc-Code"
+branding:
+  icon: "check-circle"
+  color: "purple"
+
+inputs:
+  model:
+    description: "provider/model to review with, e.g. anthropic/claude-sonnet-4-6"
+    required: true
+  api-key:
+    description: "API key for the chosen provider (pass a repo secret)"
+    required: true
+  pr-number:
+    description: "Pull request number to review (defaults to the triggering PR)"
+    required: false
+    default: ""
+  arccode-version:
+    description: "Git ref of Arc-Code to build (defaults to main)"
+    required: false
+    default: "main"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Arc-Code build
+      uses: actions/cache@v4
+      with:
+        path: ~/.arccode-build
+        key: arccode-${{ runner.os }}-${{ inputs.arccode-version }}
+
+    - name: Build Arc-Code
+      shell: bash
+      run: |
+        if [ ! -x ~/.arccode-build/arccode ]; then
+          git clone --depth 1 --branch "${{ inputs.arccode-version }}" \
+            https://github.com/vedantnimbarte/ArcCode.git /tmp/arccode-src
+          cargo build --release --manifest-path /tmp/arccode-src/Cargo.toml \
+            --no-default-features -p arccode-cli
+          mkdir -p ~/.arccode-build
+          cp /tmp/arccode-src/target/release/arccode ~/.arccode-build/arccode
+        fi
+
+    - name: Run review
+      shell: bash
+      env:
+        ARCCODE_API_KEY: ${{ inputs.api-key }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        PR="${{ inputs.pr-number }}"
+        if [ -z "$PR" ]; then PR="${{ github.event.pull_request.number }}"; fi
+        provider="${{ inputs.model }}"
+        provider="${provider%%/*}"
+        mkdir -p ~/.arccode
+        cat > ~/.arccode/config.toml <<EOF
+        default_model = "${{ inputs.model }}"
+        default_provider = "${provider}"
+
+        [providers.${provider}]
+        api_key = "\${ARCCODE_API_KEY}"
+        EOF
+        ~/.arccode-build/arccode review "$PR" | tee review.md
+
+    - name: Post review comment
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        PR="${{ inputs.pr-number }}"
+        if [ -z "$PR" ]; then PR="${{ github.event.pull_request.number }}"; fi
+        if [ -s review.md ]; then
+          gh pr comment "$PR" --body-file review.md
+        fi

@@ -54,6 +54,7 @@ pub async fn run(
         prompt,
         json: false,
         mode_override,
+        worktree: false,
         model_override: None,
     };
     crate::commands::headless::run(cfg, opts).await
