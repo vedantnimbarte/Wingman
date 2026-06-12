@@ -474,16 +474,54 @@ impl AgentLoop {
                 }
 
                 // Dispatch tools and append their results as a user-role message.
+                //
+                // When every call in the batch is read-only (none in
+                // `mutating_tools`), misses run concurrently — a model that
+                // emits three reads/greps in one turn shouldn't pay for them
+                // serially. Batches containing a mutating call keep strict
+                // sequential order, since write/shell effects can depend on
+                // earlier calls in the same batch.
+                let all_readonly = tool_calls
+                    .iter()
+                    .all(|(_, name, _)| !config.mutating_tools.iter().any(|t| t == name));
+                let mut outcomes: Vec<Option<ToolOutcome>> = vec![None; tool_calls.len()];
+                if all_readonly && tool_calls.len() > 1 {
+                    let mut pending = Vec::new();
+                    for (i, (_, name, input)) in tool_calls.iter().enumerate() {
+                        let cache_key =
+                            (name.clone(), serde_json::to_string(input).unwrap_or_default());
+                        if let Some(cached) = tool_cache.get(&cache_key) {
+                            outcomes[i] = Some(cached.clone());
+                        } else {
+                            let tools = tools.clone();
+                            let name = name.clone();
+                            let input = input.clone();
+                            pending.push(async move {
+                                let out = tools.dispatch(&name, input).await;
+                                (i, cache_key, out)
+                            });
+                        }
+                    }
+                    for (i, cache_key, out) in futures::future::join_all(pending).await {
+                        tool_cache.insert(cache_key, out.clone());
+                        outcomes[i] = Some(out);
+                    }
+                }
                 let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
-                for (id, name, input) in tool_calls {
-                    let cache_key = (name.clone(), serde_json::to_string(&input).unwrap_or_default());
-                    let outcome = if let Some(cached) = tool_cache.get(&cache_key) {
-                        // Cache hit: reuse the previous result without re-dispatching.
-                        cached.clone()
+                for (i, (id, name, input)) in tool_calls.into_iter().enumerate() {
+                    let outcome = if let Some(done) = outcomes[i].take() {
+                        done
                     } else {
-                        let fresh = tools.dispatch(&name, input).await;
-                        tool_cache.insert(cache_key, fresh.clone());
-                        fresh
+                        let cache_key =
+                            (name.clone(), serde_json::to_string(&input).unwrap_or_default());
+                        if let Some(cached) = tool_cache.get(&cache_key) {
+                            // Cache hit: reuse the previous result without re-dispatching.
+                            cached.clone()
+                        } else {
+                            let fresh = tools.dispatch(&name, input).await;
+                            tool_cache.insert(cache_key, fresh.clone());
+                            fresh
+                        }
                     };
                     if !outcome.is_error && config.mutating_tools.iter().any(|t| t == &name) {
                         mutated = true;
@@ -738,6 +776,99 @@ mod tests {
                 reason: AgentStop::EndTurn
             })
         ));
+    }
+
+    /// Dispatcher that sleeps per call and records the maximum number of
+    /// calls in flight at once.
+    struct ConcurrencyProbe {
+        in_flight: AtomicUsize,
+        max_in_flight: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolDispatcher for ConcurrencyProbe {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn dispatch(&self, _name: &str, _args: serde_json::Value) -> ToolOutcome {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_in_flight.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            ToolOutcome::ok("ok")
+        }
+    }
+
+    fn multi_tool_response(names: &[&str]) -> Vec<StreamEvent> {
+        let mut events: Vec<StreamEvent> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| StreamEvent::ToolUse {
+                block: ContentBlock::ToolUse {
+                    id: format!("t{i}"),
+                    name: (*name).into(),
+                    input: serde_json::json!({ "n": i }),
+                },
+            })
+            .collect();
+        events.push(StreamEvent::Stop {
+            reason: StopReason::ToolUse,
+        });
+        events
+    }
+
+    #[tokio::test]
+    async fn readonly_tool_batch_runs_concurrently() {
+        let probe = Arc::new(ConcurrencyProbe {
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+        });
+        let mut agent = AgentLoop::new(
+            Arc::new(ScriptedProvider::new(vec![
+                multi_tool_response(&["read_file", "grep", "glob"]),
+                end_turn_response("done"),
+            ])),
+            probe.clone(),
+            AgentConfig {
+                model: "scripted/test".into(),
+                ..Default::default()
+            },
+        );
+        let events = collect_events(&mut agent).await;
+
+        assert_eq!(probe.max_in_flight.load(Ordering::SeqCst), 3);
+        // Results still arrive in call order.
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolResult { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, vec!["t0", "t1", "t2"]);
+    }
+
+    #[tokio::test]
+    async fn batch_with_mutating_tool_stays_sequential() {
+        let probe = Arc::new(ConcurrencyProbe {
+            in_flight: AtomicUsize::new(0),
+            max_in_flight: AtomicUsize::new(0),
+        });
+        let mut agent = AgentLoop::new(
+            Arc::new(ScriptedProvider::new(vec![
+                multi_tool_response(&["read_file", "write_file", "grep"]),
+                end_turn_response("done"),
+            ])),
+            probe.clone(),
+            AgentConfig {
+                model: "scripted/test".into(),
+                gate: None,
+                ..Default::default()
+            },
+        );
+        let _ = collect_events(&mut agent).await;
+
+        assert_eq!(probe.max_in_flight.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
