@@ -19,7 +19,7 @@ pub struct BatchOptions {
 }
 
 pub async fn run(cfg: Config, opts: BatchOptions) -> Result<ExitCode> {
-    let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
+    let mode = cfg.clamp_mode(opts.mode_override.unwrap_or(cfg.permission_mode));
     let sel = resolve_selection(&cfg, opts.model_override.as_deref())?;
     let mut agent = build_agent(&cfg, &sel, mode).await?;
 

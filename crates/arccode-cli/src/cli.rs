@@ -592,7 +592,7 @@ pub async fn run() -> Result<ExitCode> {
         None => {
             let cfg = load_config()?;
             let mode_override = parse_mode(cli.mode.as_deref())?;
-            let mode = mode_override.unwrap_or(cfg.permission_mode);
+            let mode = cfg.clamp_mode(mode_override.unwrap_or(cfg.permission_mode));
 
             // Shared, replaceable MCP registry handle. Filled at startup
             // (if there's an agent), or by the agent_builder after /login.
@@ -779,11 +779,17 @@ fn load_config() -> Result<Config> {
     let global = global_config_path()?;
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let project_file = if project.config_file.exists() {
-        Some(project.config_file)
+        Some(project.config_file.clone())
     } else {
         None
     };
-    Ok(Config::load(Some(&global), project_file.as_deref())?)
+    let mut cfg = Config::load(Some(&global), project_file.as_deref())?;
+    // Project policy (committed .arccode/policy.toml) tightens the merged
+    // config last so neither personal config nor flags can relax it.
+    if let Some(policy) = arccode_config::load_policy(&project.dir)? {
+        cfg.apply_policy(&policy);
+    }
+    Ok(cfg)
 }
 
 /// Run the ChatGPT OAuth PKCE flow and store the resulting tokens in the

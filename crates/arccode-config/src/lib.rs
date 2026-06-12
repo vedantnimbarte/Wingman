@@ -104,6 +104,52 @@ impl std::fmt::Display for PermissionMode {
     }
 }
 
+impl PermissionMode {
+    /// Privilege rank for policy clamping: read-only < plan < auto-edit < yolo.
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::ReadOnly => 0,
+            Self::Plan => 1,
+            Self::AutoEdit => 2,
+            Self::Yolo => 3,
+        }
+    }
+}
+
+/// Org-level policy loaded from `<project>/.arccode/policy.toml`. Meant to
+/// be committed to the repo and reviewed like code; personal config and CLI
+/// flags cannot relax it — [`Config::apply_policy`] only ever tightens.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PolicyConfig {
+    /// Shell patterns denied in every mode, merged into tools.shell_denylist.
+    pub shell_denylist: Vec<String>,
+    /// Tools disabled for this project, merged into tools.disabled_tools.
+    pub disabled_tools: Vec<String>,
+    /// Highest permission mode a session may run with (e.g. "auto-edit"
+    /// prevents --yolo in this repo).
+    pub max_permission_mode: Option<PermissionMode>,
+    /// When true, [verify].turn_gate may not be "off".
+    pub require_turn_gate: bool,
+}
+
+/// Read `<project>/.arccode/policy.toml` if present.
+pub fn load_policy(project_dir: &Path) -> Result<Option<PolicyConfig>, ConfigError> {
+    let path = project_dir.join("policy.toml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body = std::fs::read_to_string(&path).map_err(|source| ConfigError::Io {
+        path: path.clone(),
+        source,
+    })?;
+    let policy = toml::from_str(&body).map_err(|source| ConfigError::Parse {
+        path,
+        source: Box::new(source),
+    })?;
+    Ok(Some(policy))
+}
+
 /// Per-project tool settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
@@ -166,6 +212,11 @@ pub struct Config {
     /// Session spend limits.
     #[serde(default)]
     pub budget: BudgetConfig,
+
+    /// Permission-mode ceiling imposed by the project policy file. Not
+    /// part of the TOML schema — populated by [`Config::apply_policy`].
+    #[serde(skip)]
+    pub policy_max_mode: Option<PermissionMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -441,6 +492,50 @@ impl Default for McpServerConfig {
 }
 
 impl Config {
+    /// Tighten this config according to the project policy. Only ever
+    /// restricts: denylists/disabled tools are merged in, the gate cannot
+    /// be turned off when the policy requires it, and the session's
+    /// permission mode is capped (including modes from CLI flags — callers
+    /// clamp via [`Config::clamp_mode`]).
+    pub fn apply_policy(&mut self, policy: &PolicyConfig) {
+        for pat in &policy.shell_denylist {
+            if !self.tools.shell_denylist.contains(pat) {
+                self.tools.shell_denylist.push(pat.clone());
+            }
+        }
+        for t in &policy.disabled_tools {
+            if !self.tools.disabled_tools.contains(t) {
+                self.tools.disabled_tools.push(t.clone());
+            }
+        }
+        if policy.require_turn_gate && self.verify.turn_gate.trim() == "off" {
+            tracing::warn!(
+                "policy requires a turn gate; overriding turn_gate=\"off\" with \"auto\""
+            );
+            self.verify.turn_gate = "auto".into();
+        }
+        if let Some(max) = policy.max_permission_mode {
+            self.policy_max_mode = Some(max);
+            if self.permission_mode.rank() > max.rank() {
+                self.permission_mode = max;
+            }
+        }
+    }
+
+    /// Clamp a session permission mode (possibly from a CLI flag) to the
+    /// policy ceiling, if one was applied.
+    pub fn clamp_mode(&self, mode: PermissionMode) -> PermissionMode {
+        match self.policy_max_mode {
+            Some(max) if mode.rank() > max.rank() => {
+                tracing::warn!(
+                    "policy caps permission mode at {max}; requested {mode} downgraded"
+                );
+                max
+            }
+            _ => mode,
+        }
+    }
+
     /// Load configuration with the documented merge order. Either path may
     /// be `None` to skip that layer (used by tests and `config init`).
     ///
@@ -1875,6 +1970,39 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    #[test]
+    fn policy_only_tightens() {
+        let policy: PolicyConfig = toml::from_str(
+            r#"
+            shell_denylist = ["curl | sh"]
+            disabled_tools = ["web_fetch"]
+            max_permission_mode = "auto-edit"
+            require_turn_gate = true
+        "#,
+        )
+        .unwrap();
+
+        let mut cfg = Config::default();
+        cfg.permission_mode = PermissionMode::Yolo;
+        cfg.verify.turn_gate = "off".into();
+        cfg.apply_policy(&policy);
+
+        assert!(cfg.tools.shell_denylist.contains(&"curl | sh".to_string()));
+        assert!(cfg.tools.disabled_tools.contains(&"web_fetch".to_string()));
+        assert_eq!(cfg.verify.turn_gate, "auto");
+        // Configured yolo capped to auto-edit; flag-supplied modes clamp too.
+        assert_eq!(cfg.permission_mode, PermissionMode::AutoEdit);
+        assert_eq!(cfg.clamp_mode(PermissionMode::Yolo), PermissionMode::AutoEdit);
+        // Less privileged modes pass through untouched.
+        assert_eq!(cfg.clamp_mode(PermissionMode::ReadOnly), PermissionMode::ReadOnly);
+    }
+
+    #[test]
+    fn no_policy_no_clamp() {
+        let cfg = Config::default();
+        assert_eq!(cfg.clamp_mode(PermissionMode::Yolo), PermissionMode::Yolo);
     }
 
     #[test]
