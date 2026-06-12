@@ -147,17 +147,35 @@ sharing, and visibility.
 
 ## Supporting bets (cheaper, scheduled opportunistically)
 
-- **Speculative parallelism** (`arccode-core`): while the model streams, pre-read files it is
-  likely to touch next (from index proximity to already-read files) and pre-warm `git status`/
-  build caches. Rust + tokio make this near-free; perceived latency drops.
-- **Fearless rewind:** auto-snapshot the worktree before each mutating tool call (shadow
-  `git stash create` or worktree clone) with a TUI timeline to scrub back. Users grant more
-  autonomy when undo is one keystroke — directly increases usage depth.
-- **Explain-and-teach mode:** optional per-hunk "why" annotations attached to diffs (fast-model
-  generated), browsable in the TUI diff view. Loved by juniors and reviewers; no CLI agent has it.
-- **Windows as a first-class story:** keep CI green on Windows, ship winget/MSI packaging, test
-  PowerShell quoting paths in `shell` tool. An underserved market the Unix-first competitors
-  concede by neglect.
+Shipped 2026-06-12 (feat/agent-enhancements):
+
+- ✅ **Parallel tool dispatch** (`arccode-core`): read-only tool batches run concurrently;
+  batches containing a mutating call stay sequential.
+- ✅ **Session budget hard stop**: `[budget] max_usd_per_session`; the loop refuses further
+  provider calls past the ceiling (`AgentStop::Budget`).
+- ✅ **Secrets redaction**: session text is scrubbed of credential prefixes and secret-ish
+  assignments before embedding into `sessions.db`.
+- ✅ **`arccode stats`**: sessions, memories, skill outcome scores, routing/budget setup.
+- ✅ **`arccode skill install <url|path>`**: skill sharing via raw markdown URLs.
+- ✅ **Project policy file** (`.arccode/policy.toml`): denylist/disabled-tool merge,
+  permission-mode ceiling (caps `--yolo`), required turn gate. Only ever tightens.
+- ✅ **`check_diagnostics` tool**: structured compiler/type-checker diagnostics
+  (cargo/tsc/go/python) as data the model can act on before the turn gate. (LSP-proper —
+  live diagnostics, references, rename — remains the follow-up.)
+- ✅ **MCP server mode** (`arccode mcp-serve`): Arc-Code's tools served over stdio to any
+  MCP host; read-only by default.
+- ✅ **GitHub Action** (`action.yml`, `docs/CI.md`): self-hosted PR review in CI.
+- ✅ **`--dry-run` shadow worktree**: headless sessions run in a detached worktree and print
+  the diff; the real tree is never touched.
+
+Still open:
+
+- **Speculative parallelism** (pre-reading likely-next files while the model streams).
+- **Fearless rewind:** auto-snapshot before each mutating tool call with a TUI timeline to
+  scrub back. Users grant more autonomy when undo is one keystroke.
+- **Explain-and-teach mode:** optional per-hunk "why" annotations attached to diffs
+  (fast-model generated), browsable in the TUI diff view.
+- **Windows as a first-class story:** keep CI green on Windows, ship winget/MSI packaging.
 - **Repo health autopilot:** once Pilot M2/M3 land, a low-priority scheduled run (existing
   `[schedule]` config) that uses idle time + cheap models to clear lint debt and propose small
   PRs. Converts Arc-Code from "tool I invoke" to "teammate that's always producing value."
