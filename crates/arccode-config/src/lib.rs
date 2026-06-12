@@ -457,6 +457,15 @@ impl Config {
                 }
             }
         }
+        // The webhook HMAC secret supports the same `${ENV_VAR}` indirection so
+        // it need not be stored in plaintext config.
+        if let Some(s) = self.pilot.daemon.webhook_secret.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
     }
 
     /// Render this config as TOML.
@@ -1434,6 +1443,14 @@ pub struct PilotDaemonConfig {
     pub trusted_authors: Vec<String>,
     pub trusted_labels: Vec<String>,
     pub sources: Vec<String>,
+    /// HMAC-SHA256 shared secret for the inbound J3 webhook. When set, every
+    /// `POST /goals` must carry a valid `X-Arccode-Signature: sha256=<hex>`
+    /// header over the body or it's rejected with 401, and only then may a
+    /// body-claimed author be honored for trust. Empty/unset disables the
+    /// webhook's trust elevation (claimed authors stay anonymous). May be a
+    /// `${ENV_VAR}` placeholder so the secret isn't stored in plaintext.
+    #[serde(default)]
+    pub webhook_secret: Option<String>,
 }
 
 impl Default for PilotDaemonConfig {
@@ -1452,6 +1469,7 @@ impl Default for PilotDaemonConfig {
                 "todos".into(),
                 "coverage_gaps".into(),
             ],
+            webhook_secret: None,
         }
     }
 }

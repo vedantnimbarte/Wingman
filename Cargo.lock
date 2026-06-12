@@ -141,6 +141,8 @@ dependencies = [
  "nix 0.29.0",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",

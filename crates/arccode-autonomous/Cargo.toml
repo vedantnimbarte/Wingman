@@ -22,6 +22,8 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 globset = "0.4"
+sha2 = { workspace = true }
+subtle = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
