@@ -316,6 +316,22 @@ pub enum SkillAction {
         #[arg(long)]
         force: bool,
     },
+    /// Install a shared skill from an https URL (raw markdown) or a local
+    /// .md file into the skill library.
+    Install {
+        /// https URL or local path of the skill markdown.
+        source: String,
+        /// Override the skill name (default: frontmatter name or file stem).
+        #[arg(long)]
+        name: Option<String>,
+        /// Install into the project's .arccode/skills instead of the
+        /// global library.
+        #[arg(long)]
+        project: bool,
+        /// Overwrite an existing skill with the same name.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -478,6 +494,12 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
+            SkillAction::Install {
+                source,
+                name,
+                project,
+                force,
+            } => commands::skill::install(source, name, project, force).await,
         },
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
