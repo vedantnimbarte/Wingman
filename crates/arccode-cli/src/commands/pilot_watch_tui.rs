@@ -39,7 +39,7 @@ use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::{Frame, Terminal};
 
 use arccode_autonomous::dashboard::{
-    self, AgentRow, DashboardModel, HeaderInfo, LogSeverity, RunSummary, TaskRow,
+    self, AgentRow, DashboardModel, HeaderInfo, LogRow, LogSeverity, RunSummary, TaskRow,
 };
 use arccode_autonomous::{AgentStatus, RunStatus, TaskStatus};
 
@@ -69,6 +69,95 @@ enum Focus {
     Runs,
     #[default]
     Tasks,
+    Log,
+}
+
+/// Minimum severity the Live log shows. Cycled with `f`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum SevFilter {
+    #[default]
+    All,
+    /// Warnings and errors only.
+    Warn,
+    /// Errors only.
+    Error,
+}
+
+impl SevFilter {
+    fn next(self) -> Self {
+        match self {
+            SevFilter::All => SevFilter::Warn,
+            SevFilter::Warn => SevFilter::Error,
+            SevFilter::Error => SevFilter::All,
+        }
+    }
+
+    fn accepts(self, s: LogSeverity) -> bool {
+        match self {
+            SevFilter::All => true,
+            SevFilter::Warn => matches!(s, LogSeverity::Warn | LogSeverity::Error),
+            SevFilter::Error => matches!(s, LogSeverity::Error),
+        }
+    }
+
+    fn label(self) -> Option<&'static str> {
+        match self {
+            SevFilter::All => None,
+            SevFilter::Warn => Some("warn+"),
+            SevFilter::Error => Some("errors"),
+        }
+    }
+}
+
+/// Scroll / filter state for the Live log pane. By default the log follows
+/// the newest events; scrolling up detaches it, and `End`/`G` re-attaches.
+#[derive(Debug, Clone, Default)]
+struct LogView {
+    /// Top row offset when not following. Kept clamped by the renderer.
+    scroll: u16,
+    /// Stick to the bottom (newest) as fresh events arrive.
+    follow: bool,
+    severity: SevFilter,
+    /// Case-insensitive substring filter (matches agent names, task ids, …).
+    query: String,
+    /// True while the user is typing into the `/` search box.
+    editing: bool,
+}
+
+impl LogView {
+    fn new() -> Self {
+        Self {
+            follow: true,
+            ..Default::default()
+        }
+    }
+
+    /// Whether a log row passes the active severity + text filters.
+    fn accepts(&self, r: &LogRow) -> bool {
+        self.severity.accepts(r.severity)
+            && (self.query.is_empty()
+                || r.text.to_lowercase().contains(&self.query.to_lowercase()))
+    }
+
+    /// Pane title reflecting the follow state and any active filters.
+    fn title(&self, shown: usize, total: usize) -> String {
+        let mut t = String::from("Live log");
+        if let Some(sev) = self.severity.label() {
+            t.push_str(&format!(" [{sev}]"));
+        }
+        if self.editing {
+            t.push_str(&format!(" /{}_", self.query));
+        } else if !self.query.is_empty() {
+            t.push_str(&format!(" /{}", self.query));
+        }
+        if shown != total {
+            t.push_str(&format!("  {shown}/{total}"));
+        }
+        if !self.follow {
+            t.push_str("  (paused)");
+        }
+        t
+    }
 }
 
 /// The glyph set the UI draws with. Unicode by default; the ASCII variant is
@@ -126,6 +215,7 @@ struct WatchUi {
     current: usize,
     focus: Focus,
     tasks_scroll: u16,
+    log: LogView,
     last_mtime: Option<SystemTime>,
     model: Option<DashboardModel>,
     finished: bool,
@@ -143,6 +233,7 @@ impl WatchUi {
             current,
             focus: Focus::default(),
             tasks_scroll: 0,
+            log: LogView::new(),
             last_mtime: None,
             model: None,
             finished: false,
@@ -199,6 +290,87 @@ impl WatchUi {
         }
     }
 
+    /// Advance focus through the visible panes: Tasks → Log → (Runs) → Tasks.
+    /// The Runs pane is only in the cycle when the sidebar is shown.
+    fn cycle_focus(&mut self) {
+        self.focus = match self.focus {
+            Focus::Tasks => Focus::Log,
+            Focus::Log if self.show_runs() => Focus::Runs,
+            Focus::Log => Focus::Tasks,
+            Focus::Runs => Focus::Tasks,
+        };
+    }
+
+    /// `↑` / `k` in the focused pane.
+    fn nav_up(&mut self) {
+        match self.focus {
+            Focus::Runs => self.select_prev(),
+            Focus::Tasks => self.tasks_scroll = self.tasks_scroll.saturating_sub(1),
+            Focus::Log => {
+                self.log.follow = false;
+                self.log.scroll = self.log.scroll.saturating_sub(1);
+            }
+        }
+    }
+
+    /// `↓` / `j` in the focused pane.
+    fn nav_down(&mut self) {
+        match self.focus {
+            Focus::Runs => self.select_next(),
+            Focus::Tasks => self.tasks_scroll = self.tasks_scroll.saturating_add(1),
+            Focus::Log => {
+                self.log.follow = false;
+                self.log.scroll = self.log.scroll.saturating_add(1);
+            }
+        }
+    }
+
+    /// Page-sized jump (`PgUp`/`PgDn`) in the focused scroll pane. Runs, which
+    /// select rather than scroll, ignore it.
+    fn nav_page(&mut self, down: bool) {
+        const PAGE: u16 = 10;
+        match self.focus {
+            Focus::Runs => {}
+            Focus::Tasks => {
+                self.tasks_scroll = if down {
+                    self.tasks_scroll.saturating_add(PAGE)
+                } else {
+                    self.tasks_scroll.saturating_sub(PAGE)
+                };
+            }
+            Focus::Log => {
+                self.log.follow = false;
+                self.log.scroll = if down {
+                    self.log.scroll.saturating_add(PAGE)
+                } else {
+                    self.log.scroll.saturating_sub(PAGE)
+                };
+            }
+        }
+    }
+
+    /// `Home` / `g`: jump to the top of the focused pane.
+    fn nav_home(&mut self) {
+        match self.focus {
+            Focus::Runs => self.switch_to(0),
+            Focus::Tasks => self.tasks_scroll = 0,
+            Focus::Log => {
+                self.log.follow = false;
+                self.log.scroll = 0;
+            }
+        }
+    }
+
+    /// `End` / `G`: jump to the bottom of the focused pane. For the log this
+    /// re-attaches follow-mode; for tasks the renderer clamps the overshoot.
+    fn nav_end(&mut self) {
+        match self.focus {
+            Focus::Runs => self.switch_to(self.runs.len().saturating_sub(1)),
+            Focus::Tasks => self.tasks_scroll = u16::MAX,
+            Focus::Log => self.log.follow = true,
+        }
+    }
+
     /// Re-list runs (active + the watched one), preserving the current
     /// selection by id and refreshing each run's progress/status.
     fn refresh_runs(&mut self, project_root: &Path) {
@@ -212,7 +384,7 @@ impl WatchUi {
             .min(list.len().saturating_sub(1));
         self.runs = list;
         // Focus can't sit on a hidden sidebar.
-        if !self.show_runs() {
+        if !self.show_runs() && self.focus == Focus::Runs {
             self.focus = Focus::Tasks;
         }
     }
@@ -282,30 +454,47 @@ fn run_loop(
                 if k.kind == KeyEventKind::Release {
                     continue;
                 }
-                let on_runs = ui.focus == Focus::Runs;
+                // Ctrl-C always quits, even mid-search.
+                if let (KeyCode::Char('c'), KeyModifiers::CONTROL) = (k.code, k.modifiers) {
+                    return Ok(ExitCode::SUCCESS);
+                }
+                // While typing a `/` search, keys edit the query instead of
+                // driving the panes.
+                if ui.log.editing {
+                    match k.code {
+                        KeyCode::Esc => {
+                            ui.log.editing = false;
+                            ui.log.query.clear();
+                        }
+                        KeyCode::Enter => ui.log.editing = false,
+                        KeyCode::Backspace => {
+                            ui.log.query.pop();
+                        }
+                        KeyCode::Char(c) => ui.log.query.push(c),
+                        _ => {}
+                    }
+                    continue;
+                }
                 match (k.code, k.modifiers) {
                     (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => return Ok(ExitCode::SUCCESS),
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Ok(ExitCode::SUCCESS),
-                    (KeyCode::Tab, _) if ui.show_runs() => {
-                        ui.focus = if on_runs { Focus::Tasks } else { Focus::Runs };
+                    (KeyCode::Tab, _) => ui.cycle_focus(),
+                    (KeyCode::Up | KeyCode::Char('k'), _) => ui.nav_up(),
+                    (KeyCode::Down | KeyCode::Char('j'), _) => ui.nav_down(),
+                    (KeyCode::PageUp, _) => ui.nav_page(false),
+                    (KeyCode::PageDown, _) => ui.nav_page(true),
+                    (KeyCode::Home | KeyCode::Char('g'), _) => ui.nav_home(),
+                    (KeyCode::End | KeyCode::Char('G'), _) => ui.nav_end(),
+                    // Log filtering: `/` opens the search box, `f` cycles the
+                    // severity filter. Both focus the log so the effect is
+                    // visible immediately.
+                    (KeyCode::Char('/'), _) => {
+                        ui.focus = Focus::Log;
+                        ui.log.editing = true;
                     }
-                    // Arrows drive the focused pane: run selection or task scroll.
-                    (KeyCode::Up | KeyCode::Char('k'), _) if on_runs => ui.select_prev(),
-                    (KeyCode::Down | KeyCode::Char('j'), _) if on_runs => ui.select_next(),
-                    (KeyCode::Up | KeyCode::Char('k'), _) => {
-                        ui.tasks_scroll = ui.tasks_scroll.saturating_sub(1)
+                    (KeyCode::Char('f'), _) => {
+                        ui.focus = Focus::Log;
+                        ui.log.severity = ui.log.severity.next();
                     }
-                    (KeyCode::Down | KeyCode::Char('j'), _) => {
-                        ui.tasks_scroll = ui.tasks_scroll.saturating_add(1)
-                    }
-                    (KeyCode::PageUp, _) if !on_runs => {
-                        ui.tasks_scroll = ui.tasks_scroll.saturating_sub(10)
-                    }
-                    (KeyCode::PageDown, _) if !on_runs => {
-                        ui.tasks_scroll = ui.tasks_scroll.saturating_add(10)
-                    }
-                    (KeyCode::Home | KeyCode::Char('g'), _) if on_runs => ui.switch_to(0),
-                    (KeyCode::Home | KeyCode::Char('g'), _) => ui.tasks_scroll = 0,
                     // Number keys jump straight to a run, regardless of focus.
                     (KeyCode::Char(c), _) if c.is_ascii_digit() && c != '0' => {
                         ui.switch_to(c as usize - '1' as usize);
@@ -379,7 +568,8 @@ fn draw(f: &mut Frame, ui: &mut WatchUi) {
         g,
     );
     render_agents(f, top[1], &model.agents, ui.frame, g);
-    render_log(f, grid[1], &model.log);
+    let log_focused = ui.focus == Focus::Log;
+    render_log(f, grid[1], &model.log, &mut ui.log, log_focused);
     render_footer(f, rows[2], ui.finished, ui.show_runs());
 }
 
@@ -525,14 +715,26 @@ fn render_agents(f: &mut Frame, area: Rect, agents: &[AgentRow], frame: u64, g: 
     f.render_widget(Paragraph::new(lines).block(bordered(&title)), area);
 }
 
-fn render_log(f: &mut Frame, area: Rect, log: &[LogSeverityLine]) {
-    let lines: Vec<Line> = log.iter().map(log_line).collect();
-    // Stick to the bottom so the newest events are always visible.
+fn render_log(f: &mut Frame, area: Rect, log: &[LogRow], view: &mut LogView, focused: bool) {
+    // Apply the severity + text filters, then render the surviving rows.
+    let rows: Vec<&LogRow> = log.iter().filter(|r| view.accepts(r)).collect();
+    let lines: Vec<Line> = rows.iter().map(|&r| log_line(r)).collect();
+
     let inner_h = area.height.saturating_sub(2);
-    let scroll = (lines.len() as u16).saturating_sub(inner_h);
+    let max = (lines.len() as u16).saturating_sub(inner_h);
+    // Follow-mode sticks to the newest events; otherwise honour the user's
+    // scroll, clamped so we never page past the ends.
+    let scroll = if view.follow {
+        max
+    } else {
+        view.scroll.min(max)
+    };
+    view.scroll = scroll;
+
+    let title = view.title(rows.len(), log.len());
     f.render_widget(
         Paragraph::new(lines)
-            .block(bordered("Live log"))
+            .block(bordered_focused(&title, focused))
             .scroll((scroll, 0)),
         area,
     );
@@ -540,18 +742,20 @@ fn render_log(f: &mut Frame, area: Rect, log: &[LogSeverityLine]) {
 
 fn render_footer(f: &mut Frame, area: Rect, finished: bool, show_runs: bool) {
     let cyan = Style::default().fg(Color::Cyan);
-    let mut spans = Vec::new();
+    let key = |k: &str, desc: &str| {
+        [
+            Span::styled(k.to_string(), cyan),
+            Span::styled(format!(" {desc} · "), dim()),
+        ]
+    };
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(key("Tab", "focus"));
+    spans.extend(key("↑/↓", "scroll"));
     if show_runs {
-        spans.push(Span::styled(" Tab", cyan));
-        spans.push(Span::styled(" focus · ", dim()));
-        spans.push(Span::styled("↑/↓", cyan));
-        spans.push(Span::styled(" select/scroll · ", dim()));
-        spans.push(Span::styled("1-9", cyan));
-        spans.push(Span::styled(" run · ", dim()));
-    } else {
-        spans.push(Span::styled(" ↑/↓", cyan));
-        spans.push(Span::styled(" scroll tasks · ", dim()));
+        spans.extend(key("1-9", "run"));
     }
+    spans.extend(key("/", "search"));
+    spans.extend(key("f", "filter"));
     spans.push(Span::styled("q", cyan));
     spans.push(Span::styled(" quit ", dim()));
 
@@ -985,6 +1189,105 @@ mod tests {
         assert_eq!(run_status_glyph(RunStatus::Running, 0, UNI).0, UNI.spinner(0));
         assert_eq!(run_status_glyph(RunStatus::Done, 0, UNI).0, '✓');
         assert_eq!(run_status_glyph(RunStatus::Failed, 0, UNI).0, '✗');
+    }
+
+    fn log(text: &str, severity: LogSeverity) -> LogRow {
+        LogRow {
+            text: text.into(),
+            severity,
+        }
+    }
+
+    #[test]
+    fn severity_filter_cycles_all_warn_error() {
+        let f = SevFilter::All;
+        assert_eq!(f.next(), SevFilter::Warn);
+        assert_eq!(f.next().next(), SevFilter::Error);
+        assert_eq!(f.next().next().next(), SevFilter::All);
+
+        assert!(SevFilter::All.accepts(LogSeverity::Info));
+        assert!(!SevFilter::Warn.accepts(LogSeverity::Info));
+        assert!(SevFilter::Warn.accepts(LogSeverity::Warn));
+        assert!(SevFilter::Warn.accepts(LogSeverity::Error));
+        assert!(!SevFilter::Error.accepts(LogSeverity::Warn));
+        assert!(SevFilter::Error.accepts(LogSeverity::Error));
+    }
+
+    #[test]
+    fn log_view_query_filters_case_insensitively() {
+        let mut v = LogView::new();
+        let rows = [
+            log("task.tool  t2 [brave_otter] edit_file", LogSeverity::Info),
+            log("task.status t1 → Failed", LogSeverity::Error),
+        ];
+        // No query → everything passes.
+        assert!(rows.iter().all(|r| v.accepts(r)));
+        // Query matches the agent name regardless of case.
+        v.query = "BRAVE".into();
+        assert!(v.accepts(&rows[0]));
+        assert!(!v.accepts(&rows[1]));
+    }
+
+    #[test]
+    fn log_view_combines_severity_and_query() {
+        let mut v = LogView::new();
+        v.severity = SevFilter::Error;
+        v.query = "t1".into();
+        assert!(v.accepts(&log("task.status t1 → Failed", LogSeverity::Error)));
+        // Right task, wrong severity.
+        assert!(!v.accepts(&log("task.assign t1 → x", LogSeverity::Info)));
+    }
+
+    #[test]
+    fn log_title_shows_filter_and_pause_state() {
+        let mut v = LogView::new();
+        assert_eq!(v.title(5, 5), "Live log");
+        v.severity = SevFilter::Error;
+        v.query = "otter".into();
+        v.follow = false;
+        let t = v.title(2, 5);
+        assert!(t.contains("[errors]"), "{t}");
+        assert!(t.contains("/otter"), "{t}");
+        assert!(t.contains("2/5"), "{t}");
+        assert!(t.contains("(paused)"), "{t}");
+    }
+
+    #[test]
+    fn cycle_focus_includes_log_and_skips_hidden_runs() {
+        // Single run: Tasks → Log → Tasks (Runs pane hidden).
+        let mut ui = WatchUi::new(vec![summary("only", RunStatus::Running)], 0, UNI);
+        assert_eq!(ui.focus, Focus::Tasks);
+        ui.cycle_focus();
+        assert_eq!(ui.focus, Focus::Log);
+        ui.cycle_focus();
+        assert_eq!(ui.focus, Focus::Tasks);
+
+        // Two runs: Tasks → Log → Runs → Tasks.
+        let mut ui = WatchUi::new(
+            vec![
+                summary("a", RunStatus::Running),
+                summary("b", RunStatus::Running),
+            ],
+            0,
+            UNI,
+        );
+        ui.cycle_focus();
+        assert_eq!(ui.focus, Focus::Log);
+        ui.cycle_focus();
+        assert_eq!(ui.focus, Focus::Runs);
+        ui.cycle_focus();
+        assert_eq!(ui.focus, Focus::Tasks);
+    }
+
+    #[test]
+    fn log_nav_detaches_follow_and_end_reattaches() {
+        let mut ui = WatchUi::new(vec![summary("only", RunStatus::Running)], 0, UNI);
+        ui.focus = Focus::Log;
+        assert!(ui.log.follow, "log follows by default");
+        ui.nav_up();
+        assert!(!ui.log.follow, "scrolling up detaches follow");
+        ui.nav_end();
+        assert!(ui.log.follow, "End re-attaches follow");
     }
 
     #[test]
