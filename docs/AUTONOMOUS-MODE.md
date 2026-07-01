@@ -287,20 +287,34 @@ When a run is active, the TUI shows:
 
 ### Dashboard Layout
 
+`arccode pilot watch` renders a live, colour-coded, 2-column grid: **Tasks |
+Agents** on the top row, with the **Live log** spanning the full width below.
+The header carries the run summary (progress by status, elapsed, spend, and
+the git anchors). Each row surfaces the details worth watching — per-task cost,
+elapsed time, write-set size, dependency list, and retry count; per-agent
+current tool, uptime, pid, and cost.
+
 ```
-┌─ Tasks ─────────────────────┬─ Agents ──────────────────────┐
-│ #1  developer  done         │ agent-7f3a  developer  idle   │
-│ #2  developer  in-progress  │ agent-9c1b  developer  task#2 │
-│ #3  designer   done         │ agent-2d44  designer   idle   │
-│ #4  developer  pending      │                               │
-│ …                           │                               │
-├─ Live log ──────────────────┴───────────────────────────────┤
-│ 14:32:11  task#1 developer: ✓ completed                    │
-│ 14:32:14  task#2 developer: edit_file crates/…/composer.rs │
-│ 14:32:16  task#3 designer:  read_file crates/…/theme.rs    │
-│ …                                                           │
-└─────────────────────────────────────────────────────────────┘
+┌ Pilot: 2026-07-01-0707-hq27zr · 3/16 · Running · $0.42 · 2▶ · 1✗ · 4m12s ──────┐
+┌─ Tasks (16) ────────────────────────┐┌─ Agents (4) ─────────────────────────┐
+│ ✓ t1  [designer]  Tiptap editor …   ││ ↻ agent-0001 [designer] task=t1 ·    │
+│ ↻ t2  [developer] Editor.tsx  ·      ││     ▸edit_file · pid=10628 · 3m · $.08│
+│       agent-0006 · deps: t1 · ✎3 ·   ││ ↻ agent-0006 [developer] task=t2 ·   │
+│       $0.05 · 1m20s · try2           ││     ▸run_shell · pid=19572 · 2m · $.05│
+│ ○ t3  [developer] Slash menu …       │└──────────────────────────────────────┘
+└──────────────────────────────────────┘
+┌─ Live log ─────────────────────────────────────────────────────────────────────┐
+│ 07:24:44  task.tool    t2 [agent-0006] edit_file                               │
+│ 07:25:07  task.status  t1e → Failed                                            │
+│ 07:25:53  task.create  t1f: Create editor package …                            │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+Keys: `↑`/`↓` (or `k`/`j`) and `PgUp`/`PgDn` scroll the Tasks pane, `Home`/`g`
+jumps to the top, `q`/`Esc`/`Ctrl-C` exits. The Live log auto-sticks to the
+newest events. When stdout is not a terminal (CI, `| tee`, redirected logs),
+`pilot watch` falls back to a plain reprint of the same grid; `pilot status`
+prints that grid once and exits.
 
 ### Slash Commands
 

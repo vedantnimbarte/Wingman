@@ -241,6 +241,9 @@ pub fn task_from_planned(planned: &PlannedTask) -> Task {
         usd: 0.0,
         commits: Vec::new(),
         outcome: None,
+        started_at: None,
+        ended_at: None,
+        attempts: 0,
     }
 }
 

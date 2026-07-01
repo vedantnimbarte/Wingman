@@ -205,6 +205,18 @@ pub struct Task {
     /// Outcome reported by the worker on completion (free-form summary).
     #[serde(default)]
     pub outcome: Option<TaskOutcome>,
+    /// RFC-3339 timestamp when the task first entered `in_progress`. Used by
+    /// the dashboard to show elapsed / wall time.
+    #[serde(default)]
+    pub started_at: Option<String>,
+    /// RFC-3339 timestamp when the task reached a terminal status
+    /// (`done` / `failed`).
+    #[serde(default)]
+    pub ended_at: Option<String>,
+    /// How many times a worker has been assigned to this task (retry ladder).
+    /// 1 on the first attempt; >1 after a requeue.
+    #[serde(default)]
+    pub attempts: u32,
 }
 
 impl Task {
@@ -225,6 +237,9 @@ impl Task {
             usd: 0.0,
             commits: Vec::new(),
             outcome: None,
+            started_at: None,
+            ended_at: None,
+            attempts: 0,
         }
     }
 }
@@ -254,6 +269,16 @@ pub struct Agent {
     /// any worker's transcript.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// RFC-3339 timestamp when the worker was first seen (spawn or assign).
+    /// Drives the "uptime" column in the dashboard.
+    #[serde(default)]
+    pub spawned_at: Option<String>,
+    /// The most recent tool the worker invoked, for the live dashboard.
+    #[serde(default)]
+    pub current_tool: Option<String>,
+    /// USD spent by this worker so far (sum of its `agent.usd` deltas).
+    #[serde(default)]
+    pub usd: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -567,6 +592,9 @@ pub fn apply(state: &mut RunState, event: &Event) {
                 usd: 0.0,
                 commits: Vec::new(),
                 outcome: None,
+                started_at: None,
+                ended_at: None,
+                attempts: 0,
             };
             match existing {
                 Some(i) => state.tasks[i] = task,
@@ -574,15 +602,17 @@ pub fn apply(state: &mut RunState, event: &Event) {
             }
         }
         Event::TaskAssign {
+            t: ts,
             id,
             agent,
             worktree,
-            ..
         } => {
             let role = state.task(id).map(|t| t.role.clone());
             if let Some(t) = state.task_mut(id) {
                 t.agent = Some(agent.clone());
                 t.worktree = Some(worktree.clone());
+                // Each assignment is one attempt on the retry ladder.
+                t.attempts = t.attempts.saturating_add(1);
                 if t.status == TaskStatus::Pending {
                     t.status = TaskStatus::Todo;
                 }
@@ -599,6 +629,9 @@ pub fn apply(state: &mut RunState, event: &Event) {
                         pid: None,
                         status: AgentStatus::Idle,
                         session_id: None,
+                        spawned_at: Some(ts.clone()),
+                        current_tool: None,
+                        usd: 0.0,
                     });
                 }
             } else if let Some(a) = state.agent_mut(agent) {
@@ -606,21 +639,38 @@ pub fn apply(state: &mut RunState, event: &Event) {
             }
         }
         Event::TaskStatus {
+            t: ts,
             id,
             status,
             outcome,
-            ..
         } => {
             if let Some(t) = state.task_mut(id) {
                 t.status = *status;
                 if let Some(o) = outcome {
                     t.outcome = Some(o.clone());
                 }
+                // Stamp lifecycle timing off the event clock so the
+                // dashboard can show elapsed / wall time.
+                if *status == TaskStatus::InProgress && t.started_at.is_none() {
+                    t.started_at = Some(ts.clone());
+                }
+                if status.is_terminal() {
+                    t.ended_at = Some(ts.clone());
+                }
             }
         }
-        Event::TaskTool { .. } => {
-            // Live-log only; no state mutation. Tracked in tasks.jsonl for the
-            // dashboard.
+        Event::TaskTool {
+            id, agent, tool, ..
+        } => {
+            // Live-log only for the task, but we surface the worker's most
+            // recent tool on the agent so the dashboard shows what each
+            // worker is doing right now.
+            if let Some(a) = state.agent_mut(agent) {
+                a.current_tool = Some(tool.clone());
+                if a.current_task.is_none() {
+                    a.current_task = Some(id.clone());
+                }
+            }
         }
         Event::TaskCommit { id, sha, .. } => {
             if let Some(t) = state.task_mut(id) {
@@ -628,11 +678,11 @@ pub fn apply(state: &mut RunState, event: &Event) {
             }
         }
         Event::AgentSpawn {
+            t: ts,
             agent,
             role,
             pid,
             session_id,
-            ..
         } => {
             // Preserve `current_task` if the agent was auto-registered by an
             // earlier TaskAssign — spawn only refreshes pid / session_id.
@@ -644,6 +694,9 @@ pub fn apply(state: &mut RunState, event: &Event) {
                 if session_id.is_some() {
                     existing.session_id = session_id.clone();
                 }
+                if existing.spawned_at.is_none() {
+                    existing.spawned_at = Some(ts.clone());
+                }
             } else {
                 state.agents.push(Agent {
                     id: agent.clone(),
@@ -652,6 +705,9 @@ pub fn apply(state: &mut RunState, event: &Event) {
                     pid: *pid,
                     status: AgentStatus::Idle,
                     session_id: session_id.clone(),
+                    spawned_at: Some(ts.clone()),
+                    current_tool: None,
+                    usd: 0.0,
                 });
             }
         }
@@ -670,11 +726,15 @@ pub fn apply(state: &mut RunState, event: &Event) {
             state.totals.usd += usd;
             state.totals.tokens_in += input_tokens;
             state.totals.tokens_out += output_tokens;
-            if let Some(a) = state.agent(agent) {
-                if let Some(task_id) = a.current_task.clone() {
-                    if let Some(t) = state.task_mut(&task_id) {
-                        t.usd += usd;
-                    }
+            let current_task = if let Some(a) = state.agent_mut(agent) {
+                a.usd += usd;
+                a.current_task.clone()
+            } else {
+                None
+            };
+            if let Some(task_id) = current_task {
+                if let Some(t) = state.task_mut(&task_id) {
+                    t.usd += usd;
                 }
             }
         }
@@ -684,10 +744,15 @@ pub fn apply(state: &mut RunState, event: &Event) {
         Event::RunMergeStart { .. } => {
             state.status = RunStatus::Merging;
         }
-        Event::RunMergeTask { id, commit, .. } => {
+        Event::RunMergeTask {
+            t: ts, id, commit, ..
+        } => {
             if let Some(t) = state.task_mut(id) {
                 t.commits.push(commit.clone());
                 t.status = TaskStatus::Done;
+                if t.ended_at.is_none() {
+                    t.ended_at = Some(ts.clone());
+                }
             }
         }
         Event::RunPr { url, .. } => {

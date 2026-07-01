@@ -11,6 +11,7 @@ pub mod knows;
 pub mod login;
 pub mod memory;
 pub mod pilot;
+pub mod pilot_watch_tui;
 pub mod review;
 pub mod review_multi;
 pub mod schedule;

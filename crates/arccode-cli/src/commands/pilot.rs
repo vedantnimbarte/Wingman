@@ -1029,6 +1029,17 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64) -> Result<ExitCode>
         None => runs.into_iter().next().unwrap(),
     };
 
+    // Interactive full-screen grid UI when attached to a terminal; fall
+    // back to the pipe-friendly reprint loop otherwise (CI, `| tee`, logs).
+    if std::io::stdout().is_terminal() {
+        let dir = pick.dir.clone();
+        return tokio::task::spawn_blocking(move || {
+            crate::commands::pilot_watch_tui::run(&dir, interval_ms)
+        })
+        .await
+        .context("pilot watch UI task panicked")?;
+    }
+
     eprintln!("[pilot] watching {} (Ctrl-C to exit)", pick.dir.display());
 
     let interval = Duration::from_millis(interval_ms.max(50));
