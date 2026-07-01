@@ -61,6 +61,63 @@ fn auto_ascii() -> bool {
     }
 }
 
+/// Resolve which run a control command targets: an explicit id, else the
+/// most recently updated run under the project.
+fn pick_run(run_id: Option<String>) -> Result<arccode_autonomous::dashboard::RunSummary> {
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let runs = arccode_autonomous::dashboard::list_runs(&project.root).context("listing runs")?;
+    if runs.is_empty() {
+        return Err(anyhow!("no runs found under {}", project.root.display()));
+    }
+    match run_id {
+        Some(id) => runs
+            .into_iter()
+            .find(|r| r.run_id == id)
+            .ok_or_else(|| anyhow!("no run with id {id} found")),
+        None => Ok(runs.into_iter().next().unwrap()),
+    }
+}
+
+/// Append a control command to the selected run's control channel.
+fn send_control(
+    run_id: Option<String>,
+    cmd: arccode_autonomous::control::ControlCommand,
+) -> Result<ExitCode> {
+    let pick = pick_run(run_id)?;
+    arccode_autonomous::control::append(&pick.dir, &cmd)
+        .with_context(|| format!("writing control command to run {}", pick.run_id))?;
+    eprintln!("[pilot] {} → {}", cmd.encode(), pick.run_id);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `pilot abort [run] [--task T]` — abort the whole run, or just one task.
+pub async fn control_abort(run_id: Option<String>, task: Option<String>) -> Result<ExitCode> {
+    use arccode_autonomous::control::ControlCommand;
+    let cmd = match task {
+        Some(id) => ControlCommand::AbortTask { id },
+        None => ControlCommand::AbortRun,
+    };
+    send_control(run_id, cmd)
+}
+
+/// `pilot retry <task> [run]` — re-queue a failed/blocked task.
+pub async fn control_retry(run_id: Option<String>, task: String) -> Result<ExitCode> {
+    send_control(
+        run_id,
+        arccode_autonomous::control::ControlCommand::RetryTask { id: task },
+    )
+}
+
+/// `pilot approve [run]` — release a plan-approval gate.
+pub async fn control_approve(run_id: Option<String>) -> Result<ExitCode> {
+    send_control(run_id, arccode_autonomous::control::ControlCommand::Approve)
+}
+
+/// `pilot veto [run]` — reject a pending plan.
+pub async fn control_veto(run_id: Option<String>) -> Result<ExitCode> {
+    send_control(run_id, arccode_autonomous::control::ControlCommand::Veto)
+}
+
 /// E6 adaptive-routing thresholds: a role's cheap-model blended success
 /// rate must clear this (after `ROUTE_MIN_SAMPLES` attempts) to keep being
 /// routed to the cheap model; otherwise it escalates to the capable model.
@@ -255,6 +312,20 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         effective_tier, report.estimated_usd, report.reason
     );
 
+    // Surface the gate in state.json so `pilot watch` shows AwaitingApproval
+    // and `pilot approve` / `pilot veto` have something to act on.
+    if !matches!(
+        effective_tier,
+        arccode_autonomous::approval::ApprovalTier::Auto
+    ) {
+        let _ = store
+            .append(arccode_autonomous::model::Event::RunStatusEv {
+                t: arccode_autonomous::RunStore::now(),
+                status: arccode_autonomous::RunStatus::AwaitingApproval,
+            })
+            .await;
+    }
+
     let approve = match effective_tier {
         arccode_autonomous::approval::ApprovalTier::Auto => true,
         arccode_autonomous::approval::ApprovalTier::NotifyOnly => {
@@ -263,6 +334,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
                 &goal,
                 pilot.approval.notify_only_window_secs,
                 &pilot.approval.notify_channel,
+                Some(&run_path),
             )
             .await?
         }
@@ -589,6 +661,7 @@ async fn refine_goal(
                 &goal,
                 pilot.approval.notify_only_window_secs,
                 &pilot.approval.notify_channel,
+                None,
             )
             .await
             .unwrap_or(true)
@@ -763,46 +836,94 @@ use std::io::IsTerminal;
 /// presses Enter (or sends Ctrl+C) the run is vetoed; otherwise we
 /// proceed. Non-interactive sessions auto-proceed silently — the
 /// classifier already decided this plan is safe enough to run unattended.
+/// Run the notify-only veto window, returning `true` to proceed with the
+/// plan and `false` to reject it.
+///
+/// Decision sources, whichever comes first: an interactive `Enter` (veto), a
+/// control-file `approve` / `veto` command (when `control_dir` is set — this
+/// is how `pilot approve` / `pilot veto` and the watch UI drive a headless
+/// run), or the window elapsing (proceed).
 async fn run_notify_window(
     plan: &[arccode_autonomous::planner::PlannedTask],
     goal: &str,
     window_secs: u64,
     channel: &str,
+    control_dir: Option<&std::path::Path>,
 ) -> Result<bool> {
+    use std::time::{Duration, Instant};
     let _ = goal;
     let count = plan.len();
     eprintln!(
         "[pilot] notify-only: {count} tasks in plan, vetoing window {window_secs}s (channel: {channel})."
     );
-    eprintln!("[pilot] press Enter within the window to veto; ignore to proceed.");
-    if !std::io::stdin().is_terminal() {
-        // Non-interactive: just wait the window out so an operator
-        // watching logs has a chance to interrupt with SIGTERM.
-        tokio::time::sleep(std::time::Duration::from_secs(window_secs)).await;
-        eprintln!("[pilot] notify window elapsed; proceeding.");
-        return Ok(true);
-    }
+    eprintln!(
+        "[pilot] press Enter to veto, or from another terminal run `pilot approve` / `pilot veto`; ignore to proceed."
+    );
 
-    // Read a single line from stdin on a blocking task; race it against
-    // the timeout. Tokio's tokio::io::stdin requires the `io-std`
-    // feature which the workspace doesn't enable; spawn_blocking is the
-    // workspace-friendly alternative.
-    let read_line = tokio::task::spawn_blocking(|| {
-        let mut buf = String::new();
-        let _ = std::io::stdin().read_line(&mut buf);
-        buf
-    });
-    let timeout = tokio::time::sleep(std::time::Duration::from_secs(window_secs));
-    tokio::pin!(timeout);
-    tokio::pin!(read_line);
-    tokio::select! {
-        _ = &mut read_line => {
-            eprintln!("[pilot] veto received; rejecting plan.");
-            Ok(false)
+    let window = Duration::from_secs(window_secs);
+    let start = Instant::now();
+    let mut reader = control_dir.map(|_| arccode_autonomous::control::ControlReader::new());
+
+    // Poll the control file (if any) for an approve/veto decision.
+    let poll_control = |reader: &mut Option<arccode_autonomous::control::ControlReader>| {
+        use arccode_autonomous::control::ControlCommand;
+        let (Some(r), Some(d)) = (reader.as_mut(), control_dir) else {
+            return None;
+        };
+        for cmd in r.poll(d) {
+            match cmd {
+                ControlCommand::Approve => {
+                    eprintln!("[pilot] approval received via control channel; proceeding.");
+                    return Some(true);
+                }
+                ControlCommand::Veto => {
+                    eprintln!("[pilot] veto received via control channel; rejecting plan.");
+                    return Some(false);
+                }
+                _ => {}
+            }
         }
-        _ = &mut timeout => {
-            eprintln!("[pilot] notify window elapsed; proceeding.");
-            Ok(true)
+        None
+    };
+
+    if std::io::stdin().is_terminal() {
+        // Interactive: race a single stdin line against control-file polling
+        // and the timeout.
+        let read_line = tokio::task::spawn_blocking(|| {
+            let mut buf = String::new();
+            let _ = std::io::stdin().read_line(&mut buf);
+            buf
+        });
+        tokio::pin!(read_line);
+        loop {
+            if let Some(decision) = poll_control(&mut reader) {
+                return Ok(decision);
+            }
+            let Some(remaining) = window.checked_sub(start.elapsed()) else {
+                eprintln!("[pilot] notify window elapsed; proceeding.");
+                return Ok(true);
+            };
+            let tick = remaining.min(Duration::from_millis(250));
+            tokio::select! {
+                _ = &mut read_line => {
+                    eprintln!("[pilot] veto received; rejecting plan.");
+                    return Ok(false);
+                }
+                _ = tokio::time::sleep(tick) => {}
+            }
+        }
+    } else {
+        // Non-interactive (headless): poll the control file until a decision
+        // or the window elapses. An operator can still SIGTERM.
+        loop {
+            if let Some(decision) = poll_control(&mut reader) {
+                return Ok(decision);
+            }
+            if start.elapsed() >= window {
+                eprintln!("[pilot] notify window elapsed; proceeding.");
+                return Ok(true);
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
     }
 }

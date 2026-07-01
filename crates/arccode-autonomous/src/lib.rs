@@ -11,6 +11,7 @@ pub mod automerge;
 pub mod checkpoint;
 pub mod child_process;
 pub mod concurrency;
+pub mod control;
 pub mod critic;
 pub mod daemon;
 pub mod dashboard;

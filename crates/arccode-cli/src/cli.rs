@@ -299,6 +299,31 @@ pub enum PilotAction {
         #[arg(long, default_value_t = 0)]
         cycles: usize,
     },
+    /// Abort a live run (or one of its tasks) via the control channel.
+    Abort {
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        /// Abort just this task instead of the whole run.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+    },
+    /// Retry a failed/blocked task in a live run.
+    Retry {
+        /// Task id to retry.
+        task: String,
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+    },
+    /// Approve a run waiting at the plan-approval gate.
+    Approve {
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+    },
+    /// Reject a run waiting at the plan-approval gate.
+    Veto {
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -532,6 +557,14 @@ pub async fn run() -> Result<ExitCode> {
                 let cfg = load_config()?;
                 commands::pilot::daemon(cfg, cycles).await
             }
+            PilotAction::Abort { run_id, task } => {
+                commands::pilot::control_abort(run_id, task).await
+            }
+            PilotAction::Retry { task, run_id } => {
+                commands::pilot::control_retry(run_id, task).await
+            }
+            PilotAction::Approve { run_id } => commands::pilot::control_approve(run_id).await,
+            PilotAction::Veto { run_id } => commands::pilot::control_veto(run_id).await,
         },
         Some(Command::Autonomous {
             goal,

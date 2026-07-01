@@ -379,6 +379,34 @@ When stdout is not a terminal (CI, `| tee`, redirected logs), `pilot watch`
 falls back to a plain reprint of the current run's grid (no sidebar, no
 animation, no meters); `pilot status` prints that grid once and exits.
 
+### Controlling a live run
+
+`pilot watch` and `pilot status` observe; the **control channel** lets you
+steer a run from a different process than the one hosting the orchestrator.
+Commands are newline-delimited JSON appended to `<run-dir>/control.jsonl`; the
+orchestrator's control watchdog tails the file and applies each command once.
+
+From the CLI:
+
+```
+pilot abort [RUN]            # abort the whole run
+pilot abort [RUN] --task T   # abort just task T's worker
+pilot retry T [RUN]          # re-queue a failed/blocked task
+pilot approve [RUN]          # release a plan-approval gate
+pilot veto [RUN]             # reject a pending plan
+```
+
+`RUN` defaults to the most recently updated run. In a pinch you can write the
+file by hand: `echo '{"cmd":"abort_run"}' >> <run-dir>/control.jsonl`.
+
+From the **watch UI**: `x` aborts the run (with a confirm), `r` retries the
+selected task (with a confirm), and — while a run is parked at the plan gate —
+`a` / `v` approve / veto it. `abort_run` cancels every in-flight worker, marks
+the remaining tasks failed, records `RunStatus::Aborted`, and refuses further
+assignment so the run winds down cleanly. Approve/veto are honoured by the
+notify-only approval window, which surfaces as `AwaitingApproval` in the
+dashboard; the hard gate still requires an interactive TTY.
+
 ### Slash Commands
 
 - `/autonomous status` — print run summary.

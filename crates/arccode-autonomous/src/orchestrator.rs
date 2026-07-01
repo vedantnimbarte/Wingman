@@ -28,7 +28,10 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::model::{AgentStatus, Event, Reversibility, Role, Task, TaskOutcome, TaskStatus};
+use crate::control::{ControlCommand, ControlReader};
+use crate::model::{
+    AgentStatus, Event, Reversibility, Role, RunStatus, Task, TaskOutcome, TaskStatus,
+};
 use crate::store::{RunStore, StoreError};
 
 #[derive(Debug, Error)]
@@ -47,10 +50,14 @@ pub enum OrchestratorError {
     ConcurrencyCap(u32),
     #[error("cost cap reached: spent ${spent:.2} of ${cap:.2}")]
     CostCap { spent: f64, cap: f64 },
-    #[error("task {0} write-set overlaps in-progress task {1}; serialising to avoid a conflict (E4)")]
+    #[error(
+        "task {0} write-set overlaps in-progress task {1}; serialising to avoid a conflict (E4)"
+    )]
     WriteConflict(String, String),
     #[error("orchestrator stopped before this command completed")]
     Shutdown,
+    #[error("run is aborting; no new work is being assigned")]
+    Aborting,
     #[error("worker spawn failed: {0}")]
     Spawn(String),
 }
@@ -145,6 +152,12 @@ pub enum OrchestratorCommand {
         task_id: String,
         reply: oneshot::Sender<Result<(), OrchestratorError>>,
     },
+    /// Abort the whole run: cancel every in-flight worker, mark all
+    /// non-terminal tasks failed, and refuse further assignment so the drive
+    /// loop converges. Issued by the control watchdog on `abort_run`.
+    AbortRun {
+        reply: oneshot::Sender<Result<(), OrchestratorError>>,
+    },
     MessageAgent {
         agent_id: String,
         body: String,
@@ -226,6 +239,15 @@ impl OrchestratorHandle {
                 task_id: task_id.into(),
                 reply,
             })
+            .await
+            .map_err(|_| OrchestratorError::Shutdown)?;
+        rx.await.map_err(|_| OrchestratorError::Shutdown)?
+    }
+
+    pub async fn abort_run(&self) -> Result<(), OrchestratorError> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(OrchestratorCommand::AbortRun { reply })
             .await
             .map_err(|_| OrchestratorError::Shutdown)?;
         rx.await.map_err(|_| OrchestratorError::Shutdown)?
@@ -369,6 +391,15 @@ pub fn spawn_with_splitter(
         drop(budget_rx);
     }
 
+    // Control watchdog: tails the run's control.jsonl so a separate process
+    // (`pilot watch`, `pilot abort`) can drive the live run. Skipped for the
+    // in-memory unit-test config (empty project root) where there's no run
+    // directory on disk.
+    if !cfg.project_root.as_os_str().is_empty() {
+        let run_dir = crate::run_dir(&cfg.project_root, &cfg.run_id);
+        tokio::spawn(control_watchdog(run_dir, tx.clone()));
+    }
+
     // Retry watchdog: subscribes to TaskStatus events. On Failed, fires
     // a Reassign — the actor decides rung + action based on its own
     // per-task retry state. The watchdog is now stateless.
@@ -454,6 +485,47 @@ async fn retry_watchdog(
     }
 }
 
+/// Background task: tail the run's `control.jsonl` and translate operator
+/// commands into orchestrator commands. Runs until the actor's receiver is
+/// dropped (the run ended) or a send fails.
+async fn control_watchdog(run_dir: PathBuf, orch: mpsc::Sender<OrchestratorCommand>) {
+    // Clear any stale commands left by a previous run so a resumed run doesn't
+    // replay, say, an old abort_run the instant it starts.
+    let _ = std::fs::write(crate::control::control_path(&run_dir), b"");
+    let mut reader = ControlReader::new();
+    let mut ticker = tokio::time::interval(Duration::from_millis(300));
+    loop {
+        ticker.tick().await;
+        if orch.is_closed() {
+            return;
+        }
+        for cmd in reader.poll(&run_dir) {
+            let sent = match cmd {
+                ControlCommand::AbortRun => {
+                    let (reply, _) = oneshot::channel();
+                    orch.send(OrchestratorCommand::AbortRun { reply }).await
+                }
+                ControlCommand::AbortTask { id } => {
+                    let (reply, _) = oneshot::channel();
+                    orch.send(OrchestratorCommand::AbortTask { task_id: id, reply })
+                        .await
+                }
+                ControlCommand::RetryTask { id } => {
+                    let (reply, _) = oneshot::channel();
+                    orch.send(OrchestratorCommand::Reassign { task_id: id, reply })
+                        .await
+                }
+                // Approve/Veto gate plan execution, which happens before the
+                // orchestrator exists; the run process handles those itself.
+                ControlCommand::Approve | ControlCommand::Veto => continue,
+            };
+            if sent.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 async fn run_actor(
     store: Arc<Mutex<RunStore>>,
     cfg: OrchestratorConfig,
@@ -469,6 +541,10 @@ async fn run_actor(
     let mut next_task_seq: u64 = 0;
     // E5 retry ladder state, per task.
     let mut retries: HashMap<String, RetryState> = HashMap::new();
+    // Set once `abort_run` fires: no new work is assigned, and the reassign
+    // pump (fired by the retry watchdog on the tasks we just failed) is
+    // ignored, so the drive loop sees an all-terminal state and exits.
+    let mut aborting = false;
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -478,6 +554,10 @@ async fn run_actor(
                 let _ = reply.send(result);
             }
             OrchestratorCommand::AssignTask { task_id, reply } => {
+                if aborting {
+                    let _ = reply.send(Err(OrchestratorError::Aborting));
+                    continue;
+                }
                 next_agent_seq += 1;
                 let result = handle_assign(
                     &store,
@@ -492,6 +572,10 @@ async fn run_actor(
                 let _ = reply.send(result);
             }
             OrchestratorCommand::Reassign { task_id, reply } => {
+                if aborting {
+                    let _ = reply.send(Err(OrchestratorError::Aborting));
+                    continue;
+                }
                 next_agent_seq += 1;
                 let result = handle_reassign(
                     &store,
@@ -517,6 +601,11 @@ async fn run_actor(
             }
             OrchestratorCommand::AbortTask { task_id, reply } => {
                 let result = handle_abort(&store, &active, &task_id).await;
+                let _ = reply.send(result);
+            }
+            OrchestratorCommand::AbortRun { reply } => {
+                aborting = true;
+                let result = handle_abort_run(&store, &active).await;
                 let _ = reply.send(result);
             }
             OrchestratorCommand::MessageAgent {
@@ -667,7 +756,10 @@ async fn handle_assign(
             })
             .map(|t| t.id.clone())
         {
-            return Err(OrchestratorError::WriteConflict(task_id.to_string(), conflict));
+            return Err(OrchestratorError::WriteConflict(
+                task_id.to_string(),
+                conflict,
+            ));
         }
 
         let n = *next_agent_seq;
@@ -1222,6 +1314,58 @@ pub fn fake_happy_spawner() -> WorkerSpawner {
     })
 }
 
+/// Abort the whole run: cancel every in-flight worker, mark all non-terminal
+/// tasks failed (so `drive_to_completion` converges), and record the run as
+/// Aborted. The actor sets its `aborting` flag before calling this, so the
+/// reassign pump the failures trigger is ignored.
+async fn handle_abort_run(
+    store: &Arc<Mutex<RunStore>>,
+    active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+) -> Result<(), OrchestratorError> {
+    // Cancel every live worker task.
+    let handles: Vec<_> = active.lock().await.drain().collect();
+    for (_, handle) in handles {
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    let mut store_g = store.lock().await;
+    // Snapshot the ids up front so we're not iterating while appending.
+    let pending: Vec<(String, Option<String>)> = store_g
+        .state()
+        .tasks
+        .iter()
+        .filter(|t| !t.status.is_terminal())
+        .map(|t| (t.id.clone(), t.agent.clone()))
+        .collect();
+    for (task_id, agent_id) in pending {
+        if let Some(agent) = agent_id {
+            store_g
+                .append(Event::AgentStatus {
+                    t: RunStore::now(),
+                    agent,
+                    status: AgentStatus::Aborted,
+                })
+                .await?;
+        }
+        store_g
+            .append(Event::TaskStatus {
+                t: RunStore::now(),
+                id: task_id,
+                status: TaskStatus::Failed,
+                outcome: None,
+            })
+            .await?;
+    }
+    store_g
+        .append(Event::RunStatusEv {
+            t: RunStore::now(),
+            status: RunStatus::Aborted,
+        })
+        .await?;
+    Ok(())
+}
+
 async fn handle_abort(
     store: &Arc<Mutex<RunStore>>,
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
@@ -1370,8 +1514,14 @@ mod tests {
             reversibility: Default::default(),
             reversibility_reason: None,
         };
-        handle.add_task(spec("t1", vec!["shared.rs"])).await.unwrap();
-        handle.add_task(spec("t2", vec!["shared.rs"])).await.unwrap();
+        handle
+            .add_task(spec("t1", vec!["shared.rs"]))
+            .await
+            .unwrap();
+        handle
+            .add_task(spec("t2", vec!["shared.rs"]))
+            .await
+            .unwrap();
         handle.add_task(spec("t3", vec!["other.rs"])).await.unwrap();
 
         // Assign t1 and wait for it to be in-progress.
@@ -1395,6 +1545,140 @@ mod tests {
 
         // t3 is disjoint → assigns fine.
         handle.assign_task("t3").await.unwrap();
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// A worker spawner that pins its task in-progress until aborted.
+    fn holding_spawner() -> WorkerSpawner {
+        Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = store
+                        .append(Event::AgentSpawn {
+                            t: RunStore::now(),
+                            agent: ctx.agent_id.clone(),
+                            role: ctx.task.role.clone(),
+                            pid: Some(0),
+                            session_id: Some(ctx.session_id.clone()),
+                        })
+                        .await;
+                    let _ = store
+                        .append(Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        })
+                        .await;
+                }
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        })
+    }
+
+    async fn wait_for_in_progress(handle: &OrchestratorHandle, task_id: &str) {
+        for _ in 0..200 {
+            let st = handle.snapshot().await.unwrap();
+            if st.task(task_id).map(|t| t.status) == Some(TaskStatus::InProgress) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("task {task_id} never reached in-progress");
+    }
+
+    /// `abort_run` cancels the in-flight worker, drives every non-terminal
+    /// task to a terminal state, marks the run Aborted, and refuses further
+    /// assignment — so a drive loop would converge.
+    #[tokio::test]
+    async fn abort_run_terminates_all_tasks_and_marks_run_aborted() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            crate::run_dir(dir.path(), "abort-run"),
+            "abort-run",
+            "g",
+            "deadbeef",
+            "arccode/auto/abort-run",
+        )
+        .await
+        .unwrap();
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), holding_spawner());
+
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+
+        handle.abort_run().await.unwrap();
+
+        let state = handle.snapshot().await.unwrap();
+        assert_eq!(state.status, RunStatus::Aborted, "run marked aborted");
+        assert!(
+            state.tasks.iter().all(|t| t.status.is_terminal()),
+            "every task terminal after abort: {:?}",
+            state
+                .tasks
+                .iter()
+                .map(|t| (&t.id, t.status))
+                .collect::<Vec<_>>()
+        );
+        // No new work is accepted once aborting.
+        assert!(matches!(
+            handle.assign_task("t2").await,
+            Err(OrchestratorError::Aborting)
+        ));
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// End-to-end control channel: an `abort_run` line appended to
+    /// `control.jsonl` by a "separate process" is picked up by the watchdog
+    /// and aborts the live run.
+    #[tokio::test]
+    async fn control_file_abort_run_reaches_the_orchestrator() {
+        let dir = tempdir().unwrap();
+        // The watchdog derives the control path from cfg's run_id ("test-run"),
+        // so the run dir must match it.
+        let run_path = crate::run_dir(dir.path(), "test-run");
+        let store = RunStore::create(
+            &run_path,
+            "test-run",
+            "g",
+            "deadbeef",
+            "arccode/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), holding_spawner());
+
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+
+        // A different process appends the command; the watchdog tails it.
+        crate::control::append(&run_path, &ControlCommand::AbortRun).unwrap();
+
+        let mut aborted = false;
+        for _ in 0..300 {
+            if handle.snapshot().await.unwrap().status == RunStatus::Aborted {
+                aborted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            aborted,
+            "control-file abort_run never reached the orchestrator"
+        );
 
         handle.shutdown().await;
         let _ = join.await;

@@ -61,3 +61,6 @@ treesitter = [
     "arccode-learn/treesitter",
     "arccode-tui/treesitter",
 ]
+
+[dev-dependencies]
+tempfile = "3"
