@@ -92,32 +92,49 @@ mod tests {
 
     #[test]
     fn active_retry_after_collapses_to_floor() {
-        let s = ConcurrencySignals { active_retry_after_secs: 30, ..base() };
+        let s = ConcurrencySignals {
+            active_retry_after_secs: 30,
+            ..base()
+        };
         assert_eq!(recommended_concurrency(&s), 1);
     }
 
     #[test]
     fn rate_limit_hits_reduce_cap() {
-        let s = ConcurrencySignals { recent_rate_limit_hits: 2, ..base() };
+        let s = ConcurrencySignals {
+            recent_rate_limit_hits: 2,
+            ..base()
+        };
         // factor 1 - 0.5 = 0.5 → 1 + 7*0.5 = 4.5 → 5
         assert_eq!(recommended_concurrency(&s), 5);
     }
 
     #[test]
     fn high_cpu_load_throttles() {
-        let s = ConcurrencySignals { cpu_load: 1.0, ..base() };
+        let s = ConcurrencySignals {
+            cpu_load: 1.0,
+            ..base()
+        };
         assert_eq!(recommended_concurrency(&s), 1);
     }
 
     #[test]
     fn budget_exhausted_collapses_to_floor() {
-        let s = ConcurrencySignals { usd_spent: 10.0, max_usd: 10.0, ..base() };
+        let s = ConcurrencySignals {
+            usd_spent: 10.0,
+            max_usd: 10.0,
+            ..base()
+        };
         assert_eq!(recommended_concurrency(&s), 1);
     }
 
     #[test]
     fn budget_near_cap_throttles_proportionally() {
-        let s = ConcurrencySignals { usd_spent: 9.0, max_usd: 10.0, ..base() };
+        let s = ConcurrencySignals {
+            usd_spent: 9.0,
+            max_usd: 10.0,
+            ..base()
+        };
         // burn 0.9 → factor 0.1 → 1 + 7*0.1 = 1.7 → 2
         assert_eq!(recommended_concurrency(&s), 2);
     }
@@ -136,7 +153,11 @@ mod tests {
 
     #[test]
     fn min_clamped_to_at_least_one() {
-        let s = ConcurrencySignals { min_agents: 0, max_agents: 0, ..base() };
+        let s = ConcurrencySignals {
+            min_agents: 0,
+            max_agents: 0,
+            ..base()
+        };
         assert_eq!(recommended_concurrency(&s), 1);
     }
 

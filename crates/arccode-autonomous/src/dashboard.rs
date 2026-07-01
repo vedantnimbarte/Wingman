@@ -260,7 +260,11 @@ pub fn render_dashboard(state: &RunState, recent: &[Event]) -> DashboardView {
 /// live durations (elapsed / uptime of not-yet-finished work); pass `None`
 /// for a deterministic snapshot that only reports durations of finished
 /// items (used by tests).
-pub fn build_model(state: &RunState, recent: &[Event], now: Option<DateTime<Utc>>) -> DashboardModel {
+pub fn build_model(
+    state: &RunState,
+    recent: &[Event],
+    now: Option<DateTime<Utc>>,
+) -> DashboardModel {
     let count = |st: TaskStatus| state.tasks.iter().filter(|t| t.status == st).count();
     let run_started = run_started_at(&state.run_id).or_else(|| {
         state
@@ -333,7 +337,10 @@ pub fn build_model(state: &RunState, recent: &[Event], now: Option<DateTime<Utc>
         .collect();
 
     // `recent` is already the caller-chosen tail, in chronological order.
-    let log = recent.iter().map(|ev| render_log_line(ev, &names)).collect();
+    let log = recent
+        .iter()
+        .map(|ev| render_log_line(ev, &names))
+        .collect();
 
     DashboardModel {
         header,
@@ -490,7 +497,11 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
             (sev, format!("{short_ts}  task.status  {id} → {status:?}"))
         }
         Event::TaskTool {
-            id, agent, tool, ok, ..
+            id,
+            agent,
+            tool,
+            ok,
+            ..
         } => {
             let mark = if *ok { "" } else { " ✗" };
             let sev = if *ok { Info } else { Error };
@@ -853,7 +864,10 @@ mod tests {
         );
         let a = state.agent("agent-0001").unwrap();
         assert_eq!(a.id, "agent-0001", "stable id preserved");
-        assert_eq!(a.name, crate::names::agent_name("2026-07-01-0707-hq27zr", "agent-0001"));
+        assert_eq!(
+            a.name,
+            crate::names::agent_name("2026-07-01-0707-hq27zr", "agent-0001")
+        );
         assert!(a.name.contains('_'), "name is adjective_animal: {}", a.name);
     }
 
@@ -915,7 +929,10 @@ mod tests {
         let has_grid_row = ascii
             .lines()
             .any(|l| l.contains("─ Tasks") && l.contains("─ Agents"));
-        assert!(has_grid_row, "Tasks and Agents should be side by side:\n{ascii}");
+        assert!(
+            has_grid_row,
+            "Tasks and Agents should be side by side:\n{ascii}"
+        );
         // Live log spans below, on its own row.
         assert!(ascii.lines().any(|l| l.contains("─ Live log")));
     }

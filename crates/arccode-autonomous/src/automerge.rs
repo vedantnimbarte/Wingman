@@ -176,12 +176,18 @@ mod tests {
 
     #[test]
     fn all_green_merges() {
-        assert_eq!(decide_auto_merge(&passing_inputs()), AutoMergeDecision::Merge);
+        assert_eq!(
+            decide_auto_merge(&passing_inputs()),
+            AutoMergeDecision::Merge
+        );
     }
 
     #[test]
     fn disabled_config_holds() {
-        let i = AutoMergeInputs { config_auto_merge: false, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            config_auto_merge: false,
+            ..passing_inputs()
+        };
         let d = decide_auto_merge(&i);
         assert!(!d.is_merge());
         if let AutoMergeDecision::Hold { reasons } = d {
@@ -191,19 +197,28 @@ mod tests {
 
     #[test]
     fn non_auto_tier_holds() {
-        let i = AutoMergeInputs { tier_was_auto: false, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            tier_was_auto: false,
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
     #[test]
     fn red_ci_holds() {
-        let i = AutoMergeInputs { ci_green: Some(false), ..passing_inputs() };
+        let i = AutoMergeInputs {
+            ci_green: Some(false),
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
     #[test]
     fn unknown_ci_holds_when_required() {
-        let i = AutoMergeInputs { ci_green: None, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            ci_green: None,
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
@@ -219,7 +234,10 @@ mod tests {
 
     #[test]
     fn dangerous_paths_hold() {
-        let i = AutoMergeInputs { dangerous_paths_touched: true, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            dangerous_paths_touched: true,
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
@@ -245,13 +263,19 @@ mod tests {
 
     #[test]
     fn security_block_holds() {
-        let i = AutoMergeInputs { security_blocks: true, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            security_blocks: true,
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
     #[test]
     fn critic_veto_holds() {
-        let i = AutoMergeInputs { critic_vetoes: true, ..passing_inputs() };
+        let i = AutoMergeInputs {
+            critic_vetoes: true,
+            ..passing_inputs()
+        };
         assert!(!decide_auto_merge(&i).is_merge());
     }
 
@@ -274,8 +298,13 @@ mod tests {
         let mut s = RunState::new("r1", "g", "abc", "b");
         let mut t = Task::new("t1", Role::Developer, "add flag");
         t.acceptance = vec![
-            Acceptance::Shell { cmd: "cargo check".into() },
-            Acceptance::Grep { pattern: "version-only".into(), path: "args.rs".into() },
+            Acceptance::Shell {
+                cmd: "cargo check".into(),
+            },
+            Acceptance::Grep {
+                pattern: "version-only".into(),
+                path: "args.rs".into(),
+            },
         ];
         s.tasks.push(t);
         s
@@ -305,7 +334,8 @@ mod tests {
     #[test]
     fn scrutiny_flags_dangerous_and_retried() {
         let mut s = RunState::new("r1", "g", "abc", "b");
-        s.tasks.push(Task::new("t1", Role::Developer, "auth change"));
+        s.tasks
+            .push(Task::new("t1", Role::Developer, "auth change"));
         let md = render_scrutiny(
             &s,
             &["crates/auth/src/login.rs".to_string()],

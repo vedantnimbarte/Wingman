@@ -64,7 +64,8 @@ impl Hotspots {
     pub fn ranked(&self) -> Vec<(String, u32)> {
         let mut all: std::collections::BTreeSet<&String> = self.edits.keys().collect();
         all.extend(self.conflicts.keys());
-        let mut v: Vec<(String, u32)> = all.into_iter().map(|f| (f.clone(), self.heat(f))).collect();
+        let mut v: Vec<(String, u32)> =
+            all.into_iter().map(|f| (f.clone(), self.heat(f))).collect();
         v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         v
     }
@@ -143,7 +144,9 @@ pub fn load_decisions(path: &Path) -> io::Result<Vec<DecisionRecord>> {
 /// Render `architecture.md` from a crate → modules listing.
 pub fn render_architecture(crates: &[(String, Vec<String>)]) -> String {
     let mut out = String::from("# Architecture\n\n");
-    out.push_str("_Auto-maintained by pilot mode (J8). Regenerated when crate `lib.rs` files change._\n\n");
+    out.push_str(
+        "_Auto-maintained by pilot mode (J8). Regenerated when crate `lib.rs` files change._\n\n",
+    );
     if crates.is_empty() {
         out.push_str("_No crates discovered._\n");
         return out;
@@ -173,7 +176,7 @@ mod tests {
         h.record_edit("a.rs"); // 2 edits
         h.record_edit("b.rs");
         h.record_conflict("b.rs"); // 1 edit + 1 conflict
-        // a: 2; b: 1 + 5 = 6
+                                   // a: 2; b: 1 + 5 = 6
         assert_eq!(h.heat("a.rs"), 2);
         assert_eq!(h.heat("b.rs"), 6);
     }
@@ -190,7 +193,7 @@ mod tests {
         let h = hotspots_from_observations(&obs);
         let ranked = h.ranked();
         assert_eq!(ranked[0].0, "hot.rs"); // 2 edits + 2 conflicts = 12
-        // warm (2 edits = 2) beats cold (1 edit = 1)
+                                           // warm (2 edits = 2) beats cold (1 edit = 1)
         assert_eq!(ranked[1].0, "warm.rs");
         assert_eq!(ranked[2].0, "cold.rs");
     }
@@ -233,7 +236,10 @@ mod tests {
     #[test]
     fn architecture_renders_crates_and_modules() {
         let crates = vec![
-            ("arccode-autonomous".to_string(), vec!["orchestrator".to_string(), "planner".to_string()]),
+            (
+                "arccode-autonomous".to_string(),
+                vec!["orchestrator".to_string(), "planner".to_string()],
+            ),
             ("arccode-cli".to_string(), vec![]),
         ];
         let md = render_architecture(&crates);

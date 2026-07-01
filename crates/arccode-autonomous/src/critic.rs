@@ -150,7 +150,10 @@ mod tests {
 
     #[test]
     fn clean_report_does_not_veto() {
-        let r = CriticReport { risks: vec![], summary: "looks robust".into() };
+        let r = CriticReport {
+            risks: vec![],
+            summary: "looks robust".into(),
+        };
         assert!(!r.vetoes_auto_merge());
         assert!(r.guardrail_tasks().is_empty());
     }

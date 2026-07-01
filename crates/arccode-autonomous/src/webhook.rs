@@ -114,7 +114,11 @@ pub fn handle_connection(
         // A body-claimed author may only elevate trust when the request was
         // cryptographically authenticated; otherwise it's recorded but stays
         // anonymous for trust purposes (can never reach `Trusted`).
-        let trust_author = if authenticated { author.as_deref() } else { None };
+        let trust_author = if authenticated {
+            author.as_deref()
+        } else {
+            None
+        };
         normalize(
             Channel::Webhook,
             &text,
@@ -419,7 +423,10 @@ mod tests {
         let server = std::thread::spawn(move || {
             let mut goals = Vec::new();
             let allow: Vec<String> = Vec::new();
-            serve_listener(listener, &WebhookAuth::anonymous(&allow), 1, |g| goals.push(g)).unwrap();
+            serve_listener(listener, &WebhookAuth::anonymous(&allow), 1, |g| {
+                goals.push(g)
+            })
+            .unwrap();
             goals
         });
 

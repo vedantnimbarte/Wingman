@@ -71,14 +71,18 @@ mod tests {
 
     #[test]
     fn failing_test_spawns_fixer() {
-        let e = WatchEvent::FailingTestOnMain { test: "test_auth".into() };
+        let e = WatchEvent::FailingTestOnMain {
+            test: "test_auth".into(),
+        };
         assert_eq!(react(&e), WatchReaction::SpawnFixerRun("test_auth".into()));
     }
 
     #[test]
     fn dependabot_within_allowlist_auto_merges() {
         assert_eq!(
-            react(&WatchEvent::DependabotPrGreen { within_allowlist: true }),
+            react(&WatchEvent::DependabotPrGreen {
+                within_allowlist: true
+            }),
             WatchReaction::AutoReviewAndMerge
         );
     }
@@ -86,7 +90,9 @@ mod tests {
     #[test]
     fn dependabot_outside_allowlist_proposes() {
         assert_eq!(
-            react(&WatchEvent::DependabotPrGreen { within_allowlist: false }),
+            react(&WatchEvent::DependabotPrGreen {
+                within_allowlist: false
+            }),
             WatchReaction::Propose
         );
     }
@@ -109,7 +115,9 @@ mod tests {
 
     #[test]
     fn ask_comment_spawns_research() {
-        let e = WatchEvent::FileSaveAsk { question: "why is this slow?".into() };
+        let e = WatchEvent::FileSaveAsk {
+            question: "why is this slow?".into(),
+        };
         assert_eq!(
             react(&e),
             WatchReaction::SpawnResearchWorker("why is this slow?".into())
@@ -119,7 +127,9 @@ mod tests {
     #[test]
     fn empty_ask_is_ignored() {
         assert_eq!(
-            react(&WatchEvent::FileSaveAsk { question: "  ".into() }),
+            react(&WatchEvent::FileSaveAsk {
+                question: "  ".into()
+            }),
             WatchReaction::Ignore
         );
     }

@@ -199,10 +199,14 @@ impl reqwest::dns::Resolve for PublicOnlyResolver {
                 Ok(Err(e)) => return Err(Box::new(e) as BoxErr),
                 Err(e) => return Err(Box::new(e) as BoxErr),
             };
-            let public: Vec<SocketAddr> =
-                addrs.into_iter().filter(|sa| !ip_is_blocked(sa.ip())).collect();
+            let public: Vec<SocketAddr> = addrs
+                .into_iter()
+                .filter(|sa| !ip_is_blocked(sa.ip()))
+                .collect();
             if public.is_empty() {
-                return Err("refusing to connect: host resolves only to non-public addresses".into());
+                return Err(
+                    "refusing to connect: host resolves only to non-public addresses".into(),
+                );
             }
             let iter: reqwest::dns::Addrs = Box::new(public.into_iter());
             Ok(iter)
@@ -375,7 +379,10 @@ mod tests {
             std::env::temp_dir(),
         );
         let out = WebFetch
-            .run(json!({"url": "http://169.254.169.254/latest/meta-data/iam/"}), &ctx)
+            .run(
+                json!({"url": "http://169.254.169.254/latest/meta-data/iam/"}),
+                &ctx,
+            )
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("non-public"));

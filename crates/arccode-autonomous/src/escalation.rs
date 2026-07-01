@@ -40,10 +40,7 @@ pub enum EscalationTrigger {
     },
     /// Plan touches a `dangerous_paths` glob but the goal text doesn't
     /// mention any of the matched components.
-    DangerousPathTouched {
-        path: String,
-        goal_mentions: bool,
-    },
+    DangerousPathTouched { path: String, goal_mentions: bool },
     /// Diff contains text matching a secrets pattern (high-entropy
     /// string, known API-key prefix, etc.).
     SecretsDetected { kind: String, file: String },
@@ -233,7 +230,7 @@ const LICENSE_MARKERS: &[&str] = &[
     "spdx-license-identifier",
     "licensed under",
     "all rights reserved",
-    "permission is hereby granted", // MIT body
+    "permission is hereby granted",     // MIT body
     "redistribution and use in source", // BSD body
     "gnu general public license",
     "apache license",
@@ -673,9 +670,9 @@ mod tests {
             r#"let k = "AKIAIOSFODNN7EXAMPLE";"#.to_string(),
         )];
         let trips = secret_triggers(&added);
-        assert!(trips
-            .iter()
-            .any(|t| matches!(t, EscalationTrigger::SecretsDetected { file, .. } if file == "config.rs")));
+        assert!(trips.iter().any(
+            |t| matches!(t, EscalationTrigger::SecretsDetected { file, .. } if file == "config.rs")
+        ));
     }
 
     #[test]
@@ -725,8 +722,16 @@ mod tests {
 
     #[test]
     fn cost_warn_is_advisory_others_block() {
-        assert!(!EscalationTrigger::CostWarn { spent: 8.0, cap: 10.0 }.blocks_auto_merge());
-        assert!(EscalationTrigger::CostHalt { spent: 11.0, cap: 10.0 }.blocks_auto_merge());
+        assert!(!EscalationTrigger::CostWarn {
+            spent: 8.0,
+            cap: 10.0
+        }
+        .blocks_auto_merge());
+        assert!(EscalationTrigger::CostHalt {
+            spent: 11.0,
+            cap: 10.0
+        }
+        .blocks_auto_merge());
         assert!(EscalationTrigger::SecretsDetected {
             kind: "x".into(),
             file: "y".into()

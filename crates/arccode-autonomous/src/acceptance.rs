@@ -118,7 +118,10 @@ fn run_assert(path: &str, must_contain: &[String], cwd: &Path) -> AcceptanceResu
         .map(|s| s.as_str())
         .collect();
     if missing.is_empty() {
-        AcceptanceResult::ok(label, format!("all {} fragment(s) present", must_contain.len()))
+        AcceptanceResult::ok(
+            label,
+            format!("all {} fragment(s) present", must_contain.len()),
+        )
     } else {
         AcceptanceResult::fail(label, format!("missing text: {}", missing.join(", ")))
     }

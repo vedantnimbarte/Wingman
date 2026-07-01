@@ -63,7 +63,9 @@ pub fn load_role_prompt_with_lessons(role: &Role) -> String {
 /// [`crate::learning::lessons_path`], which expects a HOME base).
 fn role_lessons_appendix(role: &Role) -> Option<String> {
     let dir = arccode_config::global_dir().ok()?;
-    let path = dir.join("agents").join(format!("{}.lessons.md", role.as_str()));
+    let path = dir
+        .join("agents")
+        .join(format!("{}.lessons.md", role.as_str()));
     let body = crate::learning::load_lessons(&path).ok().flatten()?;
     crate::learning::render_lessons_appendix(&body)
 }

@@ -192,11 +192,12 @@ impl RunStore {
             if line.is_empty() {
                 continue;
             }
-            let event: Event = serde_json::from_str(line).map_err(|source| StoreError::BadEvent {
-                path: log_path.clone(),
-                line: i + 1,
-                source,
-            })?;
+            let event: Event =
+                serde_json::from_str(line).map_err(|source| StoreError::BadEvent {
+                    path: log_path.clone(),
+                    line: i + 1,
+                    source,
+                })?;
             out.push(event);
         }
         Ok(out)

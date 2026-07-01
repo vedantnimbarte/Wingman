@@ -66,16 +66,17 @@ pub fn render(packet: &HandoffPacket<'_>) -> String {
         None => "blocked".to_string(),
     };
     out.push_str(&format!("**Status:** {status_line}\n"));
-    out.push_str(&format!(
-        "**Spend:** ${:.2}\n\n",
-        s.totals.usd
-    ));
+    out.push_str(&format!("**Spend:** ${:.2}\n\n", s.totals.usd));
 
     // Triggers (J15) — only when present.
     if !packet.triggers.is_empty() {
         out.push_str("## Escalation triggers\n\n");
         for trig in packet.triggers {
-            out.push_str(&format!("- **{}** — {}\n", trig.short_label(), trig.render()));
+            out.push_str(&format!(
+                "- **{}** — {}\n",
+                trig.short_label(),
+                trig.render()
+            ));
         }
         out.push('\n');
     }
@@ -130,9 +131,8 @@ pub fn render(packet: &HandoffPacket<'_>) -> String {
             out.push_str(n);
             out.push_str("\n\n");
         }
-        None => out.push_str(
-            "Inspect the blocked task's worktree, resolve the failure, then resume.\n\n",
-        ),
+        None => out
+            .push_str("Inspect the blocked task's worktree, resolve the failure, then resume.\n\n"),
     }
 
     // State / resume footer.
@@ -166,7 +166,12 @@ mod tests {
     use crate::model::{Role, RunState, Task, TaskStatus};
 
     fn state_with_tasks() -> RunState {
-        let mut s = RunState::new("2026-05-29-r1", "add dark mode", "abc123", "arccode/auto/r1");
+        let mut s = RunState::new(
+            "2026-05-29-r1",
+            "add dark mode",
+            "abc123",
+            "arccode/auto/r1",
+        );
         s.totals.usd = 0.42;
         let mut t1 = Task::new("t1", Role::Developer, "wire toggle key");
         t1.status = TaskStatus::Done;
@@ -201,7 +206,10 @@ mod tests {
     #[test]
     fn render_lists_triggers_and_attempts() {
         let s = state_with_tasks();
-        let triggers = vec![EscalationTrigger::CostHalt { spent: 12.0, cap: 10.0 }];
+        let triggers = vec![EscalationTrigger::CostHalt {
+            spent: 12.0,
+            cap: 10.0,
+        }];
         let attempts = vec![
             AttemptRecord {
                 rung: 1,

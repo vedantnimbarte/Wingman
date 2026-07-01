@@ -337,7 +337,10 @@ pub async fn run_to_completion(
         &inputs.dangerous_paths,
     );
     let dangerous_paths_touched = escalation_triggers.iter().any(|t| {
-        matches!(t, crate::escalation::EscalationTrigger::DangerousPathTouched { .. })
+        matches!(
+            t,
+            crate::escalation::EscalationTrigger::DangerousPathTouched { .. }
+        )
     });
     let escalation_blocks = escalation_triggers.iter().any(|t| t.blocks_auto_merge());
     if !escalation_triggers.is_empty() {
@@ -353,7 +356,12 @@ pub async fn run_to_completion(
     // task and records its verdict; the worst finding severity feeds the
     // auto-merge gate.
     let reviews = if inputs.run_reviewer {
-        run_reviewer_pass(aux_provider.as_ref(), &inputs.reviewer_model, &snapshot_for_pr).await
+        run_reviewer_pass(
+            aux_provider.as_ref(),
+            &inputs.reviewer_model,
+            &snapshot_for_pr,
+        )
+        .await
     } else {
         Vec::new()
     };
@@ -367,7 +375,12 @@ pub async fn run_to_completion(
 
     // J10 — critic pass (opt-in). A high+ risk vetoes auto-merge.
     let critic_vetoed = if inputs.run_critic {
-        run_critic_pass(aux_provider.as_ref(), &inputs.reviewer_model, &snapshot_for_pr).await
+        run_critic_pass(
+            aux_provider.as_ref(),
+            &inputs.reviewer_model,
+            &snapshot_for_pr,
+        )
+        .await
     } else {
         false
     };
@@ -467,9 +480,9 @@ fn decide_and_maybe_merge(
         tier_was_auto,
         ci_green,
         require_ci_green: pr_config.require_ci_green,
-        review_max_severity, // E7 per-task reviewer (wired below)
-        security_blocks,     // R6 security pass + J15 blocking triggers
-        critic_vetoes,       // J10 critic (wired below)
+        review_max_severity,     // E7 per-task reviewer (wired below)
+        security_blocks,         // R6 security pass + J15 blocking triggers
+        critic_vetoes,           // J10 critic (wired below)
         dangerous_paths_touched, // J15 dangerous-path-without-goal-mention
         merge_max_severity: gate,
     });
@@ -483,7 +496,9 @@ fn decide_and_maybe_merge(
             Ok(o) if o.success() => {
                 tracing::info!(target: "pilot::pipeline", url = %pr_outcome.url, "auto-merged PR");
             }
-            Ok(o) => tracing::warn!(target: "pilot::pipeline", stderr = %o.stderr, "gh pr merge failed"),
+            Ok(o) => {
+                tracing::warn!(target: "pilot::pipeline", stderr = %o.stderr, "gh pr merge failed")
+            }
             Err(e) => tracing::warn!(target: "pilot::pipeline", error = %e, "gh pr merge errored"),
         }
     }
@@ -591,11 +606,19 @@ fn collect_diff_lines(
         } else if let Some(p) = line.strip_prefix("+++ ") {
             file_b = p.to_string();
         } else if let Some(rest) = line.strip_prefix('+') {
-            let f = if file_b == "/dev/null" { &file_a } else { &file_b };
+            let f = if file_b == "/dev/null" {
+                &file_a
+            } else {
+                &file_b
+            };
             out.added.push((f.clone(), rest.to_string()));
             out.changed.push((f.clone(), rest.to_string()));
         } else if let Some(rest) = line.strip_prefix('-') {
-            let f = if file_b == "/dev/null" { &file_a } else { &file_b };
+            let f = if file_b == "/dev/null" {
+                &file_a
+            } else {
+                &file_b
+            };
             out.changed.push((f.clone(), rest.to_string()));
         }
     }
@@ -624,7 +647,10 @@ fn detect_escalation_triggers(
             .flat_map(|t| t.writes.iter().cloned())
             .collect();
         let hits = crate::approval::paths_matching(&writes, dangerous_paths);
-        triggers.extend(crate::escalation::dangerous_path_triggers(&hits, &state.goal));
+        triggers.extend(crate::escalation::dangerous_path_triggers(
+            &hits,
+            &state.goal,
+        ));
     }
     // Secrets + license-header edits, from the diff.
     let diff = collect_diff_lines(runner, project_root, base_commit, integration_branch);
@@ -649,7 +675,9 @@ async fn complete_text(
         system: Some(system.to_string()),
         messages: vec![Message {
             role: ApiRole::User,
-            content: vec![ContentBlock::Text { text: user.to_string() }],
+            content: vec![ContentBlock::Text {
+                text: user.to_string(),
+            }],
         }],
         tools: vec![],
         max_tokens: 2048,
@@ -1362,7 +1390,9 @@ mod tests {
     }
     impl RecordingRunner {
         fn new() -> Self {
-            Self { calls: Mutex::new(Vec::new()) }
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
         }
     }
     impl CommandRunner for RecordingRunner {
@@ -1371,14 +1401,19 @@ mod tests {
                 program.to_string(),
                 args.iter().map(|s| s.to_string()).collect(),
             ));
-            let stdout = if program == "gh" && args.first().copied() == Some("pr")
+            let stdout = if program == "gh"
+                && args.first().copied() == Some("pr")
                 && args.get(1).copied() == Some("create")
             {
                 "https://github.com/test/repo/pull/9\n".to_string()
             } else {
                 String::new()
             };
-            Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
@@ -1405,11 +1440,18 @@ mod tests {
     #[test]
     fn e8_auto_merge_holds_when_not_auto_approved() {
         let runner = RecordingRunner::new();
-        let pr = PrOutcome { url: "https://x/pull/1".into(), created_by_gh: true };
+        let pr = PrOutcome {
+            url: "https://x/pull/1".into(),
+            created_by_gh: true,
+        };
         let decision = decide_and_maybe_merge(
             &runner,
             Path::new("."),
-            &arccode_config::PilotPrConfig { auto_merge: true, require_ci_green: false, ..Default::default() },
+            &arccode_config::PilotPrConfig {
+                auto_merge: true,
+                require_ci_green: false,
+                ..Default::default()
+            },
             false, // not auto-approved
             arccode_config::PilotTier::Copilot,
             false, // security clean
@@ -1426,11 +1468,18 @@ mod tests {
     #[test]
     fn e8_auto_merge_fires_when_trusted_and_ci_not_required() {
         let runner = RecordingRunner::new();
-        let pr = PrOutcome { url: "https://x/pull/1".into(), created_by_gh: true };
+        let pr = PrOutcome {
+            url: "https://x/pull/1".into(),
+            created_by_gh: true,
+        };
         let decision = decide_and_maybe_merge(
             &runner,
             Path::new("."),
-            &arccode_config::PilotPrConfig { auto_merge: true, require_ci_green: false, auto_merge_max_severity: "low".into() },
+            &arccode_config::PilotPrConfig {
+                auto_merge: true,
+                require_ci_green: false,
+                auto_merge_max_severity: "low".into(),
+            },
             true, // auto-approved
             arccode_config::PilotTier::Copilot,
             false, // security clean
@@ -1442,7 +1491,9 @@ mod tests {
         assert!(decision.is_merge());
         let calls = runner.calls.lock().unwrap();
         assert!(
-            calls.iter().any(|(p, a)| p == "gh" && a.first().map(|s| s.as_str()) == Some("pr") && a.get(1).map(|s| s.as_str()) == Some("merge")),
+            calls.iter().any(|(p, a)| p == "gh"
+                && a.first().map(|s| s.as_str()) == Some("pr")
+                && a.get(1).map(|s| s.as_str()) == Some("merge")),
             "expected a gh pr merge call, got {calls:?}"
         );
     }
@@ -1475,7 +1526,11 @@ mod tests {
             } else {
                 String::new()
             };
-            Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
@@ -1518,11 +1573,18 @@ mod tests {
     #[test]
     fn e8_auto_merge_fires_when_ci_required_and_green() {
         let runner = CiRunner::new(r#"[{"state":"SUCCESS"}]"#);
-        let pr = PrOutcome { url: "https://x/pull/1".into(), created_by_gh: true };
+        let pr = PrOutcome {
+            url: "https://x/pull/1".into(),
+            created_by_gh: true,
+        };
         let decision = decide_and_maybe_merge(
             &runner,
             Path::new("."),
-            &arccode_config::PilotPrConfig { auto_merge: true, require_ci_green: true, auto_merge_max_severity: "low".into() },
+            &arccode_config::PilotPrConfig {
+                auto_merge: true,
+                require_ci_green: true,
+                auto_merge_max_severity: "low".into(),
+            },
             true,
             arccode_config::PilotTier::Copilot,
             false,
@@ -1533,18 +1595,29 @@ mod tests {
         );
         assert!(decision.is_merge());
         let calls = runner.calls.lock().unwrap();
-        assert!(calls.iter().any(|(p, a)| p == "gh" && a.first().map(|s| s.as_str()) == Some("pr") && a.get(1).map(|s| s.as_str()) == Some("checks")));
-        assert!(calls.iter().any(|(p, a)| p == "gh" && a.get(1).map(|s| s.as_str()) == Some("merge")));
+        assert!(calls.iter().any(|(p, a)| p == "gh"
+            && a.first().map(|s| s.as_str()) == Some("pr")
+            && a.get(1).map(|s| s.as_str()) == Some("checks")));
+        assert!(calls
+            .iter()
+            .any(|(p, a)| p == "gh" && a.get(1).map(|s| s.as_str()) == Some("merge")));
     }
 
     #[test]
     fn e8_auto_merge_holds_when_ci_required_and_red() {
         let runner = CiRunner::new(r#"[{"state":"FAILURE"}]"#);
-        let pr = PrOutcome { url: "https://x/pull/1".into(), created_by_gh: true };
+        let pr = PrOutcome {
+            url: "https://x/pull/1".into(),
+            created_by_gh: true,
+        };
         let decision = decide_and_maybe_merge(
             &runner,
             Path::new("."),
-            &arccode_config::PilotPrConfig { auto_merge: true, require_ci_green: true, auto_merge_max_severity: "low".into() },
+            &arccode_config::PilotPrConfig {
+                auto_merge: true,
+                require_ci_green: true,
+                auto_merge_max_severity: "low".into(),
+            },
             true,
             arccode_config::PilotTier::Copilot,
             false,
@@ -1554,17 +1627,29 @@ mod tests {
             &pr,
         );
         assert!(!decision.is_merge());
-        assert!(!runner.calls.lock().unwrap().iter().any(|(p, a)| p == "gh" && a.get(1).map(|s| s.as_str()) == Some("merge")));
+        assert!(!runner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, a)| p == "gh" && a.get(1).map(|s| s.as_str()) == Some("merge")));
     }
 
     #[test]
     fn e8_security_block_holds_even_when_auto_approved() {
         let runner = RecordingRunner::new();
-        let pr = PrOutcome { url: "https://x/pull/1".into(), created_by_gh: true };
+        let pr = PrOutcome {
+            url: "https://x/pull/1".into(),
+            created_by_gh: true,
+        };
         let decision = decide_and_maybe_merge(
             &runner,
             Path::new("."),
-            &arccode_config::PilotPrConfig { auto_merge: true, require_ci_green: false, ..Default::default() },
+            &arccode_config::PilotPrConfig {
+                auto_merge: true,
+                require_ci_green: false,
+                ..Default::default()
+            },
             true, // auto-approved
             arccode_config::PilotTier::Copilot,
             true, // security pass blocks
@@ -1581,13 +1666,22 @@ mod tests {
     fn r6_security_pass_flags_secret_in_diff() {
         struct DiffRunner;
         impl CommandRunner for DiffRunner {
-            fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &Path,
+            ) -> std::io::Result<CommandOut> {
                 let stdout = if program == "git" && args.first().copied() == Some("diff") {
                     "+++ b/config.rs\n+let key = \"AKIAIOSFODNN7EXAMPLE\";\n".to_string()
                 } else {
                     String::new()
                 };
-                Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout,
+                    stderr: String::new(),
+                })
             }
         }
         let report = run_security_pass(
@@ -1605,13 +1699,22 @@ mod tests {
     fn r6_security_pass_clean_diff_is_empty() {
         struct DiffRunner;
         impl CommandRunner for DiffRunner {
-            fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &Path,
+            ) -> std::io::Result<CommandOut> {
                 let stdout = if program == "git" && args.first().copied() == Some("diff") {
                     "+++ b/main.rs\n+let total = items.len();\n".to_string()
                 } else {
                     String::new()
                 };
-                Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout,
+                    stderr: String::new(),
+                })
             }
         }
         let report = run_security_pass(
@@ -1640,18 +1743,18 @@ mod tests {
             } else {
                 String::new()
             };
-            Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
     #[test]
     fn j15_detects_secret_and_license_and_dangerous_path() {
-        let mut state = crate::model::RunState::new(
-            "r1",
-            "speed up the parser",
-            "base123",
-            "arccode/auto/r1",
-        );
+        let mut state =
+            crate::model::RunState::new("r1", "speed up the parser", "base123", "arccode/auto/r1");
         // A write to a dangerous path the goal never mentioned.
         state.tasks.push({
             let mut t = Task::new("t1", Role::Developer, "edit auth");
@@ -1667,9 +1770,15 @@ mod tests {
             &["**/auth/**".to_string()],
         );
         use crate::escalation::EscalationTrigger as T;
-        assert!(triggers.iter().any(|t| matches!(t, T::SecretsDetected { .. })));
-        assert!(triggers.iter().any(|t| matches!(t, T::LicenseHeaderModified { .. })));
-        assert!(triggers.iter().any(|t| matches!(t, T::DangerousPathTouched { .. })));
+        assert!(triggers
+            .iter()
+            .any(|t| matches!(t, T::SecretsDetected { .. })));
+        assert!(triggers
+            .iter()
+            .any(|t| matches!(t, T::LicenseHeaderModified { .. })));
+        assert!(triggers
+            .iter()
+            .any(|t| matches!(t, T::DangerousPathTouched { .. })));
         assert!(triggers.iter().any(|t| t.blocks_auto_merge()));
     }
 
@@ -1677,13 +1786,22 @@ mod tests {
     fn j15_quiet_when_goal_mentions_path_and_diff_clean() {
         struct CleanRunner;
         impl CommandRunner for CleanRunner {
-            fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &Path,
+            ) -> std::io::Result<CommandOut> {
                 let stdout = if program == "git" && args.first().copied() == Some("diff") {
                     "+++ b/auth.rs\n+let total = items.len();\n".to_string()
                 } else {
                     String::new()
                 };
-                Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout,
+                    stderr: String::new(),
+                })
             }
         }
         let mut state = crate::model::RunState::new(
@@ -1705,7 +1823,10 @@ mod tests {
             &state,
             &["**/auth/**".to_string()],
         );
-        assert!(triggers.is_empty(), "goal mentions auth + clean diff → no triggers, got {triggers:?}");
+        assert!(
+            triggers.is_empty(),
+            "goal mentions auth + clean diff → no triggers, got {triggers:?}"
+        );
     }
 
     /// Provider that returns a fixed text body for any request — stands in
@@ -1732,8 +1853,12 @@ mod tests {
         ) -> arccode_core::Result<ProviderEventStream> {
             use futures::stream;
             let events = vec![
-                Ok(StreamEvent::TextDelta { text: self.text.clone() }),
-                Ok(StreamEvent::Stop { reason: StopReason::EndTurn }),
+                Ok(StreamEvent::TextDelta {
+                    text: self.text.clone(),
+                }),
+                Ok(StreamEvent::Stop {
+                    reason: StopReason::EndTurn,
+                }),
             ];
             Ok(Box::pin(stream::iter(events)))
         }
@@ -1811,7 +1936,9 @@ mod tests {
 
     #[tokio::test]
     async fn e7_reviewer_pass_defaults_to_approve_on_garbage() {
-        let provider = CannedTextProvider { text: "not json at all".into() };
+        let provider = CannedTextProvider {
+            text: "not json at all".into(),
+        };
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks = vec![done_task("t1")];
         let reviews = run_reviewer_pass(&provider, "m", &state).await;
@@ -1821,7 +1948,9 @@ mod tests {
     #[tokio::test]
     async fn j10_critic_pass_vetoes_on_high_risk() {
         let provider = CannedTextProvider {
-            text: r#"{"summary":"risky","risks":[{"severity":"high","description":"drops a table"}]}"#.into(),
+            text:
+                r#"{"summary":"risky","risks":[{"severity":"high","description":"drops a table"}]}"#
+                    .into(),
         };
         let mut state = crate::model::RunState::new("r1", "drop a column", "abc", "b");
         state.tasks = vec![done_task("t1")];

@@ -106,7 +106,10 @@ pub fn render_standup(runs: &[RunSummary]) -> String {
         return "📋 Standup: no pilot runs in the last day.".to_string();
     }
     let merged = runs.iter().filter(|r| r.pr_url.is_some()).count();
-    let failed = runs.iter().filter(|r| r.status == RunStatus::Failed).count();
+    let failed = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Failed)
+        .count();
     let total_usd: f64 = runs.iter().map(|r| r.usd).sum();
     let mut out = format!(
         "📋 Standup: {} run(s), {merged} with PRs, {failed} failed, ${total_usd:.2} spent.\n",
@@ -130,7 +133,10 @@ pub fn render_weekly_summary(runs: &[RunSummary]) -> String {
     }
     let n = runs.len();
     let merged = runs.iter().filter(|r| r.pr_url.is_some()).count();
-    let failed = runs.iter().filter(|r| r.status == RunStatus::Failed).count();
+    let failed = runs
+        .iter()
+        .filter(|r| r.status == RunStatus::Failed)
+        .count();
     let total_usd: f64 = runs.iter().map(|r| r.usd).sum();
     let success_rate = (n - failed) as f64 / n as f64 * 100.0;
     let mut out = format!(
@@ -237,7 +243,11 @@ mod tests {
             .map(|i| RunSummary {
                 run_id: format!("r{i}"),
                 goal: "g".into(),
-                status: if i < 4 { RunStatus::Failed } else { RunStatus::Done },
+                status: if i < 4 {
+                    RunStatus::Failed
+                } else {
+                    RunStatus::Done
+                },
                 usd: 0.1,
                 pr_url: None,
             })

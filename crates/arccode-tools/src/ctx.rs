@@ -175,10 +175,7 @@ fn normalize_lexical(path: &Path) -> PathBuf {
             Component::ParentDir => {
                 // Only pop if the last pushed component is a normal segment;
                 // never pop past a root/prefix.
-                let popped = matches!(
-                    out.components().next_back(),
-                    Some(Component::Normal(_))
-                );
+                let popped = matches!(out.components().next_back(), Some(Component::Normal(_)));
                 if popped {
                     out.pop();
                 } else {
@@ -364,10 +361,10 @@ mod tests {
     #[test]
     fn parent_traversal_to_existing_path_is_denied() {
         let root = unique_tmp_dir();
-        let outside = root.parent().unwrap().join(format!(
-            "arccode-outside-{}.txt",
-            std::process::id()
-        ));
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("arccode-outside-{}.txt", std::process::id()));
         std::fs::write(&outside, b"secret").unwrap();
         let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
         let rel = format!("../{}", outside.file_name().unwrap().to_string_lossy());

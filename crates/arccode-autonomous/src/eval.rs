@@ -87,13 +87,7 @@ pub struct RegressionReport {
     pub regressed: bool,
 }
 
-fn axis(
-    name: &str,
-    baseline: f64,
-    current: f64,
-    dir: Direction,
-    threshold: f64,
-) -> AxisDelta {
+fn axis(name: &str, baseline: f64, current: f64, dir: Direction, threshold: f64) -> AxisDelta {
     // pct change relative to baseline; if baseline is 0 we can't form a
     // ratio, so treat any worsening as a flat regression and improvement
     // as fine.
@@ -177,7 +171,11 @@ pub fn render_report(report: &RegressionReport) -> String {
     let mut out = String::from("# Eval regression report\n\n");
     out.push_str(&format!(
         "**Overall: {}**\n\n",
-        if report.regressed { "⛔ REGRESSED" } else { "✅ within tolerance" }
+        if report.regressed {
+            "⛔ REGRESSED"
+        } else {
+            "✅ within tolerance"
+        }
     ));
     out.push_str("| Axis | Baseline | Current | Δ | Status |\n");
     out.push_str("| ---- | -------- | ------- | - | ------ |\n");
@@ -210,10 +208,7 @@ mod tests {
 
     #[test]
     fn summarize_averages() {
-        let results = vec![
-            result(true, 0.10, 5.0, 0.8),
-            result(false, 0.30, 15.0, 0.6),
-        ];
+        let results = vec![result(true, 0.10, 5.0, 0.8), result(false, 0.30, 15.0, 0.6)];
         let s = summarize(&results);
         assert_eq!(s.n, 2);
         assert_eq!(s.success_rate, 0.5);
@@ -239,40 +234,94 @@ mod tests {
 
     #[test]
     fn cost_increase_beyond_threshold_regresses() {
-        let base = EvalSummary { n: 1, success_rate: 1.0, avg_usd: 0.10, avg_wall: 5.0, avg_quality: 0.9 };
-        let cur = EvalSummary { avg_usd: 0.12, ..base.clone() }; // +20% > 10%
+        let base = EvalSummary {
+            n: 1,
+            success_rate: 1.0,
+            avg_usd: 0.10,
+            avg_wall: 5.0,
+            avg_quality: 0.9,
+        };
+        let cur = EvalSummary {
+            avg_usd: 0.12,
+            ..base.clone()
+        }; // +20% > 10%
         let r = compare(&cur, &base, 0.10);
         assert!(r.regressed);
-        assert!(r.axes.iter().find(|a| a.name == "avg_usd").unwrap().regressed);
+        assert!(
+            r.axes
+                .iter()
+                .find(|a| a.name == "avg_usd")
+                .unwrap()
+                .regressed
+        );
     }
 
     #[test]
     fn cost_increase_within_threshold_ok() {
-        let base = EvalSummary { n: 1, success_rate: 1.0, avg_usd: 0.10, avg_wall: 5.0, avg_quality: 0.9 };
-        let cur = EvalSummary { avg_usd: 0.105, ..base.clone() }; // +5%
+        let base = EvalSummary {
+            n: 1,
+            success_rate: 1.0,
+            avg_usd: 0.10,
+            avg_wall: 5.0,
+            avg_quality: 0.9,
+        };
+        let cur = EvalSummary {
+            avg_usd: 0.105,
+            ..base.clone()
+        }; // +5%
         assert!(!compare(&cur, &base, 0.10).regressed);
     }
 
     #[test]
     fn success_rate_drop_regresses() {
-        let base = EvalSummary { n: 10, success_rate: 0.90, avg_usd: 0.1, avg_wall: 5.0, avg_quality: 0.9 };
-        let cur = EvalSummary { success_rate: 0.70, ..base.clone() }; // big drop
+        let base = EvalSummary {
+            n: 10,
+            success_rate: 0.90,
+            avg_usd: 0.1,
+            avg_wall: 5.0,
+            avg_quality: 0.9,
+        };
+        let cur = EvalSummary {
+            success_rate: 0.70,
+            ..base.clone()
+        }; // big drop
         assert!(compare(&cur, &base, 0.10).regressed);
     }
 
     #[test]
     fn improvements_never_regress() {
-        let base = EvalSummary { n: 10, success_rate: 0.8, avg_usd: 0.2, avg_wall: 10.0, avg_quality: 0.7 };
+        let base = EvalSummary {
+            n: 10,
+            success_rate: 0.8,
+            avg_usd: 0.2,
+            avg_wall: 10.0,
+            avg_quality: 0.7,
+        };
         // Cheaper, faster, higher success + quality.
-        let cur = EvalSummary { n: 10, success_rate: 0.95, avg_usd: 0.1, avg_wall: 5.0, avg_quality: 0.9 };
+        let cur = EvalSummary {
+            n: 10,
+            success_rate: 0.95,
+            avg_usd: 0.1,
+            avg_wall: 5.0,
+            avg_quality: 0.9,
+        };
         let r = compare(&cur, &base, 0.10);
         assert!(!r.regressed);
     }
 
     #[test]
     fn render_report_marks_regression() {
-        let base = EvalSummary { n: 1, success_rate: 1.0, avg_usd: 0.10, avg_wall: 5.0, avg_quality: 0.9 };
-        let cur = EvalSummary { avg_wall: 20.0, ..base.clone() };
+        let base = EvalSummary {
+            n: 1,
+            success_rate: 1.0,
+            avg_usd: 0.10,
+            avg_wall: 5.0,
+            avg_quality: 0.9,
+        };
+        let cur = EvalSummary {
+            avg_wall: 20.0,
+            ..base.clone()
+        };
         let md = render_report(&compare(&cur, &base, 0.10));
         assert!(md.contains("REGRESSED"));
         assert!(md.contains("avg_wall"));

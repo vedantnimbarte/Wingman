@@ -59,7 +59,11 @@ pub fn parse(verb: &str, run_id: &str, message: &str) -> Result<Interjection, St
     let kind = match verb.trim().to_ascii_lowercase().as_str() {
         "tell" => InterjectKind::Tell,
         "ask" => InterjectKind::Ask,
-        other => return Err(format!("unknown interjection verb `{other}` (expect tell|ask)")),
+        other => {
+            return Err(format!(
+                "unknown interjection verb `{other}` (expect tell|ask)"
+            ))
+        }
     };
     if run_id.trim().is_empty() {
         return Err("interjection needs a run id".to_string());

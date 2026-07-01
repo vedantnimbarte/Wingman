@@ -31,7 +31,10 @@ impl CostSamples {
     }
 
     fn samples(&self, role: &str) -> Option<&[f64]> {
-        self.per_role.get(role).map(|v| v.as_slice()).filter(|v| !v.is_empty())
+        self.per_role
+            .get(role)
+            .map(|v| v.as_slice())
+            .filter(|v| !v.is_empty())
     }
 
     /// Total number of samples across all roles.
@@ -203,7 +206,10 @@ fn confidence(plan: &[PlannedTask], samples: &CostSamples) -> Confidence {
     }
     let mut min_samples = usize::MAX;
     for t in plan {
-        let n = samples.samples(t.role.as_str()).map(|s| s.len()).unwrap_or(0);
+        let n = samples
+            .samples(t.role.as_str())
+            .map(|s| s.len())
+            .unwrap_or(0);
         min_samples = min_samples.min(n);
     }
     match min_samples {
@@ -226,7 +232,10 @@ pub fn estimate_plan(plan: &[PlannedTask], samples: &CostSamples, concurrency: u
         usd_low += lo;
         usd_point += pt;
         usd_high += hi;
-        sample_count += samples.samples(t.role.as_str()).map(|s| s.len()).unwrap_or(0);
+        sample_count += samples
+            .samples(t.role.as_str())
+            .map(|s| s.len())
+            .unwrap_or(0);
     }
 
     let conc = concurrency.max(1);
@@ -388,7 +397,10 @@ mod tests {
     fn cost_samples_skips_zero_cost_tasks() {
         // A task that never ran (or whose cost wasn't recorded) is not a
         // sample — it would bias the band toward zero.
-        let runs = vec![run_with_costs("r1", &[(Role::Developer, 0.0), (Role::Developer, 0.10)])];
+        let runs = vec![run_with_costs(
+            "r1",
+            &[(Role::Developer, 0.0), (Role::Developer, 0.10)],
+        )];
         let samples = cost_samples_from_runs(&runs);
         assert_eq!(samples.per_role["developer"], vec![0.10]);
     }

@@ -81,12 +81,22 @@ pub fn fetch_issue_candidates(
     let out = runner
         .run(
             "gh",
-            &["issue", "list", "--label", label, "--json", "number,title,author"],
+            &[
+                "issue",
+                "list",
+                "--label",
+                label,
+                "--json",
+                "number,title,author",
+            ],
             repo_root,
         )
         .map_err(|e| format!("gh issue list failed: {e}"))?;
     if !out.success() {
-        return Err(format!("gh issue list exited non-zero: {}", out.stderr.trim()));
+        return Err(format!(
+            "gh issue list exited non-zero: {}",
+            out.stderr.trim()
+        ));
     }
     let items: serde_json::Value =
         serde_json::from_str(&out.stdout).map_err(|e| format!("bad gh json: {e}"))?;
@@ -260,7 +270,11 @@ mod tests {
             } else {
                 String::new()
             };
-            Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
@@ -293,7 +307,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         // Both score 0.6*0.6/0.4 = 0.9 ≥ auto_threshold; the trusted one
         // auto-runs, the unknown one only proposes.
-        let parser = results.iter().find(|(c, _)| c.title == "fix the parser").unwrap();
+        let parser = results
+            .iter()
+            .find(|(c, _)| c.title == "fix the parser")
+            .unwrap();
         assert_eq!(parser.1, DaemonAction::AutoRun);
         let typo = results.iter().find(|(c, _)| c.title == "typo").unwrap();
         assert_eq!(typo.1, DaemonAction::Propose);
@@ -310,10 +327,17 @@ mod tests {
         };
         let mut passes = 0;
         let mut total_actions = 0;
-        run_n_cycles(&FakeIssueGh, StdPath::new("."), &cfg, 0.3, 3, |_, actions| {
-            passes += 1;
-            total_actions += actions.len();
-        });
+        run_n_cycles(
+            &FakeIssueGh,
+            StdPath::new("."),
+            &cfg,
+            0.3,
+            3,
+            |_, actions| {
+                passes += 1;
+                total_actions += actions.len();
+            },
+        );
         assert_eq!(passes, 3);
         assert_eq!(total_actions, 6); // 2 candidates × 3 cycles
     }
@@ -321,9 +345,18 @@ mod tests {
     #[test]
     fn rank_orders_by_score_desc() {
         let cands = vec![
-            Candidate { title: "low".into(), ..cand(0.2, 0.2, 0.9, TrustLevel::Trusted) },
-            Candidate { title: "high".into(), ..cand(0.9, 0.9, 0.2, TrustLevel::Trusted) },
-            Candidate { title: "mid".into(), ..cand(0.5, 0.5, 0.5, TrustLevel::Trusted) },
+            Candidate {
+                title: "low".into(),
+                ..cand(0.2, 0.2, 0.9, TrustLevel::Trusted)
+            },
+            Candidate {
+                title: "high".into(),
+                ..cand(0.9, 0.9, 0.2, TrustLevel::Trusted)
+            },
+            Candidate {
+                title: "mid".into(),
+                ..cand(0.5, 0.5, 0.5, TrustLevel::Trusted)
+            },
         ];
         let ranked = rank(cands);
         assert_eq!(ranked[0].title, "high");

@@ -96,7 +96,10 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
 
     // Learning databases.
     if let Ok(global) = arccode_config::ensure_global_dir() {
-        for (label, file) in [("skill stats", "learn.db"), ("session recall", "sessions.db")] {
+        for (label, file) in [
+            ("skill stats", "learn.db"),
+            ("session recall", "sessions.db"),
+        ] {
             let p = global.join(file);
             if p.exists() {
                 println!("{label}: {}", p.display());
@@ -131,7 +134,12 @@ fn print_memory_section(label: &str, dir: Option<&Path>) {
                 .and_then(|body| {
                     body.lines()
                         .find(|l| l.trim_start().starts_with("description:"))
-                        .map(|l| l.trim_start().trim_start_matches("description:").trim().to_string())
+                        .map(|l| {
+                            l.trim_start()
+                                .trim_start_matches("description:")
+                                .trim()
+                                .to_string()
+                        })
                 })
                 .unwrap_or_default();
             entries.push((stem, desc));

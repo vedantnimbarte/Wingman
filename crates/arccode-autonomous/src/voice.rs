@@ -80,7 +80,8 @@ mod tests {
 
     #[test]
     fn enabled_shim_routes_through_intake() {
-        let g = transcript_to_goal("add a dark mode toggle", true, Some("me"), &["me".into()]).unwrap();
+        let g =
+            transcript_to_goal("add a dark mode toggle", true, Some("me"), &["me".into()]).unwrap();
         assert_eq!(g.text, "add a dark mode toggle");
         assert_eq!(g.source, Channel::Voice);
         assert_eq!(g.trust_level, TrustLevel::Trusted);
@@ -110,8 +111,12 @@ mod tests {
     #[test]
     fn whisper_argv_includes_model_and_audio() {
         let argv = whisper_argv("models/ggml-base.bin", "/tmp/clip.wav");
-        assert!(argv.windows(2).any(|w| w[0] == "-m" && w[1] == "models/ggml-base.bin"));
-        assert!(argv.windows(2).any(|w| w[0] == "-f" && w[1] == "/tmp/clip.wav"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "-m" && w[1] == "models/ggml-base.bin"));
+        assert!(argv
+            .windows(2)
+            .any(|w| w[0] == "-f" && w[1] == "/tmp/clip.wav"));
     }
 
     #[test]

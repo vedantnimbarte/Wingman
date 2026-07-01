@@ -1683,24 +1683,22 @@ mod tests {
         // promoting it — the default must be untouched, the section present.
         Config::set_default_provider_and_save(&path, "anthropic", "claude-opus-4-7", None, true)
             .unwrap();
-        Config::set_provider_and_save(
-            &path,
-            "openai",
-            "gpt-4.1",
-            None,
-            true,
-        )
-        .unwrap();
+        Config::set_provider_and_save(&path, "openai", "gpt-4.1", None, true).unwrap();
 
         let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg.default_provider.as_deref(), Some("anthropic"));
-        assert_eq!(cfg.default_model.as_deref(), Some("anthropic/claude-opus-4-7"));
+        assert_eq!(
+            cfg.default_model.as_deref(),
+            Some("anthropic/claude-opus-4-7")
+        );
         assert_eq!(
             cfg.providers.get("openai").and_then(|p| p.model.as_deref()),
             Some("gpt-4.1")
         );
         assert_eq!(
-            cfg.providers.get("openai").and_then(|p| p.api_key.as_deref()),
+            cfg.providers
+                .get("openai")
+                .and_then(|p| p.api_key.as_deref()),
             Some("keyring:openai")
         );
 
