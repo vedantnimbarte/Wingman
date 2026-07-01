@@ -155,6 +155,11 @@ pub struct PilotOptions {
     pub max_usd: Option<f64>,
     pub sandbox: Option<String>,
     pub channel: Option<String>,
+    /// Wait for a control-channel approve/veto on a headless hard gate instead
+    /// of refusing outright.
+    pub await_approval: bool,
+    /// Seconds to wait when `await_approval` is set before rejecting.
+    pub approval_timeout_secs: u64,
     pub model_override: Option<String>,
 }
 
@@ -339,11 +344,21 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             .await?
         }
         arccode_autonomous::approval::ApprovalTier::Hard => {
-            if !std::io::stdin().is_terminal() {
+            if std::io::stdin().is_terminal() {
+                prompt_for_approval(&plan, &goal)?
+            } else if opts.await_approval {
+                // Headless hard gate, opted in: wait for an approve/veto over
+                // the control channel (`pilot approve` / `pilot veto` or the
+                // watch UI). Denies by default when the window elapses.
+                eprintln!(
+                    "[pilot] hard gate, no TTY — awaiting approval via the control channel \
+                     (`pilot approve` / `pilot veto`), up to {}s…",
+                    opts.approval_timeout_secs
+                );
+                wait_for_approval(&run_path, opts.approval_timeout_secs).await
+            } else {
                 eprintln!("[pilot] hard-gate required and no TTY — refusing to auto-approve plan.");
                 false
-            } else {
-                prompt_for_approval(&plan, &goal)?
             }
         }
     };
@@ -928,6 +943,39 @@ async fn run_notify_window(
     }
 }
 
+/// Block a headless hard-gate run until an operator approves or vetoes the
+/// plan over the control channel, or the window elapses.
+///
+/// Unlike the notify-only window, a hard gate **denies by default**: if no
+/// decision arrives before the timeout, the plan is rejected. So CI that
+/// forgets to approve fails closed rather than proceeding unsupervised.
+async fn wait_for_approval(run_dir: &std::path::Path, timeout_secs: u64) -> bool {
+    use std::time::{Duration, Instant};
+    let mut reader = arccode_autonomous::control::ControlReader::new();
+    let window = Duration::from_secs(timeout_secs);
+    let start = Instant::now();
+    loop {
+        for cmd in reader.poll(run_dir) {
+            match cmd {
+                arccode_autonomous::control::ControlCommand::Approve => {
+                    eprintln!("[pilot] approval received via control channel; proceeding.");
+                    return true;
+                }
+                arccode_autonomous::control::ControlCommand::Veto => {
+                    eprintln!("[pilot] veto received via control channel; rejecting plan.");
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if start.elapsed() >= window {
+            eprintln!("[pilot] approval window elapsed with no decision; rejecting (deny-by-default).");
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 // ----------------------------------------------------------------------
 // `arccode pilot resume`
 // ----------------------------------------------------------------------
@@ -1346,4 +1394,45 @@ fn append_daemon_queue(
     });
     writeln!(f, "{line}")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arccode_autonomous::control::{append, ControlCommand};
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wait_for_approval_returns_true_on_approve() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        // Approve arrives shortly after the wait starts.
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            append(&path, &ControlCommand::Approve).unwrap();
+        });
+        let approved = wait_for_approval(dir.path(), 5).await;
+        writer.await.unwrap();
+        assert!(approved, "approve command should release the gate");
+    }
+
+    #[tokio::test]
+    async fn wait_for_approval_returns_false_on_veto() {
+        let dir = tempfile::tempdir().unwrap();
+        append(dir.path(), &ControlCommand::Veto).unwrap();
+        assert!(
+            !wait_for_approval(dir.path(), 5).await,
+            "veto rejects the plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_approval_denies_by_default_on_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        // No command written; a 0s window must reject rather than proceed.
+        assert!(
+            !wait_for_approval(dir.path(), 0).await,
+            "a hard gate must fail closed when the window elapses"
+        );
+    }
 }

@@ -403,9 +403,16 @@ From the **watch UI**: `x` aborts the run (with a confirm), `r` retries the
 selected task (with a confirm), and — while a run is parked at the plan gate —
 `a` / `v` approve / veto it. `abort_run` cancels every in-flight worker, marks
 the remaining tasks failed, records `RunStatus::Aborted`, and refuses further
-assignment so the run winds down cleanly. Approve/veto are honoured by the
-notify-only approval window, which surfaces as `AwaitingApproval` in the
-dashboard; the hard gate still requires an interactive TTY.
+assignment so the run winds down cleanly.
+
+Approve/veto surface the run as `AwaitingApproval` in the dashboard and are
+honoured by the **notify-only** approval window. The **hard** gate normally
+requires an interactive TTY, but a headless hard-gate run started with
+`pilot run --await-approval [--approval-timeout SECS]` will instead park at the
+gate and wait for a control-channel `approve` / `veto` (from another terminal
+or the watch UI). Unlike the notify window, the hard gate **denies by default**:
+if the window (600s by default) elapses with no decision, the plan is rejected,
+so unattended CI fails closed rather than proceeding unsupervised.
 
 ### Slash Commands
 

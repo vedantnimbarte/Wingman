@@ -262,6 +262,14 @@ pub enum PilotAction {
         /// Notification channel for plan/completion notices.
         #[arg(long, value_name = "CHANNEL")]
         channel: Option<String>,
+        /// For a headless hard-gate run, wait for `pilot approve` / `pilot
+        /// veto` (or the watch UI) via the control channel instead of
+        /// refusing outright. Times out to a rejection.
+        #[arg(long)]
+        await_approval: bool,
+        /// Seconds to wait for `--await-approval` before rejecting the plan.
+        #[arg(long, value_name = "SECS", default_value_t = 600)]
+        approval_timeout: u64,
     },
     /// Print the latest run's status as ASCII; exits immediately.
     Status {
@@ -518,6 +526,8 @@ pub async fn run() -> Result<ExitCode> {
                 max_usd,
                 sandbox,
                 channel,
+                await_approval,
+                approval_timeout,
             } => {
                 let cfg = load_config()?;
                 commands::pilot::run(
@@ -535,6 +545,8 @@ pub async fn run() -> Result<ExitCode> {
                         max_usd,
                         sandbox,
                         channel,
+                        await_approval,
+                        approval_timeout_secs: approval_timeout,
                         model_override: cli.model,
                     },
                 )
@@ -595,6 +607,8 @@ pub async fn run() -> Result<ExitCode> {
                     max_usd,
                     sandbox: None,
                     channel: None,
+                    await_approval: false,
+                    approval_timeout_secs: 600,
                     model_override: cli.model,
                 },
             )
