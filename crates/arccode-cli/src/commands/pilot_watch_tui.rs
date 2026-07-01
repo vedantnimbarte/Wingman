@@ -41,6 +41,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Sparkline, Wrap};
 use ratatui::{Frame, Terminal};
 
+use arccode_autonomous::control::{self, ControlCommand};
 use arccode_autonomous::dashboard::{
     self, AgentRow, DashboardModel, HeaderInfo, LogRow, LogSeverity, RunSummary, TaskRow,
 };
@@ -231,6 +232,10 @@ struct WatchUi {
     detail: Option<String>,
     /// Whether the `?` keybinding help overlay is open.
     help: bool,
+    /// A pending destructive action awaiting y/n confirmation.
+    confirm: Option<Confirm>,
+    /// One-shot status line shown after a control action is dispatched.
+    toast: Option<String>,
     last_mtime: Option<SystemTime>,
     model: Option<DashboardModel>,
     finished: bool,
@@ -252,6 +257,13 @@ struct WatchUi {
     hit: HitAreas,
     /// Glyph set the UI renders with (unicode or ASCII fallback).
     glyphs: Glyphs,
+}
+
+/// A destructive control action queued behind a y/n confirmation prompt.
+#[derive(Debug, Clone)]
+struct Confirm {
+    prompt: String,
+    cmd: ControlCommand,
 }
 
 /// Screen geometry captured each frame for mouse hit-testing.
@@ -309,6 +321,8 @@ impl WatchUi {
             log: LogView::new(),
             detail: None,
             help: false,
+            confirm: None,
+            toast: None,
             last_mtime: None,
             model: None,
             finished: false,
@@ -394,6 +408,8 @@ impl WatchUi {
             self.current = idx;
             self.tasks_sel = 0;
             self.detail = None;
+            self.confirm = None;
+            self.toast = None;
             // The sparkline and bell state are per-run; start fresh.
             self.spend_samples.clear();
             self.seen_failed = 0;
@@ -505,6 +521,26 @@ impl WatchUi {
             .as_ref()
             .and_then(|m| m.tasks.get(self.tasks_sel))
             .map(|t| t.id.clone())
+    }
+
+    /// Whether the watched run is parked at the plan-approval gate.
+    fn awaiting_approval(&self) -> bool {
+        self.model
+            .as_ref()
+            .map(|m| m.header.status == RunStatus::AwaitingApproval)
+            .unwrap_or(false)
+    }
+
+    /// Append a control command to the current run's control channel and show
+    /// a short confirmation toast.
+    fn send_control(&mut self, cmd: ControlCommand, note: &str) {
+        let Some(dir) = self.current_dir().map(Path::to_path_buf) else {
+            return;
+        };
+        match control::append(&dir, &cmd) {
+            Ok(()) => self.toast = Some(note.to_string()),
+            Err(e) => self.toast = Some(format!("control write failed: {e}")),
+        }
     }
 
     /// Mouse-wheel over a pane scrolls it (falling back to the focused pane
@@ -665,6 +701,18 @@ fn run_loop(
                         ui.help = false;
                         continue;
                     }
+                    // A confirmation prompt is modal: y/Enter runs the queued
+                    // action, anything else cancels.
+                    if ui.confirm.is_some() {
+                        if matches!(k.code, KeyCode::Char('y') | KeyCode::Enter) {
+                            let c = ui.confirm.take().unwrap();
+                            let note = describe_cmd(&c.cmd);
+                            ui.send_control(c.cmd, &note);
+                        } else {
+                            ui.confirm = None;
+                        }
+                        continue;
+                    }
                     // A detail overlay is modal: Esc/Enter/q dismiss it, everything
                     // else is swallowed so it doesn't drive the panes underneath.
                     if ui.detail.is_some() {
@@ -715,6 +763,30 @@ fn run_loop(
                             ui.log.severity = ui.log.severity.next();
                         }
                         (KeyCode::Char('?'), _) => ui.help = true,
+                        // Run control (writes to the run's control channel).
+                        // Abort is destructive → confirm first.
+                        (KeyCode::Char('x'), _) => {
+                            ui.confirm = Some(Confirm {
+                                prompt: "Abort this run? (y/n)".into(),
+                                cmd: ControlCommand::AbortRun,
+                            });
+                        }
+                        (KeyCode::Char('r'), _) => {
+                            if let Some(id) = ui.selected_task_id() {
+                                ui.confirm = Some(Confirm {
+                                    prompt: format!("Retry task {id}? (y/n)"),
+                                    cmd: ControlCommand::RetryTask { id },
+                                });
+                            }
+                        }
+                        // Approve / veto are the expected response to a gate,
+                        // so they act directly — but only while awaiting.
+                        (KeyCode::Char('a'), _) if ui.awaiting_approval() => {
+                            ui.send_control(ControlCommand::Approve, "approved");
+                        }
+                        (KeyCode::Char('v'), _) if ui.awaiting_approval() => {
+                            ui.send_control(ControlCommand::Veto, "vetoed");
+                        }
                         // Number keys jump straight to a run, regardless of focus.
                         (KeyCode::Char(c), _) if c.is_ascii_digit() && c != '0' => {
                             ui.switch_to(c as usize - '1' as usize);
@@ -724,12 +796,16 @@ fn run_loop(
                 }
                 // Mouse: wheel scrolls the pane under the pointer, left-click
                 // focuses/selects. Ignored while an overlay is modal.
-                CtEvent::Mouse(m) if ui.detail.is_none() && !ui.help => match m.kind {
-                    MouseEventKind::ScrollDown => ui.on_scroll(true, m.column, m.row),
-                    MouseEventKind::ScrollUp => ui.on_scroll(false, m.column, m.row),
-                    MouseEventKind::Down(MouseButton::Left) => ui.on_click(m.column, m.row),
-                    _ => {}
-                },
+                CtEvent::Mouse(m)
+                    if ui.detail.is_none() && !ui.help && ui.confirm.is_none() =>
+                {
+                    match m.kind {
+                        MouseEventKind::ScrollDown => ui.on_scroll(true, m.column, m.row),
+                        MouseEventKind::ScrollUp => ui.on_scroll(false, m.column, m.row),
+                        MouseEventKind::Down(MouseButton::Left) => ui.on_click(m.column, m.row),
+                        _ => {}
+                    }
+                }
                 _ => {}
             }
         }
@@ -802,7 +878,14 @@ fn draw(f: &mut Frame, ui: &mut WatchUi) {
     render_agents(f, top[1], &model.agents, ui.frame, g);
     let log_focused = ui.focus == Focus::Log;
     render_log(f, grid[1], &model.log, &mut ui.log, log_focused);
-    render_footer(f, rows[3], ui.finished, ui.show_runs());
+    render_footer(
+        f,
+        rows[3],
+        ui.finished,
+        ui.show_runs(),
+        ui.awaiting_approval(),
+        ui.toast.as_deref(),
+    );
 
     // Capture geometry for mouse hit-testing on the next input tick.
     ui.hit = HitAreas {
@@ -812,12 +895,50 @@ fn draw(f: &mut Frame, ui: &mut WatchUi) {
         tasks_scroll,
     };
 
-    // Overlays float above the grid when open. Help wins if both are set.
-    if ui.help {
+    // Overlays float above the grid when open. Confirm is the most modal,
+    // then help, then the detail overlay.
+    if let Some(c) = &ui.confirm {
+        render_confirm(f, area, c);
+    } else if ui.help {
         render_help(f, area, ui.glyphs);
     } else if let Some(id) = &ui.detail {
         render_detail(f, area, &model, id, g);
     }
+}
+
+/// Short past-tense description of a dispatched control command, for the toast.
+fn describe_cmd(cmd: &ControlCommand) -> String {
+    match cmd {
+        ControlCommand::AbortRun => "run abort sent".into(),
+        ControlCommand::AbortTask { id } => format!("abort sent for {id}"),
+        ControlCommand::RetryTask { id } => format!("retry sent for {id}"),
+        ControlCommand::Approve => "approved".into(),
+        ControlCommand::Veto => "vetoed".into(),
+    }
+}
+
+/// Small centred y/n confirmation prompt for a destructive action.
+fn render_confirm(f: &mut Frame, area: Rect, c: &Confirm) {
+    let rect = centered_rect(44, 20, area);
+    f.render_widget(Clear, rect);
+    let lines = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            c.prompt.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("y", Style::default().fg(Color::Green)),
+            Span::styled(" confirm    ", dim()),
+            Span::styled("n/Esc", Style::default().fg(Color::Red)),
+            Span::styled(" cancel", dim()),
+        ]),
+    ];
+    let p = Paragraph::new(lines)
+        .block(bordered_focused("Confirm", true))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, rect);
 }
 
 /// The Runs sidebar: one row per active run, the watched one marked and the
@@ -1087,7 +1208,40 @@ fn render_log(f: &mut Frame, area: Rect, log: &[LogRow], view: &mut LogView, foc
     );
 }
 
-fn render_footer(f: &mut Frame, area: Rect, finished: bool, show_runs: bool) {
+fn render_footer(
+    f: &mut Frame,
+    area: Rect,
+    finished: bool,
+    show_runs: bool,
+    awaiting: bool,
+    toast: Option<&str>,
+) {
+    // A control-action toast takes over the footer line when present.
+    if let Some(t) = toast {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" ✓ {t} "),
+                Style::default().fg(Color::Green),
+            ))),
+            area,
+        );
+        return;
+    }
+    // While a run is parked at the approval gate, foreground the a/v hint.
+    if awaiting {
+        let spans = vec![
+            Span::styled(" plan awaiting approval — ", Style::default().fg(Color::Yellow)),
+            Span::styled("a", Style::default().fg(Color::Green)),
+            Span::styled(" approve · ", dim()),
+            Span::styled("v", Style::default().fg(Color::Red)),
+            Span::styled(" veto · ", dim()),
+            Span::styled("q", Style::default().fg(Color::Cyan)),
+            Span::styled(" quit ", dim()),
+        ];
+        f.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let cyan = Style::default().fg(Color::Cyan);
     let key = |k: &str, desc: &str| {
         [
@@ -1103,6 +1257,7 @@ fn render_footer(f: &mut Frame, area: Rect, finished: bool, show_runs: bool) {
         spans.extend(key("1-9", "run"));
     }
     spans.extend(key("/", "search"));
+    spans.extend(key("x", "abort"));
     spans.extend(key("?", "help"));
     spans.push(Span::styled("q", cyan));
     spans.push(Span::styled(" quit ", dim()));
@@ -1242,6 +1397,11 @@ fn render_help(f: &mut Frame, area: Rect, g: Glyphs) {
         row("/".into(), "search the log (Esc clears)"),
         row("f".into(), "cycle log severity: all · warn+ · errors"),
         row("mouse".into(), "wheel scrolls · click selects"),
+        Line::raw(""),
+        row("x".into(), "abort the run (confirm)"),
+        row("r".into(), "retry the selected task (confirm)"),
+        row("a / v".into(), "approve / veto (while awaiting the plan gate)"),
+        Line::raw(""),
         row("?".into(), "toggle this help"),
         row("q · Esc · Ctrl-C".into(), "quit"),
     ];
@@ -1973,6 +2133,60 @@ mod tests {
         assert!(s.contains("brave_otter"), "worker name missing:\n{s}");
         assert!(s.contains("Wire up the editor"), "full title missing:\n{s}");
         assert!(s.contains("edit_file"), "recent log line missing:\n{s}");
+    }
+
+    #[test]
+    fn describe_cmd_is_human_readable() {
+        assert_eq!(describe_cmd(&ControlCommand::AbortRun), "run abort sent");
+        assert_eq!(
+            describe_cmd(&ControlCommand::RetryTask { id: "t4".into() }),
+            "retry sent for t4"
+        );
+        assert_eq!(describe_cmd(&ControlCommand::Approve), "approved");
+    }
+
+    #[test]
+    fn awaiting_approval_tracks_header_status() {
+        let mut ui = WatchUi::new(vec![summary("only", RunStatus::AwaitingApproval)], 0, UNI);
+        let mut model = sample_model();
+        model.header.status = RunStatus::AwaitingApproval;
+        ui.model = Some(model);
+        assert!(ui.awaiting_approval());
+        ui.model.as_mut().unwrap().header.status = RunStatus::Running;
+        assert!(!ui.awaiting_approval());
+    }
+
+    #[test]
+    fn send_control_writes_to_the_run_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = RunSummary {
+            run_id: "r1".into(),
+            dir: dir.path().to_path_buf(),
+            status: RunStatus::Running,
+            goal: String::new(),
+            done: 0,
+            total: 0,
+        };
+        let mut ui = WatchUi::new(vec![run], 0, UNI);
+        ui.send_control(ControlCommand::AbortRun, "run abort sent");
+        assert_eq!(ui.toast.as_deref(), Some("run abort sent"));
+
+        // The command lands in the run's control.jsonl.
+        let mut reader = control::ControlReader::new();
+        assert_eq!(reader.poll(dir.path()), vec![ControlCommand::AbortRun]);
+    }
+
+    #[test]
+    fn confirm_overlay_shows_the_prompt() {
+        let mut ui = WatchUi::new(vec![summary("only", RunStatus::Running)], 0, UNI);
+        ui.model = Some(sample_model());
+        ui.confirm = Some(Confirm {
+            prompt: "Abort this run? (y/n)".into(),
+            cmd: ControlCommand::AbortRun,
+        });
+        let s = render_to_string(&mut ui, 120, 30);
+        assert!(s.contains("Confirm"), "confirm title missing:\n{s}");
+        assert!(s.contains("Abort this run?"), "prompt missing:\n{s}");
     }
 
     #[test]
