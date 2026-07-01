@@ -13,7 +13,9 @@ skills from observed work, and recalls past sessions across projects.
 It is positioned as an open, provider-agnostic alternative to Claude Code,
 Cursor, and Aider — with native support for Anthropic, OpenAI, ChatGPT
 (OAuth), Google Gemini, OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama,
-plus a planned MCP host.
+a built-in MCP host that adapts external MCP-server tools as first-class
+tools, and a multi-agent **pilot mode** that plans a goal, delegates to
+worker agents in isolated worktrees, and converges into a PR.
 
 ---
 
@@ -27,7 +29,8 @@ plus a planned MCP host.
   - [docs/TREE-SITTER.md](docs/TREE-SITTER.md) — language-aware parsing integration.
   - [docs/LEARNING-LOOP.md](docs/LEARNING-LOOP.md) — memories, skills, session recall.
   - [docs/TOOLS.md](docs/TOOLS.md) — complete reference for all 20+ built-in tools.
-  - [docs/AUTONOMOUS-MODE.md](docs/AUTONOMOUS-MODE.md) — planned multi-task orchestration (M8).
+  - [docs/AUTONOMOUS-MODE.md](docs/AUTONOMOUS-MODE.md) — design doc for multi-task orchestration (now shipped as [Pilot mode](#pilot-mode)).
+  - [docs/DIFFERENTIATION.md](docs/DIFFERENTIATION.md) — single-agent differentiation roadmap (routing, warm index, verification receipts, team memory).
 - **For Developers:** See [Development](#development) below.
 
 ---
@@ -45,9 +48,24 @@ plus a planned MCP host.
   adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.
   Gemini and ChatGPT (OAuth) have their own adapters. All speak the same
   `arccode_core::Message` contract.
-- **Two surfaces.** A `ratatui`-based TUI for interactive coding and a
+- **Three surfaces.** A `ratatui`-based TUI for interactive coding, a
   headless `--print` mode that emits either text or newline-delimited JSON
-  events — ready to pipe into other tools or CI.
+  events, and a `--batch <file.jsonl>` mode that runs a file of prompts
+  non-interactively — all ready to pipe into other tools or CI.
+- **MCP host.** Declare Model Context Protocol servers under `[mcp.<name>]`
+  in config (stdio or HTTP transport); their tools are namespaced as
+  `mcp__<server>__<tool>` and dispatched like built-ins. Manage them live
+  from the TUI with `/mcp`.
+- **Guided provider login.** `arccode login <provider>` (or `/login` in the
+  TUI) probes the key, stores it in the OS keyring, and records the default
+  model; `arccode logout <provider>` clears it. ChatGPT uses a browser
+  OAuth flow.
+- **Multi-agent pilot mode.** `arccode pilot run "<goal>"` plans, spawns
+  worker agents in isolated worktrees, and opens a PR. See
+  [Pilot mode](#pilot-mode).
+- **`arccode knows`.** Prints what Arc-Code knows about the current project:
+  memories, skills, model routing, the verification gate, and index
+  freshness.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
   listing, shell execution, semantic search, and the new learning tools
   (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
@@ -142,9 +160,9 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 | `arccode-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback.       |
 | `arccode-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt.               |
 | `arccode-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
-| `arccode-mcp`        | MCP host scaffolding (M3).                                                                             |
+| `arccode-mcp`        | MCP host: connects to stdio/HTTP MCP servers and adapts their tools as `arccode_core` tool dispatchers, namespaced `mcp__<server>__<tool>`. |
 | `arccode-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
-| `arccode-autonomous` | Pilot mode (M1): multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR. |
+| `arccode-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR — planner, manager, control channel, sandbox tiers, discovery daemon. |
 
 ---
 
@@ -194,6 +212,13 @@ arccode pilot run --yes "<goal>"
 arccode pilot status              # one-shot summary of the latest run
 arccode pilot watch               # live ASCII dashboard, polls state.json
 arccode pilot watch <run-id>      # specific run
+
+# Control a live run (via the control channel)
+arccode pilot approve             # release a run waiting at the plan gate
+arccode pilot veto                # reject a gated run
+arccode pilot abort [--task <id>] # abort the whole run or one task
+arccode pilot retry <task>        # retry a failed/blocked task
+arccode pilot resume <run-id>     # resume an interrupted run
 ```
 
 Per-run artefacts land under `<project>/.arccode/autonomous/<run-id>/`:
@@ -206,13 +231,15 @@ Per-run artefacts land under `<project>/.arccode/autonomous/<run-id>/`:
 
 ### Status
 
-M1 phases 1–7 are implemented (RunStore, planner, worker subprocess
+The full M1 pipeline is implemented (RunStore, planner, worker subprocess
 with cross-platform supervisor, manager + orchestrator, git worktrees +
-squash-merge, gh PR creation, dashboard). Phase 8 ships cost-cap
-enforcement, the provider-support gate, and this documentation;
-end-to-end runs against the providers below need real API keys and
-are user-validated rather than CI-validated for now. M2 enhancements
-(E1–E13) and M3 autonomy (J1–J15) are roadmap.
+squash-merge, gh PR creation, dashboard, cost-cap enforcement, and the
+provider-support gate). On top of that, the crate now ships the
+`copilot`/`autopilot` machinery: a live control channel (`approve` /
+`veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
+sandbox tiers (`host` / `container` / `vm`), and the always-on discovery
+`daemon`. End-to-end runs against the providers below need real API keys
+and are user-validated rather than CI-validated for now.
 
 ### Provider support for pilot mode
 
@@ -462,12 +489,24 @@ arccode --mode yolo            # no prompts; per-session only
 
 ### Inside the TUI
 
-- Type a prompt and hit Enter to send.
-- `/model <provider>/<model-id>` — swap the active model live.
+- Type a prompt and hit Enter to send. A `/`-prefixed line shows a slash
+  autocomplete popup.
+- `/model [<provider>/<model-id>]` — swap the active model live; empty arg
+  opens the picker.
+- `/mode <read-only|auto-edit|yolo>` — change the permission mode live.
+- `/login` (`/connect`) — guided provider-connect wizard; `/logout [name]`.
+- `/mcp` — add / remove / connect / disconnect MCP servers.
 - `/memory` — list saved memories. `/memory forget <name>` to delete one.
 - `/recall <query>` — search across past sessions for prior context.
-- `/skill stats [name]` — show skill usage and outcome counts.
+- `/skills [new <name>]` — browse and apply skills, or scaffold a new one;
+  `/skill <name>` queues a skill and `/skill stats [name]` shows usage counts.
 - `/learn [status|reset]` — self-learning loop dashboard.
+- `/usage` — per-model token + cost breakdown. `/params` — model params.
+- `/add <path>` — attach a file to the next prompt.
+- `/export [md]` — write the transcript to a file. `/resume` — reload the
+  last session.
+- `/find <query>` — search the transcript (`/findnext`, `/findprev`,
+  `/findclear`).
 - Tool calls render inline with their output (head/tail truncated per the
   active budget) and the token-usage strip updates after each turn.
 
@@ -650,6 +689,16 @@ api_key = "${LITELLM_API_KEY}"
 base_url = "http://localhost:4000/v1"
 model = "anthropic/claude-opus-4-7"
 
+# MCP servers — each becomes a set of `mcp__<name>__<tool>` tools.
+[mcp.filesystem]
+transport = "stdio"                 # "stdio" (default) or "http"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[mcp.remote]
+transport = "http"
+url = "http://localhost:9000/mcp"
+
 [logging]
 filter = "info,arccode=info"
 file = true
@@ -701,7 +750,8 @@ arccode [OPTIONS] [COMMAND]
 | `--mode <MODE>`          | `read-only` \| `auto-edit` \| `yolo`.                                       |
 | `--model <MODEL>`        | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Env: `ARCCODE_MODEL`. |
 | `--print <PROMPT>`       | Run a single prompt and exit (non-interactive).                              |
-| `--json`                 | Emit newline-delimited JSON events instead of text. Use with `--print`.      |
+| `--batch <FILE>`         | Run a JSONL file of prompts non-interactively. Pairs with `--json`.          |
+| `--json`                 | Emit newline-delimited JSON events instead of text. Use with `--print`/`--batch`. |
 | `-v`, `-vv`              | Increase log verbosity.                                                      |
 | `--quiet`                | Suppress non-error stderr output.                                            |
 | `--version`              | Print version and exit.                                                      |
@@ -714,6 +764,9 @@ arccode [OPTIONS] [COMMAND]
 | `config init`        | Write a starter `~/.arccode/config.toml`. `--force` to overwrite. |
 | `config show`        | Print the merged effective configuration. `--json` for JSON output. |
 | `config paths`       | Print the resolved global and project config paths.    |
+| `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
+| `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
+| `knows`              | Show what Arc-Code knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
 | `init`               | Scan the current project and write a starter `ARCCODE.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
 | `undo`               | Restore the most recent `arccode checkpoint` via `git stash pop`. |
@@ -732,9 +785,19 @@ arccode [OPTIONS] [COMMAND]
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.arccode/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
+| `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
+| `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
+| `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
+| `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
+| `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
+| `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 
 Running `arccode` with no subcommand launches the TUI against the resolved
 provider and model.
+
+> `arccode autonomous "<goal>"` is a deprecated alias for `arccode pilot
+> run` — kept through M3, removed at M4.
 
 ---
 
@@ -779,8 +842,8 @@ The project is being built milestone by milestone:
 - **M1** — Headless and TUI agent loop against Anthropic with built-in tools. *(shipped)*
 - **M2** — Six more providers, token pipeline, live `/model` swap. *(shipped)*
 - **M3** — Session persistence (`arccode-session`), `/resume`, MCP host
-  scaffolding (`arccode-mcp`). *(shipped — session persistence; MCP host in
-  progress)*
+  (`arccode-mcp`): stdio/HTTP transports, `[mcp]` config, `/mcp` management,
+  tools namespaced as `mcp__<server>__<tool>`. *(shipped)*
 - **M4** — Repo index / RAG (`arccode-rag`) with SQLite store and `fastembed`
   or hash-embedder fallback. *(shipped)*
 - **M5** — Skills (`arccode-skills`), ChatGPT OAuth, TUI polish (welcome
@@ -789,10 +852,14 @@ The project is being built milestone by milestone:
   memories, skill usage stats with outcome scoring, cross-session recall,
   nudges. *(shipped)*
 - **M7** — Tree-sitter integration across RAG, tools, diff/review, TUI. *(shipped)*
-- **M8** — Autonomous mode (`arccode autonomous`): multi-task planning, worker
-  agents in isolated worktrees, merge + PR. *(planned)*
+- **Pilot mode** — Multi-agent orchestration (`arccode pilot`): multi-task
+  planning, worker agents in isolated worktrees, squash-merge + PR, capability
+  tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
+  end-to-end runs are user-validated)* `arccode autonomous` is a deprecated
+  alias.
 - **Next** — Interactive TUI approval modal for skill/memory proposals,
-  session logging from the TUI (currently headless-only), full MCP host.
+  session logging from the TUI (currently headless-only), autopilot-tier
+  hardening (critic, knowledge graph, tool synthesis).
 
 ---
 

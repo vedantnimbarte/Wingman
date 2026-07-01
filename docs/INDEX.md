@@ -30,11 +30,12 @@ Welcome to Arc-Code's technical documentation. This index guides you to the righ
   - Best for: Complete tool signatures, behavior, permission requirements, error handling.
   - Read this if: You want to know what tools are available or how to use a specific tool.
 
-### Planned Features
+### Pilot Mode & Roadmap
 
-- **[AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md)** — Planned multi-task agent orchestration (M8).
+- **[AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md)** — Design doc for multi-task agent orchestration, now shipped as **Pilot mode** (`arccode pilot`).
   - Best for: Understanding the vision, data model, architecture, TUI integration.
-  - Read this if: You're interested in the roadmap or contributing to autonomous mode.
+  - Read this if: You're using pilot mode, contributing to it, or interested in the roadmap.
+  - See also: **Pilot mode** in [README.md](../README.md#pilot-mode) for the shipped command surface.
 
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
   - Best for: Understanding how Arc-Code plans to beat Claude Code/Codex on speed, trust, and retention.
@@ -50,18 +51,20 @@ Key commands:
 - `arccode` — launch TUI.
 - `arccode --print "<prompt>"` — one-shot headless mode.
 - `arccode config init` — scaffold config.
+- `arccode login <provider>` — connect a provider (OS keyring); `arccode logout <provider>` to remove.
 - `arccode review <pr#>` — code review.
 - `arccode session list` — browse past sessions.
-- `arccode memory list` — view memories.
-- `arccode knows` — show what Arc-Code knows about this project (memories, skills, routing, turn gate, index freshness).
+- `arccode memory export/import/diff` — share memory packs.
+- `arccode knows` — show what Arc-Code knows about this project (memories, skills, routing, verification gate, index freshness).
 - `arccode skill extract` — mine skills from sessions.
 - `arccode discover` — find local LLMs.
+- `arccode pilot run "<goal>"` — multi-agent orchestration → PR (see [README.md](../README.md#pilot-mode)).
 
 ### Configuration
 
 See **Configuration** in [README.md](../README.md#configuration) for:
 - Layered config resolution (defaults → global → project → env vars → CLI flags).
-- Config sections (tokens, router, tui, providers, hooks, schedule, autonomous).
+- Config sections (tokens, router, tui, providers, hooks, schedule, mcp, pilot).
 - Permission modes (read-only, plan, auto-edit, yolo).
 - Hooks (pre_tool_use, post_tool_use, stop, user_prompt_submit).
 
@@ -69,7 +72,7 @@ See **Configuration** in [README.md](../README.md#configuration) for:
 
 See **Inside the TUI** in [README.md](../README.md#inside-the-tui) for:
 - Typing prompts and hitting Enter.
-- Slash commands (`/model`, `/memory`, `/recall`, `/skill`, `/learn`).
+- Slash commands (`/model`, `/mode`, `/login`, `/mcp`, `/memory`, `/recall`, `/skills`, `/learn`, `/usage`).
 - File sidebar (`Ctrl+B`).
 - Themes and colors.
 - Transcript search (`/find`, `/findnext`).
@@ -111,7 +114,7 @@ Read **[ARCHITECTURE.md](ARCHITECTURE.md)** → **Crate Responsibilities** for:
 | `arccode-cli`        | Binary entry point, CLI args, command dispatch.        |
 | `arccode-core`       | Agent loop, Provider trait, tool dispatch.             |
 | `arccode-config`     | Layered config loading, permission model.              |
-| `arccode-providers`  | Nine LLM provider adapters.                            |
+| `arccode-providers`  | 73+ LLM provider adapters (native + OpenAI-compat).    |
 | `arccode-tools`      | 20+ built-in tools + registry.                         |
 | `arccode-tui`        | Interactive ratatui surface.                           |
 | `arccode-session`    | Append-only JSONL session logging.                     |
@@ -119,7 +122,8 @@ Read **[ARCHITECTURE.md](ARCHITECTURE.md)** → **Crate Responsibilities** for:
 | `arccode-skills`     | Markdown skill library (global + project).             |
 | `arccode-learn`      | Memory store, skill stats, session embedding.          |
 | `arccode-ts`         | Tree-sitter facade (language parsing).                 |
-| `arccode-mcp`        | MCP host scaffolding (early stage).                    |
+| `arccode-mcp`        | MCP host: stdio/HTTP servers → `mcp__<server>__<tool>`. |
+| `arccode-autonomous` | Pilot mode: multi-agent orchestrator → PR.             |
 
 ### Adding a New Tool
 
@@ -205,7 +209,7 @@ Session embedding happens asynchronously after the session ends. This is normal 
 
 ### Internal References
 
-- **Plan (M8+ roadmap):** `plan.md` in repository root.
+- **Plan (pilot mode roadmap):** `plan.md` in repository root.
 - **Changelog (if any):** `CHANGELOG.md` (when created).
 - **Contributing guidelines:** `CONTRIBUTING.md` (when created).
 
@@ -218,11 +222,11 @@ docs/
 ├── TREE-SITTER.md           (language parsing integration)
 ├── LEARNING-LOOP.md         (memories, skills, session recall)
 ├── TOOLS.md                 (complete tool reference)
-├── AUTONOMOUS-MODE.md       (planned multi-task orchestration)
+├── AUTONOMOUS-MODE.md       (pilot mode design — shipped as `arccode pilot`)
 └── DIFFERENTIATION.md       (single-agent differentiation roadmap)
 
 ../README.md                 (main project overview)
-../plan.md                   (M8 implementation plan)
+../plan.md                   (pilot mode implementation plan)
 ../Cargo.toml                (workspace manifest)
 ```
 
@@ -247,4 +251,4 @@ If this documentation is unclear or missing something:
 
 ---
 
-**Last updated:** 2026-05-28 | **Arc-Code v0.0.1**
+**Last updated:** 2026-07-01 | **Arc-Code v0.0.1**
