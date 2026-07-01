@@ -97,7 +97,9 @@ pub fn shannon_entropy(s: &str) -> f64 {
 /// mostly credential-shaped characters, and high per-char entropy. Tuned
 /// to flag base64/hex secrets while ignoring prose and short identifiers.
 pub fn looks_like_secret(token: &str) -> bool {
-    let t = token.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '+' && c != '/');
+    let t = token.trim_matches(|c: char| {
+        !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '+' && c != '/'
+    });
     if t.len() < 20 {
         return false;
     }
@@ -124,9 +126,18 @@ pub fn looks_like_secret(token: &str) -> bool {
 /// high-entropy token sits next to a credential-ish key name.
 fn line_mentions_credential(line: &str) -> bool {
     let l = line.to_ascii_lowercase();
-    ["secret", "token", "passwd", "password", "api_key", "apikey", "access_key", "private_key"]
-        .iter()
-        .any(|k| l.contains(k))
+    [
+        "secret",
+        "token",
+        "passwd",
+        "password",
+        "api_key",
+        "apikey",
+        "access_key",
+        "private_key",
+    ]
+    .iter()
+    .any(|k| l.contains(k))
 }
 
 /// Scan added diff lines for secrets. `added` is a list of
@@ -164,7 +175,9 @@ pub fn scan_secrets(added: &[(String, String)]) -> Vec<SecurityFinding> {
             continue;
         }
         // Entropy-based — medium/high confidence.
-        for token in line.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')')) {
+        for token in line.split(|c: char| {
+            c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ',' | ';' | '(' | ')')
+        }) {
             if looks_like_secret(token) {
                 let sev = if line_mentions_credential(line) {
                     Severity::High
@@ -203,9 +216,18 @@ pub fn parse_cargo_audit(json: &str) -> Result<Vec<SecurityFinding>, String> {
         .cloned()
         .unwrap_or_default();
     for item in list {
-        let advisory = item.get("advisory").cloned().unwrap_or(serde_json::Value::Null);
-        let id = advisory.get("id").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
-        let title = advisory.get("title").and_then(|s| s.as_str()).unwrap_or("(no title)");
+        let advisory = item
+            .get("advisory")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let id = advisory
+            .get("id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
+        let title = advisory
+            .get("title")
+            .and_then(|s| s.as_str())
+            .unwrap_or("(no title)");
         let pkg = item
             .pointer("/package/name")
             .and_then(|s| s.as_str())
@@ -256,7 +278,11 @@ fn cvss_score_to_severity(score: f64) -> Severity {
 /// if *any* alternative is allowed; `AND` expressions require *all*.
 pub fn scan_licenses(deps: &[(String, String)], allowed: &[String]) -> Vec<SecurityFinding> {
     let allowed_lc: Vec<String> = allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
-    let is_allowed = |lic: &str| allowed_lc.iter().any(|a| a == &lic.trim().to_ascii_lowercase());
+    let is_allowed = |lic: &str| {
+        allowed_lc
+            .iter()
+            .any(|a| a == &lic.trim().to_ascii_lowercase())
+    };
     let mut findings = Vec::new();
     for (name, license) in deps {
         if license.trim().is_empty() {
@@ -269,7 +295,9 @@ pub fn scan_licenses(deps: &[(String, String)], allowed: &[String]) -> Vec<Secur
             continue;
         }
         let ok = if license.contains(" OR ") || license.contains('/') {
-            split_spdx(license, &["OR", "/"]).iter().any(|l| is_allowed(l))
+            split_spdx(license, &["OR", "/"])
+                .iter()
+                .any(|l| is_allowed(l))
         } else if license.contains(" AND ") {
             split_spdx(license, &["AND"]).iter().all(|l| is_allowed(l))
         } else {
@@ -304,7 +332,12 @@ fn split_spdx(expr: &str, seps: &[&str]) -> Vec<String> {
     }
     parts
         .into_iter()
-        .map(|p| p.trim().trim_matches(|c| c == '(' || c == ')').trim().to_string())
+        .map(|p| {
+            p.trim()
+                .trim_matches(|c| c == '(' || c == ')')
+                .trim()
+                .to_string()
+        })
         .filter(|p| !p.is_empty())
         .collect()
 }
@@ -329,8 +362,15 @@ pub fn render_report(report: &SecurityReport, block_gate: Severity) -> String {
         if blocking { "**blocked**" } else { "permitted" }
     ));
     for f in &report.findings {
-        let loc = f.file.as_deref().map(|p| format!(" `{p}`")).unwrap_or_default();
-        out.push_str(&format!("- [{}] ({}){} {}\n", f.severity, f.kind, loc, f.message));
+        let loc = f
+            .file
+            .as_deref()
+            .map(|p| format!(" `{p}`"))
+            .unwrap_or_default();
+        out.push_str(&format!(
+            "- [{}] ({}){} {}\n",
+            f.severity, f.kind, loc, f.message
+        ));
     }
     out
 }
@@ -354,7 +394,10 @@ mod tests {
 
     #[test]
     fn detects_github_token() {
-        let added = vec![line(".env", "GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz")];
+        let added = vec![line(
+            ".env",
+            "GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+        )];
         let f = scan_secrets(&added);
         assert!(f.iter().any(|x| x.message.contains("GitHub")));
     }
@@ -374,7 +417,10 @@ mod tests {
     #[test]
     fn ignores_normal_prose() {
         let added = vec![
-            line("README.md", "This is a perfectly ordinary sentence of documentation."),
+            line(
+                "README.md",
+                "This is a perfectly ordinary sentence of documentation.",
+            ),
             line("main.rs", "let total = items.iter().map(|x| x.cost).sum();"),
         ];
         assert!(scan_secrets(&added).is_empty());

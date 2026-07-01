@@ -628,10 +628,7 @@ mod tests {
         out
     }
 
-    fn agent_with_gate(
-        responses: Vec<Vec<StreamEvent>>,
-        gate: Arc<CountingGate>,
-    ) -> AgentLoop {
+    fn agent_with_gate(responses: Vec<Vec<StreamEvent>>, gate: Arc<CountingGate>) -> AgentLoop {
         AgentLoop::new(
             Arc::new(ScriptedProvider::new(responses)),
             Arc::new(OkDispatcher),
@@ -656,9 +653,9 @@ mod tests {
         let events = collect_events(&mut agent).await;
 
         assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
-        assert!(events.iter().any(
-            |e| matches!(e, AgentEvent::Verification { passed: true, .. })
-        ));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Verification { passed: true, .. })));
         assert!(matches!(
             events.last(),
             Some(AgentEvent::Stop {
@@ -695,10 +692,12 @@ mod tests {
         // The failure was fed back to the model as a user message.
         assert!(agent.history().iter().any(|m| {
             m.role == Role::User
-                && m.content.iter().any(|b| matches!(
-                    b,
-                    ContentBlock::Text { text } if text.contains("[arccode verify]")
-                ))
+                && m.content.iter().any(|b| {
+                    matches!(
+                        b,
+                        ContentBlock::Text { text } if text.contains("[arccode verify]")
+                    )
+                })
         }));
         assert!(matches!(
             events.last(),

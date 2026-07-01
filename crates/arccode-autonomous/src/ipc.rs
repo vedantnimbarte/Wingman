@@ -92,13 +92,17 @@ mod tests {
 
     #[test]
     fn cancel_roundtrips() {
-        let cmd = ManagerCommand::Cancel { reason: "superseded".into() };
+        let cmd = ManagerCommand::Cancel {
+            reason: "superseded".into(),
+        };
         assert_eq!(parse_command(&encode_command(&cmd)).unwrap(), cmd);
     }
 
     #[test]
     fn clarify_roundtrips() {
-        let cmd = ManagerCommand::Clarify { answer: "use anyhow".into() };
+        let cmd = ManagerCommand::Clarify {
+            answer: "use anyhow".into(),
+        };
         assert_eq!(parse_command(&encode_command(&cmd)).unwrap(), cmd);
     }
 
@@ -110,7 +114,9 @@ mod tests {
 
     #[test]
     fn question_message_roundtrips() {
-        let msg = WorkerMessage::Question { text: "which config file?".into() };
+        let msg = WorkerMessage::Question {
+            text: "which config file?".into(),
+        };
         let line = encode_message(&msg);
         assert!(line.contains(r#""msg":"question""#));
         assert_eq!(parse_message(&line).unwrap(), Some(msg));
@@ -136,8 +142,12 @@ mod tests {
     #[test]
     fn ack_and_blocked_roundtrip() {
         for msg in [
-            WorkerMessage::Ack { command: "pivot".into() },
-            WorkerMessage::Blocked { on: "clarify".into() },
+            WorkerMessage::Ack {
+                command: "pivot".into(),
+            },
+            WorkerMessage::Blocked {
+                on: "clarify".into(),
+            },
         ] {
             assert_eq!(parse_message(&encode_message(&msg)).unwrap(), Some(msg));
         }

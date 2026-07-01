@@ -165,7 +165,7 @@ mod tests {
     fn accept_batch_dedups_and_filters() {
         let proposals = vec![
             proposal("query_db"),
-            proposal("query_db"),       // dup within batch
+            proposal("query_db"),        // dup within batch
             proposal("BadName"),         // invalid
             proposal("list_migrations"), // fine
         ];

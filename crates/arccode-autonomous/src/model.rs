@@ -712,7 +712,10 @@ pub fn apply(state: &mut RunState, event: &Event) {
             // Preserve `current_task` if the agent was auto-registered by an
             // earlier TaskAssign — spawn only refreshes pid / session_id.
             let already = state.agent(agent).is_some();
-            let needs_name = state.agent(agent).map(|a| a.name.is_empty()).unwrap_or(false);
+            let needs_name = state
+                .agent(agent)
+                .map(|a| a.name.is_empty())
+                .unwrap_or(false);
             // Compute the name up front to avoid holding a mutable borrow of
             // `state` across the immutable read `fresh_agent_name` needs.
             let refreshed_name = needs_name.then(|| fresh_agent_name(state, agent));

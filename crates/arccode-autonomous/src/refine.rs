@@ -91,7 +91,12 @@ pub enum RefineAction {
 }
 
 fn challenge_threshold(config: &PilotRefineConfig) -> Option<Severity> {
-    match config.challenge_threshold.trim().to_ascii_lowercase().as_str() {
+    match config
+        .challenge_threshold
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "off" | "none" | "" => None,
         other => other.parse::<Severity>().ok().or(Some(Severity::Medium)),
     }
@@ -143,7 +148,9 @@ pub fn decide(
             .map(Confidence::parse)
             .unwrap_or(Confidence::Low);
         return match conf {
-            Confidence::High => RefineAction::Proceed { goal: restated.clone() },
+            Confidence::High => RefineAction::Proceed {
+                goal: restated.clone(),
+            },
             Confidence::Medium => RefineAction::NotifyWindow {
                 goal: restated.clone(),
                 note: format!("interpreting goal as: {restated}"),
@@ -161,7 +168,9 @@ pub fn decide(
     }
 
     // 4. Nothing to negotiate — proceed with the original goal.
-    RefineAction::Proceed { goal: original_goal.to_string() }
+    RefineAction::Proceed {
+        goal: original_goal.to_string(),
+    }
 }
 
 /// Parse the refinement agent's JSON output.
@@ -190,7 +199,12 @@ mod tests {
     #[test]
     fn clean_report_proceeds_with_original() {
         let action = decide(&empty(), &cfg(), "add a flag");
-        assert_eq!(action, RefineAction::Proceed { goal: "add a flag".into() });
+        assert_eq!(
+            action,
+            RefineAction::Proceed {
+                goal: "add a flag".into()
+            }
+        );
     }
 
     #[test]
@@ -208,7 +222,13 @@ mod tests {
     #[test]
     fn questions_capped_at_config_max() {
         let r = RefinementReport {
-            clarifying_questions: vec!["q1".into(), "q2".into(), "q3".into(), "q4".into(), "q5".into()],
+            clarifying_questions: vec![
+                "q1".into(),
+                "q2".into(),
+                "q3".into(),
+                "q4".into(),
+                "q5".into(),
+            ],
             ..empty()
         };
         match decide(&r, &cfg(), "g") {
@@ -220,19 +240,31 @@ mod tests {
     #[test]
     fn high_severity_challenge_escalates() {
         let r = RefinementReport {
-            challenges: vec![Challenge { severity: "high".into(), message: "conflicts with auth-v2".into() }],
+            challenges: vec![Challenge {
+                severity: "high".into(),
+                message: "conflicts with auth-v2".into(),
+            }],
             ..empty()
         };
-        assert!(matches!(decide(&r, &cfg(), "g"), RefineAction::AskUser { .. }));
+        assert!(matches!(
+            decide(&r, &cfg(), "g"),
+            RefineAction::AskUser { .. }
+        ));
     }
 
     #[test]
     fn low_challenge_under_threshold_does_not_escalate() {
         let r = RefinementReport {
-            challenges: vec![Challenge { severity: "low".into(), message: "minor".into() }],
+            challenges: vec![Challenge {
+                severity: "low".into(),
+                message: "minor".into(),
+            }],
             ..empty()
         };
-        assert_eq!(decide(&r, &cfg(), "g"), RefineAction::Proceed { goal: "g".into() });
+        assert_eq!(
+            decide(&r, &cfg(), "g"),
+            RefineAction::Proceed { goal: "g".into() }
+        );
     }
 
     #[test]
@@ -240,10 +272,16 @@ mod tests {
         let mut c = cfg();
         c.challenge_threshold = "off".into();
         let r = RefinementReport {
-            challenges: vec![Challenge { severity: "critical".into(), message: "x".into() }],
+            challenges: vec![Challenge {
+                severity: "critical".into(),
+                message: "x".into(),
+            }],
             ..empty()
         };
-        assert_eq!(decide(&r, &c, "g"), RefineAction::Proceed { goal: "g".into() });
+        assert_eq!(
+            decide(&r, &c, "g"),
+            RefineAction::Proceed { goal: "g".into() }
+        );
     }
 
     #[test]
@@ -255,7 +293,9 @@ mod tests {
         };
         assert_eq!(
             decide(&r, &cfg(), "g"),
-            RefineAction::Proceed { goal: "extend the existing --quiet flag".into() }
+            RefineAction::Proceed {
+                goal: "extend the existing --quiet flag".into()
+            }
         );
     }
 
@@ -279,7 +319,10 @@ mod tests {
             restatement_confidence: Some("low".into()),
             ..empty()
         };
-        assert!(matches!(decide(&r, &cfg(), "g"), RefineAction::AskUser { .. }));
+        assert!(matches!(
+            decide(&r, &cfg(), "g"),
+            RefineAction::AskUser { .. }
+        ));
     }
 
     #[test]
@@ -288,7 +331,10 @@ mod tests {
         c.suggest_alternatives = false;
         let r = RefinementReport {
             clarifying_questions: vec!["q".into()],
-            alternatives: vec![Alternative { description: "alt".into(), tradeoff: "faster".into() }],
+            alternatives: vec![Alternative {
+                description: "alt".into(),
+                tradeoff: "faster".into(),
+            }],
             ..empty()
         };
         match decide(&r, &c, "g") {

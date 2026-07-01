@@ -58,7 +58,11 @@ fn route_token(token: &str) -> RoutingDecision {
         "" | "suppress" | "none" | "off" => RoutingDecision::Suppress,
         "digest" => RoutingDecision::Digest,
         other => RoutingDecision::Immediate(
-            other.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            other
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         ),
     }
 }
@@ -77,10 +81,7 @@ fn route_channels(channels: &[String]) -> RoutingDecision {
 }
 
 /// Route a notification of the given severity per config.
-pub fn route(
-    severity: NotificationSeverity,
-    config: &PilotNotificationsConfig,
-) -> RoutingDecision {
+pub fn route(severity: NotificationSeverity, config: &PilotNotificationsConfig) -> RoutingDecision {
     match severity {
         NotificationSeverity::Escalation => route_channels(&config.escalation),
         NotificationSeverity::Decision => route_channels(&config.decision),
@@ -138,7 +139,12 @@ impl Digest {
         }
         let mut out = format!("# Pilot digest ({} update(s))\n\n", self.pending.len());
         for n in &self.pending {
-            out.push_str(&format!("- [{}] {} — {}\n", n.severity.as_str(), n.title, n.body));
+            out.push_str(&format!(
+                "- [{}] {} — {}\n",
+                n.severity.as_str(),
+                n.title,
+                n.body
+            ));
         }
         self.pending.clear();
         Some(out)
@@ -148,11 +154,7 @@ impl Digest {
 /// J3 channel sender shell: POST a notification body to a Slack/webhook
 /// URL via `curl`. The runner abstraction makes it testable without a
 /// network; the orchestrator wires the real [`crate::pr::SystemCommandRunner`].
-pub fn send_webhook(
-    runner: &dyn CommandRunner,
-    url: &str,
-    body: &str,
-) -> Result<(), String> {
+pub fn send_webhook(runner: &dyn CommandRunner, url: &str, body: &str) -> Result<(), String> {
     let payload = serde_json::json!({ "text": body }).to_string();
     let out = runner
         .run(
@@ -211,19 +213,28 @@ mod tests {
 
     #[test]
     fn progress_defaults_to_digest() {
-        assert_eq!(route(NotificationSeverity::Progress, &cfg()), RoutingDecision::Digest);
+        assert_eq!(
+            route(NotificationSeverity::Progress, &cfg()),
+            RoutingDecision::Digest
+        );
     }
 
     #[test]
     fn info_defaults_to_suppress() {
-        assert_eq!(route(NotificationSeverity::Info, &cfg()), RoutingDecision::Suppress);
+        assert_eq!(
+            route(NotificationSeverity::Info, &cfg()),
+            RoutingDecision::Suppress
+        );
     }
 
     #[test]
     fn empty_channel_list_suppresses() {
         let mut c = cfg();
         c.escalation = vec![];
-        assert_eq!(route(NotificationSeverity::Escalation, &c), RoutingDecision::Suppress);
+        assert_eq!(
+            route(NotificationSeverity::Escalation, &c),
+            RoutingDecision::Suppress
+        );
     }
 
     #[test]
@@ -247,13 +258,19 @@ mod tests {
                     .unwrap()
                     .push(args.iter().map(|s| s.to_string()).collect());
             }
-            Ok(CommandOut { status: Some(0), stdout: String::new(), stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
         }
     }
 
     #[test]
     fn send_webhook_posts_json_payload() {
-        let runner = RecordingCurl { calls: Mutex::new(Vec::new()) };
+        let runner = RecordingCurl {
+            calls: Mutex::new(Vec::new()),
+        };
         send_webhook(&runner, "https://hooks.slack.com/x", "run done").unwrap();
         let calls = runner.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);

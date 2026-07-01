@@ -275,7 +275,10 @@ mod tests {
 
     #[test]
     fn parse_gh_state_variants() {
-        assert_eq!(parse_pr_view_json(r#"{"state":"OPEN"}"#).unwrap(), PrState::Open);
+        assert_eq!(
+            parse_pr_view_json(r#"{"state":"OPEN"}"#).unwrap(),
+            PrState::Open
+        );
         assert_eq!(
             parse_pr_view_json(r#"{"state":"MERGED"}"#).unwrap(),
             PrState::Merged
@@ -315,8 +318,14 @@ mod tests {
 
     #[test]
     fn is_revert_of_rejects_non_reverts() {
-        assert!(!is_revert_of("add dark-mode toggle", "add dark-mode toggle"));
-        assert!(!is_revert_of(r#"Revert "something else""#, "add dark-mode toggle"));
+        assert!(!is_revert_of(
+            "add dark-mode toggle",
+            "add dark-mode toggle"
+        ));
+        assert!(!is_revert_of(
+            r#"Revert "something else""#,
+            "add dark-mode toggle"
+        ));
     }
 
     #[test]
@@ -385,7 +394,11 @@ mod tests {
             } else {
                 String::new()
             };
-            Ok(CommandOut { status: Some(0), stdout, stderr: String::new() })
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
         }
     }
 
@@ -416,15 +429,10 @@ mod tests {
     #[tokio::test]
     async fn poll_and_record_appends_event() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = crate::store::RunStore::create(
-            dir.path(),
-            "r1",
-            "g",
-            "abc",
-            "arccode/auto/r1",
-        )
-        .await
-        .unwrap();
+        let mut store =
+            crate::store::RunStore::create(dir.path(), "r1", "g", "abc", "arccode/auto/r1")
+                .await
+                .unwrap();
         let r = FakeGh { state: "MERGED" };
         let outcome = poll_and_record(&r, &mut store, StdPath::new("."), "42")
             .await
@@ -434,7 +442,10 @@ mod tests {
         let events = store.read_events().await.unwrap();
         assert!(events.iter().any(|e| matches!(
             e,
-            crate::model::Event::PrOutcome { kind: PrOutcomeKind::Merged, .. }
+            crate::model::Event::PrOutcome {
+                kind: PrOutcomeKind::Merged,
+                ..
+            }
         )));
     }
 

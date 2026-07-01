@@ -50,8 +50,7 @@ impl SemVer {
     /// `self >= required`)? Used to decide whether an installed pack
     /// satisfies a spec.
     pub fn satisfies(&self, required: &SemVer) -> bool {
-        self.major == required.major
-            && (self.minor, self.patch) >= (required.minor, required.patch)
+        self.major == required.major && (self.minor, self.patch) >= (required.minor, required.patch)
     }
 }
 
@@ -61,7 +60,10 @@ pub fn parse_semver(s: &str) -> Result<SemVer, String> {
     if parts.len() < 2 || parts.len() > 3 {
         return Err(format!("bad semver `{s}` (expect X.Y or X.Y.Z)"));
     }
-    let num = |p: &str| p.parse::<u32>().map_err(|_| format!("bad semver component `{p}`"));
+    let num = |p: &str| {
+        p.parse::<u32>()
+            .map_err(|_| format!("bad semver component `{p}`"))
+    };
     Ok(SemVer {
         major: num(parts[0])?,
         minor: num(parts[1])?,
@@ -82,7 +84,9 @@ pub fn parse_pack_ref(spec: &str) -> Result<PackRef, String> {
         return Err(format!("pack spec `{spec}` has empty owner or name"));
     }
     if !valid_ident(owner) || !valid_ident(name) {
-        return Err(format!("pack spec `{spec}` has invalid owner/name characters"));
+        return Err(format!(
+            "pack spec `{spec}` has invalid owner/name characters"
+        ));
     }
     Ok(PackRef {
         owner: owner.to_string(),
@@ -134,13 +138,27 @@ mod tests {
         let r = parse_pack_ref("arccode-official/rust-developer@1.4").unwrap();
         assert_eq!(r.owner, "arccode-official");
         assert_eq!(r.name, "rust-developer");
-        assert_eq!(r.version, SemVer { major: 1, minor: 4, patch: 0 });
+        assert_eq!(
+            r.version,
+            SemVer {
+                major: 1,
+                minor: 4,
+                patch: 0
+            }
+        );
     }
 
     #[test]
     fn parse_spec_with_patch() {
         let r = parse_pack_ref("vedantnimbarte/arccode-tui-designer@0.3.2").unwrap();
-        assert_eq!(r.version, SemVer { major: 0, minor: 3, patch: 2 });
+        assert_eq!(
+            r.version,
+            SemVer {
+                major: 0,
+                minor: 3,
+                patch: 2
+            }
+        );
     }
 
     #[test]
@@ -162,10 +180,26 @@ mod tests {
 
     #[test]
     fn semver_satisfies_caret() {
-        let installed = SemVer { major: 1, minor: 5, patch: 0 };
-        assert!(installed.satisfies(&SemVer { major: 1, minor: 4, patch: 0 }));
-        assert!(!installed.satisfies(&SemVer { major: 1, minor: 6, patch: 0 }));
-        assert!(!installed.satisfies(&SemVer { major: 2, minor: 0, patch: 0 }));
+        let installed = SemVer {
+            major: 1,
+            minor: 5,
+            patch: 0,
+        };
+        assert!(installed.satisfies(&SemVer {
+            major: 1,
+            minor: 4,
+            patch: 0
+        }));
+        assert!(!installed.satisfies(&SemVer {
+            major: 1,
+            minor: 6,
+            patch: 0
+        }));
+        assert!(!installed.satisfies(&SemVer {
+            major: 2,
+            minor: 0,
+            patch: 0
+        }));
     }
 
     #[test]

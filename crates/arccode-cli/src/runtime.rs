@@ -592,7 +592,11 @@ impl TurnGate for ShellTurnGate {
                 let passed = o.status.success();
                 let stderr = String::from_utf8_lossy(&o.stderr);
                 let stdout = String::from_utf8_lossy(&o.stdout);
-                let body = if stderr.trim().is_empty() { stdout } else { stderr };
+                let body = if stderr.trim().is_empty() {
+                    stdout
+                } else {
+                    stderr
+                };
                 // Keep the receipt small: last 40 lines is enough for the
                 // model (and the user) to see what broke.
                 let lines: Vec<&str> = body.lines().collect();
@@ -608,7 +612,9 @@ impl TurnGate for ShellTurnGate {
                 let mark = if passed { "✓ passed" } else { "✗ failed" };
                 GateReport {
                     passed,
-                    summary: format!("$ {}\n{mark}\n{tail}", self.cmd).trim_end().to_string(),
+                    summary: format!("$ {}\n{mark}\n{tail}", self.cmd)
+                        .trim_end()
+                        .to_string(),
                 }
             }
             Err(e) => GateReport {
@@ -764,10 +770,7 @@ pub async fn build_agent_registry_learn(
                         .and_then(|s| s.split_once('/'))
                         .map(|(p, m)| (p.to_string(), m.to_string()))
                     {
-                        tracing::info!(
-                            "routing subagent (class '{}') to {p}/{m}",
-                            spec.task_class
-                        );
+                        tracing::info!("routing subagent (class '{}') to {p}/{m}", spec.task_class);
                         Selection {
                             provider_id: p,
                             model: m,

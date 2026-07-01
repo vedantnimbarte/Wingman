@@ -58,11 +58,25 @@ const DEP_MARKERS: &[&str] = &[
 ];
 
 /// Path fragments that imply infra/migration changes → vm.
-const VM_MARKERS: &[&str] = &["migration", "migrations", "terraform", "Dockerfile", "/infra/", "helm"];
+const VM_MARKERS: &[&str] = &[
+    "migration",
+    "migrations",
+    "terraform",
+    "Dockerfile",
+    "/infra/",
+    "helm",
+];
 
 /// Acceptance-command substrings that imply running untrusted/network/build
 /// work → at least container.
-const RISKY_CMDS: &[&str] = &["docker", "deploy", "curl", "wget", "npm install", "cargo install"];
+const RISKY_CMDS: &[&str] = &[
+    "docker",
+    "deploy",
+    "curl",
+    "wget",
+    "npm install",
+    "cargo install",
+];
 
 fn writes_match(task: &Task, markers: &[&str]) -> bool {
     task.writes
@@ -227,7 +241,9 @@ mod tests {
     #[test]
     fn risky_acceptance_command_goes_container() {
         let mut t = task(&["crates/cli/src/main.rs"], Reversibility::Trivial);
-        t.acceptance = vec![Acceptance::Shell { cmd: "docker build .".into() }];
+        t.acceptance = vec![Acceptance::Shell {
+            cmd: "docker build .".into(),
+        }];
         assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Container);
     }
 
@@ -235,7 +251,10 @@ mod tests {
     fn default_tier_is_a_floor() {
         let t = task(&["crates/cli/src/main.rs"], Reversibility::Trivial);
         // Even a trivial edit respects a container default.
-        assert_eq!(select_tier(&t, SandboxTier::Container), SandboxTier::Container);
+        assert_eq!(
+            select_tier(&t, SandboxTier::Container),
+            SandboxTier::Container
+        );
     }
 
     #[test]
@@ -251,8 +270,14 @@ mod tests {
         present: bool,
     }
     impl CommandRunner for DockerProbe {
-        fn run(&self, program: &str, args: &[&str], _c: &std::path::Path) -> std::io::Result<CommandOut> {
-            let ok = !(program == "docker" && args.first().copied() == Some("version") && !self.present);
+        fn run(
+            &self,
+            program: &str,
+            args: &[&str],
+            _c: &std::path::Path,
+        ) -> std::io::Result<CommandOut> {
+            let ok =
+                !(program == "docker" && args.first().copied() == Some("version") && !self.present);
             Ok(CommandOut {
                 status: Some(if ok { 0 } else { 1 }),
                 stdout: String::new(),
@@ -269,7 +294,8 @@ mod tests {
 
     #[test]
     fn host_tier_never_degrades() {
-        let (eff, degraded) = resolve_effective_tier(SandboxTier::Host, &DockerProbe { present: false });
+        let (eff, degraded) =
+            resolve_effective_tier(SandboxTier::Host, &DockerProbe { present: false });
         assert_eq!(eff, SandboxTier::Host);
         assert!(!degraded);
     }
@@ -292,7 +318,8 @@ mod tests {
 
     #[test]
     fn vm_tier_degrades_to_host_without_docker() {
-        let (eff, degraded) = resolve_effective_tier(SandboxTier::Vm, &DockerProbe { present: false });
+        let (eff, degraded) =
+            resolve_effective_tier(SandboxTier::Vm, &DockerProbe { present: false });
         assert_eq!(eff, SandboxTier::Host);
         assert!(degraded);
     }
@@ -303,14 +330,28 @@ mod tests {
             calls: Mutex<Vec<Vec<String>>>,
         }
         impl CommandRunner for Rec {
-            fn run(&self, program: &str, args: &[&str], _cwd: &std::path::Path) -> std::io::Result<CommandOut> {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &std::path::Path,
+            ) -> std::io::Result<CommandOut> {
                 if program == "docker" {
-                    self.calls.lock().unwrap().push(args.iter().map(|s| s.to_string()).collect());
+                    self.calls
+                        .lock()
+                        .unwrap()
+                        .push(args.iter().map(|s| s.to_string()).collect());
                 }
-                Ok(CommandOut { status: Some(0), stdout: String::new(), stderr: String::new() })
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                })
             }
         }
-        let rec = Rec { calls: Mutex::new(Vec::new()) };
+        let rec = Rec {
+            calls: Mutex::new(Vec::new()),
+        };
         let out = run_in_container(&rec, "img:latest", "/wt", "cargo test").unwrap();
         assert!(out.success());
         let calls = rec.calls.lock().unwrap();

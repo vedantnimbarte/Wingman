@@ -99,7 +99,9 @@ pub async fn run(opts: LoginOptions) -> Result<ExitCode> {
         crate::login::run_login_task(LoginTask::Probe(payload.clone()))
             .await
             .map_err(|e| {
-                anyhow!("probe failed: {e}\n(use --no-probe to save the credential without testing)")
+                anyhow!(
+                    "probe failed: {e}\n(use --no-probe to save the credential without testing)"
+                )
             })?;
         eprintln!("  ✓ provider responded");
     }
@@ -110,13 +112,18 @@ pub async fn run(opts: LoginOptions) -> Result<ExitCode> {
     if let Some(key) = api_key.as_deref() {
         secrets::store(provider_id, key).context("storing key in keyring")?;
     }
-    let with_keyring =
-        api_key.is_some() || secrets::load(provider_id).ok().flatten().is_some();
+    let with_keyring = api_key.is_some() || secrets::load(provider_id).ok().flatten().is_some();
 
     let path = global_config_path()?;
     if opts.no_default {
-        Config::set_provider_and_save(&path, provider_id, &model, base_url.as_deref(), with_keyring)
-            .context("saving config")?;
+        Config::set_provider_and_save(
+            &path,
+            provider_id,
+            &model,
+            base_url.as_deref(),
+            with_keyring,
+        )
+        .context("saving config")?;
     } else {
         Config::set_default_provider_and_save(
             &path,

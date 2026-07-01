@@ -83,7 +83,10 @@ impl Bucket {
     /// production reality, while first-try only reflects what survived
     /// acceptance.
     pub fn blended_rate(&self) -> Option<f64> {
-        match (self.first_try_rate(), self.post_merge.adjusted_success_rate()) {
+        match (
+            self.first_try_rate(),
+            self.post_merge.adjusted_success_rate(),
+        ) {
             (Some(ft), Some(pm)) => Some(0.3 * ft + 0.7 * pm),
             (Some(ft), None) => Some(ft),
             (None, Some(pm)) => Some(pm),
@@ -108,7 +111,10 @@ impl Aggregates {
 pub fn aggregate(records: impl IntoIterator<Item = StatRecord>) -> Aggregates {
     let mut agg = Aggregates::default();
     for r in records {
-        let b = agg.buckets.entry((r.role.clone(), r.model.clone())).or_default();
+        let b = agg
+            .buckets
+            .entry((r.role.clone(), r.model.clone()))
+            .or_default();
         b.attempts += 1;
         if r.first_try_ok {
             b.first_try_successes += 1;
@@ -256,7 +262,11 @@ pub fn append_lesson(path: &Path, lesson: &Lesson) -> io::Result<()> {
             "Auto-maintained by pilot mode (E6). Each entry is a takeaway from a\nreverted or heavily-rewritten task by this role.\n"
         )?;
     }
-    writeln!(f, "- ({}) {} — run `{}`", lesson.t, lesson.text, lesson.run_id)
+    writeln!(
+        f,
+        "- ({}) {} — run `{}`",
+        lesson.t, lesson.text, lesson.run_id
+    )
 }
 
 /// Load a role's accumulated lessons (the raw markdown body), or `None`
@@ -392,7 +402,13 @@ pub fn render_priming(goal: &str, past: &[StatRecord], k: usize) -> Option<Strin
 mod tests {
     use super::*;
 
-    fn rec(run: &str, role: &str, model: &str, ok: bool, outcome: Option<PrOutcomeKind>) -> StatRecord {
+    fn rec(
+        run: &str,
+        role: &str,
+        model: &str,
+        ok: bool,
+        outcome: Option<PrOutcomeKind>,
+    ) -> StatRecord {
         StatRecord {
             run_id: run.into(),
             role: role.into(),
@@ -408,8 +424,20 @@ mod tests {
     #[test]
     fn aggregate_counts_first_try_and_outcomes() {
         let records = vec![
-            rec("r1", "developer", "haiku", true, Some(PrOutcomeKind::Merged)),
-            rec("r2", "developer", "haiku", false, Some(PrOutcomeKind::Reverted)),
+            rec(
+                "r1",
+                "developer",
+                "haiku",
+                true,
+                Some(PrOutcomeKind::Merged),
+            ),
+            rec(
+                "r2",
+                "developer",
+                "haiku",
+                false,
+                Some(PrOutcomeKind::Reverted),
+            ),
             rec("r3", "developer", "haiku", true, None),
         ];
         let agg = aggregate(records);
@@ -451,20 +479,44 @@ mod tests {
         let candidates = vec!["cheap".to_string(), "pricey".to_string()];
         let agg = Aggregates::default();
         // No data at all → explore the cheapest.
-        assert_eq!(pick_model(&candidates, &agg, "developer", 0.8, 3), Some("cheap"));
+        assert_eq!(
+            pick_model(&candidates, &agg, "developer", 0.8, 3),
+            Some("cheap")
+        );
     }
 
     #[test]
     fn pick_model_skips_proven_bad_cheap_model() {
         let candidates = vec!["cheap".to_string(), "pricey".to_string()];
         let records = vec![
-            rec("r1", "developer", "cheap", false, Some(PrOutcomeKind::Reverted)),
-            rec("r2", "developer", "cheap", false, Some(PrOutcomeKind::Reverted)),
-            rec("r3", "developer", "cheap", false, Some(PrOutcomeKind::Reverted)),
+            rec(
+                "r1",
+                "developer",
+                "cheap",
+                false,
+                Some(PrOutcomeKind::Reverted),
+            ),
+            rec(
+                "r2",
+                "developer",
+                "cheap",
+                false,
+                Some(PrOutcomeKind::Reverted),
+            ),
+            rec(
+                "r3",
+                "developer",
+                "cheap",
+                false,
+                Some(PrOutcomeKind::Reverted),
+            ),
             // pricey is untried → benefit of the doubt.
         ];
         let agg = aggregate(records);
-        assert_eq!(pick_model(&candidates, &agg, "developer", 0.8, 3), Some("pricey"));
+        assert_eq!(
+            pick_model(&candidates, &agg, "developer", 0.8, 3),
+            Some("pricey")
+        );
     }
 
     #[test]
@@ -481,7 +533,10 @@ mod tests {
         let agg = aggregate(records);
         // Both proven bad (rate 0 < 0.8) and both have >= min_samples →
         // fall back to last candidate.
-        assert_eq!(pick_model(&candidates, &agg, "developer", 0.8, 3), Some("pricey"));
+        assert_eq!(
+            pick_model(&candidates, &agg, "developer", 0.8, 3),
+            Some("pricey")
+        );
     }
 
     #[test]
@@ -492,7 +547,10 @@ mod tests {
     #[test]
     fn route_model_explores_cheap_without_history() {
         let agg = Aggregates::default();
-        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "haiku");
+        assert_eq!(
+            route_model(&agg, "developer", "haiku", "opus", 0.7, 3),
+            "haiku"
+        );
     }
 
     #[test]
@@ -504,7 +562,10 @@ mod tests {
             rec("r3", "developer", "haiku", false, None),
         ];
         let agg = aggregate(records);
-        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "opus");
+        assert_eq!(
+            route_model(&agg, "developer", "haiku", "opus", 0.7, 3),
+            "opus"
+        );
     }
 
     #[test]
@@ -515,13 +576,19 @@ mod tests {
             rec("r3", "developer", "haiku", true, None),
         ];
         let agg = aggregate(records);
-        assert_eq!(route_model(&agg, "developer", "haiku", "opus", 0.7, 3), "haiku");
+        assert_eq!(
+            route_model(&agg, "developer", "haiku", "opus", 0.7, 3),
+            "haiku"
+        );
     }
 
     #[test]
     fn route_model_single_candidate_when_cheap_equals_capable() {
         let agg = Aggregates::default();
-        assert_eq!(route_model(&agg, "developer", "opus", "opus", 0.7, 3), "opus");
+        assert_eq!(
+            route_model(&agg, "developer", "opus", "opus", 0.7, 3),
+            "opus"
+        );
     }
 
     #[test]
@@ -601,8 +668,14 @@ mod tests {
     fn render_priming_dedupes_by_run_id() {
         // Two per-task records from the same run + goal → one line.
         let past = vec![
-            StatRecord { goal: "add export button".into(), ..rec("r1", "developer", "m", true, Some(PrOutcomeKind::Merged)) },
-            StatRecord { goal: "add export button".into(), ..rec("r1", "tester", "m", true, Some(PrOutcomeKind::Merged)) },
+            StatRecord {
+                goal: "add export button".into(),
+                ..rec("r1", "developer", "m", true, Some(PrOutcomeKind::Merged))
+            },
+            StatRecord {
+                goal: "add export button".into(),
+                ..rec("r1", "tester", "m", true, Some(PrOutcomeKind::Merged))
+            },
         ];
         let block = render_priming("add export button to toolbar", &past, 5).unwrap();
         assert_eq!(block.matches("export button").count(), 1);
@@ -622,7 +695,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("arccode-learn-{}", std::process::id()));
         let path = stats_path(&dir);
         let _ = fs::remove_file(&path);
-        let r = rec("r1", "developer", "haiku", true, Some(PrOutcomeKind::Merged));
+        let r = rec(
+            "r1",
+            "developer",
+            "haiku",
+            true,
+            Some(PrOutcomeKind::Merged),
+        );
         append_stat(&path, &r).unwrap();
         append_stat(&path, &rec("r2", "tester", "haiku", false, None)).unwrap();
         let loaded = load_stats(&path).unwrap();
@@ -640,7 +719,8 @@ mod tests {
 
     #[test]
     fn load_stats_skips_corrupt_lines() {
-        let dir = std::env::temp_dir().join(format!("arccode-learn-corrupt-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("arccode-learn-corrupt-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("stats.jsonl");
         fs::write(&path, "{not json}\n{\"run_id\":\"r1\",\"role\":\"developer\",\"model\":\"m\",\"first_try_ok\":true}\n").unwrap();
@@ -657,12 +737,20 @@ mod tests {
         let _ = fs::remove_file(&path);
         append_lesson(
             &path,
-            &Lesson { run_id: "r1".into(), t: "2026-05-29".into(), text: "avoid unwrap in tools".into() },
+            &Lesson {
+                run_id: "r1".into(),
+                t: "2026-05-29".into(),
+                text: "avoid unwrap in tools".into(),
+            },
         )
         .unwrap();
         append_lesson(
             &path,
-            &Lesson { run_id: "r2".into(), t: "2026-05-30".into(), text: "prefer anyhow".into() },
+            &Lesson {
+                run_id: "r2".into(),
+                t: "2026-05-30".into(),
+                text: "prefer anyhow".into(),
+            },
         )
         .unwrap();
         let body = fs::read_to_string(&path).unwrap();
@@ -683,7 +771,11 @@ mod tests {
         assert!(load_lessons(&path).unwrap().is_none());
         append_lesson(
             &path,
-            &Lesson { run_id: "r1".into(), t: "2026-06-02".into(), text: "always assert on stderr too".into() },
+            &Lesson {
+                run_id: "r1".into(),
+                t: "2026-06-02".into(),
+                text: "always assert on stderr too".into(),
+            },
         )
         .unwrap();
         let body = load_lessons(&path).unwrap().expect("lessons present");
