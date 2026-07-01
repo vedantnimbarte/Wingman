@@ -1232,7 +1232,10 @@ fn render_help(f: &mut Frame, area: Rect, g: Glyphs) {
         Line::raw(""),
         row(format!("{ud} · j/k"), "scroll / select in the focused pane"),
         row("PgUp/PgDn".into(), "page the focused pane"),
-        row("Home/g · End/G".into(), "jump to top / bottom (End re-follows log)"),
+        row(
+            "Home/g · End/G".into(),
+            "jump to top / bottom (End re-follows log)",
+        ),
         row("Tab".into(), "cycle focus: Tasks · Log · Runs"),
         row("1-9".into(), "jump straight to a run"),
         row("Enter".into(), "open the selected task's detail"),
@@ -2003,7 +2006,10 @@ mod tests {
         let s = render_to_string(&mut ui, 120, 30);
         assert!(s.contains("Keys"), "help title missing:\n{s}");
         assert!(s.contains("cycle focus"), "focus help missing:\n{s}");
-        assert!(!s.contains("Task t2"), "detail should be hidden behind help:\n{s}");
+        assert!(
+            !s.contains("Task t2"),
+            "detail should be hidden behind help:\n{s}"
+        );
     }
 
     #[test]

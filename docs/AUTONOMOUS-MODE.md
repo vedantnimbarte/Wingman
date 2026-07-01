@@ -323,6 +323,16 @@ spinner (`◐◓◑◒`) in place of the static status glyph, so the work happen
 *right now* is obvious at a glance. The spinner is driven off wall-clock time,
 so it rotates smoothly regardless of the `--interval-ms` state-poll cadence.
 
+Under the header is a **meters** row: a progress gauge (done/total) whose label
+carries the percent, a linear **ETA** (from the average time per completed
+task) and the **spend-rate** (`$/min`), next to a **spend sparkline** that
+plots cumulative cost over the run. ETA and rate appear once there's enough
+signal to estimate them.
+
+Terminals that can't render the unicode glyphs (legacy Windows console,
+non-UTF-8 locales) are auto-detected and fall back to a plain-ASCII glyph set;
+pass `--ascii` to force it, or set `ARCCODE_ASCII=0` to force unicode.
+
 **Multiple runs.** When more than one run is active, a **Runs sidebar** appears
 on the left of the top row (Runs | Tasks | Agents) listing each active run with
 its status glyph and progress; the watched run is marked `▸`. `Tab` moves focus
@@ -343,12 +353,31 @@ sidebar is hidden and the layout is the plain Tasks | Agents grid.
 └────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-Keys: `↑`/`↓` (or `k`/`j`) and `PgUp`/`PgDn` scroll the Tasks pane (or select a
-run when the Runs pane is focused), `Tab` switches focus, `1`–`9` jump to a run,
-`Home`/`g` jumps to the top, `q`/`Esc`/`Ctrl-C` exits. The Live log auto-sticks
-to the newest events. When stdout is not a terminal (CI, `| tee`, redirected
-logs), `pilot watch` falls back to a plain reprint of the current run's grid (no
-sidebar, no animation); `pilot status` prints that grid once and exits.
+**Interaction.** `Tab` cycles focus through the visible panes (Tasks → Live log
+→ Runs); the focused pane gets a cyan border. The arrows (`↑`/`↓` or `k`/`j`),
+`PgUp`/`PgDn`, and `Home`/`End` (`g`/`G`) drive the focused pane — moving the
+run selection, the highlighted task, or the log scroll position.
+
+- **Tasks** — the highlighted row is a selection; `Enter` opens a **detail
+  overlay** with the full title, deps, write-set, attempts, spend, and the
+  assigned worker's tool/pid/uptime, plus that task's recent log lines.
+- **Live log** — no longer force-stuck to the bottom: scroll up to read back
+  (`End`/`G` re-attaches follow-mode). `/` opens a case-insensitive search
+  (matches agent names, task ids, tool names); `f` cycles the severity filter
+  (all → warn+ → errors). The pane title shows the active filter and a
+  `(paused)` marker when detached.
+- **Runs** — `1`–`9` jump straight to the first nine runs; beyond that, focus
+  the Runs pane (`Tab`) and use the arrows or `Home`/`End`.
+- **Mouse** — the wheel scrolls whichever pane is under the pointer; left-click
+  focuses a pane and selects the clicked run or task row.
+- `?` toggles a keybinding overlay; `q`/`Esc`/`Ctrl-C` exits.
+
+The terminal **bell** rings once on a new task failure and once when the
+watched run finishes (mute with `ARCCODE_NO_BELL`).
+
+When stdout is not a terminal (CI, `| tee`, redirected logs), `pilot watch`
+falls back to a plain reprint of the current run's grid (no sidebar, no
+animation, no meters); `pilot status` prints that grid once and exits.
 
 ### Slash Commands
 
