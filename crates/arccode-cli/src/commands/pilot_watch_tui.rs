@@ -229,6 +229,8 @@ struct WatchUi {
     log: LogView,
     /// When `Some`, a task-detail overlay is open for this task id.
     detail: Option<String>,
+    /// Whether the `?` keybinding help overlay is open.
+    help: bool,
     last_mtime: Option<SystemTime>,
     model: Option<DashboardModel>,
     finished: bool,
@@ -299,6 +301,7 @@ impl WatchUi {
             tasks_len: 0,
             log: LogView::new(),
             detail: None,
+            help: false,
             last_mtime: None,
             model: None,
             finished: false,
@@ -617,6 +620,11 @@ fn run_loop(
                     if let (KeyCode::Char('c'), KeyModifiers::CONTROL) = (k.code, k.modifiers) {
                         return Ok(ExitCode::SUCCESS);
                     }
+                    // The help overlay is modal: any key closes it.
+                    if ui.help {
+                        ui.help = false;
+                        continue;
+                    }
                     // A detail overlay is modal: Esc/Enter/q dismiss it, everything
                     // else is swallowed so it doesn't drive the panes underneath.
                     if ui.detail.is_some() {
@@ -666,6 +674,7 @@ fn run_loop(
                             ui.focus = Focus::Log;
                             ui.log.severity = ui.log.severity.next();
                         }
+                        (KeyCode::Char('?'), _) => ui.help = true,
                         // Number keys jump straight to a run, regardless of focus.
                         (KeyCode::Char(c), _) if c.is_ascii_digit() && c != '0' => {
                             ui.switch_to(c as usize - '1' as usize);
@@ -674,8 +683,8 @@ fn run_loop(
                     }
                 }
                 // Mouse: wheel scrolls the pane under the pointer, left-click
-                // focuses/selects. Ignored while the detail overlay is modal.
-                CtEvent::Mouse(m) if ui.detail.is_none() => match m.kind {
+                // focuses/selects. Ignored while an overlay is modal.
+                CtEvent::Mouse(m) if ui.detail.is_none() && !ui.help => match m.kind {
                     MouseEventKind::ScrollDown => ui.on_scroll(true, m.column, m.row),
                     MouseEventKind::ScrollUp => ui.on_scroll(false, m.column, m.row),
                     MouseEventKind::Down(MouseButton::Left) => ui.on_click(m.column, m.row),
@@ -763,8 +772,10 @@ fn draw(f: &mut Frame, ui: &mut WatchUi) {
         tasks_scroll,
     };
 
-    // The detail overlay floats above the grid when open.
-    if let Some(id) = &ui.detail {
+    // Overlays float above the grid when open. Help wins if both are set.
+    if ui.help {
+        render_help(f, area, ui.glyphs);
+    } else if let Some(id) = &ui.detail {
         render_detail(f, area, &model, id, g);
     }
 }
@@ -1052,7 +1063,7 @@ fn render_footer(f: &mut Frame, area: Rect, finished: bool, show_runs: bool) {
         spans.extend(key("1-9", "run"));
     }
     spans.extend(key("/", "search"));
-    spans.extend(key("f", "filter"));
+    spans.extend(key("?", "help"));
     spans.push(Span::styled("q", cyan));
     spans.push(Span::styled(" quit ", dim()));
 
@@ -1161,6 +1172,38 @@ fn render_detail(f: &mut Frame, area: Rect, model: &DashboardModel, id: &str, g:
     let title = format!("Task {} — Esc to close", t.id);
     let p = Paragraph::new(lines)
         .block(bordered_focused(&title, true))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, rect);
+}
+
+/// The `?` keybinding cheat-sheet overlay.
+fn render_help(f: &mut Frame, area: Rect, g: Glyphs) {
+    let rect = centered_rect(58, 72, area);
+    f.render_widget(Clear, rect);
+
+    let ud = if g.ascii { "Up/Dn" } else { "↑/↓" };
+    let row = |keys: String, desc: &str| {
+        Line::from(vec![
+            Span::styled(format!("  {keys:<16}"), Style::default().fg(Color::Cyan)),
+            Span::raw(desc.to_string()),
+        ])
+    };
+    let lines = vec![
+        Line::raw(""),
+        row(format!("{ud} · j/k"), "scroll / select in the focused pane"),
+        row("PgUp/PgDn".into(), "page the focused pane"),
+        row("Home/g · End/G".into(), "jump to top / bottom (End re-follows log)"),
+        row("Tab".into(), "cycle focus: Tasks · Log · Runs"),
+        row("1-9".into(), "jump straight to a run"),
+        row("Enter".into(), "open the selected task's detail"),
+        row("/".into(), "search the log (Esc clears)"),
+        row("f".into(), "cycle log severity: all · warn+ · errors"),
+        row("mouse".into(), "wheel scrolls · click selects"),
+        row("?".into(), "toggle this help"),
+        row("q · Esc · Ctrl-C".into(), "quit"),
+    ];
+    let p = Paragraph::new(lines)
+        .block(bordered_focused("Keys — press any key to close", true))
         .wrap(Wrap { trim: false });
     f.render_widget(p, rect);
 }
@@ -1875,6 +1918,18 @@ mod tests {
         assert!(s.contains("brave_otter"), "worker name missing:\n{s}");
         assert!(s.contains("Wire up the editor"), "full title missing:\n{s}");
         assert!(s.contains("edit_file"), "recent log line missing:\n{s}");
+    }
+
+    #[test]
+    fn help_overlay_lists_keys_and_wins_over_detail() {
+        let mut ui = WatchUi::new(vec![summary("only", RunStatus::Running)], 0, UNI);
+        ui.model = Some(sample_model());
+        ui.help = true;
+        ui.detail = Some("t2".into()); // help takes precedence
+        let s = render_to_string(&mut ui, 120, 30);
+        assert!(s.contains("Keys"), "help title missing:\n{s}");
+        assert!(s.contains("cycle focus"), "focus help missing:\n{s}");
+        assert!(!s.contains("Task t2"), "detail should be hidden behind help:\n{s}");
     }
 
     #[test]
