@@ -281,7 +281,21 @@ fn build_request_body(req: &CompletionRequest) -> Value {
         body["tools"] = encode_tools(&req.tools, cache_tools);
     }
 
-    body["messages"] = encode_messages(&req.messages);
+    // Rolling conversation cache: the caller places an `AfterMessage(n)`
+    // breakpoint (typically the last message) so the growing prefix is
+    // cached and later turns read it instead of re-billing every prior turn.
+    // We honor the deepest requested index, clamped to the message list.
+    let cache_through = req
+        .cache_breakpoints
+        .iter()
+        .filter_map(|b| match b {
+            CacheBreakpoint::AfterMessage(n) => Some(*n),
+            _ => None,
+        })
+        .max()
+        .map(|n| n.min(req.messages.len().saturating_sub(1)));
+
+    body["messages"] = encode_messages(&req.messages, cache_through);
 
     body
 }
@@ -306,15 +320,23 @@ fn encode_tools(tools: &[ToolSpec], cache_last: bool) -> Value {
     Value::Array(arr)
 }
 
-fn encode_messages(messages: &[Message]) -> Value {
+fn encode_messages(messages: &[Message], cache_through: Option<usize>) -> Value {
     let arr: Vec<Value> = messages
         .iter()
-        .map(|m| {
+        .enumerate()
+        .map(|(i, m)| {
             let role = match m.role {
                 Role::User => "user",
                 Role::Assistant => "assistant",
             };
-            let content: Vec<Value> = m.content.iter().map(encode_block).collect();
+            let mut content: Vec<Value> = m.content.iter().map(encode_block).collect();
+            // Mark the last content block of the cache-through message so the
+            // provider caches the whole prefix up to and including it.
+            if cache_through == Some(i) {
+                if let Some(last) = content.last_mut() {
+                    last["cache_control"] = json!({ "type": "ephemeral" });
+                }
+            }
             json!({ "role": role, "content": content })
         })
         .collect();
@@ -375,6 +397,49 @@ mod tests {
         let system = &body["system"];
         assert!(system.is_array(), "system should be array when caching");
         assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn after_message_caches_last_block_of_that_message() {
+        use arccode_core::{Message, Role};
+        let mut req = CompletionRequest::new("claude-opus-4-8");
+        req.messages = vec![
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::Text { text: "a".into() }],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![ContentBlock::Text { text: "b".into() }],
+            },
+        ];
+        req.cache_breakpoints = vec![CacheBreakpoint::AfterMessage(1)];
+        let body = build_request_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert!(
+            msgs[0]["content"][0].get("cache_control").is_none(),
+            "earlier message must not be marked"
+        );
+        assert_eq!(
+            msgs[1]["content"][0]["cache_control"]["type"], "ephemeral",
+            "cache-through message's last block must carry cache_control"
+        );
+    }
+
+    #[test]
+    fn after_message_index_clamps_to_last_message() {
+        use arccode_core::{Message, Role};
+        let mut req = CompletionRequest::new("claude-opus-4-8");
+        req.messages = vec![Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: "a".into() }],
+        }];
+        // An out-of-range index (stale rolling breakpoint) clamps to the last
+        // message rather than dropping the breakpoint.
+        req.cache_breakpoints = vec![CacheBreakpoint::AfterMessage(99)];
+        let body = build_request_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
     }
 
     #[test]

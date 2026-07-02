@@ -458,6 +458,14 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             &pilot.notifications,
             !outcome.failed_tasks.is_empty(),
         );
+        // Per-phase token breakdown — the "where did the tokens go?" baseline.
+        if let Ok(events) = final_store.read_events().await {
+            eprintln!(
+                "[pilot] {}",
+                arccode_autonomous::reporting::render_token_breakdown(&events)
+                    .replace('\n', "\n[pilot] ")
+            );
+        }
     }
     if !outcome.failed_tasks.is_empty() {
         eprintln!(

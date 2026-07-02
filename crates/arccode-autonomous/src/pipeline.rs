@@ -149,7 +149,7 @@ pub async fn run_to_completion(
     let registry = build_manager_registry(handle.clone(), cwd, project_root.clone());
     let mut agent = build_manager(inputs.provider, inputs.manager_model, registry, None);
 
-    drive_to_completion(&mut agent, &handle, inputs.max_ticks).await?;
+    let manager_usage = drive_to_completion(&mut agent, &handle, inputs.max_ticks).await?;
 
     // Manager exited. Grab the final state and decide whether to merge.
     let final_state = handle.snapshot().await?;
@@ -157,6 +157,13 @@ pub async fn run_to_completion(
     let _ = join.await;
 
     let run_dir = crate::run_dir(&project_root, &run_id);
+
+    // Attribute the manager loop's tokens (previously dropped). Workers
+    // already emit `agent.usd`; recording the manager here keeps run totals
+    // honest and feeds the per-phase breakdown. Best-effort.
+    if let Ok(mut s) = RunStore::load(&run_dir).await {
+        record_phase_usage(&mut s, "manager", &manager_usage).await;
+    }
 
     // E11 — advisory checkpoint-hygiene check over the recorded tool
     // stream. Surfaced (not blocked) so the operator can see when a
@@ -355,16 +362,19 @@ pub async fn run_to_completion(
     // E7 — per-task reviewer pass (opt-in). Runs a reviewer agent per
     // task and records its verdict; the worst finding severity feeds the
     // auto-merge gate.
+    let mut reviewer_usage = arccode_core::Usage::default();
     let reviews = if inputs.run_reviewer {
         run_reviewer_pass(
             aux_provider.as_ref(),
             &inputs.reviewer_model,
             &snapshot_for_pr,
+            &mut reviewer_usage,
         )
         .await
     } else {
         Vec::new()
     };
+    record_phase_usage(&mut store, "reviewer", &reviewer_usage).await;
     let review_max_severity = reviews
         .iter()
         .filter_map(|(_, v)| match v {
@@ -374,16 +384,19 @@ pub async fn run_to_completion(
         .max();
 
     // J10 — critic pass (opt-in). A high+ risk vetoes auto-merge.
+    let mut critic_usage = arccode_core::Usage::default();
     let critic_vetoed = if inputs.run_critic {
         run_critic_pass(
             aux_provider.as_ref(),
             &inputs.reviewer_model,
             &snapshot_for_pr,
+            &mut critic_usage,
         )
         .await
     } else {
         false
     };
+    record_phase_usage(&mut store, "critic", &critic_usage).await;
 
     // E8 — auto-merge gate. Combine the available signals and decide
     // whether to merge automatically. When it decides Merge and the PR was
@@ -659,6 +672,32 @@ fn detect_escalation_triggers(
     triggers
 }
 
+/// Record a phase's token usage as a `phase:<name>`-tagged `agent.usd`
+/// event so it rolls into `state.totals` and the per-phase breakdown. The
+/// synthetic agent id is never a registered agent, so `apply` only updates
+/// totals — no spurious per-task attribution. Best-effort: a failed append
+/// is logged and swallowed so instrumentation never breaks a run. (Cache
+/// read/write tokens aren't in the event schema yet, so only fresh
+/// input/output are recorded.)
+async fn record_phase_usage(store: &mut RunStore, phase: &str, usage: &arccode_core::Usage) {
+    if usage.input_tokens == 0 && usage.output_tokens == 0 {
+        return;
+    }
+    if let Err(e) = store
+        .append(crate::Event::AgentUsd {
+            t: RunStore::now(),
+            agent: format!("phase:{phase}"),
+            model: String::new(),
+            input_tokens: usage.input_tokens as u64,
+            output_tokens: usage.output_tokens as u64,
+            usd: 0.0,
+        })
+        .await
+    {
+        tracing::warn!(target: "pilot::pipeline", phase, error = %e, "failed to record phase token usage");
+    }
+}
+
 /// One-shot text completion: send a system+user prompt and concatenate
 /// the assistant's `TextDelta`s. Used by the E7 reviewer and J10 critic
 /// passes, which expect a single JSON object back.
@@ -667,8 +706,11 @@ async fn complete_text(
     model: &str,
     system: &str,
     user: &str,
-) -> Result<String, PipelineError> {
-    use arccode_core::{CompletionRequest, ContentBlock, Message, Role as ApiRole, StreamEvent};
+) -> Result<(String, arccode_core::Usage), PipelineError> {
+    use arccode_core::{
+        CacheBreakpoint, CompletionRequest, ContentBlock, Message, Role as ApiRole, StreamEvent,
+        Usage,
+    };
     use futures::StreamExt;
     let req = CompletionRequest {
         model: model.to_string(),
@@ -682,19 +724,24 @@ async fn complete_text(
         tools: vec![],
         max_tokens: 2048,
         temperature: None,
-        cache_breakpoints: vec![],
+        // The reviewer pass reuses this system prompt once per task; caching
+        // it lets calls 2..N read it back instead of re-sending it each time.
+        cache_breakpoints: vec![CacheBreakpoint::AfterSystem],
     };
     let mut stream = provider
         .complete(req)
         .await
         .map_err(|e| PipelineError::Provider(e.to_string()))?;
     let mut out = String::new();
+    let mut usage = Usage::default();
     while let Some(ev) = stream.next().await {
-        if let Ok(StreamEvent::TextDelta { text }) = ev {
-            out.push_str(&text);
+        match ev {
+            Ok(StreamEvent::TextDelta { text }) => out.push_str(&text),
+            Ok(StreamEvent::Usage { usage: u }) => usage.add(&u),
+            _ => {}
         }
     }
-    Ok(out)
+    Ok((out, usage))
 }
 
 /// Extract the first top-level JSON object from a possibly-chatty reply
@@ -713,6 +760,7 @@ async fn run_reviewer_pass(
     provider: &dyn Provider,
     model: &str,
     state: &crate::model::RunState,
+    usage: &mut arccode_core::Usage,
 ) -> Vec<(String, crate::review::Verdict)> {
     const SYSTEM: &str = "You are a meticulous code reviewer. Review the described task's \
         diff and reply with ONLY a JSON object: {\"verdict\":\"approve\"|\"rework\", \
@@ -740,10 +788,13 @@ async fn run_reviewer_pass(
                 .unwrap_or_default()
         );
         let verdict = match complete_text(provider, model, SYSTEM, &user).await {
-            Ok(text) => match crate::review::parse_review(extract_json(&text)) {
-                Ok(report) => report.verdict,
-                Err(_) => crate::review::Verdict::Approve,
-            },
+            Ok((text, u)) => {
+                usage.add(&u);
+                match crate::review::parse_review(extract_json(&text)) {
+                    Ok(report) => report.verdict,
+                    Err(_) => crate::review::Verdict::Approve,
+                }
+            }
             Err(e) => {
                 tracing::warn!(target: "pilot::pipeline", task = %task.id, error = %e, "reviewer call failed");
                 crate::review::Verdict::Approve
@@ -760,6 +811,7 @@ async fn run_critic_pass(
     provider: &dyn Provider,
     model: &str,
     state: &crate::model::RunState,
+    usage: &mut arccode_core::Usage,
 ) -> bool {
     const SYSTEM: &str = "You are an adversarial critic on a different model family than the \
         author. Find what could break this work. Reply with ONLY a JSON object: \
@@ -772,10 +824,13 @@ async fn run_critic_pass(
         .collect();
     let user = format!("Goal: {}\nTasks:\n{}", state.goal, tasks.join("\n"));
     match complete_text(provider, model, SYSTEM, &user).await {
-        Ok(text) => match crate::critic::parse_critic(extract_json(&text)) {
-            Ok(report) => report.vetoes_auto_merge(),
-            Err(_) => false,
-        },
+        Ok((text, u)) => {
+            usage.add(&u);
+            match crate::critic::parse_critic(extract_json(&text)) {
+                Ok(report) => report.vetoes_auto_merge(),
+                Err(_) => false,
+            }
+        }
         Err(e) => {
             tracing::warn!(target: "pilot::pipeline", error = %e, "critic call failed");
             false
@@ -1929,7 +1984,8 @@ mod tests {
         };
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks = vec![done_task("t1")];
-        let reviews = run_reviewer_pass(&provider, "m", &state).await;
+        let reviews =
+            run_reviewer_pass(&provider, "m", &state, &mut arccode_core::Usage::default()).await;
         assert_eq!(reviews.len(), 1);
         assert_eq!(reviews[0].1, crate::review::Verdict::Rework);
     }
@@ -1941,7 +1997,8 @@ mod tests {
         };
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks = vec![done_task("t1")];
-        let reviews = run_reviewer_pass(&provider, "m", &state).await;
+        let reviews =
+            run_reviewer_pass(&provider, "m", &state, &mut arccode_core::Usage::default()).await;
         assert_eq!(reviews[0].1, crate::review::Verdict::Approve);
     }
 
@@ -1954,7 +2011,7 @@ mod tests {
         };
         let mut state = crate::model::RunState::new("r1", "drop a column", "abc", "b");
         state.tasks = vec![done_task("t1")];
-        assert!(run_critic_pass(&provider, "m", &state).await);
+        assert!(run_critic_pass(&provider, "m", &state, &mut arccode_core::Usage::default()).await);
     }
 
     #[tokio::test]
@@ -1964,7 +2021,7 @@ mod tests {
         };
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks = vec![done_task("t1")];
-        assert!(!run_critic_pass(&provider, "m", &state).await);
+        assert!(!run_critic_pass(&provider, "m", &state, &mut arccode_core::Usage::default()).await);
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 //! [`RunSummary`]; the [`crate::notify`] layer (R5) decides where each
 //! goes and at what severity.
 
-use crate::model::{RunState, RunStatus};
+use crate::model::{Event, RunState, RunStatus};
 
 /// One run's headline facts, used for standup / weekly rollups.
 #[derive(Debug, Clone, PartialEq)]
@@ -148,10 +148,123 @@ pub fn render_weekly_summary(runs: &[RunSummary]) -> String {
     out
 }
 
+/// Per-phase token totals derived from the run's `agent.usd` events.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PhaseTokens {
+    pub phase: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Classify an `agent.usd` event's agent id into a phase bucket. Workers
+/// carry ids like `agent-0007`; the pipeline records non-worker phases
+/// under the synthetic id `phase:<name>` (manager, reviewer, critic).
+fn phase_of(agent: &str) -> &str {
+    if let Some(p) = agent.strip_prefix("phase:") {
+        p
+    } else if agent.starts_with("agent-") {
+        "worker"
+    } else {
+        "other"
+    }
+}
+
+/// Bucket the run's `agent.usd` events into per-phase token totals, sorted
+/// by total tokens descending (ties broken by phase name so the output is
+/// deterministic). This is the "where did the tokens go?" baseline.
+pub fn tokens_by_phase(events: &[Event]) -> Vec<PhaseTokens> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+    for ev in events {
+        if let Event::AgentUsd {
+            agent,
+            input_tokens,
+            output_tokens,
+            ..
+        } = ev
+        {
+            let entry = map.entry(phase_of(agent).to_string()).or_default();
+            entry.0 += *input_tokens;
+            entry.1 += *output_tokens;
+        }
+    }
+    let mut out: Vec<PhaseTokens> = map
+        .into_iter()
+        .map(|(phase, (i, o))| PhaseTokens {
+            phase,
+            input_tokens: i,
+            output_tokens: o,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (b.input_tokens + b.output_tokens)
+            .cmp(&(a.input_tokens + a.output_tokens))
+            .then_with(|| a.phase.cmp(&b.phase))
+    });
+    out
+}
+
+/// Render the per-phase token breakdown as a compact multi-line block for
+/// the end-of-run log. Returns a single line when nothing was recorded.
+pub fn render_token_breakdown(events: &[Event]) -> String {
+    let phases = tokens_by_phase(events);
+    if phases.is_empty() {
+        return "token usage by phase: none recorded".to_string();
+    }
+    let (ti, to): (u64, u64) = phases
+        .iter()
+        .fold((0, 0), |(i, o), p| (i + p.input_tokens, o + p.output_tokens));
+    let mut out = format!("token usage by phase (total in={ti} out={to}):");
+    for p in &phases {
+        out.push_str(&format!(
+            "\n  {:<9} in={:>8} out={:>8}",
+            p.phase, p.input_tokens, p.output_tokens
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{Role, Task, TaskStatus};
+
+    fn usd_event(agent: &str, input: u64, output: u64) -> Event {
+        Event::AgentUsd {
+            t: "t".into(),
+            agent: agent.into(),
+            model: String::new(),
+            input_tokens: input,
+            output_tokens: output,
+            usd: 0.0,
+        }
+    }
+
+    #[test]
+    fn tokens_by_phase_buckets_workers_and_phases() {
+        let events = vec![
+            usd_event("agent-0001", 100, 10),
+            usd_event("agent-0002", 200, 20),
+            usd_event("phase:manager", 50, 5),
+            usd_event("phase:reviewer", 30, 3),
+        ];
+        let phases = tokens_by_phase(&events);
+        // Workers aggregate under one bucket and lead by total tokens.
+        assert_eq!(phases[0].phase, "worker");
+        assert_eq!(phases[0].input_tokens, 300);
+        assert_eq!(phases[0].output_tokens, 30);
+        let manager = phases.iter().find(|p| p.phase == "manager").unwrap();
+        assert_eq!(manager.input_tokens, 50);
+        assert!(phases.iter().any(|p| p.phase == "reviewer"));
+    }
+
+    #[test]
+    fn render_token_breakdown_reports_total_and_empty() {
+        assert!(render_token_breakdown(&[]).contains("none recorded"));
+        let md = render_token_breakdown(&[usd_event("phase:manager", 40, 4)]);
+        assert!(md.contains("total in=40 out=4"));
+        assert!(md.contains("manager"));
+    }
 
     fn state() -> RunState {
         let mut s = RunState::new("r1", "add dark mode toggle to the TUI", "abc", "b");
