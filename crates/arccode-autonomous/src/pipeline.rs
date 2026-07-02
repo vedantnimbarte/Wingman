@@ -668,7 +668,9 @@ async fn complete_text(
     system: &str,
     user: &str,
 ) -> Result<String, PipelineError> {
-    use arccode_core::{CompletionRequest, ContentBlock, Message, Role as ApiRole, StreamEvent};
+    use arccode_core::{
+        CacheBreakpoint, CompletionRequest, ContentBlock, Message, Role as ApiRole, StreamEvent,
+    };
     use futures::StreamExt;
     let req = CompletionRequest {
         model: model.to_string(),
@@ -682,7 +684,9 @@ async fn complete_text(
         tools: vec![],
         max_tokens: 2048,
         temperature: None,
-        cache_breakpoints: vec![],
+        // The reviewer pass reuses this system prompt once per task; caching
+        // it lets calls 2..N read it back instead of re-sending it each time.
+        cache_breakpoints: vec![CacheBreakpoint::AfterSystem],
     };
     let mut stream = provider
         .complete(req)

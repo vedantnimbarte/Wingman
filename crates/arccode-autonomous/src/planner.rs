@@ -15,7 +15,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use arccode_core::{CompletionRequest, Message, Provider, StopReason, StreamEvent};
+use arccode_core::{CacheBreakpoint, CompletionRequest, Message, Provider, StopReason, StreamEvent};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -98,7 +98,10 @@ impl<'p> PlannerLlm for ProviderLlm<'p> {
             tools: Vec::new(),
             max_tokens: self.max_tokens,
             temperature: Some(0.2),
-            cache_breakpoints: Vec::new(),
+            // The planner's draft→rewrite passes (and the refiner) share this
+            // system prompt, so caching it lets the second call read it back
+            // instead of re-billing the full prompt.
+            cache_breakpoints: vec![CacheBreakpoint::AfterSystem],
         };
         let mut stream = self.provider.complete(req).await?;
         let mut out = String::new();
