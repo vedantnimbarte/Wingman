@@ -178,49 +178,13 @@ pub fn validate_plan(tasks: &[PlannedTask]) -> Result<(), PlannerError> {
 }
 
 fn has_cycle(tasks: &[PlannedTask]) -> bool {
-    // DFS with three-colour marking.
-    use std::collections::HashMap;
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum Mark {
-        White,
-        Gray,
-        Black,
-    }
-    let mut marks: HashMap<&str, Mark> =
-        tasks.iter().map(|t| (t.id.as_str(), Mark::White)).collect();
-    let deps: HashMap<&str, Vec<&str>> = tasks
+    // Delegate to the shared checker so the planner's static validation and
+    // the orchestrator's runtime mutation guards use one implementation.
+    let edges: std::collections::HashMap<String, Vec<String>> = tasks
         .iter()
-        .map(|t| (t.id.as_str(), t.deps.iter().map(|s| s.as_str()).collect()))
+        .map(|t| (t.id.clone(), t.deps.clone()))
         .collect();
-
-    fn visit<'a>(
-        node: &'a str,
-        marks: &mut std::collections::HashMap<&'a str, Mark>,
-        deps: &std::collections::HashMap<&'a str, Vec<&'a str>>,
-    ) -> bool {
-        match marks.get(node).copied().unwrap_or(Mark::White) {
-            Mark::Gray => return true,
-            Mark::Black => return false,
-            Mark::White => {}
-        }
-        marks.insert(node, Mark::Gray);
-        if let Some(ds) = deps.get(node) {
-            for d in ds {
-                if visit(d, marks, deps) {
-                    return true;
-                }
-            }
-        }
-        marks.insert(node, Mark::Black);
-        false
-    }
-
-    for t in tasks {
-        if visit(t.id.as_str(), &mut marks, &deps) {
-            return true;
-        }
-    }
-    false
+    crate::scheduler::edges_have_cycle(&edges)
 }
 
 /// Convert a planned task into an internal [`Task`] (status = `Pending`).
