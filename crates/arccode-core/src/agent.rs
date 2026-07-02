@@ -143,6 +143,11 @@ pub struct AgentConfig {
     pub temperature: Option<f32>,
     /// Cache after `system` + tools by default. Empty disables explicit caching.
     pub cache_breakpoints: Vec<CacheBreakpoint>,
+    /// Roll a cache breakpoint onto the last message each turn so the growing
+    /// conversation prefix is cached and subsequent turns read it instead of
+    /// re-billing every prior turn. Providers without explicit cache control
+    /// ignore it. On by default; only pays off across multi-turn loops.
+    pub cache_conversation: bool,
     /// Truncate large tool outputs before feeding them back to the model.
     pub tool_output_budget: ToolOutputBudget,
     /// Compaction policy. Compaction runs **before** each request if the
@@ -170,6 +175,7 @@ impl std::fmt::Debug for AgentConfig {
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .field("cache_breakpoints", &self.cache_breakpoints)
+            .field("cache_conversation", &self.cache_conversation)
             .field("tool_output_budget", &self.tool_output_budget)
             .field("compactor", &self.compactor)
             .field("learning", &self.learning.as_ref().map(|_| "<hook>"))
@@ -189,6 +195,7 @@ impl Default for AgentConfig {
             max_tokens: 4096,
             temperature: None,
             cache_breakpoints: vec![CacheBreakpoint::AfterSystem, CacheBreakpoint::AfterTools],
+            cache_conversation: true,
             tool_output_budget: ToolOutputBudget::default(),
             compactor: Compactor::default(),
             learning: None,
@@ -340,6 +347,14 @@ impl AgentLoop {
                     (base, None) => base.map(str::to_string),
                 };
 
+                // Roll a cache breakpoint onto the last message so this turn's
+                // request caches the whole conversation prefix and the next
+                // turn reads it. Recomputed per turn because `history` grows.
+                let mut cache_breakpoints = config.cache_breakpoints.clone();
+                if config.cache_conversation && !history.is_empty() {
+                    cache_breakpoints.push(CacheBreakpoint::AfterMessage(history.len() - 1));
+                }
+
                 let req = CompletionRequest {
                     model: config.model.clone(),
                     system: system_for_turn,
@@ -347,7 +362,7 @@ impl AgentLoop {
                     tools: specs.clone(),
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
-                    cache_breakpoints: config.cache_breakpoints.clone(),
+                    cache_breakpoints,
                 };
 
                 let mut event_stream = match provider.complete(req).await {
@@ -575,6 +590,38 @@ mod tests {
         }
     }
 
+    /// Provider that records the `cache_breakpoints` of every request it
+    /// receives, so tests can assert what the loop asked to be cached.
+    struct CapturingProvider {
+        captured: Arc<Mutex<Vec<Vec<CacheBreakpoint>>>>,
+        responses: Mutex<VecDeque<Vec<StreamEvent>>>,
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        fn id(&self) -> &str {
+            "capturing"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                cache_kind: crate::CacheKind::Explicit,
+            }
+        }
+        async fn complete(&self, req: CompletionRequest) -> crate::Result<ProviderEventStream> {
+            self.captured.lock().unwrap().push(req.cache_breakpoints.clone());
+            let events = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("provider called more times than scripted");
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
     /// Gate that fails the first `fail_first` checks, then passes. Counts calls.
     struct CountingGate {
         fail_first: usize,
@@ -626,6 +673,65 @@ mod tests {
             out.push(ev);
         }
         out
+    }
+
+    fn capturing_agent(
+        responses: Vec<Vec<StreamEvent>>,
+        captured: Arc<Mutex<Vec<Vec<CacheBreakpoint>>>>,
+        cfg: AgentConfig,
+    ) -> AgentLoop {
+        let provider = Arc::new(CapturingProvider {
+            captured,
+            responses: Mutex::new(responses.into()),
+        });
+        AgentLoop::new(provider, Arc::new(OkDispatcher), cfg)
+    }
+
+    #[tokio::test]
+    async fn rolling_conversation_cache_breakpoint_is_injected() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = capturing_agent(
+            vec![end_turn_response("hi")],
+            captured.clone(),
+            AgentConfig {
+                model: "m".into(),
+                ..Default::default()
+            },
+        );
+        let _ = collect_events(&mut agent).await;
+        let reqs = captured.lock().unwrap();
+        assert_eq!(reqs.len(), 1);
+        // At request time history is just the one user message (index 0).
+        assert!(
+            reqs[0].contains(&CacheBreakpoint::AfterMessage(0)),
+            "rolling breakpoint missing: {:?}",
+            reqs[0]
+        );
+        // Default system/tools breakpoints are preserved alongside it.
+        assert!(reqs[0].contains(&CacheBreakpoint::AfterSystem));
+    }
+
+    #[tokio::test]
+    async fn rolling_cache_breakpoint_absent_when_disabled() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = capturing_agent(
+            vec![end_turn_response("hi")],
+            captured.clone(),
+            AgentConfig {
+                model: "m".into(),
+                cache_conversation: false,
+                ..Default::default()
+            },
+        );
+        let _ = collect_events(&mut agent).await;
+        let reqs = captured.lock().unwrap();
+        assert!(
+            !reqs[0]
+                .iter()
+                .any(|b| matches!(b, CacheBreakpoint::AfterMessage(_))),
+            "breakpoint should be absent when disabled: {:?}",
+            reqs[0]
+        );
     }
 
     fn agent_with_gate(responses: Vec<Vec<StreamEvent>>, gate: Arc<CountingGate>) -> AgentLoop {
