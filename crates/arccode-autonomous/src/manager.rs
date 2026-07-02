@@ -34,6 +34,8 @@ pub enum ManagerError {
     Agent(String),
     #[error("orchestrator: {0}")]
     Orchestrator(#[from] OrchestratorError),
+    #[error("dependency deadlock — the task graph cannot make progress: {0}")]
+    Deadlock(String),
 }
 
 /// Build the restricted tool registry the manager runs against.
@@ -164,11 +166,32 @@ pub async fn drive_to_completion(
     handle: &OrchestratorHandle,
     max_ticks: usize,
 ) -> Result<(), ManagerError> {
+    // Fingerprint of the previous tick's task statuses. A dependency
+    // deadlock is only declared when the picture is *unchanged* from the
+    // prior tick (so the manager already had a full turn to break it — e.g.
+    // by adding a task or finalizing a review) and still cannot progress.
+    let mut prev_fingerprint: Option<String> = None;
     for tick in 0..max_ticks {
         let state = handle.snapshot().await?;
         if state.tasks.iter().all(|t| t.status.is_terminal()) {
             tracing::info!(target: "pilot::manager", tick, "all tasks terminal — exiting drive loop");
             return Ok(());
+        }
+        // Fail fast on a wedged graph instead of spinning fruitlessly (and
+        // burning LLM budget) until `max_ticks`. A cycle or a dep on a
+        // failed/blocked/missing task leaves tasks that can never become
+        // eligible; catching it here turns a silent stall into a clear error.
+        if let Some(reason) = dag_stall_reason(&state) {
+            let fingerprint = state_fingerprint(&state);
+            if prev_fingerprint.as_deref() == Some(fingerprint.as_str()) {
+                tracing::warn!(target: "pilot::manager", tick, %reason, "dependency deadlock — aborting drive loop");
+                return Err(ManagerError::Deadlock(reason));
+            }
+            // First observation: give the manager this tick to try to break
+            // it, then re-check next tick against this fingerprint.
+            prev_fingerprint = Some(fingerprint);
+        } else {
+            prev_fingerprint = Some(state_fingerprint(&state));
         }
         let prompt = format!(
             "{state_block}\n\n\
@@ -192,7 +215,168 @@ pub fn run_is_done(state: &RunState) -> bool {
     !state.tasks.is_empty() && state.tasks.iter().all(|t| t.status.is_terminal())
 }
 
+/// A compact, order-stable fingerprint of the run's task statuses. Used by
+/// the drive loop to tell whether a tick changed anything.
+fn state_fingerprint(state: &RunState) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(state.tasks.len() * 12);
+    for t in &state.tasks {
+        let _ = write!(s, "{}={:?};", t.id, t.status);
+    }
+    s
+}
+
+/// If the DAG can no longer make progress toward completion, return a
+/// human-readable reason naming the stuck tasks and why; otherwise `None`.
+///
+/// The run can still progress while any not-yet-`Done` task is *actionable*:
+/// - `InProgress` — a worker is running it,
+/// - `Review` — the manager can finalize it,
+/// - `Pending`/`Todo` whose deps are all `Done` — it can be assigned now.
+///
+/// When none of the unfinished tasks are actionable, the graph is wedged —
+/// typically a dependency cycle, or a dep on a task that failed, blocked, or
+/// never existed (so it will never reach `Done`). `Failed` on its own is
+/// terminal and handled by the caller's all-terminal check; it only shows up
+/// here when another task is stuck waiting on it.
+fn dag_stall_reason(state: &RunState) -> Option<String> {
+    use TaskStatus::*;
+    let is_done = |id: &str| {
+        state
+            .task(id)
+            .map(|t| t.status == Done)
+            .unwrap_or(false)
+    };
+    let unfinished: Vec<&crate::model::Task> =
+        state.tasks.iter().filter(|t| t.status != Done).collect();
+    if unfinished.is_empty() {
+        return None;
+    }
+    let can_progress = state.tasks.iter().any(|t| match t.status {
+        InProgress | Review => true,
+        Pending | Todo => t.deps.iter().all(|d| is_done(d)),
+        Done | Failed | Blocked => false,
+    });
+    if can_progress {
+        return None;
+    }
+    let mut reasons: Vec<String> = Vec::new();
+    for t in &unfinished {
+        match t.status {
+            Failed => reasons.push(format!("{} failed with no retry path", t.id)),
+            Blocked => reasons.push(format!("{} is blocked (retry ladder exhausted)", t.id)),
+            Pending | Todo => {
+                let unmet: Vec<String> = t
+                    .deps
+                    .iter()
+                    .filter(|d| !is_done(d))
+                    .map(|d| match state.task(d) {
+                        None => format!("{d} (missing)"),
+                        Some(dep) => format!("{d} ({:?})", dep.status),
+                    })
+                    .collect();
+                reasons.push(format!("{} waits on [{}]", t.id, unmet.join(", ")));
+            }
+            InProgress | Review | Done => {}
+        }
+    }
+    Some(reasons.join("; "))
+}
+
 /// Convenience: did every task end up `done` (vs `failed`)?
 pub fn run_succeeded(state: &RunState) -> bool {
     !state.tasks.is_empty() && state.tasks.iter().all(|t| t.status == TaskStatus::Done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Role, Task};
+
+    fn task(id: &str, status: TaskStatus, deps: &[&str]) -> Task {
+        let mut t = Task::new(id, Role::Developer, id);
+        t.status = status;
+        t.deps = deps.iter().map(|s| s.to_string()).collect();
+        t
+    }
+
+    fn state(tasks: Vec<Task>) -> RunState {
+        let mut s = RunState::new("r", "goal", "base", "branch");
+        s.tasks = tasks;
+        s
+    }
+
+    #[test]
+    fn no_stall_when_a_task_is_eligible() {
+        // t1 has no deps → assignable now; the run can progress.
+        let s = state(vec![
+            task("t1", TaskStatus::Pending, &[]),
+            task("t2", TaskStatus::Pending, &["t1"]),
+        ]);
+        assert!(dag_stall_reason(&s).is_none());
+    }
+
+    #[test]
+    fn no_stall_while_a_worker_runs() {
+        let s = state(vec![
+            task("t1", TaskStatus::InProgress, &[]),
+            task("t2", TaskStatus::Pending, &["t1"]),
+        ]);
+        assert!(dag_stall_reason(&s).is_none());
+    }
+
+    #[test]
+    fn no_stall_while_a_task_awaits_finalize() {
+        // A Review task is actionable — the manager can finalize it.
+        let s = state(vec![
+            task("t1", TaskStatus::Review, &[]),
+            task("t2", TaskStatus::Pending, &["t1"]),
+        ]);
+        assert!(dag_stall_reason(&s).is_none());
+    }
+
+    #[test]
+    fn no_stall_when_all_done() {
+        let s = state(vec![task("t1", TaskStatus::Done, &[])]);
+        assert!(dag_stall_reason(&s).is_none());
+    }
+
+    #[test]
+    fn stall_detected_on_dependency_cycle() {
+        // t1 ⇄ t2: neither can ever have its deps Done, nothing is running.
+        let s = state(vec![
+            task("t1", TaskStatus::Pending, &["t2"]),
+            task("t2", TaskStatus::Pending, &["t1"]),
+        ]);
+        let reason = dag_stall_reason(&s).expect("a cycle must be flagged as a stall");
+        assert!(reason.contains("t1") && reason.contains("t2"), "got: {reason}");
+    }
+
+    #[test]
+    fn stall_when_pending_waits_on_a_failed_dep() {
+        // t1 failed and won't be retried; t2 can never become eligible.
+        let s = state(vec![
+            task("t1", TaskStatus::Failed, &[]),
+            task("t2", TaskStatus::Pending, &["t1"]),
+        ]);
+        let reason = dag_stall_reason(&s).expect("waiting on a failed dep is a stall");
+        assert!(reason.contains("t2"), "got: {reason}");
+    }
+
+    #[test]
+    fn stall_when_only_blocked_tasks_remain() {
+        // Blocked isn't terminal (is_terminal = Done|Failed), so without this
+        // detector the drive loop would spin to max_ticks.
+        let s = state(vec![task("t1", TaskStatus::Blocked, &[])]);
+        assert!(dag_stall_reason(&s).is_some());
+    }
+
+    #[test]
+    fn fingerprint_tracks_status_changes() {
+        let a = state(vec![task("t1", TaskStatus::Pending, &[])]);
+        let b = state(vec![task("t1", TaskStatus::InProgress, &[])]);
+        assert_ne!(state_fingerprint(&a), state_fingerprint(&b));
+        let c = state(vec![task("t1", TaskStatus::Pending, &[])]);
+        assert_eq!(state_fingerprint(&a), state_fingerprint(&c));
+    }
 }
