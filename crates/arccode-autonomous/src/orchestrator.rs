@@ -60,6 +60,27 @@ pub enum OrchestratorError {
     Aborting,
     #[error("worker spawn failed: {0}")]
     Spawn(String),
+    #[error("invalid task graph: {0}")]
+    InvalidDag(String),
+}
+
+/// Build the projected `id → deps` adjacency map for the run's current
+/// tasks, with `overrides` applied on top (a mutation about to be
+/// persisted). Used to validate `add_task` / splitter edges against
+/// [`crate::scheduler::validate_edges`] before they touch the store.
+fn projected_edges(
+    state: &crate::model::RunState,
+    overrides: &[(String, Vec<String>)],
+) -> HashMap<String, Vec<String>> {
+    let mut edges: HashMap<String, Vec<String>> = state
+        .tasks
+        .iter()
+        .map(|t| (t.id.clone(), t.deps.clone()))
+        .collect();
+    for (id, deps) in overrides {
+        edges.insert(id.clone(), deps.clone());
+    }
+    edges
 }
 
 /// Snapshot of one worker's outcome, returned by a spawner closure.
@@ -664,6 +685,13 @@ async fn handle_add_task(
         let n = *next_seq;
         format!("t{n}")
     });
+    // Guard the projected DAG before persisting: `task.create` bypasses the
+    // planner's `validate_plan`, so this is the only thing stopping a
+    // manager-issued (or E5-splitter-issued) edge from wedging the run with a
+    // dependency cycle or a dep on an id that will never complete.
+    let edges = projected_edges(store.state(), &[(id.clone(), spec.deps.clone())]);
+    crate::scheduler::validate_edges(&edges)
+        .map_err(|e| OrchestratorError::InvalidDag(e.to_string()))?;
     store
         .append(Event::TaskCreate {
             t: RunStore::now(),
@@ -1021,34 +1049,94 @@ async fn run_splitter_rung(
         ));
     }
 
-    // Append every subtask as a task.create. Their `deps` inherit the
-    // failing task's deps; downstream tasks that depended on the
-    // failing task get re-pointed to depend on every new subtask so
-    // the DAG stays acyclic and the dep wave is preserved.
+    // Resolve each subtask's id + effective deps up front (deps inherit the
+    // failing task's deps unless the splitter declared its own), and compute
+    // the re-pointed dependents, so the *projected* DAG can be validated
+    // before the store is mutated. The splitter is an LLM call — it can hand
+    // back subtasks that cycle against a re-pointed dependent or dep on an
+    // unknown id, and a bad edge would silently wedge the run.
     let parent_deps = failing_task.deps.clone();
+    let mut resolved: Vec<NewTaskSpec> = Vec::new();
     let mut new_ids: Vec<String> = Vec::new();
+    for mut spec in new_specs {
+        *next_task_seq += 1;
+        let id = spec
+            .id
+            .clone()
+            .unwrap_or_else(|| format!("t{}", *next_task_seq));
+        let deps = if spec.deps.is_empty() {
+            parent_deps.clone()
+        } else {
+            spec.deps.clone()
+        };
+        spec.id = Some(id.clone());
+        spec.deps = deps;
+        new_ids.push(id);
+        resolved.push(spec);
+    }
+
+    // Re-point any task that depended on the failing task onto every new
+    // subtask instead (additive task.create-replace: same id, new deps).
+    let dependents: Vec<crate::model::Task> = {
+        let store_g = store.lock().await;
+        store_g
+            .state()
+            .tasks
+            .iter()
+            .filter(|t| t.deps.iter().any(|d| d == task_id))
+            .cloned()
+            .collect()
+    };
+    let repointed: Vec<crate::model::Task> = dependents
+        .into_iter()
+        .map(|mut d| {
+            d.deps.retain(|dep| dep != task_id);
+            d.deps.extend(new_ids.iter().cloned());
+            d
+        })
+        .collect();
+
+    // Validate the projected graph before any append. On a bad graph, block
+    // the failing task (so the run still converges instead of spinning to
+    // max_ticks) and surface the reason to the retry ladder.
+    {
+        let store_g = store.lock().await;
+        let mut overrides: Vec<(String, Vec<String>)> = resolved
+            .iter()
+            .map(|s| (s.id.clone().unwrap_or_default(), s.deps.clone()))
+            .collect();
+        overrides.extend(repointed.iter().map(|d| (d.id.clone(), d.deps.clone())));
+        let edges = projected_edges(store_g.state(), &overrides);
+        if let Err(e) = crate::scheduler::validate_edges(&edges) {
+            drop(store_g);
+            let mut store_g = store.lock().await;
+            store_g
+                .append(Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: task_id.to_string(),
+                    status: TaskStatus::Blocked,
+                    outcome: None,
+                })
+                .await?;
+            return Err(OrchestratorError::InvalidDag(format!(
+                "E5 splitter produced an invalid DAG for task {task_id}: {e}"
+            )));
+        }
+    }
+
+    // Graph is sound — persist the subtasks, the re-pointed dependents, and
+    // mark the failing task Done (its work is now covered by the subtasks).
     {
         let mut store_g = store.lock().await;
-        for spec in new_specs {
-            *next_task_seq += 1;
-            let id = spec.id.unwrap_or_else(|| {
-                let n = *next_task_seq;
-                format!("t{n}")
-            });
-            new_ids.push(id.clone());
-            let deps = if spec.deps.is_empty() {
-                parent_deps.clone()
-            } else {
-                spec.deps.clone()
-            };
+        for spec in resolved {
             store_g
                 .append(Event::TaskCreate {
                     t: RunStore::now(),
-                    id: id.clone(),
+                    id: spec.id.unwrap_or_default(),
                     role: spec.role,
                     title: spec.title,
                     goal: spec.goal,
-                    deps,
+                    deps: spec.deps,
                     writes: spec.writes,
                     acceptance: spec.acceptance,
                     reversibility: spec.reversibility,
@@ -1056,20 +1144,7 @@ async fn run_splitter_rung(
                 })
                 .await?;
         }
-        // Re-point any task that depended on the failing task to depend
-        // on every new subtask instead. The task.create-replace event
-        // schema is additive: we append updated task.create events with
-        // the same ids but different deps; apply() replaces the task.
-        let dependents: Vec<crate::model::Task> = store_g
-            .state()
-            .tasks
-            .iter()
-            .filter(|t| t.deps.iter().any(|d| d == task_id))
-            .cloned()
-            .collect();
-        for mut d in dependents {
-            d.deps.retain(|dep| dep != task_id);
-            d.deps.extend(new_ids.iter().cloned());
+        for d in repointed {
             store_g
                 .append(Event::TaskCreate {
                     t: RunStore::now(),
@@ -1085,8 +1160,6 @@ async fn run_splitter_rung(
                 })
                 .await?;
         }
-        // Mark the failing task Done so the DAG considers it satisfied
-        // — its work has been re-allocated to subtasks.
         store_g
             .append(Event::TaskStatus {
                 t: RunStore::now(),
@@ -1449,6 +1522,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("task {task_id} never reached review");
+    }
+
+    /// A task added mid-run via `add_task` must be held to the same
+    /// acyclic/known-dep invariant the planner enforces: a dep on an unknown
+    /// id, and a re-create that closes a cycle, are both rejected with
+    /// `InvalidDag` and leave the store unmutated.
+    #[tokio::test]
+    async fn add_task_rejects_unknown_dep_and_cycle() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".arccode/autonomous/dag-run"),
+            "dag-run",
+            "g",
+            "deadbeef",
+            "arccode/auto/dag-run",
+        )
+        .await
+        .unwrap();
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+
+        // A dep on an id no task carries is rejected.
+        let err = handle
+            .add_task(dev_task("t1", vec!["t99"]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OrchestratorError::InvalidDag(_)), "got {err:?}");
+
+        // Build a valid chain t1 → t2, then re-create t1 depending on t2 —
+        // that closes a t1→t2→t1 cycle and must be refused.
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
+        let err = handle
+            .add_task(dev_task("t1", vec!["t2"]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, OrchestratorError::InvalidDag(_)), "got {err:?}");
+
+        // The rejected re-create left t1's deps untouched (still empty), so
+        // the graph is still schedulable.
+        let state = handle.snapshot().await.unwrap();
+        assert!(state.task("t1").unwrap().deps.is_empty());
+
+        handle.shutdown().await;
+        let _ = join.await;
     }
 
     /// E4 — write-set conflict avoidance: two independent tasks whose

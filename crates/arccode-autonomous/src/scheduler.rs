@@ -14,6 +14,8 @@
 //! a pair that might be independent) rather than missing a real conflict —
 //! the safe direction.
 
+use std::collections::HashMap;
+
 use globset::Glob;
 
 use crate::model::Task;
@@ -116,6 +118,105 @@ pub fn select_wave<'a>(
     chosen
 }
 
+/// A dependency-graph validation failure. Shared by the planner's static
+/// check and the runtime task mutators (`add_task`, the E5 splitter) so a
+/// task added mid-run is held to the same acyclic/known-dep invariant the
+/// initial plan is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DagError {
+    /// A task lists itself as one of its own deps.
+    SelfDep(String),
+    /// A dep references an id no task in the graph carries.
+    UnknownDep { task: String, dep: String },
+    /// The deps form a cycle — no topological order exists.
+    Cycle,
+}
+
+impl std::fmt::Display for DagError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DagError::SelfDep(t) => write!(f, "task {t} depends on itself"),
+            DagError::UnknownDep { task, dep } => {
+                write!(f, "task {task} depends on unknown id {dep}")
+            }
+            DagError::Cycle => write!(f, "dependency cycle"),
+        }
+    }
+}
+
+impl std::error::Error for DagError {}
+
+/// True when the `id → deps` adjacency map contains a cycle. Three-colour
+/// DFS: white = unseen, gray = on the current stack (a gray hit is a back
+/// edge → cycle), black = fully explored. Deps pointing at ids absent from
+/// the map are ignored here (that's [`validate_edges`]'s job), so this is
+/// safe to call on partial graphs.
+pub fn edges_have_cycle(edges: &HashMap<String, Vec<String>>) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Mark {
+        White,
+        Gray,
+        Black,
+    }
+    fn visit<'a>(
+        node: &'a str,
+        marks: &mut HashMap<&'a str, Mark>,
+        edges: &'a HashMap<String, Vec<String>>,
+    ) -> bool {
+        match marks.get(node).copied().unwrap_or(Mark::White) {
+            Mark::Gray => return true,
+            Mark::Black => return false,
+            Mark::White => {}
+        }
+        marks.insert(node, Mark::Gray);
+        if let Some(deps) = edges.get(node) {
+            for d in deps {
+                if visit(d, marks, edges) {
+                    return true;
+                }
+            }
+        }
+        marks.insert(node, Mark::Black);
+        false
+    }
+
+    let mut marks: HashMap<&str, Mark> = HashMap::with_capacity(edges.len());
+    for id in edges.keys() {
+        if visit(id, &mut marks, edges) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Validate an `id → deps` adjacency map: no task may depend on itself,
+/// every dep must reference a known id, and the graph must be acyclic.
+///
+/// The planner runs this over the whole plan before persisting; the
+/// orchestrator runs it over the *projected* graph (current tasks plus the
+/// pending mutation) before appending a `task.create`, so a manager- or
+/// splitter-issued edge can never wedge the run with a cycle or a dangling
+/// dep the scheduler would wait on forever.
+pub fn validate_edges(edges: &HashMap<String, Vec<String>>) -> Result<(), DagError> {
+    for (id, deps) in edges {
+        for d in deps {
+            if d == id {
+                return Err(DagError::SelfDep(id.clone()));
+            }
+            if !edges.contains_key(d) {
+                return Err(DagError::UnknownDep {
+                    task: id.clone(),
+                    dep: d.clone(),
+                });
+            }
+        }
+    }
+    if edges_have_cycle(edges) {
+        return Err(DagError::Cycle);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,5 +303,54 @@ mod tests {
     fn select_wave_empty_when_no_slots() {
         let t1 = task("t1", &["a/1.rs"]);
         assert!(select_wave(&[&t1], &[], 0).is_empty());
+    }
+
+    fn edges(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(id, deps)| {
+                (
+                    id.to_string(),
+                    deps.iter().map(|s| s.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn validate_edges_accepts_a_clean_dag() {
+        let g = edges(&[("t1", &[]), ("t2", &["t1"]), ("t3", &["t1", "t2"])]);
+        assert!(validate_edges(&g).is_ok());
+    }
+
+    #[test]
+    fn validate_edges_rejects_self_dep() {
+        let g = edges(&[("t1", &["t1"])]);
+        assert_eq!(validate_edges(&g), Err(DagError::SelfDep("t1".into())));
+    }
+
+    #[test]
+    fn validate_edges_rejects_unknown_dep() {
+        let g = edges(&[("t1", &["t99"])]);
+        assert_eq!(
+            validate_edges(&g),
+            Err(DagError::UnknownDep {
+                task: "t1".into(),
+                dep: "t99".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_edges_rejects_direct_cycle() {
+        let g = edges(&[("t1", &["t2"]), ("t2", &["t1"])]);
+        assert_eq!(validate_edges(&g), Err(DagError::Cycle));
+    }
+
+    #[test]
+    fn validate_edges_rejects_indirect_cycle() {
+        let g = edges(&[("t1", &["t2"]), ("t2", &["t3"]), ("t3", &["t1"])]);
+        assert_eq!(validate_edges(&g), Err(DagError::Cycle));
+        assert!(edges_have_cycle(&g));
     }
 }
