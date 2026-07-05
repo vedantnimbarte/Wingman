@@ -125,6 +125,9 @@ impl Transcript {
 
 pub struct TranscriptView<'a> {
     pub transcript: &'a Transcript,
+    /// When the agent is mid-turn, a "thinking…" indicator is appended below
+    /// the last item so it lives in the message area rather than the input.
+    pub busy: bool,
 }
 
 impl<'a> Widget for TranscriptView<'a> {
@@ -179,6 +182,16 @@ impl<'a> Widget for TranscriptView<'a> {
                     )));
                 }
             }
+        }
+        // While the agent is working, show the thinking indicator inline at
+        // the bottom of the message area (not in the input composer).
+        if self.busy {
+            lines.push(Line::from(Span::styled(
+                "⏳ thinking…",
+                Style::default()
+                    .fg(th.system)
+                    .add_modifier(Modifier::ITALIC),
+            )));
         }
         let block = Block::default().borders(Borders::NONE);
         Paragraph::new(lines)

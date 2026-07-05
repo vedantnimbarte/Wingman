@@ -77,6 +77,13 @@ pub type McpRunner =
 /// Returns the current set of MCP server summaries for display.
 pub type McpListRunner = Arc<dyn Fn() -> BoxFuture<'static, Vec<McpServerSummary>> + Send + Sync>;
 
+/// Fetches the live model catalog for one provider id (e.g. via an
+/// OpenAI-compatible `GET /models`). `Err` means the provider can't list
+/// models or the request failed; the picker then keeps its static entries.
+pub type ModelsRunner = Arc<
+    dyn Fn(String) -> BoxFuture<'static, std::result::Result<Vec<String>, String>> + Send + Sync,
+>;
+
 pub struct AppCtx {
     pub provider_id: String,
     pub model: String,
@@ -88,6 +95,7 @@ pub struct AppCtx {
     pub logout_runner: LogoutRunner,
     pub mcp_runner: McpRunner,
     pub mcp_list_runner: McpListRunner,
+    pub models_runner: ModelsRunner,
 }
 
 pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
@@ -225,6 +233,29 @@ fn parse_slash(line: &str) -> Cmd {
     }
 }
 
+/// Provider ids the user is currently connected to: the keys of the merged
+/// config's `[providers]` table, plus the active provider. The `/model`
+/// picker is restricted to these so it lists only what the user has logged
+/// into rather than every provider ArcCode can talk to. Reloaded each time
+/// the picker opens so a mid-session `/login` is reflected. On a config-load
+/// failure this returns just the active provider (empty if none), and an
+/// empty result makes the picker fall back to the full catalog.
+fn connected_provider_ids(active: &str) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    let global = arccode_config::global_config_path().ok();
+    let project_file = std::env::current_dir()
+        .ok()
+        .map(|cwd| arccode_config::ProjectPaths::discover(&cwd).config_file)
+        .filter(|p| p.exists());
+    if let Ok(cfg) = arccode_config::Config::load(global.as_deref(), project_file.as_deref()) {
+        ids.extend(cfg.providers.keys().cloned());
+    }
+    if !active.is_empty() && !ids.iter().any(|i| i == active) {
+        ids.push(active.to_string());
+    }
+    ids
+}
+
 fn load_user_command(name: &str) -> Option<String> {
     if !name
         .chars()
@@ -317,6 +348,9 @@ async fn run_inner(
                 ui.lifetime.save_merged(&ui.status.usage);
                 return Ok(());
             }
+            // A modal queued a task; loop back so the pump at the top of
+            // the loop drains it (take_pending_task → run_modal_task).
+            IdleAction::PumpModal => continue,
             IdleAction::Submit(prompt) => {
                 ui.transcript
                     .push(TranscriptItem::UserPrompt(prompt.clone()));
@@ -387,6 +421,20 @@ async fn run_modal_task(
     ctx: &AppCtx,
 ) -> Result<()> {
     match task {
+        ModalTask::Models(provider_ids) => {
+            // Fetch each connected provider's live catalog. A provider that
+            // errors (no listing endpoint, network failure) is skipped and
+            // keeps its static entries.
+            let mut fetched: Vec<(String, Vec<String>)> = Vec::new();
+            for id in provider_ids {
+                if let Ok(models) = (ctx.models_runner)(id.clone()).await {
+                    fetched.push((id, models));
+                }
+            }
+            if let ActiveModal::ModelPicker(p) = &mut ui.modal {
+                p.set_dynamic(fetched);
+            }
+        }
         ModalTask::Mcp(mcp_task) => {
             let result = (ctx.mcp_runner)(mcp_task).await;
             ui.modal.task_completed(result);
@@ -414,10 +462,15 @@ async fn run_modal_task(
             if was_commit {
                 match result {
                     Ok(()) => {
-                        // Build the new agent now that keyring + config are
-                        // persisted. If this fails the modal stays open in
-                        // error state so the user can fix and retry.
                         let payload = payload_after.expect("commit task carries payload");
+                        ui.status.provider = payload.provider_id.clone();
+                        ui.status.model = payload.model.clone();
+                        ui.modal = ActiveModal::None;
+                        ui.transcript.push(TranscriptItem::System(format!(
+                            "saving credentials for {}/{}…",
+                            payload.provider_id, payload.model
+                        )));
+
                         match (ctx.agent_builder)(
                             payload.provider_id.clone(),
                             payload.model.clone(),
@@ -426,24 +479,20 @@ async fn run_modal_task(
                         {
                             Ok(new_agent) => {
                                 *agent = Some(new_agent);
-                                ui.status.provider = payload.provider_id.clone();
-                                ui.status.model = payload.model.clone();
                                 ui.status.connected = true;
-                                ui.modal = ActiveModal::None;
                                 ui.transcript.push(TranscriptItem::System(format!(
                                     "connected to {}/{}",
                                     payload.provider_id, payload.model
                                 )));
                             }
                             Err(e) => {
-                                ui.modal.task_completed(Err(e));
+                                ui.transcript.push(TranscriptItem::System(format!(
+                                    "failed to build agent: {e}"
+                                )));
                             }
                         }
                     }
-                    Err(_) => {
-                        // task_completed already moved the wizard back to
-                        // the model-entry stage with an error to show.
-                    }
+                    Err(_) => {}
                 }
             }
         }
@@ -454,6 +503,10 @@ async fn run_modal_task(
 enum IdleAction {
     Quit,
     Submit(String),
+    /// A modal queued an async task (e.g. the /login commit). Hand control
+    /// back to the outer loop so it drains the task via `take_pending_task`
+    /// instead of blocking here on the next key.
+    PumpModal,
 }
 
 async fn idle_step(
@@ -601,6 +654,13 @@ async fn idle_step(
                         }
                     }
                     draw(terminal, ui)?;
+                    // If the modal just queued an async task (e.g. /login
+                    // commit), return to the outer loop so it gets pumped;
+                    // otherwise we'd block here on the next key and the
+                    // modal would freeze mid-task (e.g. "Saving credentials…").
+                    if ui.modal.has_pending_task() {
+                        return Ok(IdleAction::PumpModal);
+                    }
                     continue;
                 }
                 match k.code {
@@ -626,7 +686,16 @@ async fn idle_step(
                                 )));
                             }
                             Cmd::Model(None) => {
-                                ui.modal = ActiveModal::ModelPicker(ModelPicker::new());
+                                let connected = connected_provider_ids(&ui.status.provider);
+                                ui.modal =
+                                    ActiveModal::ModelPicker(ModelPicker::new(&connected));
+                                // Kick off the live-catalog fetch: draw the
+                                // picker (with its "fetching…" hint) and hand
+                                // control to the outer task pump.
+                                if ui.modal.has_pending_task() {
+                                    draw(terminal, ui)?;
+                                    return Ok(IdleAction::PumpModal);
+                                }
                             }
                             Cmd::Model(Some(arg)) => match arg.split_once('/') {
                                 Some((provider_id, model_id)) => {
@@ -1371,11 +1440,12 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
             FileTreeView { tree }.render(area_l, f.buffer_mut());
         }
         let chunks = [body_area, vchunks[1], vchunks[2]];
-        if ui.transcript.items.is_empty() {
+        if ui.transcript.items.is_empty() && !ui.composer.busy {
             WelcomeView { status: &ui.status }.render(chunks[0], f.buffer_mut());
         } else {
             TranscriptView {
                 transcript: &ui.transcript,
+                busy: ui.composer.busy,
             }
             .render(chunks[0], f.buffer_mut());
         }

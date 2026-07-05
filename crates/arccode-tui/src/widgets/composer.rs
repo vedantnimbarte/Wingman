@@ -89,9 +89,12 @@ impl<'a> Widget for ComposerView<'a> {
         };
 
         let line = if self.composer.busy {
+            // The thinking indicator now lives in the message area; while busy
+            // the composer just shows a muted "working" hint (or any text the
+            // user had already typed) so the input isn't hijacked.
             if self.composer.input.is_empty() {
                 Line::from(Span::styled(
-                    "thinking…",
+                    " working…",
                     Style::default()
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::ITALIC),

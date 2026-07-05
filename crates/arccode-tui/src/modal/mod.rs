@@ -53,6 +53,9 @@ pub enum ModalOutcome {
 pub enum ModalTask {
     Login(LoginTask),
     Mcp(McpTask),
+    /// Fetch live model lists for the given connected provider ids (the
+    /// `/model` picker requesting a dynamic catalog).
+    Models(Vec<String>),
 }
 
 /// The active modal, if any.
@@ -101,7 +104,7 @@ impl ActiveModal {
             Self::None => None,
             Self::Login(w) => w.take_pending_task().map(ModalTask::Login),
             Self::FilePicker(_) => None,
-            Self::ModelPicker(_) => None,
+            Self::ModelPicker(p) => p.take_pending_task().map(ModalTask::Models),
             Self::Usage(_) => None,
             Self::Skills(_) => None,
             Self::Mcp(v) => v.take_pending_task().map(ModalTask::Mcp),
@@ -110,6 +113,18 @@ impl ActiveModal {
             Self::SessionPicker(_) => None,
             Self::SkillVars(_) => None,
             Self::DiffPreview(_) => None,
+        }
+    }
+
+    /// Non-draining peek: does the active modal have an async task queued
+    /// for the host to run? Used by the input loop to hand control back to
+    /// the outer task pump instead of blocking on the next key.
+    pub fn has_pending_task(&self) -> bool {
+        match self {
+            Self::Login(w) => w.has_pending_task(),
+            Self::Mcp(v) => v.has_pending_task(),
+            Self::ModelPicker(p) => p.has_pending_task(),
+            _ => false,
         }
     }
 

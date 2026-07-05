@@ -1,9 +1,9 @@
 //! `/model` picker — flat fuzzy list of `provider/model` entries.
 //!
-//! For each provider known to the login wizard ([`super::login::PROVIDERS`])
-//! we expose a small curated set of well-known models. The list is
-//! deliberately short; users who want an obscure model can still type
-//! `/model provider/<model-id>` directly.
+//! The picker is restricted to the providers the user is actually connected
+//! to (see `ModelPicker::new`); for each we expose a small curated set of
+//! well-known models. The list is deliberately short; users who want an
+//! obscure model can still type `/model provider/<model-id>` directly.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use nucleo_matcher::{
@@ -37,17 +37,37 @@ pub struct ModelPicker {
     ranked: Vec<usize>,
     query: String,
     selected: usize,
+    /// Connected providers whose live catalogs still need fetching. Drained
+    /// once by the host loop via [`take_pending_task`](Self::take_pending_task).
+    pending_providers: Option<Vec<String>>,
+    /// True while the live-catalog fetch is in flight; drives the spinner
+    /// hint in `render`.
+    loading: bool,
 }
 
 impl ModelPicker {
-    pub fn new() -> Self {
-        let entries = catalog();
+    /// Build a picker limited to `connected` provider ids (the providers the
+    /// user has logged into / configured). When `connected` is empty — e.g.
+    /// no provider is set up yet — we fall back to the full catalog so the
+    /// picker is never empty.
+    pub fn new(connected: &[String]) -> Self {
+        let entries = catalog(connected);
         let ranked: Vec<usize> = (0..entries.len()).collect();
+        // Only fetch live catalogs when we have a bounded set of connected
+        // providers; with no filter we'd hit every provider's API at once.
+        let pending_providers = if connected.is_empty() {
+            None
+        } else {
+            Some(connected.to_vec())
+        };
+        let loading = pending_providers.is_some();
         Self {
             entries,
             ranked,
             query: String::new(),
             selected: 0,
+            pending_providers,
+            loading,
         }
     }
 
@@ -57,6 +77,39 @@ impl ModelPicker {
             .get(self.selected)
             .and_then(|&i| self.entries.get(i))
             .cloned()
+    }
+
+    /// Non-draining peek: is a live-catalog fetch still queued?
+    pub fn has_pending_task(&self) -> bool {
+        self.pending_providers.is_some()
+    }
+
+    /// Drain the one-shot list of providers whose live catalogs the host
+    /// should fetch. Returns `Some` at most once per picker.
+    pub fn take_pending_task(&mut self) -> Option<Vec<String>> {
+        self.pending_providers.take()
+    }
+
+    /// Merge fetched model lists into the catalog. For every provider that
+    /// returned at least one model we replace its static entries with the
+    /// live list; providers absent from `fetched` — an unsupported endpoint
+    /// or a failed request — keep their curated static entries. Clears the
+    /// loading flag regardless.
+    pub fn set_dynamic(&mut self, fetched: Vec<(String, Vec<String>)>) {
+        self.loading = false;
+        for (provider_id, models) in fetched {
+            if models.is_empty() {
+                continue;
+            }
+            self.entries.retain(|e| e.provider_id != provider_id);
+            for model in models {
+                self.entries.push(ModelChoice {
+                    provider_id: provider_id.clone(),
+                    model,
+                });
+            }
+        }
+        self.rerank();
     }
 
     pub fn handle_key(&mut self, k: KeyEvent) -> ModalOutcome {
@@ -179,22 +232,30 @@ impl ModelPicker {
             .collect();
         List::new(items).render(chunks[1], buf);
 
-        Paragraph::new(Line::from(Span::styled(
+        let mut hint = vec![Span::styled(
             "↑/↓ navigate · Enter switch · Esc cancel",
             Style::default().fg(Color::DarkGray),
-        )))
-        .render(chunks[2], buf);
+        )];
+        if self.loading {
+            hint.push(Span::styled(
+                "  · fetching live models…",
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        Paragraph::new(Line::from(hint)).render(chunks[2], buf);
     }
 }
 
 impl Default for ModelPicker {
     fn default() -> Self {
-        Self::new()
+        Self::new(&[])
     }
 }
 
-/// Curated catalog. Order roughly reflects "first try this" preferences.
-fn catalog() -> Vec<ModelChoice> {
+/// Curated catalog, filtered to the `connected` provider ids. Order roughly
+/// reflects "first try this" preferences. An empty `connected` slice means
+/// "no filter" — every provider is shown.
+fn catalog(connected: &[String]) -> Vec<ModelChoice> {
     let entries: &[(&str, &[&str])] = &[
         (
             "anthropic",
@@ -553,6 +614,9 @@ fn catalog() -> Vec<ModelChoice> {
     ];
     let mut out = Vec::new();
     for (provider, models) in entries {
+        if !connected.is_empty() && !connected.iter().any(|c| c == provider) {
+            continue;
+        }
         for m in *models {
             out.push(ModelChoice {
                 provider_id: (*provider).into(),
@@ -561,4 +625,79 @@ fn catalog() -> Vec<ModelChoice> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_connected_shows_full_catalog() {
+        // No filter -> the whole hardcoded catalog (many providers).
+        assert!(catalog(&[]).len() > 100);
+    }
+
+    #[test]
+    fn filters_to_connected_providers_only() {
+        let connected = vec!["anthropic".to_string(), "openai".to_string()];
+        let entries = catalog(&connected);
+        assert!(!entries.is_empty());
+        assert!(entries
+            .iter()
+            .all(|e| e.provider_id == "anthropic" || e.provider_id == "openai"));
+        // Both connected providers actually contribute models.
+        assert!(entries.iter().any(|e| e.provider_id == "anthropic"));
+        assert!(entries.iter().any(|e| e.provider_id == "openai"));
+    }
+
+    #[test]
+    fn unknown_connected_provider_yields_no_entries() {
+        assert!(catalog(&["not-a-real-provider".to_string()]).is_empty());
+    }
+
+    #[test]
+    fn connected_picker_queues_a_fetch_once() {
+        let mut p = ModelPicker::new(&["openrouter".to_string()]);
+        assert!(p.has_pending_task());
+        assert_eq!(
+            p.take_pending_task(),
+            Some(vec!["openrouter".to_string()])
+        );
+        // Drains exactly once.
+        assert!(!p.has_pending_task());
+        assert_eq!(p.take_pending_task(), None);
+    }
+
+    #[test]
+    fn empty_picker_queues_no_fetch() {
+        let mut p = ModelPicker::new(&[]);
+        assert!(!p.has_pending_task());
+        assert_eq!(p.take_pending_task(), None);
+    }
+
+    #[test]
+    fn set_dynamic_replaces_provider_entries() {
+        let mut p = ModelPicker::new(&["openrouter".to_string()]);
+        let static_count = p.entries.len();
+        assert!(static_count > 0);
+        p.set_dynamic(vec![(
+            "openrouter".to_string(),
+            vec!["a/model-1".to_string(), "b/model-2".to_string()],
+        )]);
+        // Static openrouter entries are gone; the two fetched ones remain.
+        assert_eq!(p.entries.len(), 2);
+        assert!(p.entries.iter().all(|e| e.provider_id == "openrouter"));
+        assert!(p.entries.iter().any(|e| e.model == "a/model-1"));
+        assert!(!p.loading);
+    }
+
+    #[test]
+    fn set_dynamic_keeps_static_entries_for_empty_fetch() {
+        let mut p = ModelPicker::new(&["openrouter".to_string()]);
+        let static_count = p.entries.len();
+        // An empty list (unsupported endpoint / failure) leaves statics intact.
+        p.set_dynamic(vec![("openrouter".to_string(), vec![])]);
+        assert_eq!(p.entries.len(), static_count);
+        assert!(!p.loading);
+    }
 }

@@ -107,6 +107,11 @@ impl McpView {
         t
     }
 
+    /// Non-draining peek: is an async task queued for the host to run?
+    pub fn has_pending_task(&self) -> bool {
+        self.pending.is_some()
+    }
+
     pub fn task_completed(&mut self, result: Result<(), String>) {
         self.in_flight = false;
         match result {

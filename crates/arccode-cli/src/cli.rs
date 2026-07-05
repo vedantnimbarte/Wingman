@@ -777,6 +777,19 @@ pub async fn run() -> Result<ExitCode> {
                 })
             });
 
+            // Live model-catalog runner — builds the provider from the
+            // current config and asks it to enumerate models. Config is
+            // reloaded each call so a provider connected mid-session works.
+            let models_runner: arccode_tui::ModelsRunner =
+                std::sync::Arc::new(move |provider_id: String| {
+                    Box::pin(async move {
+                        let cfg = load_config().map_err(|e| e.to_string())?;
+                        let provider = crate::runtime::build_provider(&cfg, &provider_id)
+                            .map_err(|e| e.to_string())?;
+                        provider.list_models().await.map_err(|e| e.to_string())
+                    })
+                });
+
             let (provider_id, model) = selection
                 .as_ref()
                 .map(|s| (s.provider_id.clone(), s.model.clone()))
@@ -792,6 +805,7 @@ pub async fn run() -> Result<ExitCode> {
                 logout_runner,
                 mcp_runner,
                 mcp_list_runner,
+                models_runner,
             };
             arccode_tui::init_theme(&cfg.tui);
             arccode_tui::run(agent, ctx).await?;
