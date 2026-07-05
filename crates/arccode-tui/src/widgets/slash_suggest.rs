@@ -49,7 +49,7 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "/usage",
-        description: "per-model token + cost breakdown",
+        description: "token + cost breakdown by provider (`clear` to reset)",
     },
     Command {
         name: "/skills",

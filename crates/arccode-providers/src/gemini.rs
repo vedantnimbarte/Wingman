@@ -225,11 +225,15 @@ impl Provider for GeminiProvider {
 
 fn parse_usage(v: &Value) -> Option<Usage> {
     let field = |name: &str| v.get(name).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    // promptTokenCount includes the cached slice — subtract to avoid double
+    // billing. thoughtsTokenCount (2.5 thinking models) is reasoning output,
+    // billed at the output rate but not folded into candidatesTokenCount.
+    let cached = field("cachedContentTokenCount");
     Some(Usage {
-        input_tokens: field("promptTokenCount"),
-        output_tokens: field("candidatesTokenCount"),
+        input_tokens: field("promptTokenCount").saturating_sub(cached),
+        output_tokens: field("candidatesTokenCount") + field("thoughtsTokenCount"),
         cache_creation_input_tokens: 0,
-        cache_read_input_tokens: field("cachedContentTokenCount"),
+        cache_read_input_tokens: cached,
     })
 }
 

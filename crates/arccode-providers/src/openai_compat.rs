@@ -634,15 +634,18 @@ impl Provider for OpenAiCompatProvider {
 
 fn parse_usage(v: &Value) -> Option<Usage> {
     let field = |name: &str| v.get(name).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    // `prompt_tokens` includes the cached slice; subtract it so cost isn't
+    // billed twice (full input rate + cache-read rate).
+    let cached = v
+        .get("prompt_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
     Some(Usage {
-        input_tokens: field("prompt_tokens"),
+        input_tokens: field("prompt_tokens").saturating_sub(cached),
         output_tokens: field("completion_tokens"),
         cache_creation_input_tokens: 0,
-        cache_read_input_tokens: v
-            .get("prompt_tokens_details")
-            .and_then(|d| d.get("cached_tokens"))
-            .and_then(|x| x.as_u64())
-            .unwrap_or(0) as u32,
+        cache_read_input_tokens: cached,
     })
 }
 
@@ -1000,5 +1003,19 @@ mod tests {
         req.system = Some("hi".into());
         let body = build_request_body(&req);
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn cached_tokens_not_double_counted() {
+        // prompt_tokens includes the cached slice; input_tokens must exclude it.
+        let u = parse_usage(&json!({
+            "prompt_tokens": 1000,
+            "completion_tokens": 50,
+            "prompt_tokens_details": { "cached_tokens": 800 },
+        }))
+        .unwrap();
+        assert_eq!(u.input_tokens, 200);
+        assert_eq!(u.cache_read_input_tokens, 800);
+        assert_eq!(u.output_tokens, 50);
     }
 }

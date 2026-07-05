@@ -256,13 +256,20 @@ impl Provider for ChatGptProvider {
 }
 
 fn parse_usage(v: &Value) -> Option<Usage> {
-    let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
-    let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let field = |name: &str| v.get(name).and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    // input_tokens includes cached_tokens; subtract so the cached slice isn't
+    // billed at the full input rate on top of the cache-read rate. Reasoning
+    // tokens are already folded into output_tokens by the Responses API.
+    let cached = v
+        .get("input_tokens_details")
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
     Some(Usage {
-        input_tokens: input,
-        output_tokens: output,
+        input_tokens: field("input_tokens").saturating_sub(cached),
+        output_tokens: field("output_tokens"),
         cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
+        cache_read_input_tokens: cached,
     })
 }
 

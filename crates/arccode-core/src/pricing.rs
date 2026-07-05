@@ -40,14 +40,15 @@ pub fn price_for(key: &str) -> Option<Price> {
     let lower = key.to_ascii_lowercase();
     let model = lower.rsplit('/').next().unwrap_or(&lower);
     Some(match model {
-        // Anthropic
-        "claude-opus-4-7" => Price {
+        // Anthropic. Opus and Sonnet tiers have held the same list price
+        // across the 4.x/5 generations; keep old ids resolving too.
+        "claude-opus-4-8" | "claude-opus-4-7" => Price {
             input_per_mtok: 15.0,
             output_per_mtok: 75.0,
             cache_write_per_mtok: 18.75,
             cache_read_per_mtok: 1.50,
         },
-        "claude-sonnet-4-6" => Price {
+        "claude-sonnet-5" | "claude-sonnet-4-6" => Price {
             input_per_mtok: 3.0,
             output_per_mtok: 15.0,
             cache_write_per_mtok: 3.75,
@@ -60,7 +61,19 @@ pub fn price_for(key: &str) -> Option<Price> {
             cache_read_per_mtok: 0.10,
         },
 
-        // OpenAI
+        // OpenAI. gpt-5 auto-caches input (no separate write fee).
+        "gpt-5" => Price {
+            input_per_mtok: 1.25,
+            output_per_mtok: 10.0,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.125,
+        },
+        "gpt-5-mini" => Price {
+            input_per_mtok: 0.25,
+            output_per_mtok: 2.0,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.025,
+        },
         "gpt-4.1" => Price {
             input_per_mtok: 2.50,
             output_per_mtok: 10.0,
@@ -116,4 +129,25 @@ pub fn price_for(key: &str) -> Option<Price> {
 
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_default_models_are_priced() {
+        // Regression: the app's live defaults must resolve, prefixed or not.
+        for m in ["claude-opus-4-8", "anthropic/claude-sonnet-5", "gpt-5"] {
+            assert!(price_for(m).is_some(), "{m} should be priced");
+        }
+    }
+
+    #[test]
+    fn cache_read_billed_below_input() {
+        let p = price_for("claude-opus-4-8").unwrap();
+        let fresh = Usage { input_tokens: 1000, ..Default::default() };
+        let cached = Usage { cache_read_input_tokens: 1000, ..Default::default() };
+        assert!(p.cost(&cached) < p.cost(&fresh));
+    }
 }
