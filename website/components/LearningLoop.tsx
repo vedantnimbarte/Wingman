@@ -5,7 +5,7 @@ import { CodeBlock } from "./CodeBlock";
 const pillars = [
   {
     title: "Memories",
-    body: "Markdown + frontmatter under ~/.arccode/memory/ and per-project. Four types — user, feedback, project, reference. The index is in every prompt; bodies load on demand.",
+    body: "Markdown + frontmatter under ~/.wingman/memory/ and per-project. Four types — user, feedback, project, reference. The index is in every prompt; bodies load on demand.",
   },
   {
     title: "Skills",
@@ -45,7 +45,7 @@ export function LearningLoop() {
 
         <Reveal delay={0.1} className="lg:sticky lg:top-28">
           <CodeBlock
-            title="~/.arccode/memory/prefers-pnpm.md"
+            title="~/.wingman/memory/prefers-pnpm.md"
             lines={[
               { text: "---", tone: "comment" },
               { text: "name: prefers-pnpm", tone: "default" },

@@ -6,7 +6,7 @@ export function Logo({ href = "/" }: { href?: string }) {
     <Link
       href={href}
       className="group inline-flex items-center gap-2.5"
-      aria-label="Arc-Code home"
+      aria-label="Wingman home"
     >
       <span className="relative grid h-8 w-8 place-items-center rounded-lg border border-[var(--border-strong)] bg-[var(--color-carbon-300)] transition-colors group-hover:border-[var(--color-french-500)]">
         <svg

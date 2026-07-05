@@ -22,12 +22,12 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://arccode.dev"),
-  title: "Arc-Code — Coming soon",
+  metadataBase: new URL("https://wingman.dev"),
+  title: "Wingman — Coming soon",
   description:
-    "Arc-Code is a Rust-native, terminal-first AI coding agent with a self-improving learning loop, 73+ providers, and an autonomous pilot mode. Launching soon.",
+    "Wingman is a Rust-native, terminal-first AI coding agent with a self-improving learning loop, 73+ providers, and an autonomous pilot mode. Launching soon.",
   keywords: [
-    "Arc-Code",
+    "Wingman",
     "AI coding agent",
     "Rust",
     "terminal",
@@ -39,15 +39,15 @@ export const metadata: Metadata = {
   ],
   authors: [{ name: "Vedant Nimbarte" }],
   openGraph: {
-    title: "Arc-Code — Coming soon",
+    title: "Wingman — Coming soon",
     description: "The self-improving, terminal-first coding agent. Launching soon.",
-    url: "https://arccode.dev",
-    siteName: "Arc-Code",
+    url: "https://wingman.dev",
+    siteName: "Wingman",
     type: "website",
   },
   twitter: {
     card: "summary_large_image",
-    title: "Arc-Code — Coming soon",
+    title: "Wingman — Coming soon",
     description: "The self-improving, terminal-first coding agent. Launching soon.",
   },
 };

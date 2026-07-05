@@ -21,13 +21,13 @@ The file-tree sidebar toggles with `Ctrl+B`: `j`/`k` move, `Tab` descends,
 
 ## User-defined commands
 
-Place markdown files at `~/.arccode/commands/<name>.md` (global) or
-`<project>/.arccode/commands/<name>.md` (project). When you type
+Place markdown files at `~/.wingman/commands/<name>.md` (global) or
+`<project>/.wingman/commands/<name>.md` (project). When you type
 `/<name> rest of line` in the TUI, the markdown body is expanded into the prompt
 with the literal token `$ARGS` replaced by `rest of line`, and submitted as if
 typed directly. Project-local commands shadow globals.
 
-Example `~/.arccode/commands/refactor.md`:
+Example `~/.wingman/commands/refactor.md`:
 
 ```markdown
 Refactor the following Rust code with these constraints:

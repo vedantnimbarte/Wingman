@@ -11,9 +11,9 @@ const steps = [
     block: {
       title: "shell",
       lines: [
-        { text: "git clone https://github.com/vedantnimbarte/Arc-Code.git", tone: "prompt" as const },
-        { text: "cd Arc-Code", tone: "prompt" as const },
-        { text: "cargo install --path crates/arccode-cli", tone: "prompt" as const },
+        { text: "git clone https://github.com/vedantnimbarte/Wingman.git", tone: "prompt" as const },
+        { text: "cd Wingman", tone: "prompt" as const },
+        { text: "cargo install --path crates/wingman-cli", tone: "prompt" as const },
       ],
     },
   },
@@ -23,7 +23,7 @@ const steps = [
     block: {
       title: "shell",
       lines: [
-        { text: "arccode config init", tone: "prompt" as const },
+        { text: "wingman config init", tone: "prompt" as const },
         { text: "export ANTHROPIC_API_KEY=sk-ant-...", tone: "prompt" as const },
       ],
     },
@@ -35,9 +35,9 @@ const steps = [
       title: "shell",
       lines: [
         { text: "# interactive TUI", tone: "comment" as const },
-        { text: "arccode", tone: "prompt" as const },
+        { text: "wingman", tone: "prompt" as const },
         { text: "# or headless one-shot", tone: "comment" as const },
-        { text: 'arccode --print "explain the agent loop"', tone: "prompt" as const },
+        { text: 'wingman --print "explain the agent loop"', tone: "prompt" as const },
       ],
     },
   },
@@ -59,7 +59,7 @@ export function InstallSection() {
               </h2>
               <p className="mt-4 text-base leading-7 text-[var(--text-muted)]">
                 Requires Rust 1.80+. The binary lands at{" "}
-                <code>target/release/arccode</code>. For local providers like
+                <code>target/release/wingman</code>. For local providers like
                 Ollama or LM Studio, no API key is needed.
               </p>
               <div className="mt-7 flex flex-wrap gap-3">

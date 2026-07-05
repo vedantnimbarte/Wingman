@@ -1,6 +1,6 @@
 export const metadata = {
   title: "Quick start",
-  description: "Scaffold a config, set an API key, and run Arc-Code.",
+  description: "Scaffold a config, set an API key, and run Wingman.",
 };
 
 # Quick start
@@ -8,10 +8,10 @@ export const metadata = {
 ## 1. Scaffold a config
 
 ```bash
-arccode config init
+wingman config init
 ```
 
-This writes a starter `~/.arccode/config.toml` populated with entries for every
+This writes a starter `~/.wingman/config.toml` populated with entries for every
 supported provider, each pointing at a `${ENV_VAR}` placeholder for the API key.
 
 ## 2. Set an API key
@@ -34,22 +34,22 @@ the `base_url` at the running instance.
 
 ```bash
 # Interactive TUI in the current project
-arccode
+wingman
 
 # Headless one-shot
-arccode --print "explain the agent loop in crates/arccode-core"
+wingman --print "explain the agent loop in crates/wingman-core"
 
 # Headless, streaming JSON events (newline-delimited)
-arccode --print "list the public types in arccode-core" --json
+wingman --print "list the public types in wingman-core" --json
 
 # Pick a model for this session only
-arccode --model anthropic/claude-opus-4-7
-arccode --model openai/gpt-4.1
-arccode --model gemini/gemini-2.5-pro
+wingman --model anthropic/claude-opus-4-7
+wingman --model openai/gpt-4.1
+wingman --model gemini/gemini-2.5-pro
 
 # Loosen the permission model for this session
-arccode --mode auto-edit
-arccode --mode yolo            # no prompts; per-session only
+wingman --mode auto-edit
+wingman --mode yolo            # no prompts; per-session only
 ```
 
 ## Inside the TUI

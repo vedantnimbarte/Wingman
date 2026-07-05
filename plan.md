@@ -1,18 +1,18 @@
 # Autonomous Mode — Implementation Plan
 
-A new `arccode autonomous "<goal>"` subcommand that plans a multi-task piece of
+A new `wingman autonomous "<goal>"` subcommand that plans a multi-task piece of
 work, spawns a manager agent that delegates to specialized worker agents
 running in isolated git worktrees, then converges their output into one branch
 and opens a PR.
 
 This builds on existing pieces:
 
-- `arccode-core` agent loop, `Provider` trait, streaming events.
-- `arccode-tools::spawn_subagent` (will be generalized).
-- `arccode worktree create / remove` (worktree management).
-- `arccode --print --json` (headless agent loop with NDJSON event stream).
-- `arccode review` (uses `gh` for PR diffs — same dependency path).
-- `arccode-session` JSONL append-only log format.
+- `wingman-core` agent loop, `Provider` trait, streaming events.
+- `wingman-tools::spawn_subagent` (will be generalized).
+- `wingman worktree create / remove` (worktree management).
+- `wingman --print --json` (headless agent loop with NDJSON event stream).
+- `wingman review` (uses `gh` for PR diffs — same dependency path).
+- `wingman-session` JSONL append-only log format.
 
 ---
 
@@ -36,8 +36,8 @@ This builds on existing pieces:
 >   the worker subprocess composes its system prompt with the role's
 >   accumulated lessons folded in.
 >
-> **432 tests** green in `arccode-autonomous` (+7); `cargo clippy` clean
-> on `arccode-autonomous` + `arccode-cli`; `cargo check -p arccode-cli`
+> **432 tests** green in `wingman-autonomous` (+7); `cargo clippy` clean
+> on `wingman-autonomous` + `wingman-cli`; `cargo check -p wingman-cli`
 > clean. **Still deferred (genuinely external):** Docker daemon, audio
 > hardware, Slack/email accounts, live provider-key validation matrix.
 
@@ -59,7 +59,7 @@ This builds on existing pieces:
 > E8 auto-merge gate (`decide_and_maybe_merge` now takes the real signal
 > instead of a hardcoded `false`); results surface in
 > `PipelineOutcome.escalation_triggers`. **425 tests** green in
-> `arccode-autonomous` (+12); `cargo clippy` and `cargo check --workspace`
+> `wingman-autonomous` (+12); `cargo clippy` and `cargo check --workspace`
 > clean. **Deferred:** `check_runtime` wiring (needs test-count + prior-run
 > telemetry), live force-push hook, and folding static triggers into the R3
 > blocked-run escalation packet.
@@ -75,7 +75,7 @@ This builds on existing pieces:
 >   the auto-merge gate when `[pilot.pr].require_ci_green` is set.
 > - **E6 (adaptive routing):** `learning::route_model` is now read back at
 >   spawn time — the live worker spawner picks the base model per role from
->   `~/.arccode/stats.jsonl` history, escalating roles whose cheap-model
+>   `~/.wingman/stats.jsonl` history, escalating roles whose cheap-model
 >   success rate is below threshold.
 > - **E6 (planner priming):** `learning::render_priming` +
 >   `planner::plan_from_goal_with_priming` inject the most similar past runs
@@ -86,10 +86,10 @@ This builds on existing pieces:
 > - **J5 + R5 (reporting/routing):** a completion/failure report
 >   (`reporting::render_run_*`) is now pushed at run end, routed by severity
 >   through `[pilot.notifications]` (`notify::route`) to the terminal or the
->   `.arccode/pilot-digest.jsonl` digest.
+>   `.wingman/pilot-digest.jsonl` digest.
 > - **E12 (`--watch`):** wired into `pilot run` for an in-terminal tail.
 >
-> **413 tests** green in `arccode-autonomous`; `cargo check --workspace`
+> **413 tests** green in `wingman-autonomous`; `cargo check --workspace`
 > and `cargo clippy` clean. What remains is the residue below: a handful of
 > deeper orchestrator changes (E7 during-run spawn, E11 hard gate,
 > rebase-as-you-go, J8 knowledge-keeper) and the external-I/O items that
@@ -100,7 +100,7 @@ This builds on existing pieces:
 
 > **Session 2 update (2026-05-29):** landed the decision/logic cores for
 > **27** more plan items as self-contained, pure-function modules in
-> `arccode-autonomous` (the same pattern as `approval.rs`/`escalation.rs`),
+> `wingman-autonomous` (the same pattern as `approval.rs`/`escalation.rs`),
 > each with thorough unit tests. New modules: `escalation` (R1+J15, wired
 > in), `feedback` (R2), `learning` (E6), `handoff` (R3), `review` (E7),
 > `security` (R6), `severity` (shared scale), `scheduler` (E4), `critic`
@@ -110,7 +110,7 @@ This builds on existing pieces:
 > J6 added `Acceptance::Run`/`Assert` variants; plus `daemon` (J2),
 > `intake` (J3), `interject` (J4), `sandbox` (J11), `watcher` (J13),
 > `voice` (J14). Added `[pilot.security]` + `[pilot.notifications]` config
-> sections. **372 tests** green in `arccode-autonomous` (+10 config);
+> sections. **372 tests** green in `wingman-autonomous` (+10 config);
 > clippy clean; `cargo check --workspace` clean. **Ten items are wired
 > into the live pipeline/orchestrator/CLI** (not just logic): **R1**
 > (approval calls `final_approval_tier`), **J9** (estimate banner before
@@ -133,7 +133,7 @@ This builds on existing pieces:
 > + `run_in_container` (J11: invoke `docker run`), `voice::whisper_argv` +
 > `transcribe_file` (J14: run whisper.cpp on a clip).
 >
-> The daemon poll loop is now a real `arccode pilot daemon` CLI command
+> The daemon poll loop is now a real `wingman pilot daemon` CLI command
 > (`commands::pilot::daemon`), and the J3 inbound HTTP receiver
 > (`webhook.rs`) binds + serves a real socket (loopback-tested).
 >
@@ -160,12 +160,12 @@ This builds on existing pieces:
 
 The first build session shipped 12 commits to `main` covering all of M1
 plus four M2 enhancements. The product is **functionally usable
-end-to-end**: `arccode pilot run "<goal>"` plans, gates approval per
+end-to-end**: `wingman pilot run "<goal>"` plans, gates approval per
 tier, spawns workers in real git worktrees with cross-platform
 tree-kill supervision, gates Review on executable acceptance, retries
 up to 3 rungs on failure, squash-merges into an integration branch,
-and opens a PR. **101 tests** green (91 in `arccode-autonomous`, 10
-in `arccode-config`); workspace `cargo check` clean on Windows MSVC.
+and opens a PR. **101 tests** green (91 in `wingman-autonomous`, 10
+in `wingman-config`); workspace `cargo check` clean on Windows MSVC.
 
 Use the checklist below to pick up where the last session stopped.
 Items are tagged with the git commit that landed them.
@@ -175,12 +175,12 @@ Items are tagged with the git commit that landed them.
 | Phase | Status | Commit | Notes |
 | ----- | :----: | ------ | ----- |
 | Phase 1 — Scaffolding & data model                | ✅ | `33e4ab9` | RunStore + Event schema + model types; tested replay across process restart |
-| Phase 2 — CLI surface & planner                   | ✅ | `33e4ab9` | `arccode pilot run/status/watch/resume`; default role markdown loader |
+| Phase 2 — CLI surface & planner                   | ✅ | `33e4ab9` | `wingman pilot run/status/watch/resume`; default role markdown loader |
 | Phase 3 — Worker subprocess protocol              | ✅ | `1466e63` | Cross-platform Supervisor (Unix `setsid`+`kill -pgid`; Windows Job Objects); NDJSON parser |
 | Phase 4 — Manager agent + scheduling              | ✅ | `2b18bbe` | In-process AgentLoop + Orchestrator actor + 6 manager-only tools |
-| Phase 5 — Worktree integration & merge            | ✅ | `d7143f9` | `git worktree add`, per-task branches under `arccode/auto-tasks/`, squash-merge into `arccode/auto/<run-id>`, conflict halt |
+| Phase 5 — Worktree integration & merge            | ✅ | `d7143f9` | `git worktree add`, per-task branches under `wingman/auto-tasks/`, squash-merge into `wingman/auto/<run-id>`, conflict halt |
 | Phase 6 — PR creation                             | ✅ | `86a659d` | `gh pr create` with `git push` + compare-URL fallback |
-| Phase 7 — TUI dashboard                           | ✅ | `3a15c71` | Renderer + `pilot status`/`pilot watch` CLIs via mtime polling. **Deferred:** deep arccode-tui integration (Ctrl+A, slash commands, in-app top-bar) — see M4 polish |
+| Phase 7 — TUI dashboard                           | ✅ | `3a15c71` | Renderer + `pilot status`/`pilot watch` CLIs via mtime polling. **Deferred:** deep wingman-tui integration (Ctrl+A, slash commands, in-app top-bar) — see M4 polish |
 | Phase 8 — Cross-provider validation + polish      | ✅ | `ade3984`, `5584db6` | Cost-cap (assign-time + budget watchdog), provider gate, retry watchdog, README provider-support table, end-to-end pipeline wired, e2e stub-provider test. **Deferred:** live 9-provider validation (needs user API keys) |
 
 ### M2 (copilot tier) — E1/E2/E3/E5/E12/E13 shipped; E4/E6/E7/E8/E11 wired (sessions 2–3); E9/E10 remain (logic-complete)
@@ -192,13 +192,13 @@ Items are tagged with the git commit that landed them.
 | E3 — Executable acceptance + self-verify| ✅ | `0bfd84d` | `run_acceptance` builtin tool + orchestrator gates Review→Done on green results |
 | E4 — Conflict avoidance + rebase-as-you-go + auto merge-fixer | ✅ **wired** | `scheduler.rs` | Logic + **live**: `orchestrator::handle_assign` rejects assigning a task whose `writes` overlap an in-progress task (`OrchestratorError::WriteConflict`), serialising them. **Deferred:** rebase-as-you-go + merge-fixer auto-spawn |
 | E5 — 4-rung retry ladder + per-turn check-gate | ✅ partial | `2fc9e63` | Rungs 1 (context), 2 (escalate model), 3 (splitter), 4 (Blocked) all implemented. **Deferred:** E5.5 per-turn `cargo check` gate (needs E11 checkpoint rollback to be useful) |
-| E6 — Cross-run learning + adaptive routing | ✅ **wired** | `learning.rs` | Logic + **live**: `pipeline.rs` appends a `StatRecord` per task to `~/.arccode/stats.jsonl` on every run (`record_run_stats`); **session 3** reads them back — the live worker spawner routes the base model per role via `learning::route_model`, and `pilot run` primes the planner with similar past runs via `learning::render_priming` + `planner::plan_from_goal_with_priming`. **Session 5** wired **per-role lessons file load**: `learning::load_lessons` + `render_lessons_appendix` + `role::load_role_prompt_with_lessons`, with the worker subprocess composing its prompt via the lessons-aware loader. **Deferred:** true first-try detection (still proxied by Done-status) |
+| E6 — Cross-run learning + adaptive routing | ✅ **wired** | `learning.rs` | Logic + **live**: `pipeline.rs` appends a `StatRecord` per task to `~/.wingman/stats.jsonl` on every run (`record_run_stats`); **session 3** reads them back — the live worker spawner routes the base model per role via `learning::route_model`, and `pilot run` primes the planner with similar past runs via `learning::render_priming` + `planner::plan_from_goal_with_priming`. **Session 5** wired **per-role lessons file load**: `learning::load_lessons` + `render_lessons_appendix` + `role::load_role_prompt_with_lessons`, with the worker subprocess composing its prompt via the lessons-aware loader. **Deferred:** true first-try detection (still proxied by Done-status) |
 | E7 — Per-task reviewer                  | ✅ **wired** | `review.rs` | Logic + **live**: `pipeline::run_reviewer_pass` runs a reviewer agent per Done task (gated by the `per_task_reviewer` capability, on for copilot+); a Rework verdict feeds the E8 gate. **Deferred:** spawn it *during* the run on each Review transition (currently post-run) |
-| E8 — PR-side automation                 | ✅ **wired** | `automerge.rs` | Logic + **live**: `pipeline.rs` calls `decide_auto_merge` after PR open and issues `gh pr merge --squash --auto` when it passes (`decide_and_maybe_merge`); **session 3** plumbs real **CI status** via `gh pr checks --json state` (`query_ci_status`) into the gate. Per-task-review + critic signals already feed it. **Deferred:** `arccode review` inline PR comments |
+| E8 — PR-side automation                 | ✅ **wired** | `automerge.rs` | Logic + **live**: `pipeline.rs` calls `decide_auto_merge` after PR open and issues `gh pr merge --squash --auto` when it passes (`decide_and_maybe_merge`); **session 3** plumbs real **CI status** via `gh pr checks --json state` (`query_ci_status`) into the gate. Per-task-review + critic signals already feed it. **Deferred:** `wingman review` inline PR comments |
 | E9 — Speculative dispatch + adaptive concurrency | ✅ partial | `concurrency.rs`: `recommended_concurrency` scales the cap from rate-limit/CPU/burn signals. **Deferred:** speculative pre-spawn of the next task |
 | E10 — Manager↔worker IPC                | ✅ logic | `ipc.rs`: `ManagerCommand` (pivot/cancel/clarify) + `WorkerMessage` (question/ack/blocked) NDJSON encode/parse. **Deferred:** wiring the stdin pipe in `child_process.rs` (old `message_agent` actor stub from `2b18bbe` remains) |
 | E11 — Mandatory checkpoint hygiene      | ✅ **wired** | `checkpoint.rs` | Logic + **live**: `pipeline.rs` reads the event log and reports per-task hygiene violations in `PipelineOutcome.checkpoint_violations` (advisory). **Deferred:** make it a hard Review gate + worker-prompt mandate |
-| E12 — `--watch` mode                    | ✅ **wired** | `3a15c71` | `arccode pilot watch <id>` ships; **session 3** wired `--watch` into `pilot run` (`run_with_watch`) for an in-terminal compact tail of the in-process run via a `select!` loop |
+| E12 — `--watch` mode                    | ✅ **wired** | `3a15c71` | `wingman pilot watch <id>` ships; **session 3** wired `--watch` into `pilot run` (`run_with_watch`) for an in-terminal compact tail of the in-process run via a `select!` loop |
 | E13 — Role lineup                       | ✅ | `33e4ab9` | All 6 roles shipped with default prompts (developer/designer/tester/reviewer/refactorer/merge-fixer) |
 
 ### M3 (autopilot tier) — all J-items logic-complete (session 2); live I/O + orchestrator wiring deferred
@@ -206,10 +206,10 @@ Items are tagged with the git commit that landed them.
 | Item | Status | Notes |
 | ---- | :----: | ----- |
 | J1 — Goal refinement + challenge        | ✅ **wired** | `refine.rs`: parse clarify/challenge/restatement/alternatives; `decide` → Proceed / NotifyWindow / AskUser by confidence + `challenge_threshold`. **Live (session 3):** `pilot run` runs the refinement agent before E2 (gated by the `goal_refinement` capability, autopilot default); `refine_goal`/`ask_user_refinement` render the negotiation and feed the (possibly restated) goal into the run |
-| J2 — Daemon mode                        | ✅ **wired** | `daemon.rs` logic + `run_cycle`/`run_n_cycles` + **live `arccode pilot daemon` CLI command** (real poll loop: `run_cycle` on the configured interval, logs decisions, queues accepted candidates to `.arccode/daemon-queue.jsonl`; `--cycles N` for one-shot). Functions fully given a GitHub token. **Deferred:** auto-dispatching accepted goals into nested runs |
+| J2 — Daemon mode                        | ✅ **wired** | `daemon.rs` logic + `run_cycle`/`run_n_cycles` + **live `wingman pilot daemon` CLI command** (real poll loop: `run_cycle` on the configured interval, logs decisions, queues accepted candidates to `.wingman/daemon-queue.jsonl`; `--cycles N` for one-shot). Functions fully given a GitHub token. **Deferred:** auto-dispatching accepted goals into nested runs |
 | J3 — Multi-channel intake               | ✅ **wired** | `intake.rs` normalization + `scan_inbox` (file-drop, fs-tested) + **`webhook.rs` inbound HTTP receiver** (dependency-free `TcpListener`; `handle_connection`/`serve` loopback-tested) + outbound `notify::send_webhook`. **Deferred:** Slack/email *transports* (thin transforms over `normalize`, need live accounts) |
 | J4 — Mid-run interjection               | ✅ logic | `interject.rs`: parse `tell`/`ask` → `Dispatch` over E10 `ipc`. **Deferred:** CLI subcommands + live channel delivery |
-| J5 — Proactive status reporting         | ✅ **wired** | `reporting.rs`: per-run start/mid(>50% est.)/complete/failure + daily standup + weekly summary renderers. **Live (session 3):** `pilot run` pushes a completion/failure report at run end, routed by severity through `[pilot.notifications]` (`report_run_outcome` → `notify::route`) to the terminal or the `.arccode/pilot-digest.jsonl` digest. **Deferred:** daemon-scheduled standup/weekly cron + Slack/email transports |
+| J5 — Proactive status reporting         | ✅ **wired** | `reporting.rs`: per-run start/mid(>50% est.)/complete/failure + daily standup + weekly summary renderers. **Live (session 3):** `pilot run` pushes a completion/failure report at run end, routed by severity through `[pilot.notifications]` (`report_run_outcome` → `notify::route`) to the terminal or the `.wingman/pilot-digest.jsonl` digest. **Deferred:** daemon-scheduled standup/weekly cron + Slack/email transports |
 | J6 — Real verification (run/screenshot/http) | ✅ partial | Added `Acceptance::Run` + `Acceptance::Assert` (screenshot text-contains) variants; sync runner executes both. **Deferred:** real browser/screenshot capture + async `http` runner |
 | J7 — Tool synthesis                     | ✅ logic | `toolsynth.rs`: `ToolProposal` parse + `validate` (name/schema/dup) + `accept_batch` dedupe. **Deferred:** `tool-smith` role that generates impl+test + registration |
 | J8 — Project knowledge graph            | ✅ logic | `knowledge.rs`: `Hotspots` (edit/conflict heat → scheduler bias), `decisions.jsonl` append/load, `render_architecture`. **Deferred:** knowledge-keeper agent that regenerates these post-merge |
@@ -229,7 +229,7 @@ Items are tagged with the git commit that landed them.
 | R2 — Post-merge feedback loop         | M2 | ✅ logic + poller | `feedback.rs` + `Event::PrOutcome`: gh-state parse, `Revert "…"` detection, `WeightedStats`. `poll_pr_outcome` + `poll_and_record` (appends the `pr.outcome` event, mock-runner tested). **Deferred:** only the scheduling cadence that calls it + an optional webhook receiver |
 | R3 — Handoff packet                   | M2 | ✅ **wired** | `handoff.rs` logic + **live**: `pipeline.rs` writes `escalation.md` on a blocked run and surfaces its path; `PipelineOutcome.escalation_packet` + CLI prints it. **Session 5** populates the real J15 **triggers** in the packet — the blocked-run path runs `detect_escalation_triggers` and threads them into the `HandoffPacket` so the page names the reason. **Deferred:** retry-ladder `attempts` (needs E5 ladder telemetry) |
 | R4 — Eval / regression harness        | M2 | ✅ logic | `eval.rs`: `summarize` + `compare` (per-axis ±threshold regression detection, direction-aware) + markdown dashboard. **Deferred:** the canned-goal runner, LLM-judge, and CI gate wiring |
-| R5 — Notification routing & digesting | M3 | ✅ **wired** | `notify.rs`: `route` per severity tier → Immediate/Digest/Suppress; `Digest` accumulator + flush. Added `[pilot.notifications]`. **Live (session 3):** `pilot run`'s end-of-run report is routed through `notify::route` (terminal delivery + `.arccode/pilot-digest.jsonl` queue). **Deferred:** real Slack/email channel senders + digest cron |
+| R5 — Notification routing & digesting | M3 | ✅ **wired** | `notify.rs`: `route` per severity tier → Immediate/Digest/Suppress; `Digest` accumulator + flush. Added `[pilot.notifications]`. **Live (session 3):** `pilot run`'s end-of-run report is routed through `notify::route` (terminal delivery + `.wingman/pilot-digest.jsonl` queue). **Deferred:** real Slack/email channel senders + digest cron |
 | R6 — Security pass in PR pipeline     | M2 | ✅ **wired** | `security.rs` logic + **live**: `pipeline.rs` runs the built-in secrets scan over `git diff <base>..<integration>` (`run_security_pass`) and feeds `security_blocks` into the E8 auto-merge gate. Added `[pilot.security]`. **Deferred:** external `gitleaks`/`cargo audit` subprocess + license scan from lockfile + PR comment |
 
 ### Cumulative metrics
@@ -237,10 +237,10 @@ Items are tagged with the git commit that landed them.
 - Commits ahead of `main`: 12 (33e4ab9, 1466e63, 2b18bbe, d7143f9,
   86a659d, 3a15c71, ade3984, 5584db6, 1a686fd, 0bfd84d, aa7b335,
   2fc9e63)
-- Tests: 91 in `arccode-autonomous` + 10 in `arccode-config` = 101
+- Tests: 91 in `wingman-autonomous` + 10 in `wingman-config` = 101
 - Workspace `cargo check`: clean
-- Clippy in `arccode-autonomous`: zero warnings
-- Lines added to `crates/arccode-autonomous/`: ~10,000
+- Clippy in `wingman-autonomous`: zero warnings
+- Lines added to `crates/wingman-autonomous/`: ~10,000
 
 ### Next-session priorities (suggested order)
 
@@ -282,26 +282,26 @@ Items are tagged with the git commit that landed them.
 
 | Decision           | Choice                                                                 |
 | ------------------ | ---------------------------------------------------------------------- |
-| Entry point        | New CLI subcommand: `arccode autonomous "<goal>"`                      |
+| Entry point        | New CLI subcommand: `wingman autonomous "<goal>"`                      |
 | Approval gates     | Plan approval + PR review only; otherwise hands-off                    |
-| Worker execution   | Subprocess per agent (`arccode --print --json` child processes)        |
+| Worker execution   | Subprocess per agent (`wingman --print --json` child processes)        |
 | Model tiering      | Manager + reviewers on `default_model`; workers on `router.fast_model` |
 | Dev branch         | `feature/autonomous-mode` off `main`; per-phase PRs into it; final     |
 |                    | PR from `feature/autonomous-mode` into `main`                          |
 | Platforms          | Windows **and** Unix in v1 — cross-platform process control from day 1 |
 | Providers          | All nine supported providers — Phase 8 smoke-tests each tool-call path |
 | Session logs       | Each manager + worker writes its own JSONL under                       |
-|                    | `<project>/.arccode/sessions/`; `tasks.jsonl` references by session id |
+|                    | `<project>/.wingman/sessions/`; `tasks.jsonl` references by session id |
 
 ## Opinionated defaults (flip during review if wrong)
 
 | Area                  | Default                                                                  |
 | --------------------- | ------------------------------------------------------------------------ |
-| New crate             | `arccode-autonomous` (parallel to `arccode-learn`, `arccode-mcp`)        |
-| Run directory         | `<project>/.arccode/autonomous/<run-id>/`                                |
+| New crate             | `wingman-autonomous` (parallel to `wingman-learn`, `wingman-mcp`)        |
+| Run directory         | `<project>/.wingman/autonomous/<run-id>/`                                |
 | Task store            | `tasks.jsonl` (append-only) + `state.json` (latest snapshot)             |
-| Worker worktrees      | `.arccode/worktrees/auto-<run-id>-<task-slug>/`                          |
-| Integration branch    | `arccode/auto/<run-id>` — workers merge here, PR opens from it           |
+| Worker worktrees      | `.wingman/worktrees/auto-<run-id>-<task-slug>/`                          |
+| Integration branch    | `wingman/auto/<run-id>` — workers merge here, PR opens from it           |
 | Base commit           | `HEAD` at run start; all worktrees branch from this commit               |
 | Concurrency cap       | `[autonomous] max_concurrent_agents = 4`                                 |
 | Cost cap              | `[autonomous] max_usd = 10.0` — abort run if exceeded                    |
@@ -309,7 +309,7 @@ Items are tagged with the git commit that landed them.
 | Conflict strategy     | Manager linearizes merges; first conflict → task → `review`, run halts   |
 | Failure policy        | One retry with a fresh worker; second failure → `review` + user prompt   |
 | Agent roles shipped   | `developer`, `designer`, `tester`, `reviewer` (manager is implicit)      |
-| Role definition       | Markdown files at `~/.arccode/agents/<role>.md` (with system prompt)     |
+| Role definition       | Markdown files at `~/.wingman/agents/<role>.md` (with system prompt)     |
 | PR creation           | `gh pr create` — falls back to "push + print URL" if `gh` missing        |
 
 ---
@@ -329,21 +329,21 @@ Architecture, Phases 1–13, E1–E13, J1–J15) remains the source of truth
 for *how* each capability is built. This section defines *how they
 compose into one product.*
 
-### Naming & CLI surface (replaces `arccode autonomous`)
+### Naming & CLI surface (replaces `wingman autonomous`)
 
-Subcommand: `pilot`. The legacy `arccode autonomous` becomes a hidden
-alias that prints a deprecation notice and forwards to `arccode pilot`,
+Subcommand: `pilot`. The legacy `wingman autonomous` becomes a hidden
+alias that prints a deprecation notice and forwards to `wingman pilot`,
 removed at M4.
 
 ```text
-arccode pilot <GOAL> [OPTIONS]              # run a goal end-to-end
-arccode pilot daemon                        # start the always-on watcher (autopilot)
-arccode pilot status [<run-id>]             # active runs, history, daemon queue
-arccode pilot tell <run-id> "<message>"     # inject a message into a live run
-arccode pilot ask  <run-id> "<question>"    # block on an answer from a run
-arccode pilot abort <run-id>                # graceful stop, leave worktrees
-arccode pilot resume <run-id>               # restart an interrupted run
-arccode pilot queue list|drop|prioritize    # manage daemon's pending goals
+wingman pilot <GOAL> [OPTIONS]              # run a goal end-to-end
+wingman pilot daemon                        # start the always-on watcher (autopilot)
+wingman pilot status [<run-id>]             # active runs, history, daemon queue
+wingman pilot tell <run-id> "<message>"     # inject a message into a live run
+wingman pilot ask  <run-id> "<question>"    # block on an answer from a run
+wingman pilot abort <run-id>                # graceful stop, leave worktrees
+wingman pilot resume <run-id>               # restart an interrupted run
+wingman pilot queue list|drop|prioritize    # manage daemon's pending goals
 
 OPTIONS
   --tier <assist|copilot|autopilot>   # capability tier (default: copilot)
@@ -469,7 +469,7 @@ require_ci_green         = true
 
 [pilot.sandbox]
 default_tier             = "host"                  # host | container | vm
-container_image          = "arccode/sandbox:latest"
+container_image          = "wingman/sandbox:latest"
 vm_provider              = "firecracker"           # firecracker | qemu | cloud
 
 [pilot.daemon]                                        # autopilot only
@@ -478,7 +478,7 @@ poll_interval_secs       = 300
 auto_threshold           = 0.75
 max_concurrent_runs      = 2
 trusted_authors          = ["vedantnimbarte"]
-trusted_labels           = ["arccode:auto"]
+trusted_labels           = ["wingman:auto"]
 sources                  = ["github_issues", "ci_failures",
                             "dependabot", "todos", "coverage_gaps"]
 
@@ -487,9 +487,9 @@ channels                 = ["cli", "github_issue", "github_comment",
                             "slack", "email", "webhook", "file_drop"]
 [pilot.intake.slack]
 webhook_url              = "https://hooks.slack.com/..."
-trigger_pattern          = "@arccode"
+trigger_pattern          = "@wingman"
 [pilot.intake.email]
-address                  = "arccode+arc-code@example.com"
+address                  = "wingman+arc-code@example.com"
 [pilot.intake.voice]
 enabled                  = false
 
@@ -499,8 +499,8 @@ challenge_threshold      = "medium"
 suggest_alternatives     = true
 
 [pilot.skills]
-packs                    = ["arccode-official/rust-developer@1.4",
-                            "arccode-official/security-reviewer@2.0"]
+packs                    = ["wingman-official/rust-developer@1.4",
+                            "wingman-official/security-reviewer@2.0"]
 
 [pilot.capabilities]                                  # per-capability override
 # critic         = true     # turn on a capability that's off in the tier
@@ -584,7 +584,7 @@ Default tier at each milestone:
 
 ### Migration & deprecation
 
-- `arccode autonomous <GOAL>` → hidden alias for `arccode pilot <GOAL>`
+- `wingman autonomous <GOAL>` → hidden alias for `wingman pilot <GOAL>`
   from M1 through M3, prints a one-line deprecation notice. Removed at M4.
 - `[autonomous]` config section is auto-migrated into `[pilot]` on first
   read with a warning; values map 1:1 (e.g.
@@ -630,7 +630,7 @@ Default tier at each milestone:
 ### CLI
 
 ```text
-arccode autonomous <GOAL> [OPTIONS]
+wingman autonomous <GOAL> [OPTIONS]
 
   <GOAL>                         The high-level objective in natural language.
 
@@ -646,13 +646,13 @@ arccode autonomous <GOAL> [OPTIONS]
 ### Run lifecycle, from the user's perspective
 
 ```
-$ arccode autonomous "add dark-mode toggle to the TUI"
+$ wingman autonomous "add dark-mode toggle to the TUI"
 
 [autonomous] planning…
 [autonomous] proposed 7 tasks (run id: 2026-05-27-1430-a3f).
   1. [developer] Add `theme.mode` field to tui config (deps: —)
   2. [developer] Wire toggle key (`Ctrl+T`) into composer
-  3. [designer]  Define dark palette in arccode-tui::theme
+  3. [designer]  Define dark palette in wingman-tui::theme
   …
   7. [reviewer]  Final review + changelog entry
 
@@ -664,13 +664,13 @@ Approve plan? [y / e (edit) / n] y
 [autonomous] task 1 done (developer, 2m18s, $0.07)
 [autonomous] task 3 done (designer,  3m02s, $0.11)
 …
-[autonomous] all tasks done. merging worktrees into arccode/auto/<run-id>…
-[autonomous] PR opened: https://github.com/vedantnimbarte/Arc-Code/pull/42
+[autonomous] all tasks done. merging worktrees into wingman/auto/<run-id>…
+[autonomous] PR opened: https://github.com/vedantnimbarte/Wingman/pull/42
 ```
 
 ### TUI dashboard
 
-When the user runs `arccode` (no subcommand) and an autonomous run is active in
+When the user runs `wingman` (no subcommand) and an autonomous run is active in
 the cwd, a new top-bar entry **`Autonomous: <run-id> · 3/7 done`** is shown
 and `Ctrl+A` opens a dedicated split-pane view:
 
@@ -682,7 +682,7 @@ and `Ctrl+A` opens a dedicated split-pane view:
 │ …                           │                               │
 ├─ Live log ──────────────────┴───────────────────────────────┤
 │ 14:32:11  task#5 developer: edit_file crates/…/composer.rs  │
-│ 14:32:14  task#6 tester:    run_shell cargo test -p arccode │
+│ 14:32:14  task#6 tester:    run_shell cargo test -p wingman │
 │ …                                                           │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -700,15 +700,15 @@ Three new slash commands:
 ### Session logs (per-agent JSONL, reused infra)
 
 Each manager and worker subprocess is run with session logging enabled, so
-`<project>/.arccode/sessions/<session-id>.jsonl` is written for each agent
+`<project>/.wingman/sessions/<session-id>.jsonl` is written for each agent
 exactly as a normal headless run would. The autonomous layer:
 
 - Assigns each agent a session id at spawn time and passes it to the child
-  via env var (`ARCCODE_SESSION_ID`).
+  via env var (`WINGMAN_SESSION_ID`).
 - Records `agent.session` events in `tasks.jsonl` that point at the
   session id — so `state.json` always knows where to find the full
   turn-by-turn for any agent.
-- This means `arccode session fork <id>` works on an autonomous worker's
+- This means `wingman session fork <id>` works on an autonomous worker's
   session, and `recall_session` will surface autonomous-mode work in
   future runs through the existing learning loop.
 
@@ -725,7 +725,7 @@ Each line is one event. State is reconstructed by replaying events on load.
 {"t":"…","ev":"task.status","id":"t1","status":"review","outcome":{"summary":"…","commits":["abc123"],"files_changed":4}}
 {"t":"…","ev":"task.status","id":"t1","status":"done"}
 {"t":"…","ev":"agent.usd","agent":"agent-7f3a","model":"…","input_tokens":1234,"output_tokens":456,"usd":0.07}
-{"t":"…","ev":"run.merge.start","branch":"arccode/auto/<run-id>"}
+{"t":"…","ev":"run.merge.start","branch":"wingman/auto/<run-id>"}
 {"t":"…","ev":"run.merge.task","id":"t1","strategy":"squash","commit":"def456"}
 {"t":"…","ev":"run.pr","url":"https://github.com/…/pull/42"}
 {"t":"…","ev":"run.done"}
@@ -743,7 +743,7 @@ awaiting integration) → `done` (merged into integration branch) | `failed` |
   "run_id": "2026-05-27-1430-a3f",
   "goal": "add dark-mode toggle to the TUI",
   "base_commit": "346077d…",
-  "integration_branch": "arccode/auto/2026-05-27-1430-a3f",
+  "integration_branch": "wingman/auto/2026-05-27-1430-a3f",
   "status": "running",
   "tasks": [
     {"id":"t1","role":"developer","title":"…","status":"done","deps":[],"agent":"agent-7f3a","worktree":"…","usd":0.07,"commits":["abc123"]},
@@ -763,13 +763,13 @@ awaiting integration) → `done` (merged into integration branch) | `failed` |
 
 ```
                        ┌───────────────────────┐
-   arccode autonomous  │ arccode-cli           │  parses subcommand,
+   wingman autonomous  │ wingman-cli           │  parses subcommand,
    "add dark-mode…"    │  ::autonomous_main()  │  loads config, picks run-id
                        └──────────┬────────────┘
                                   │
                                   ▼
                        ┌───────────────────────┐
-                       │ arccode-autonomous    │
+                       │ wingman-autonomous    │
                        │  ::Orchestrator       │  plan → approve → spawn manager
                        │                       │  → schedule workers → merge → PR
                        └──────────┬────────────┘
@@ -779,7 +779,7 @@ awaiting integration) → `done` (merged into integration branch) | `failed` |
    ┌─────────────────┐                ┌─────────────────────┐
    │ manager agent   │                │ worker agent  ×N    │
    │ (in-process     │                │ (child process:     │
-   │  agent loop)    │ ── tool ──►    │  arccode --print    │
+   │  agent loop)    │ ── tool ──►    │  wingman --print    │
    │                 │  assign_task   │  --json --mode      │
    │                 │  finalize_task │  auto-edit          │
    │                 │  add_task      │  --worktree <path>  │
@@ -801,10 +801,10 @@ workers write them directly. Instead, every state-mutating tool call (manager
 tools, worker `task_complete` tool) is routed through an in-process
 `RunStore` actor that serializes writes and broadcasts updates to the TUI.
 
-### New crate: `arccode-autonomous`
+### New crate: `wingman-autonomous`
 
 ```
-crates/arccode-autonomous/
+crates/wingman-autonomous/
 ├── Cargo.toml
 └── src/
     ├── lib.rs              # public Orchestrator API
@@ -816,7 +816,7 @@ crates/arccode-autonomous/
     ├── model.rs            # Task, Agent, Run, Status, Role
     ├── worktree.rs         # create / cleanup / merge helpers
     ├── pr.rs               # gh integration (with fallback)
-    ├── role.rs             # AgentRole loader (~/.arccode/agents/)
+    ├── role.rs             # AgentRole loader (~/.wingman/agents/)
     └── tools/              # manager-only tools
         ├── mod.rs
         ├── add_task.rs
@@ -831,15 +831,15 @@ crates/arccode-autonomous/
 
 | File / area                                       | Change                                                                 |
 | ------------------------------------------------- | ---------------------------------------------------------------------- |
-| `crates/arccode-cli/src/main.rs`                  | Add `Autonomous { goal, … }` subcommand variant + dispatch.            |
-| `crates/arccode-cli/src/args.rs` (or equiv.)      | Argument struct for the subcommand.                                    |
-| `crates/arccode-cli/src/print_mode.rs` (or equiv.) | Honor new `--worker-mode` + `--task-file` flags when spawned as a worker. |
-| `crates/arccode-config/src/lib.rs`                | Add `[autonomous]` config section + serde struct.                      |
-| `crates/arccode-core/src/agent.rs` (or equiv.)    | Plumb a `WorkerHooks` so child processes emit `task.tool` events.      |
-| `crates/arccode-tools/src/spawn_subagent.rs`      | Generalize: lift depth-1 cap behind an explicit `allow_nested` flag.   |
-| `crates/arccode-tui/src/app.rs`                   | Detect active run; add `Ctrl+A` dashboard, `/autonomous *` commands.   |
-| `crates/arccode-tui/src/views/autonomous.rs`      | New file: dashboard split-pane view.                                   |
-| `Cargo.toml` (workspace root)                     | Add `arccode-autonomous` to `members`.                                 |
+| `crates/wingman-cli/src/main.rs`                  | Add `Autonomous { goal, … }` subcommand variant + dispatch.            |
+| `crates/wingman-cli/src/args.rs` (or equiv.)      | Argument struct for the subcommand.                                    |
+| `crates/wingman-cli/src/print_mode.rs` (or equiv.) | Honor new `--worker-mode` + `--task-file` flags when spawned as a worker. |
+| `crates/wingman-config/src/lib.rs`                | Add `[autonomous]` config section + serde struct.                      |
+| `crates/wingman-core/src/agent.rs` (or equiv.)    | Plumb a `WorkerHooks` so child processes emit `task.tool` events.      |
+| `crates/wingman-tools/src/spawn_subagent.rs`      | Generalize: lift depth-1 cap behind an explicit `allow_nested` flag.   |
+| `crates/wingman-tui/src/app.rs`                   | Detect active run; add `Ctrl+A` dashboard, `/autonomous *` commands.   |
+| `crates/wingman-tui/src/views/autonomous.rs`      | New file: dashboard split-pane view.                                   |
+| `Cargo.toml` (workspace root)                     | Add `wingman-autonomous` to `members`.                                 |
 | `README.md`                                       | New section under Highlights + Roadmap entry.                          |
 
 ---
@@ -848,11 +848,11 @@ crates/arccode-autonomous/
 
 ### Phase 1 — Scaffolding & data model
 
-1. Create `arccode-autonomous` crate, add to workspace.
+1. Create `wingman-autonomous` crate, add to workspace.
 2. Define `Task`, `Agent`, `Run`, `Status`, `Role`, `Event` types in `model.rs`.
 3. Implement `RunStore` with append-only JSONL writer + atomic `state.json`
    snapshotter + replay-on-load. Unit-test event replay correctness.
-4. Add `[autonomous]` to `arccode-config` (limits, role overrides, branch
+4. Add `[autonomous]` to `wingman-config` (limits, role overrides, branch
    prefix, gh path).
 
 **Done when:** can construct a `RunStore`, append events, kill the process,
@@ -860,22 +860,22 @@ reopen, and observe the same state.
 
 ### Phase 2 — CLI surface & planner
 
-1. Wire `arccode autonomous <GOAL>` in `arccode-cli`.
+1. Wire `wingman autonomous <GOAL>` in `wingman-cli`.
 2. Implement `planner.rs`: single call to manager model with a system prompt
-   templated from `~/.arccode/agents/manager-planner.md` (default shipped
+   templated from `~/.wingman/agents/manager-planner.md` (default shipped
    with the crate, user-overridable). Output: structured JSON list of tasks
    with `role`, `title`, `goal`, `acceptance`, `deps`.
 3. Render the plan in the terminal, prompt `y / e / n`. `e` opens `$EDITOR`
    on the task list; user edits, we re-parse.
 4. On approval, persist all tasks as `task.create` events.
 
-**Done when:** `arccode autonomous --plan-only "<goal>"` writes a valid
+**Done when:** `wingman autonomous --plan-only "<goal>"` writes a valid
 `tasks.jsonl` and exits.
 
 ### Phase 3 — Worker subprocess protocol
 
-1. Add a hidden `--worker-mode` flag to `arccode-cli` that:
-   - Loads the role's system prompt from `~/.arccode/agents/<role>.md`.
+1. Add a hidden `--worker-mode` flag to `wingman-cli` that:
+   - Loads the role's system prompt from `~/.wingman/agents/<role>.md`.
    - Reads task spec from `--task-file <path>` (JSON).
    - Sets `--mode auto-edit`, cwd = worktree path, model = configured
      worker model.
@@ -901,13 +901,13 @@ worktree, with events streamed into `tasks.jsonl`, and a clean exit.
 
 ### Phase 4 — Manager agent + scheduling
 
-1. Implement `manager.rs`: an in-process `arccode-core` agent loop using the
+1. Implement `manager.rs`: an in-process `wingman-core` agent loop using the
    manager model and a tool registry restricted to:
    `add_task`, `assign_task`, `reassign_task`, `finalize_task` (move
    `review → done` after merge), `message_agent`, `abort_task`, plus
    read-only inspection tools (`list_dir`, `read_file`, `grep_tool`).
 2. Manager system prompt is loaded from
-   `~/.arccode/agents/manager.md` (default shipped, user-overridable).
+   `~/.wingman/agents/manager.md` (default shipped, user-overridable).
 3. Manager runs in a loop: scan `state.json`, pick eligible tasks (deps met,
    under concurrency cap), call `assign_task` → orchestrator spawns worker.
 4. Orchestrator wakes manager whenever a task moves to `review` or `failed`
@@ -919,13 +919,13 @@ with the manager correctly waiting on the dep.
 ### Phase 5 — Worktree integration & merge
 
 1. `worktree.rs`: for each worker, create
-   `.arccode/worktrees/auto-<run-id>-<task-slug>/` from `base_commit` on a
-   branch named `arccode/auto/<run-id>/<task-slug>`.
+   `.wingman/worktrees/auto-<run-id>-<task-slug>/` from `base_commit` on a
+   branch named `wingman/auto/<run-id>/<task-slug>`.
 2. After each worker exits cleanly, run `git -C <wt> add -A && git commit`
    if there are unstaged changes (worker is also expected to commit, but
    belt-and-braces).
 3. When all tasks are `review`, orchestrator:
-   - Creates integration branch `arccode/auto/<run-id>` from `base_commit`.
+   - Creates integration branch `wingman/auto/<run-id>` from `base_commit`.
    - Linearizes tasks by dep order, then by id.
    - For each task: `git merge --squash <task-branch>` + commit with
      message `<task.title>\n\n<task.outcome.summary>`.
@@ -950,15 +950,15 @@ push URL) and the run terminates cleanly.
 
 ### Phase 7 — TUI dashboard
 
-1. New view `crates/arccode-tui/src/views/autonomous.rs` with three panes
+1. New view `crates/wingman-tui/src/views/autonomous.rs` with three panes
    (Tasks, Agents, Live log).
-2. App boot: scan `.arccode/autonomous/*/state.json` for runs in non-terminal
+2. App boot: scan `.wingman/autonomous/*/state.json` for runs in non-terminal
    states; if any, surface the top-bar indicator.
 3. `Ctrl+A` toggles the dashboard. `/autonomous {status,abort,resume}`.
 4. Dashboard subscribes to `RunStore` broadcast channel — every appended
    event triggers a redraw.
 
-**Done when:** running the TUI while a background `arccode autonomous` is
+**Done when:** running the TUI while a background `wingman autonomous` is
 active shows live progress without polling.
 
 ### Phase 8 — Cross-provider validation, failure handling, polish
@@ -1048,12 +1048,12 @@ Schema change for tasks:
   "ev": "task.create", "id": "t1", "role": "developer",
   "title": "Add --version-only flag",
   "goal": "…",
-  "writes": ["crates/arccode-cli/src/main.rs",
-             "crates/arccode-cli/src/args.rs"],
+  "writes": ["crates/wingman-cli/src/main.rs",
+             "crates/wingman-cli/src/args.rs"],
   "acceptance": [
-    {"kind": "shell", "cmd": "cargo check -p arccode-cli"},
-    {"kind": "shell", "cmd": "cargo test -p arccode-cli version_only"},
-    {"kind": "grep",  "pattern": "version-only", "path": "crates/arccode-cli/src/args.rs"}
+    {"kind": "shell", "cmd": "cargo check -p wingman-cli"},
+    {"kind": "shell", "cmd": "cargo test -p wingman-cli version_only"},
+    {"kind": "grep",  "pattern": "version-only", "path": "crates/wingman-cli/src/args.rs"}
   ]
 }
 ```
@@ -1072,7 +1072,7 @@ Replace the "linearize merges at the end, halt on first conflict" strategy:
    them (E3); critique pass enforces non-overlap inside a concurrency
    wave.
 2. **Continuous integration branch**: orchestrator merges each task into
-   `arccode/auto/<run-id>` the moment the task hits `review` + passes
+   `wingman/auto/<run-id>` the moment the task hits `review` + passes
    acceptance. Later workers branch from / rebase onto the latest
    integration tip instead of the original base commit.
 3. **Auto-merge-fixer subagent**: on conflict, spawn a dedicated worker
@@ -1104,12 +1104,12 @@ Leverage existing `recall_session` / session-log infrastructure:
 - **Planner priming**: before E2's draft pass, fetch top-K similar past
   runs by goal-embedding similarity; inject their plans + final outcomes
   (merged / reverted / abandoned) as in-context examples.
-- **Per-role lessons file**: `~/.arccode/agents/<role>.lessons.md` —
+- **Per-role lessons file**: `~/.wingman/agents/<role>.lessons.md` —
   appended to whenever a task by that role is reverted in PR review or
   rewritten heavily by a later commit. Loaded into the role's system
   prompt on subsequent runs.
 - **Adaptive model routing**: track first-try success rate per
-  `(role, task_kind, model)` tuple in `~/.arccode/stats.jsonl`; the
+  `(role, task_kind, model)` tuple in `~/.wingman/stats.jsonl`; the
   scheduler picks the cheapest model whose historical success rate
   exceeds a threshold, instead of statically using `router.fast_model`
   for all workers.
@@ -1135,7 +1135,7 @@ This is the change that lets the human PR review become a rubber stamp.
 
 Before notifying the user that the PR is ready:
 
-1. Run `arccode review` on the integration branch; post findings as
+1. Run `wingman review` on the integration branch; post findings as
    inline PR comments via `gh pr review --comment`.
 2. Auto-generate the PR body sections:
    - **Summary** — from the goal + per-task outcome summaries.
@@ -1147,7 +1147,7 @@ Before notifying the user that the PR is ready:
    - **What to scrutinize** — auto-flagged list of files matching
      `dangerous_paths`, plus any task that took >1 retry rung.
 3. **Auto-merge** when: tier was `auto` (E1), CI is green, no
-   `dangerous_paths` touched, and `arccode review` finds nothing
+   `dangerous_paths` touched, and `wingman review` finds nothing
    severity ≥ `medium`. User is notified post-merge with a link.
 
 Config:
@@ -1187,7 +1187,7 @@ killing the task. Eliminates most "restart from scratch on drift" cases.
 
 ### E11. Mandatory checkpoint hygiene (promotes Open Q #5)
 
-Worker system prompt mandates `arccode checkpoint` before any
+Worker system prompt mandates `wingman checkpoint` before any
 multi-file edit and after each acceptance-green milestone. Orchestrator
 verifies via the session log that at least one checkpoint exists before
 allowing a task to enter `review`. Rollback (E5 turn-gate) uses the
@@ -1195,7 +1195,7 @@ nearest prior checkpoint.
 
 ### E12. `--watch` mode (low-cost UX win)
 
-`arccode autonomous --watch "<goal>"` runs the orchestrator and tails
+`wingman autonomous --watch "<goal>"` runs the orchestrator and tails
 the run with a minimal terminal progress UI (reuse the event stream from
 the TUI dashboard but render flat). For users who want to observe a run
 without opening the full TUI. Default behavior remains background-style
@@ -1252,7 +1252,7 @@ These overrides replace the corresponding rows in "Opinionated defaults":
 | Failure policy        | 4-rung retry ladder with auto-splitting (E5); per-turn check-gate        |
 | Agent roles shipped   | `developer`, `designer`, `tester`, `reviewer`, `refactorer`, `merge-fixer` (E13) |
 | Reviewer placement    | Per-task reviewer (E7); final reviewer only for cross-cutting concerns   |
-| PR finalization       | Auto-`arccode review` + auto-generated body + conditional auto-merge (E8) |
+| PR finalization       | Auto-`wingman review` + auto-generated body + conditional auto-merge (E8) |
 | Manager↔worker IPC    | Bidirectional via stdin command channel (E10)                            |
 | Checkpoint policy     | Mandatory before multi-file edits; enforced by orchestrator (E11)        |
 
@@ -1295,7 +1295,7 @@ without halting and without manual merge intervention.
 ### Phase 7.8 — Trust tier, PR automation, UX
 
 1. **E1** — trust-tiered approval + config.
-2. **E8** — `arccode review` on integration + auto-PR-body +
+2. **E8** — `wingman review` on integration + auto-PR-body +
    conditional auto-merge.
 3. **E12** — `--watch` mode.
 
@@ -1367,14 +1367,14 @@ suggest_alternatives     = true
 A new long-running mode that finds work without being asked:
 
 ```bash
-arccode daemon                      # runs in background, watches repo + signals
-arccode daemon status
-arccode daemon stop
+wingman daemon                      # runs in background, watches repo + signals
+wingman daemon status
+wingman daemon stop
 ```
 
 The daemon polls/subscribes to:
 
-- **GitHub issues** labeled `arccode:auto` (or configured label).
+- **GitHub issues** labeled `wingman:auto` (or configured label).
 - **GitHub PRs** failing CI, with dependabot PRs as a special case.
 - **Failing scheduled jobs** (read recent CI runs via `gh run list`).
 - **TODO / FIXME / XXX** comments added in recent commits, scored by age
@@ -1401,7 +1401,7 @@ poll_interval_secs   = 300
 auto_threshold       = 0.75
 max_concurrent_runs  = 2
 trusted_authors      = ["vedantnimbarte"]
-trusted_labels       = ["arccode:auto"]
+trusted_labels       = ["wingman:auto"]
 sources              = ["github_issues", "ci_failures", "dependabot",
                         "todos", "coverage_gaps"]
 ```
@@ -1412,13 +1412,13 @@ Goals shouldn't only arrive via CLI. Pluggable intake adapters:
 
 | Channel        | Trigger                                                |
 | -------------- | ------------------------------------------------------ |
-| CLI            | `arccode autonomous "<goal>"` (already in plan)        |
-| GitHub issue   | New issue with `arccode:auto` label                    |
-| GitHub comment | `/arccode <goal>` comment on issue or PR by trusted user |
-| Slack          | `@arccode <goal>` mention, or DM                       |
-| Email          | Mail to `arccode+<repo>@<your-domain>` with goal in body |
+| CLI            | `wingman autonomous "<goal>"` (already in plan)        |
+| GitHub issue   | New issue with `wingman:auto` label                    |
+| GitHub comment | `/wingman <goal>` comment on issue or PR by trusted user |
+| Slack          | `@wingman <goal>` mention, or DM                       |
+| Email          | Mail to `wingman+<repo>@<your-domain>` with goal in body |
 | Webhook        | `POST /goals` to daemon's local HTTP endpoint          |
-| File drop      | Write `goal.md` into `.arccode/inbox/`; daemon picks it up |
+| File drop      | Write `goal.md` into `.wingman/inbox/`; daemon picks it up |
 
 Each adapter normalizes to a `Goal { text, source, author, trust_level }`
 struct and feeds the daemon's queue. Same auto/notify/gate tiers apply.
@@ -1429,8 +1429,8 @@ Once a run is in flight, the user should be able to redirect without
 killing it. Reuse E10's manager↔worker IPC and extend up to the user:
 
 ```bash
-arccode autonomous tell <run-id> "skip the changelog task, we'll do that manually"
-arccode autonomous ask  <run-id> "what files have you touched so far?"
+wingman autonomous tell <run-id> "skip the changelog task, we'll do that manually"
+wingman autonomous ask  <run-id> "what files have you touched so far?"
 ```
 
 Or in any intake channel: a reply in the same Slack thread / GitHub
@@ -1459,7 +1459,7 @@ add verification kinds that actually exercise the change:
 
 ```jsonc
 "acceptance": [
-  {"kind": "shell",  "cmd": "cargo test -p arccode-tui"},
+  {"kind": "shell",  "cmd": "cargo test -p wingman-tui"},
   {"kind": "run",    "target": "tui", "script": "screenshots/dark-mode.script"},
   {"kind": "assert", "screenshot": "screenshots/dark-mode.png",
                      "must_contain_text": ["Dark mode on"]},
@@ -1484,7 +1484,7 @@ the SQLite DB but there's no tool"), it can propose a new tool:
 2. Orchestrator queues this as a `meta` task in the next run (or
    immediately, in daemon mode).
 3. A `tool-smith` role generates the tool implementation in
-   `~/.arccode/tools/<name>.{ts,py,rs}`, with a test, and registers it.
+   `~/.wingman/tools/<name>.{ts,py,rs}`, with a test, and registers it.
 4. Next run, the tool is available to all workers.
 
 Gated behind `[autonomous.tools].allow_synthesis = true`. New tools are
@@ -1496,7 +1496,7 @@ runs rather than starting from scratch each time.
 ### J8. Project knowledge graph (durable memory, beyond session logs)
 
 Session logs (Phase 0 infra) are turn-by-turn and per-run. Add a
-**project-scoped knowledge layer** at `.arccode/knowledge/`:
+**project-scoped knowledge layer** at `.wingman/knowledge/`:
 
 - `architecture.md` — auto-maintained module map, regenerated when
   `crates/*/src/lib.rs` changes.
@@ -1564,15 +1564,15 @@ overridable via `[autonomous.sandbox]` defaults.
 
 ### J12. Skill packs (shareable, versioned agent definitions)
 
-Today: role definitions in `~/.arccode/agents/<role>.md`. Make them
+Today: role definitions in `~/.wingman/agents/<role>.md`. Make them
 shareable:
 
 ```toml
 [autonomous.skills]
 packs = [
-  "arccode-official/rust-developer@1.4",
-  "arccode-official/security-reviewer@2.0",
-  "vedantnimbarte/arccode-tui-designer@0.3",
+  "wingman-official/rust-developer@1.4",
+  "wingman-official/security-reviewer@2.0",
+  "vedantnimbarte/wingman-tui-designer@0.3",
 ]
 ```
 
@@ -1590,7 +1590,7 @@ in real time:
 - New failing test on `main` → spin up a fixer run.
 - Dependabot PR with green CI → auto-review + auto-merge if within
   allowlisted paths.
-- New issue with `arccode:auto` → triage immediately, not on next poll.
+- New issue with `wingman:auto` → triage immediately, not on next poll.
 - Local file save with `// ASK: <question>` comment → spawn a quick
   research worker; reply inline as comment.
 
@@ -1621,7 +1621,7 @@ Hard escalation triggers (always interrupt the user, regardless of tier):
 - 3 consecutive failed runs on related goals — likely the agent is stuck
   in a wrong mental model and needs human reset.
 - License / copyright headers being modified.
-- Force-push to any non-`arccode/auto/*` branch.
+- Force-push to any non-`wingman/auto/*` branch.
 
 These are non-negotiable — no config flag disables them. Trust is built by
 the daemon visibly stopping at these lines, not by maximizing autonomy.
@@ -1644,7 +1644,7 @@ estimates land within ±30% of actuals on a 20-run benchmark.
 
 ### Phase 10 — Always-on daemon (J2, J3, J5, J13)
 
-Goal: `arccode daemon` discovers, proposes, executes, and reports without
+Goal: `wingman daemon` discovers, proposes, executes, and reports without
 being invoked per-run.
 
 **Done when:** daemon runs for a week on a real repo, opens ≥5 PRs from
@@ -1795,7 +1795,7 @@ Edit `crates/auth/src/token.rs:42` to include
 `claims.insert("kid", config.signing_kid())`, re-run `cargo test`.
 
 ## State
-Worktrees preserved. Resume with: `arccode pilot resume <run-id>`.
+Worktrees preserved. Resume with: `wingman pilot resume <run-id>`.
 ```
 
 Generated by a dedicated `handoff` agent call (cheap, fast model) with
@@ -1815,7 +1815,7 @@ scored automatically:
 
 Triggered on every commit touching planner prompts, role markdown,
 tool registry, or any crate affecting orchestrator behavior. Results
-land in `.arccode/eval/results.jsonl` + a markdown dashboard. CI
+land in `.wingman/eval/results.jsonl` + a markdown dashboard. CI
 fails a PR if any axis regresses > 10% without an explicit override
 label.
 
@@ -1864,7 +1864,7 @@ Before E8's auto-merge gate, run a pre-PR security pass:
    CVEs → block; medium → comment + require human approval.
 3. **`security-review` skill** — invoke on the diff; severity ≥
    medium blocks auto-merge (separate findings stream from E8's
-   `arccode review`).
+   `wingman review`).
 4. **License scan** — flag any new dependency outside
    `[pilot.security].allowed_licenses`.
 
@@ -1924,7 +1924,7 @@ These don't block writing code today, but flag them before merging:
    review each task before it moves to `done`, gating merges? That's a
    bigger UX change — defer to a v2 once basics work.
 5. **Worktree commit hygiene**: each worker commits on its branch.
-   Should we require workers to use `arccode checkpoint` before edits so a
+   Should we require workers to use `wingman checkpoint` before edits so a
    bad agent run is recoverable? Probably yes — add to the worker system
    prompt.
 
@@ -1935,11 +1935,11 @@ These don't block writing code today, but flag them before merging:
 On a fresh checkout of this repo, run:
 
 ```bash
-arccode autonomous "add a --version-only flag to arccode-cli that prints the version and exits without loading config"
+wingman autonomous "add a --version-only flag to wingman-cli that prints the version and exits without loading config"
 ```
 
 Expected: planner proposes 2–3 tasks (developer for the flag, tester for a
 smoke test, reviewer for changelog), user approves, workers run in worktrees,
-integration branch `arccode/auto/<run-id>` ends up with 2–3 squashed commits,
+integration branch `wingman/auto/<run-id>` ends up with 2–3 squashed commits,
 and a PR is opened against `main`. Total wall time on a Sonnet/Haiku tier
 should be under 5 minutes and under $0.50.

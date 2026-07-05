@@ -5,31 +5,31 @@ export const metadata = {
 
 # Architecture
 
-Arc-Code is a Cargo workspace. Each crate has a narrow, well-defined
+Wingman is a Cargo workspace. Each crate has a narrow, well-defined
 responsibility.
 
 | Crate                | Role                                                                 |
 | -------------------- | ------------------------------------------------------------------- |
-| `arccode-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode. |
-| `arccode-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
-| `arccode-config`     | TOML config loading, layered merge, env-var resolution, permission model. |
-| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
-| `arccode-tools`      | Built-in tool implementations and the `ToolRegistry`.               |
-| `arccode-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands. |
-| `arccode-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`. |
-| `arccode-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback. |
-| `arccode-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt. |
-| `arccode-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks. |
-| `arccode-mcp`        | MCP host scaffolding.                                               |
-| `arccode-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs. |
-| `arccode-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR. |
+| `wingman-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode. |
+| `wingman-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
+| `wingman-config`     | TOML config loading, layered merge, env-var resolution, permission model. |
+| `wingman-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
+| `wingman-tools`      | Built-in tool implementations and the `ToolRegistry`.               |
+| `wingman-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands. |
+| `wingman-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`. |
+| `wingman-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback. |
+| `wingman-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt. |
+| `wingman-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks. |
+| `wingman-mcp`        | MCP host scaffolding.                                               |
+| `wingman-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs. |
+| `wingman-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR. |
 
 ## On-disk layout
 
-Global state lives under `~/.arccode/`:
+Global state lives under `~/.wingman/`:
 
 ```text
-~/.arccode/
+~/.wingman/
 ├── config.toml             # global config
 ├── credentials.toml        # provider credentials (optional)
 ├── logs/                   # tracing output
@@ -39,10 +39,10 @@ Global state lives under `~/.arccode/`:
 └── sessions.db             # cross-project session embeddings (SQLite)
 ```
 
-Project state lives under `<project>/.arccode/`:
+Project state lives under `<project>/.wingman/`:
 
 ```text
-<project-root>/.arccode/
+<project-root>/.wingman/
 ├── config.toml             # project-local overrides
 ├── sessions/               # per-session JSONL logs (append-only)
 ├── index.db                # project RAG index (SQLite + embeddings)

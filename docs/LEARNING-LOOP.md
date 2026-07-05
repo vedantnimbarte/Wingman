@@ -1,6 +1,6 @@
 # Self-Improving Learning Loop
 
-Arc-Code builds a persistent model of you and your projects across sessions. This document explains how memories, skill tracking, and session recall work together.
+Wingman builds a persistent model of you and your projects across sessions. This document explains how memories, skill tracking, and session recall work together.
 
 ## Overview
 
@@ -11,7 +11,7 @@ The learning loop comprises four subsystems:
 3. **Session Index** — Embedding and semantic search over past conversation transcripts.
 4. **Learning Hooks** — Agent loop integration points that trigger persistence and tracking.
 
-All data is local-first — no cloud component. Everything lives under `~/.arccode/` (global) and `<project>/.arccode/` (project-scoped).
+All data is local-first — no cloud component. Everything lives under `~/.wingman/` (global) and `<project>/.wingman/` (project-scoped).
 
 ## Memory Store
 
@@ -21,14 +21,14 @@ Memories are stored as markdown files with YAML frontmatter, indexed in a siblin
 
 **File layout:**
 ```
-~/.arccode/memory/
+~/.wingman/memory/
 ├── MEMORY.md                    # index: one bullet per memory
 ├── user_role.md
 ├── feedback_testing.md
 ├── reference_issue_tracker.md
 └── …
 
-<project>/.arccode/memory/
+<project>/.wingman/memory/
 ├── MEMORY.md
 ├── project_build_command.md
 └── …
@@ -102,7 +102,7 @@ Agent calls forget_memory("user-pkg-manager")
 
 ### Data Model
 
-Skills are tracked in `~/.arccode/learn.db` (SQLite). Each invocation records:
+Skills are tracked in `~/.wingman/learn.db` (SQLite). Each invocation records:
 - Skill name
 - Timestamp
 - Outcome (success / corrected / unclear)
@@ -122,16 +122,16 @@ After the agent calls `invoke_skill`, the system monitors the next user turn for
 When a skill crosses a threshold:
 - **3+ invocations** AND **≥50% correction rate** → skill flagged for rewrite.
 - Next session: system prompt includes suggestion: *"Skill X has been corrected often. Consider refining it."*
-- User can run `arccode skill extract` to generate a new draft from recent sessions.
+- User can run `wingman skill extract` to generate a new draft from recent sessions.
 
 ### Viewing Statistics
 
 ```bash
 # List all skills with usage counts
-arccode skill stats
+wingman skill stats
 
 # Detailed breakdown of one skill
-arccode skill stats my-skill
+wingman skill stats my-skill
 # Output: my-skill: invoked 5 times, success 3, corrected 1, unclear 1
 ```
 
@@ -142,7 +142,7 @@ arccode skill stats my-skill
 After a session ends, the system:
 1. Chunks the conversation transcript into thread-shaped windows (last N turns with context).
 2. Embeds each chunk using the same embedder as RAG (fastembed BGE small or hash fallback).
-3. Stores embeddings in `~/.arccode/sessions.db` (SQLite).
+3. Stores embeddings in `~/.wingman/sessions.db` (SQLite).
 
 This happens asynchronously; the TUI remains responsive.
 
@@ -156,14 +156,14 @@ When the agent sees a prompt like *"Have we done this before?"*, it calls `recal
 
 The tool:
 1. Embeds the query.
-2. Searches `~/.arccode/sessions.db` for similar session chunks.
+2. Searches `~/.wingman/sessions.db` for similar session chunks.
 3. Returns top-5 results with project, session ID, and snippet.
 
 The agent can then call `read_session(session_id)` to fetch the full transcript.
 
 ## Learning Hooks
 
-The `LearnHook` trait is implemented by `LearnHook` in `crates/arccode-learn/src/hooks.rs`. It integrates into the agent loop at key points.
+The `LearnHook` trait is implemented by `LearnHook` in `crates/wingman-learn/src/hooks.rs`. It integrates into the agent loop at key points.
 
 ### Hook Points
 
@@ -183,14 +183,14 @@ The `LearnHook` trait is implemented by `LearnHook` in `crates/arccode-learn/src
 **4. `on_session_end()`**
 - Chunk the full transcript.
 - Embed chunks (async background task).
-- Insert into `~/.arccode/sessions.db`.
+- Insert into `~/.wingman/sessions.db`.
 
 ## Nudges
 
 The quiet-session nudge encourages memory creation when the agent hasn't saved anything in a while.
 
 **Mechanism:**
-- Counter stored in `~/.arccode/learn.db`: "quiet sessions since last save".
+- Counter stored in `~/.wingman/learn.db`: "quiet sessions since last save".
 - On session start: if counter ≥ 5, append to system prompt:
   ```
   The user hasn't saved a memory in 5 sessions.
@@ -202,7 +202,7 @@ The quiet-session nudge encourages memory creation when the agent hasn't saved a
 
 ## Data Files Reference
 
-### Global (`~/.arccode/`)
+### Global (`~/.wingman/`)
 
 | File/Dir            | Purpose                                  |
 |---------------------|------------------------------------------|
@@ -211,7 +211,7 @@ The quiet-session nudge encourages memory creation when the agent hasn't saved a
 | `learn.db`          | Skill usage + outcome stats (SQLite).    |
 | `sessions.db`       | Session embeddings for cross-project recall (SQLite). |
 
-### Project-Scoped (`<project>/.arccode/`)
+### Project-Scoped (`<project>/.wingman/`)
 
 | File/Dir            | Purpose                                  |
 |---------------------|------------------------------------------|
@@ -229,8 +229,8 @@ User (in TUI): "Remember that I always run tests before commits"
     ↓
 Agent calls: save_memory("user-testing-habit", type="feedback", body="...")
     ↓
-MemoryStore writes ~/.arccode/memory/user_testing_habit.md
-MemoryStore updates ~/.arccode/memory/MEMORY.md
+MemoryStore writes ~/.wingman/memory/user_testing_habit.md
+MemoryStore updates ~/.wingman/memory/MEMORY.md
     ↓
 Next session:
   - MEMORY.md index loaded into system prompt
@@ -263,22 +263,22 @@ Skill crosses threshold (3 invokes, 100% corrected)
 Session 4 startup:
   System prompt: "Skill 'refactor-rust' has been corrected in all recent uses.
                   Consider refining it."
-  User: arccode skill extract
+  User: wingman skill extract
     ↓
     New draft generated from recent sessions, saved to
-    ~/.arccode/skills/proposed/refactor-rust.md for review.
+    ~/.wingman/skills/proposed/refactor-rust.md for review.
 ```
 
 ### Example 3: Cross-Project Recall
 
 ```
-Current project: Arc-Code
+Current project: Wingman
 
 User: "How have we handled async error recovery in the past?"
     ↓
 Agent calls: recall_session(query="async error recovery")
     ↓
-SessionIndex searches ~/.arccode/sessions.db across all projects
+SessionIndex searches ~/.wingman/sessions.db across all projects
     ↓
 Returns:
   - Project "MyTokioApp" (2024-01-15), snippet about RetryPolicy
@@ -304,7 +304,7 @@ embed_sessions = true
 # Quiet-session threshold for nudge.
 quiet_sessions_threshold = 5
 
-# Stats database location (relative to ~/.arccode/)
+# Stats database location (relative to ~/.wingman/)
 stats_db = "learn.db"
 
 # Session embeddings database location
@@ -320,7 +320,7 @@ format = "markdown"
 
 - **No cloud uploads.** All memories and sessions stored locally.
 - **No external API calls.** Embedding uses fastembed (ONNX runtime) or deterministic hash.
-- **User control.** Full history available under `~/.arccode/` for inspection, deletion, or sharing.
+- **User control.** Full history available under `~/.wingman/` for inspection, deletion, or sharing.
 - **Selective recall.** Agent doesn't fetch full memory bodies unless relevant (prevents token waste).
 - **Opt-out per memory.** `forget_memory()` deletes any memory permanently.
 
@@ -328,9 +328,9 @@ format = "markdown"
 
 ### Q: Why isn't my memory showing up?
 
-**A:** Check `~/.arccode/memory/MEMORY.md` — it may not be indexed. Run:
+**A:** Check `~/.wingman/memory/MEMORY.md` — it may not be indexed. Run:
 ```bash
-arccode memory list
+wingman memory list
 ```
 
 If the file exists in the directory but not in MEMORY.md, the agent may not have saved it properly. Try manually adding an entry to MEMORY.md:
@@ -342,14 +342,14 @@ If the file exists in the directory but not in MEMORY.md, the agent may not have
 
 **A:**
 ```bash
-arccode memory export /tmp/my-memories.json
+wingman memory export /tmp/my-memories.json
 # Send /tmp/my-memories.json to colleague
-# They run: arccode memory import /tmp/my-memories.json
+# They run: wingman memory import /tmp/my-memories.json
 ```
 
 ### Q: Session embeddings take up too much space. Can I clear them?
 
-**A:** Yes, it's safe to delete `~/.arccode/sessions.db`. It will be rebuilt on next session end. Cross-project recall will be unavailable until rebuilt.
+**A:** Yes, it's safe to delete `~/.wingman/sessions.db`. It will be rebuilt on next session end. Cross-project recall will be unavailable until rebuilt.
 
 ### Q: I want to disable learning entirely. How?
 

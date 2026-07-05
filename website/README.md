@@ -1,7 +1,7 @@
-# Arc-Code Website
+# Wingman Website
 
 Marketing landing page + documentation site for the
-[Arc-Code](../README.md) CLI.
+[Wingman](../README.md) CLI.
 
 Built with **Next.js (App Router)**, **Tailwind CSS v4**, **Motion**, and
 **MDX**. Dark-themed, with an animated dotted-wave background and soft scroll

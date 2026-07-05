@@ -1,0 +1,36 @@
+[package]
+name = "wingman-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "ratatui-based terminal UI for wingman"
+
+[dependencies]
+wingman-core = { workspace = true }
+wingman-config = { workspace = true }
+wingman-skills = { workspace = true }
+wingman-session = { workspace = true }
+wingman-learn = { workspace = true }
+wingman-ts = { workspace = true, optional = true, features = ["highlight"] }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ignore = "0.4"
+nucleo-matcher = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+base64 = "0.22"
+
+[features]
+default = ["treesitter"]
+treesitter = ["dep:wingman-ts"]
+
+[dev-dependencies]
+tempfile = "3"

@@ -53,7 +53,7 @@ export function NotifyForm() {
           <p className="text-xs text-[var(--text-muted)]">
             We&rsquo;ll reach out at{" "}
             <span className="font-mono text-[var(--text)]">{email.trim()}</span>{" "}
-            the moment Arc-Code ships.
+            the moment Wingman ships.
           </p>
         </div>
       </div>

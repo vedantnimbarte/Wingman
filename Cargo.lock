@@ -127,263 +127,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "arccode-autonomous"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arccode-config",
- "arccode-core",
- "arccode-tools",
- "async-trait",
- "chrono",
- "futures",
- "globset",
- "nix 0.29.0",
- "serde",
- "serde_json",
- "sha2",
- "subtle",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "arccode-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arccode-autonomous",
- "arccode-config",
- "arccode-core",
- "arccode-learn",
- "arccode-mcp",
- "arccode-providers",
- "arccode-rag",
- "arccode-session",
- "arccode-skills",
- "arccode-tools",
- "arccode-ts",
- "arccode-tui",
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "clap",
- "crossterm",
- "futures",
- "rand 0.8.6",
- "ratatui",
- "reqwest",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "urlencoding",
-]
-
-[[package]]
-name = "arccode-config"
-version = "0.0.1"
-dependencies = [
- "directories",
- "keyring",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "arccode-core"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "async-stream",
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-learn"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "arccode-core",
- "arccode-rag",
- "arccode-session",
- "arccode-skills",
- "arccode-ts",
- "chrono",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-mcp"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "arccode-core",
- "async-trait",
- "futures",
- "reqwest",
- "rmcp",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-providers"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "arccode-core",
- "async-stream",
- "async-trait",
- "bytes",
- "eventsource-stream",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-rag"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arccode-config",
- "arccode-core",
- "arccode-ts",
- "async-trait",
- "blake3",
- "fastembed",
- "futures",
- "ignore",
- "notify",
- "notify-debouncer-mini",
- "rusqlite",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-session"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "arccode-core",
- "chrono",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "arccode-skills"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "thiserror 1.0.69",
- "tracing",
-]
-
-[[package]]
-name = "arccode-tools"
-version = "0.0.1"
-dependencies = [
- "arccode-config",
- "arccode-core",
- "arccode-learn",
- "arccode-rag",
- "arccode-session",
- "arccode-skills",
- "arccode-ts",
- "async-trait",
- "futures",
- "globset",
- "ignore",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "similar",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "urlencoding",
-]
-
-[[package]]
-name = "arccode-ts"
-version = "0.0.1"
-dependencies = [
- "thiserror 1.0.69",
- "tracing",
- "tree-sitter",
- "tree-sitter-go",
- "tree-sitter-highlight",
- "tree-sitter-javascript",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
-]
-
-[[package]]
-name = "arccode-tui"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "arccode-config",
- "arccode-core",
- "arccode-learn",
- "arccode-session",
- "arccode-skills",
- "arccode-ts",
- "base64 0.22.1",
- "chrono",
- "crossterm",
- "futures",
- "ignore",
- "nucleo-matcher",
- "ratatui",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "arg_enum_proc_macro"
 version = "0.3.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4836,6 +4579,263 @@ name = "windows_x86_64_msvc"
 version = "0.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
+
+[[package]]
+name = "wingman-autonomous"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "futures",
+ "globset",
+ "nix 0.29.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "windows-sys 0.59.0",
+ "wingman-config",
+ "wingman-core",
+ "wingman-tools",
+]
+
+[[package]]
+name = "wingman-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "crossterm",
+ "futures",
+ "rand 0.8.6",
+ "ratatui",
+ "reqwest",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "urlencoding",
+ "wingman-autonomous",
+ "wingman-config",
+ "wingman-core",
+ "wingman-learn",
+ "wingman-mcp",
+ "wingman-providers",
+ "wingman-rag",
+ "wingman-session",
+ "wingman-skills",
+ "wingman-tools",
+ "wingman-ts",
+ "wingman-tui",
+]
+
+[[package]]
+name = "wingman-config"
+version = "0.0.1"
+dependencies = [
+ "directories",
+ "keyring",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "wingman-core"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+]
+
+[[package]]
+name = "wingman-learn"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+ "wingman-rag",
+ "wingman-session",
+ "wingman-skills",
+ "wingman-ts",
+]
+
+[[package]]
+name = "wingman-mcp"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "reqwest",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+]
+
+[[package]]
+name = "wingman-providers"
+version = "0.0.1"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "bytes",
+ "eventsource-stream",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+]
+
+[[package]]
+name = "wingman-rag"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "blake3",
+ "fastembed",
+ "futures",
+ "ignore",
+ "notify",
+ "notify-debouncer-mini",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+ "wingman-ts",
+]
+
+[[package]]
+name = "wingman-session"
+version = "0.0.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+]
+
+[[package]]
+name = "wingman-skills"
+version = "0.0.1"
+dependencies = [
+ "thiserror 1.0.69",
+ "tracing",
+ "wingman-config",
+]
+
+[[package]]
+name = "wingman-tools"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "futures",
+ "globset",
+ "ignore",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "similar",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "wingman-config",
+ "wingman-core",
+ "wingman-learn",
+ "wingman-rag",
+ "wingman-session",
+ "wingman-skills",
+ "wingman-ts",
+]
+
+[[package]]
+name = "wingman-ts"
+version = "0.0.1"
+dependencies = [
+ "thiserror 1.0.69",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-highlight",
+ "tree-sitter-javascript",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "wingman-tui"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "crossterm",
+ "futures",
+ "ignore",
+ "nucleo-matcher",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "wingman-config",
+ "wingman-core",
+ "wingman-learn",
+ "wingman-session",
+ "wingman-skills",
+ "wingman-ts",
+]
 
 [[package]]
 name = "winnow"

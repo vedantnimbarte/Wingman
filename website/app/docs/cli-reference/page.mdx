@@ -1,15 +1,15 @@
 export const metadata = {
   title: "CLI reference",
-  description: "Top-level flags and subcommands for the arccode binary.",
+  description: "Top-level flags and subcommands for the wingman binary.",
 };
 
 # CLI reference
 
 ```text
-arccode [OPTIONS] [COMMAND]
+wingman [OPTIONS] [COMMAND]
 ```
 
-Running `arccode` with no subcommand launches the TUI against the resolved
+Running `wingman` with no subcommand launches the TUI against the resolved
 provider and model.
 
 ## Top-level flags
@@ -29,16 +29,16 @@ provider and model.
 
 | Command                            | Description                                                       |
 | ---------------------------------- | ----------------------------------------------------------------- |
-| `config init`                      | Write a starter `~/.arccode/config.toml`. `--force` to overwrite. |
+| `config init`                      | Write a starter `~/.wingman/config.toml`. `--force` to overwrite. |
 | `config show`                      | Print the merged effective configuration. `--json` for JSON.      |
 | `config paths`                     | Print the resolved global and project config paths.               |
-| `init`                             | Scan the project and write a starter `ARCCODE.md`.                |
+| `init`                             | Scan the project and write a starter `WINGMAN.md`.                |
 | `checkpoint`                       | Snapshot the working tree into a tagged `git stash`.              |
-| `undo`                             | Restore the most recent `arccode checkpoint`.                     |
+| `undo`                             | Restore the most recent `wingman checkpoint`.                     |
 | `cost`                             | Show per-model token usage and estimated USD spend.               |
 | `session list`                     | List recent session JSONL files for this project.                 |
 | `session fork`                     | Copy an existing session into a new file (`--at N` truncates).    |
-| `worktree create <branch>`         | Create a `git worktree` under `.arccode/worktrees/`.              |
+| `worktree create <branch>`         | Create a `git worktree` under `.wingman/worktrees/`.              |
 | `worktree list`                    | `git worktree list` passthrough.                                  |
 | `worktree remove <path>`           | Remove a worktree by path.                                        |
 | `memory export <out>`              | Export the global memory dir to a directory or `.json` pack.      |

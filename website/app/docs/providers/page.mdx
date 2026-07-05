@@ -7,7 +7,7 @@ export const metadata = {
 
 All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
 `OpenAiCompatProvider` adapter
-(`crates/arccode-providers/src/openai_compat.rs`). Add a new hosted
+(`crates/wingman-providers/src/openai_compat.rs`). Add a new hosted
 OpenAI-shape clone by extending its `Variant` enum and the mapper functions.
 
 | Provider        | id           | Env var                | Default base URL                              |
@@ -40,7 +40,7 @@ OpenAI-shape clone by extending its `Variant` enum and the mapper functions.
 | GCP Vertex AI   | `vertex`     | `GOOGLE_VERTEX_TOKEN`  | (set to your project/region OpenAPI URL)      |
 | IBM watsonx.ai  | `watsonx`    | `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` | `https://<region>.ml.cloud.ibm.com` |
 
-This is a representative slice — Arc-Code ships **73+** provider entries in
+This is a representative slice — Wingman ships **73+** provider entries in
 total, including Anyscale, Lepton, Replicate, Novita, Hyperbolic, Lambda,
 Nebius, HF Inference, Snowflake, Databricks, Writer, Qwen, Zhipu GLM, Moonshot
 Kimi, MiniMax, Doubao, SiliconFlow, Vercel AI Gateway, and many local servers.
