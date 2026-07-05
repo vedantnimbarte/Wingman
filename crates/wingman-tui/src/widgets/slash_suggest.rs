@@ -48,6 +48,14 @@ pub const CATALOG: &[Command] = &[
         description: "attach a file to the next prompt",
     },
     Command {
+        name: "/commit",
+        description: "stage all changes and commit with <message>",
+    },
+    Command {
+        name: "/pr",
+        description: "push the branch and open a PR (via gh) · optional title",
+    },
+    Command {
         name: "/usage",
         description: "token + cost breakdown by provider (`clear` to reset)",
     },

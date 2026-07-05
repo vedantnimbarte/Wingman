@@ -20,6 +20,35 @@ pub struct StatusLine {
     pub usage: BTreeMap<String, Usage>,
     /// Whether the agent is currently connected / active.
     pub connected: bool,
+    /// Current git branch, if the working dir is a repo. Refreshed on turn
+    /// boundaries and after `/commit`.
+    pub git_branch: Option<String>,
+    /// Number of changed (tracked + untracked) files per `git status`.
+    pub git_dirty: usize,
+}
+
+impl StatusLine {
+    /// Refresh `git_branch`/`git_dirty` by shelling out to `git` in `root`.
+    /// Cheap enough to call on turn boundaries; silently clears on non-repos.
+    pub fn refresh_git(&mut self, root: &std::path::Path) {
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        };
+        // `branch --show-current` is Some even on an unborn branch and empty
+        // on detached HEAD (unlike `rev-parse --abbrev-ref`, which errors).
+        self.git_branch = run(&["branch", "--show-current"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        self.git_dirty = run(&["status", "--porcelain"])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0);
+    }
 }
 
 impl StatusLine {
@@ -79,6 +108,19 @@ impl<'a> Widget for StatusView<'a> {
                 Style::default().fg(Color::DarkGray),
             ),
         ];
+        if let Some(branch) = &s.git_branch {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("⎇ {branch}"),
+                Style::default().fg(Color::Magenta),
+            ));
+            if s.git_dirty > 0 {
+                spans.push(Span::styled(
+                    format!("*{}", s.git_dirty),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        }
         if !s.usage.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
@@ -115,5 +157,43 @@ impl<'a> Widget for StatusView<'a> {
         Paragraph::new(Line::from(spans))
             .style(Style::default().bg(Color::Reset))
             .render(area, buf);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed");
+    }
+
+    #[test]
+    fn refresh_git_tracks_branch_and_dirty() {
+        let dir = std::env::temp_dir().join(format!("wingman-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q"]);
+        git(
+            &dir,
+            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"],
+        );
+
+        let mut s = StatusLine::default();
+        s.refresh_git(&dir);
+        assert!(s.git_branch.is_some());
+        assert_eq!(s.git_dirty, 0);
+
+        std::fs::write(dir.join("f.txt"), "x").unwrap();
+        s.refresh_git(&dir);
+        assert_eq!(s.git_dirty, 1);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

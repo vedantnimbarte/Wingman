@@ -137,6 +137,8 @@ enum Cmd {
     Logout(Option<String>),
     Add(String),
     Usage(String),
+    Commit(String),
+    Pr(String),
     Skills,
     SkillsNew(String),
     SkillsInstall { source: String, project: bool },
@@ -188,6 +190,8 @@ fn parse_slash(line: &str) -> Cmd {
         }),
         "/add" if !arg.is_empty() => Cmd::Add(arg.to_string()),
         "/usage" => Cmd::Usage(arg.to_string()),
+        "/commit" => Cmd::Commit(arg.to_string()),
+        "/pr" => Cmd::Pr(arg.to_string()),
         "/skills" => {
             let mut it = arg.split_whitespace();
             match it.next() {
@@ -364,6 +368,7 @@ async fn run_inner(
         slash: SlashSuggest::default(),
         sidebar: None,
     };
+    ui.status.refresh_git(&ctx.project_root);
     let mut events = EventStream::new();
     loop {
         ui.composer.busy = false;
@@ -436,6 +441,9 @@ async fn run_inner(
                         // interrupted mid-stream is at risk, not worth a global
                         // signal-handler mirror to recover.
                         ui.lifetime.save_merged(&ui.status.usage);
+                        // The agent may have edited files or committed; refresh
+                        // the branch/dirty indicator.
+                        ui.status.refresh_git(&ctx.project_root);
                     }
                     None => {
                         ui.transcript.push(TranscriptItem::Error(
@@ -788,6 +796,35 @@ async fn idle_step(
                             }
                             Cmd::Add(path) => {
                                 ui.composer.input.push_str(&format!("@{} ", path.trim()));
+                            }
+                            Cmd::Commit(msg) => {
+                                let msg = msg.trim();
+                                if msg.is_empty() {
+                                    ui.transcript.push(TranscriptItem::Error(
+                                        "/commit <message> — or ask the agent to write one".into(),
+                                    ));
+                                } else {
+                                    match git_commit(project_root, msg) {
+                                        Ok(out) => ui.transcript.push(TranscriptItem::System(out)),
+                                        Err(e) => ui.transcript.push(TranscriptItem::Error(
+                                            format!("/commit: {e}"),
+                                        )),
+                                    }
+                                    ui.status.refresh_git(project_root);
+                                }
+                            }
+                            Cmd::Pr(title) => {
+                                ui.transcript.push(TranscriptItem::System(
+                                    "opening pull request…".into(),
+                                ));
+                                draw(terminal, ui)?;
+                                match git_open_pr(project_root, title.trim()) {
+                                    Ok(out) => ui.transcript.push(TranscriptItem::System(out)),
+                                    Err(e) => ui
+                                        .transcript
+                                        .push(TranscriptItem::Error(format!("/pr: {e}"))),
+                                }
+                                ui.status.refresh_git(project_root);
                             }
                             Cmd::Usage(arg) => {
                                 if arg.trim().eq_ignore_ascii_case("clear") {
@@ -1400,6 +1437,57 @@ async fn fetch_text(url: &str) -> std::result::Result<String, String> {
         ));
     }
     String::from_utf8(bytes.to_vec()).map_err(|_| "response was not UTF-8 text".to_string())
+}
+
+/// Run a git subcommand in `root`, returning stdout on success or the
+/// trimmed stderr as the error.
+fn git(root: &std::path::Path, args: &[&str]) -> std::result::Result<String, String> {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("git not available: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// `git add -A && git commit -m <msg>`, reporting the new commit.
+fn git_commit(root: &std::path::Path, msg: &str) -> std::result::Result<String, String> {
+    git(root, &["add", "-A"])?;
+    git(root, &["commit", "-m", msg])?; // errors "nothing to commit" if clean
+    let head = git(root, &["log", "-1", "--pretty=%h %s"])?;
+    Ok(format!("committed {}", head.trim()))
+}
+
+/// Push the current branch and open a PR via `gh`. Returns the PR URL.
+fn git_open_pr(root: &std::path::Path, title: &str) -> std::result::Result<String, String> {
+    let branch = git(root, &["branch", "--show-current"])?.trim().to_string();
+    if branch.is_empty() {
+        return Err("detached HEAD — check out a branch first".into());
+    }
+    git(root, &["push", "-u", "origin", &branch]).map_err(|e| format!("push failed: {e}"))?;
+    let mut args: Vec<String> = vec!["pr".into(), "create".into()];
+    if title.is_empty() {
+        args.push("--fill".into()); // title + body from commits
+    } else {
+        args.extend(["--title".into(), title.into(), "--body".into(), title.into()]);
+    }
+    let out = std::process::Command::new("gh")
+        .args(&args)
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("gh not installed: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        Err(format!(
+            "gh pr create: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
 }
 
 fn launch_editor(
