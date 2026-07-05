@@ -97,6 +97,121 @@ pub fn starter_template(name: &str) -> String {
     )
 }
 
+/// Where a `/skills install`ed file should land.
+#[derive(Debug, Clone, Copy)]
+pub enum InstallScope {
+    Global,
+    Project,
+}
+
+/// A `/skills install <source>` argument, classified into something we can
+/// fetch. Everything ultimately resolves to a URL that returns markdown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillSourceKind {
+    /// A direct `http(s)://` URL to a markdown file.
+    Url(String),
+    /// A bare name to resolve against the configured registry index.
+    RegistryName(String),
+}
+
+/// Classify an install source:
+/// - `http(s)://…`          → [`SkillSourceKind::Url`] verbatim
+/// - `owner/repo[/path.md]` → a `raw.githubusercontent.com` URL
+/// - anything else          → [`SkillSourceKind::RegistryName`]
+pub fn classify_source(source: &str) -> SkillSourceKind {
+    let s = source.trim();
+    if s.starts_with("http://") || s.starts_with("https://") {
+        return SkillSourceKind::Url(s.to_string());
+    }
+    if let Some(url) = github_raw_url(s) {
+        return SkillSourceKind::Url(url);
+    }
+    SkillSourceKind::RegistryName(s.to_string())
+}
+
+/// Turn `owner/repo` or `owner/repo/path` into a raw GitHub URL on the
+/// default branch (`HEAD`). Returns `None` if `spec` doesn't look like a
+/// repo path. A bare `owner/repo` fetches `SKILL.md`; a trailing path that
+/// isn't already a `.md` file gets `/SKILL.md` appended.
+fn github_raw_url(spec: &str) -> Option<String> {
+    let parts: Vec<&str> = spec.split('/').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return None;
+    }
+    let safe = |p: &&str| {
+        p.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !parts.iter().all(safe) {
+        return None;
+    }
+    let (owner, repo) = (parts[0], parts[1]);
+    let path = match &parts[2..] {
+        [] => "SKILL.md".to_string(),
+        rest => {
+            let joined = rest.join("/");
+            if joined.ends_with(".md") {
+                joined
+            } else {
+                format!("{joined}/SKILL.md")
+            }
+        }
+    };
+    Some(format!(
+        "https://raw.githubusercontent.com/{owner}/{repo}/HEAD/{path}"
+    ))
+}
+
+/// Reduce an arbitrary skill name to a safe file stem — lowercase, only
+/// `[a-z0-9._-]`, no leading/trailing `-`/`.`. Guards against path traversal
+/// from an attacker-controlled `name:` field. `None` if nothing usable left.
+fn sanitize_name(name: &str) -> Option<String> {
+    let cleaned: String = name
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(|c| c == '-' || c == '.').to_string();
+    (!cleaned.is_empty()).then_some(cleaned)
+}
+
+/// Validate downloaded markdown as a skill and write it into the chosen
+/// skills dir, filed under its own (sanitised) `name`. `name_hint` is used
+/// only when the frontmatter omits `name` (e.g. the URL basename).
+/// Overwrites an existing same-named skill (install doubles as update).
+pub fn install_markdown(
+    content: &str,
+    name_hint: &str,
+    project_root: &Path,
+    scope: InstallScope,
+) -> Result<Skill, SkillError> {
+    let (front, body) = split_frontmatter(content);
+    if body.trim().is_empty() {
+        return Err(SkillError::Io("downloaded skill body is empty".into()));
+    }
+    let fm = parse_frontmatter(front);
+    let raw_name = fm
+        .get("name")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| name_hint.to_string());
+    let name = sanitize_name(&raw_name)
+        .ok_or_else(|| SkillError::Io("skill has no usable name".into()))?;
+    let (path, source) = match scope {
+        InstallScope::Global => (new_global_path(&name)?, SkillSource::Global),
+        InstallScope::Project => (new_project_path(project_root, &name)?, SkillSource::Project),
+    };
+    std::fs::write(&path, content).map_err(|e| SkillError::Io(format!("{e}")))?;
+    load_one(&path, source)
+}
+
 fn load_dir(dir: &Path, source: SkillSource) -> Vec<Skill> {
     let mut out = Vec::new();
     let entries = match std::fs::read_dir(dir) {
@@ -257,5 +372,51 @@ mod tests {
         let m = parse_frontmatter("name: foo\ndescription: bar baz\n");
         assert_eq!(m.get("name").map(|s| s.as_str()), Some("foo"));
         assert_eq!(m.get("description").map(|s| s.as_str()), Some("bar baz"));
+    }
+
+    #[test]
+    fn classifies_install_sources() {
+        use SkillSourceKind::*;
+        assert_eq!(
+            classify_source("https://x.com/a.md"),
+            Url("https://x.com/a.md".into())
+        );
+        // owner/repo → raw GitHub SKILL.md
+        assert_eq!(
+            classify_source("acme/skills"),
+            Url("https://raw.githubusercontent.com/acme/skills/HEAD/SKILL.md".into())
+        );
+        // owner/repo/path.md kept verbatim
+        assert_eq!(
+            classify_source("acme/skills/pack/review.md"),
+            Url("https://raw.githubusercontent.com/acme/skills/HEAD/pack/review.md".into())
+        );
+        // bare name → registry lookup
+        assert_eq!(classify_source("code-review"), RegistryName("code-review".into()));
+    }
+
+    #[test]
+    fn sanitize_blocks_path_traversal() {
+        assert_eq!(sanitize_name("../../etc/passwd").as_deref(), Some("etc-passwd"));
+        assert_eq!(sanitize_name("Good Skill!").as_deref(), Some("good-skill"));
+        assert_eq!(sanitize_name("///"), None);
+    }
+
+    #[test]
+    fn install_project_roundtrip() {
+        let root = std::env::temp_dir().join(format!("wingman-inst-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let md = "---\nname: Demo Skill\ndescription: does things\n---\nBe helpful and terse.\n";
+        let skill = install_markdown(md, "fallback", &root, InstallScope::Project).unwrap();
+        // Lookup name comes from frontmatter; the on-disk filename is sanitised.
+        assert_eq!(skill.name, "Demo Skill");
+        assert_eq!(skill.path.file_name().unwrap(), "demo-skill.md");
+        // the normal loader now finds it with no extra registration step
+        let all = load_all(&root);
+        assert!(all
+            .iter()
+            .any(|s| s.name == "Demo Skill" && s.description == "does things"));
+        std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -53,7 +53,7 @@ pub const CATALOG: &[Command] = &[
     },
     Command {
         name: "/skills",
-        description: "browse and apply skills",
+        description: "browse skills · new <name> · install <url|owner/repo|name>",
     },
     Command {
         name: "/skill",

@@ -139,6 +139,7 @@ enum Cmd {
     Usage(String),
     Skills,
     SkillsNew(String),
+    SkillsInstall { source: String, project: bool },
     Skill(String),
     Mcp,
     Export(String),
@@ -188,15 +189,33 @@ fn parse_slash(line: &str) -> Cmd {
         "/add" if !arg.is_empty() => Cmd::Add(arg.to_string()),
         "/usage" => Cmd::Usage(arg.to_string()),
         "/skills" => {
-            if let Some(rest) = arg.strip_prefix("new") {
-                let name = rest.trim().to_string();
-                if name.is_empty() {
-                    Cmd::Skills
-                } else {
-                    Cmd::SkillsNew(name)
+            let mut it = arg.split_whitespace();
+            match it.next() {
+                Some("new") => {
+                    let name = it.collect::<Vec<_>>().join(" ");
+                    if name.is_empty() {
+                        Cmd::Skills
+                    } else {
+                        Cmd::SkillsNew(name)
+                    }
                 }
-            } else {
-                Cmd::Skills
+                Some("install") | Some("add") => {
+                    let mut project = false;
+                    let mut source = String::new();
+                    for t in it {
+                        if t == "--project" || t == "-p" {
+                            project = true;
+                        } else if source.is_empty() {
+                            source = t.to_string();
+                        }
+                    }
+                    if source.is_empty() {
+                        Cmd::Skills
+                    } else {
+                        Cmd::SkillsInstall { source, project }
+                    }
+                }
+                _ => Cmd::Skills,
             }
         }
         "/skill" if !arg.is_empty() => {
@@ -1048,6 +1067,34 @@ async fn idle_step(
                                         .push(TranscriptItem::Error(format!("/skills new: {e}")));
                                 }
                             },
+                            Cmd::SkillsInstall { source, project } => {
+                                let scope = if project {
+                                    wingman_skills::InstallScope::Project
+                                } else {
+                                    wingman_skills::InstallScope::Global
+                                };
+                                ui.transcript.push(TranscriptItem::System(format!(
+                                    "installing skill from '{source}'…"
+                                )));
+                                draw(terminal, ui)?;
+                                match install_skill(&source, project_root, scope).await {
+                                    Ok(skill) => ui.transcript.push(TranscriptItem::System(
+                                        format!(
+                                            "installed skill '{}'{} — use /skill {} (or the agent can invoke it)",
+                                            skill.name,
+                                            if skill.description.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(": {}", skill.description)
+                                            },
+                                            skill.name,
+                                        ),
+                                    )),
+                                    Err(e) => ui.transcript.push(TranscriptItem::Error(format!(
+                                        "/skills install: {e}"
+                                    ))),
+                                }
+                            }
                             Cmd::Find(q) => {
                                 let n = ui.transcript.search_set(&q);
                                 ui.transcript.push(TranscriptItem::System(format!(
@@ -1269,6 +1316,92 @@ fn truncate(mut s: String, max: usize) -> String {
 /// Suspend the TUI, launch `$EDITOR` (falling back to a platform default)
 /// on `path` and block until it exits, then re-enter the alternate screen
 /// and request a redraw on the next `draw` call.
+/// Resolve a `/skills install` source to a URL, download it, and write the
+/// skill into `scope`. Registry lookups read the index URL from the
+/// `WINGMAN_SKILLS_REGISTRY` env var.
+async fn install_skill(
+    source: &str,
+    project_root: &std::path::Path,
+    scope: wingman_skills::InstallScope,
+) -> std::result::Result<wingman_skills::Skill, String> {
+    let (url, hint) = match wingman_skills::classify_source(source) {
+        wingman_skills::SkillSourceKind::Url(u) => {
+            let hint = url_basename(&u);
+            (u, hint)
+        }
+        wingman_skills::SkillSourceKind::RegistryName(name) => {
+            let reg = std::env::var("WINGMAN_SKILLS_REGISTRY").map_err(|_| {
+                format!(
+                    "'{name}' looks like a registry name, but no registry is configured. \
+                     Set WINGMAN_SKILLS_REGISTRY to an index URL, or pass a full URL or owner/repo."
+                )
+            })?;
+            let index = fetch_text(&reg).await?;
+            let v: serde_json::Value =
+                serde_json::from_str(&index).map_err(|e| format!("registry index parse: {e}"))?;
+            let entries = v
+                .as_array()
+                .ok_or("registry index must be a JSON array of {name, url}")?;
+            let url = entries
+                .iter()
+                .find(|e| e["name"].as_str() == Some(name.as_str()))
+                .and_then(|e| e["url"].as_str())
+                .ok_or_else(|| {
+                    let names: Vec<&str> =
+                        entries.iter().filter_map(|e| e["name"].as_str()).collect();
+                    format!(
+                        "'{name}' not in registry. available: {}",
+                        if names.is_empty() {
+                            "(none)".to_string()
+                        } else {
+                            names.join(", ")
+                        }
+                    )
+                })?
+                .to_string();
+            (url, name)
+        }
+    };
+    let content = fetch_text(&url).await?;
+    wingman_skills::install_markdown(&content, &hint, project_root, scope).map_err(|e| format!("{e}"))
+}
+
+/// Last path segment of a URL, minus a `.md` suffix — a fallback skill name.
+fn url_basename(url: &str) -> String {
+    let last = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .rsplit('/')
+        .next()
+        .unwrap_or("skill");
+    last.trim_end_matches(".md").to_string()
+}
+
+/// GET `url` as UTF-8 text, with a timeout and a size cap so a hostile or
+/// wrong URL can't hang the TUI or blow up memory.
+async fn fetch_text(url: &str) -> std::result::Result<String, String> {
+    const MAX_BYTES: usize = 512 * 1024;
+    let resp = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "wingman")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} from {url}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    if bytes.len() > MAX_BYTES {
+        return Err(format!(
+            "skill too large ({} bytes, max {MAX_BYTES})",
+            bytes.len()
+        ));
+    }
+    String::from_utf8(bytes.to_vec()).map_err(|_| "response was not UTF-8 text".to_string())
+}
+
 fn launch_editor(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     path: &std::path::Path,
