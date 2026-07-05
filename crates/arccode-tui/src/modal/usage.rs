@@ -139,24 +139,56 @@ impl UsageView {
                 .add_modifier(Modifier::UNDERLINED),
         );
 
-        let mut rows: Vec<Row> = data
-            .iter()
-            .map(|(model, u)| {
-                let cost = price_for(model)
-                    .map(|p| format!("${:.4}", p.cost(u)))
+        // Group by provider — usage keys are "provider/model" (BTreeMap keeps
+        // each provider's models contiguous and sorted).
+        let mut groups: BTreeMap<&str, Vec<(&str, &Usage)>> = BTreeMap::new();
+        for (key, u) in data {
+            let (prov, model) = key.split_once('/').unwrap_or(("(unknown)", key));
+            groups.entry(prov).or_default().push((model, u));
+        }
+
+        let mut rows: Vec<Row> = Vec::new();
+        for (prov, models) in &groups {
+            rows.push(
+                Row::new(vec![prov.to_string(), String::new(), String::new(), String::new(), String::new(), String::new()])
+                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            );
+            let mut sub = Usage::default();
+            let mut sub_cost = 0.0;
+            let mut sub_priced = false;
+            for (model, u) in models {
+                sub.add(u);
+                let cost = price_for(&format!("{prov}/{model}"))
+                    .map(|p| {
+                        let c = p.cost(u);
+                        sub_cost += c;
+                        sub_priced = true;
+                        format!("${c:.4}")
+                    })
                     .unwrap_or_else(|| "—".into());
-                Row::new(vec![
-                    model.clone(),
+                rows.push(Row::new(vec![
+                    format!("  {model}"),
                     fmt(u.input_tokens),
                     fmt(u.output_tokens),
                     fmt(u.cache_read_input_tokens),
                     fmt(u.cache_creation_input_tokens),
                     cost,
+                ]));
+            }
+            rows.push(
+                Row::new(vec![
+                    "  subtotal".to_string(),
+                    fmt(sub.input_tokens),
+                    fmt(sub.output_tokens),
+                    fmt(sub.cache_read_input_tokens),
+                    fmt(sub.cache_creation_input_tokens),
+                    if sub_priced { format!("${sub_cost:.4}") } else { "—".into() },
                 ])
-            })
-            .collect();
+                .style(Style::default().fg(Color::DarkGray)),
+            );
+        }
 
-        // Totals row.
+        // Grand totals row.
         let total = sum(data);
         let total_cost: Option<f64> = {
             let mut sum = 0.0;
