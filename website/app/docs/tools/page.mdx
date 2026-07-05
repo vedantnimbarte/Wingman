@@ -5,31 +5,38 @@ export const metadata = {
 
 # Built-in tools
 
-Each tool runs through the registry, which receives a `ToolCtx` carrying the
-active permission mode, current working directory, and project root. Tools
-decide whether to act, prompt, or refuse based on that context.
+Wingman ships 20+ built-in tools. Each one runs through the registry, which
+receives a `ToolCtx` carrying the active permission mode, current working
+directory, and project root. Tools decide whether to act, prompt, or refuse
+based on that context. Connected MCP servers add their own namespaced tools on
+top of the built-in set.
 
-| Tool              | Purpose                                                          |
-| ----------------- | ---------------------------------------------------------------- |
-| `read_file`       | Read a file by absolute path. Returns content with line numbers. |
-| `write_file`      | Create or overwrite a file.                                      |
-| `edit_file`       | Exact string replacement inside an existing file.                |
-| `apply_patch`     | Multi-file atomic edit (Update / Add / Delete blocks).           |
-| `spawn_subagent`  | Run an isolated inner agent loop on a sub-task; depth-capped at 1. |
-| `glob_tool`       | Find files by glob pattern (e.g. `**/*.rs`).                     |
-| `grep_tool`       | Content search via ripgrep semantics.                            |
-| `list_dir`        | List a directory.                                                |
-| `run_shell`       | Execute a shell command. Subject to the permission denylist.     |
-| `web_fetch`       | Download an http(s) URL, strip HTML, return text.                |
-| `web_search`      | DuckDuckGo HTML search (no API key); pairs with `web_fetch`.     |
-| `semantic_search` | Cosine search the project RAG index for relevant code chunks.    |
-| `present_plan`    | Structured plan block; required step before edits in `plan` mode. |
-| `save_memory`     | Persist a fact / preference / instruction across sessions.       |
-| `recall_memory`   | Read the full body of a memory by slug.                          |
-| `forget_memory`   | Delete a memory by slug.                                         |
-| `invoke_skill`    | Load a named skill's body for the current turn; records stats.   |
-| `recall_session`  | Cross-project semantic search over past session transcripts.     |
-| `read_session`    | Fetch a full session JSONL by id.                                |
+| Tool                    | Purpose                                                          |
+| ----------------------- | ---------------------------------------------------------------- |
+| `read_file`             | Read a file by absolute path. Returns content with line numbers. |
+| `write_file`            | Create or overwrite a file.                                      |
+| `edit_file`             | Exact string replacement inside an existing file.                |
+| `edit_symbol`           | Replace a named function/method body via tree-sitter (rust, python, js, ts, tsx, go). |
+| `apply_patch`           | Multi-file atomic edit (Update / Add / Delete blocks).           |
+| `glob_tool`             | Find files by glob pattern (e.g. `**/*.rs`).                     |
+| `grep_tool`             | Content search via ripgrep semantics.                            |
+| `list_dir`              | List a directory.                                                |
+| `find_symbol`           | Locate where a symbol is *defined* via tree-sitter; returns `path:line kind name signature` rows. |
+| `outline`               | Signatures-only outline of a source file (one line per fn/struct/class). |
+| `semantic_search`       | Cosine search the project RAG index for relevant code chunks.    |
+| `run_shell`             | Execute a shell command. Subject to the permission denylist.     |
+| `web_fetch`             | Download an http(s) URL, strip HTML, return text.                |
+| `web_search`            | DuckDuckGo HTML search (no API key); pairs with `web_fetch`.     |
+| `present_plan`          | Structured plan block; required step before edits in `plan` mode. |
+| `spawn_subagent`        | Run an isolated inner agent loop on a sub-task; depth-capped at 1. |
+| `task_complete`         | Terminal call for a pilot/worker run: reports the final summary and files changed. |
+| `save_memory`           | Persist a fact / preference / instruction across sessions.       |
+| `recall_memory`         | Read the full body of a memory by slug.                          |
+| `forget_memory`         | Delete a memory by slug.                                         |
+| `invoke_skill`          | Load a named skill's body for the current turn; records stats.   |
+| `recall_session`        | Cross-project semantic search over past session transcripts.     |
+| `read_session`          | Fetch a full session JSONL by id.                                |
+| `mcp__<server>__<tool>` | Namespaced tools exposed by connected MCP servers.               |
 
 ## Output bounding
 
@@ -46,3 +53,11 @@ sessions inside the active model's context window alongside the
   not raw JSON.
 - **`spawn_subagent`** lets the model delegate a focused sub-task to an isolated
   inner loop, capped at depth 1.
+- **`find_symbol` / `outline` / `edit_symbol`** are tree-sitter backed (rust,
+  python, javascript, typescript, tsx, go) and ship with the default
+  `treesitter` build. `edit_symbol` is safer than `edit_file` when the same
+  text appears in multiple places.
+- **`task_complete`** is available in pilot/worker runs: the agent calls it to
+  hand the final summary back to the orchestrator and end its turn.
+- **MCP tools** are registered per connected server under the
+  `mcp__<server>__<tool>` namespace and flow through the same permission gating.

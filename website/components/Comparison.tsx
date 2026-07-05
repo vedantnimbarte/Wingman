@@ -16,29 +16,26 @@ type Row = {
 
 // Column order is shared by the header and every row's `marks` array.
 const tools: Tool[] = [
-  { name: "Wingman", tag: "Autonomous · Rust", highlight: true },
-  { name: "Hermes", tag: "Open-model agent" },
-  { name: "Devin", tag: "Autonomous SWE" },
-  { name: "Cursor", tag: "AI editor" },
-  { name: "Copilot", tag: "Autocomplete" },
+  { name: "Wingman", tag: "Self-improving · Rust", highlight: true },
   { name: "Claude Code", tag: "Agentic CLI" },
+  { name: "Cursor", tag: "AI editor" },
+  { name: "Aider", tag: "AI pair · CLI" },
 ];
 
 const rows: Row[] = [
-  { label: "Autonomous goal → ship loop", marks: ["full", "full", "full", "partial", "none", "partial"] },
-  { label: "Dependency-aware task graph", marks: ["full", "partial", "full", "none", "none", "none"] },
-  { label: "Sandboxed worktree execution", marks: ["full", "partial", "partial", "none", "none", "partial"] },
-  { label: "Self-correcting test loop", marks: ["full", "full", "full", "partial", "none", "partial"] },
-  { label: "Opens real pull requests", marks: ["full", "partial", "full", "partial", "none", "partial"] },
-  { label: "Runs headless / unattended", marks: ["full", "full", "full", "none", "none", "partial"] },
-  { label: "Single binary, no runtime", marks: ["full", "none", "none", "none", "none", "none"] },
-  { label: "Model-agnostic / BYO model", marks: ["full", "full", "none", "partial", "none", "none"] },
-  { label: "Self-hostable / local", marks: ["full", "full", "none", "none", "none", "partial"] },
+  { label: "73+ providers, one interface", marks: ["full", "none", "partial", "full"] },
+  { label: "Self-improving memory / learning loop", marks: ["full", "partial", "partial", "none"] },
+  { label: "Multi-agent pilot mode (worktrees → PR)", marks: ["full", "partial", "none", "none"] },
+  { label: "MCP host (namespaced external tools)", marks: ["full", "full", "full", "none"] },
+  { label: "Runs headless / scriptable", marks: ["full", "full", "none", "partial"] },
+  { label: "Single binary, no runtime", marks: ["full", "none", "none", "none"] },
+  { label: "Self-hostable / local models", marks: ["full", "none", "none", "partial"] },
+  { label: "Open source", marks: ["full", "none", "none", "full"] },
 ];
 
 // label column + one column per tool. Kept as a static literal so Tailwind's
 // JIT scanner can see it (interpolated class names are not detected).
-const gridCols = "grid-cols-[minmax(180px,1.5fr)_repeat(6,minmax(0,1fr))]";
+const gridCols = "grid-cols-[minmax(180px,1.5fr)_repeat(4,minmax(0,1fr))]";
 
 const markMeta: Record<Mark, string> = {
   full: "Native",
@@ -90,13 +87,13 @@ export function Comparison() {
       <SectionHeading
         eyebrow="Compare"
         title="How Wingman holds the line"
-        lead="Most tools help you type faster. Wingman closes the loop on its own — planning, sandboxed execution, self-correcting tests, and a reviewable pull request. Here is how it measures against the field, open-model agents like Hermes included."
+        lead="An open, provider-agnostic alternative to Claude Code, Cursor, and Aider. Wingman pairs 73+ providers behind one interface with a self-improving learning loop and a multi-agent pilot mode that converges into a reviewable pull request. Here is how it measures up."
       />
 
       <Reveal className="mt-10">
         <div className="glow-ring overflow-hidden rounded-2xl border border-[var(--border)] bg-[var(--surface)]">
           <div className="overflow-x-auto">
-            <div className="min-w-[720px]">
+            <div className="min-w-[640px]">
               {/* Header */}
               <div className={`grid ${gridCols} border-b border-[var(--border)]`}>
                 <div className="px-5 py-5 font-mono text-[0.68rem] uppercase tracking-[0.14em] text-[var(--text-dim)]">

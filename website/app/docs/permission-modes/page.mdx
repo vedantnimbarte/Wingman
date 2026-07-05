@@ -20,14 +20,19 @@ decide whether to act, prompt, or refuse based on that context.
 
 - **`read-only`** is the default. Reads and searches are allowed; writes and
   shell commands prompt for confirmation.
-- **`plan`** keeps the session read-only and expects the assistant to call
-  `present_plan` and wait for you before requesting any write/shell tool. The
-  `present_plan` tool is always available so the model can produce a structured
-  plan even outside plan mode (it just won't gate anything in that case).
+- **`plan`** stays read-only while the assistant investigates and calls
+  `present_plan`; once you approve the plan the session transitions to
+  `auto-edit` for the rest of that turn, so writes and shell run automatically
+  after approval. The `present_plan` tool is always available so the model can
+  produce a structured plan even outside plan mode (it just won't gate anything
+  in that case).
 - **`auto-edit`** auto-allows writes and shell inside the project tree; the
   denylist still prompts, and out-of-tree paths still prompt.
 - **`yolo`** runs without prompts and is **per-session only — never persisted**
-  to config.
+  to config. The `/mode` picker omits it; enable it with `--mode yolo`.
+- In every mode except `yolo`, reads are confined to the project tree — an
+  out-of-tree read (e.g. `~/.ssh/id_rsa`) is refused rather than prompted, so
+  the agent can't be steered into exfiltrating files outside the project.
 
 Set the mode in config (`permission_mode`), via `WINGMAN_PERMISSION_MODE`, or
 per-session with the `--mode` flag.

@@ -46,6 +46,16 @@ model = "gpt-4.1"
 base_url = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 
+# MCP servers — each becomes a set of `mcp__<name>__<tool>` tools.
+[mcp.filesystem]
+transport = "stdio"                 # "stdio" (default) or "http"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+
+[mcp.remote]
+transport = "http"
+url = "http://localhost:9000/mcp"
+
 [logging]
 filter = "info,wingman=info"
 file = true
@@ -53,6 +63,26 @@ file = true
 
 Any string field of the form `${ENV_VAR}` is resolved against the environment
 at load time.
+
+## Credentials
+
+`wingman login <provider>` (or `/login` in the TUI) probes the key, stores it
+in the OS keyring, and records the default provider + model. The credential and
+default are persisted **synchronously** on login — the keyring write runs
+best-effort in the background. `wingman logout <provider>` removes it.
+
+## MCP servers
+
+Declare Model Context Protocol servers under `[mcp.<name>]` with either a
+`stdio` transport (`command` + `args`) or an `http` transport (`url`). Their
+tools are namespaced `mcp__<server>__<tool>` and dispatched like built-ins;
+manage them live from the TUI with `/mcp`.
+
+## Memory
+
+Persistent memories live as markdown-with-frontmatter files under
+`~/.wingman/memory/` (global) and `<project>/.wingman/memory/` (project),
+each indexed by a sibling `MEMORY.md`.
 
 ## Environment variables
 

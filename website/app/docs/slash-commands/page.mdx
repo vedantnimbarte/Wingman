@@ -7,14 +7,27 @@ export const metadata = {
 
 ## Built-in
 
-| Command                  | Effect                                                |
-| ------------------------ | ----------------------------------------------------- |
-| `/model <provider>/<id>` | Swap the active model live; history preserved.        |
-| `/memory`                | List saved memories. `/memory forget <name>` deletes. |
-| `/recall <query>`        | Search across past sessions for prior context.        |
-| `/skill stats [name]`    | Show skill usage and outcome counts.                  |
-| `/learn [status|reset]`  | Self-learning loop dashboard.                         |
-| `/find <query>`          | In-transcript search; `/findnext`, `/findprev`, `/findclear`. |
+| Command                    | Effect                                                                        |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `/help` (`/?`)             | Show the command list.                                                        |
+| `/clear`                   | Reset the conversation.                                                       |
+| `/login` (`/connect`)      | Connect a provider through the guided wizard.                                 |
+| `/logout [provider]`       | Remove a stored API key; no argument logs out the active provider.            |
+| `/model [<provider>/<id>]` | Swap the active model live; history preserved. Empty argument opens a picker scoped to your connected providers, listing each provider's live models. |
+| `/mode [<name>]`           | Switch permission mode (`read-only`, `plan`, `auto-edit`). Empty opens a picker. |
+| `/mcp`                     | Manage MCP servers — add, remove, connect, disconnect live.                   |
+| `/add <file>`              | Attach a file to the next prompt.                                             |
+| `/usage [clear]`           | Token + cost breakdown by provider; `clear` resets the counters.             |
+| `/skills [new <name>]`     | Browse and apply skills; `new <name>` scaffolds a skill.                      |
+| `/skill <name>`            | Queue a named skill for the next prompt. `/skill stats [name]` shows usage and outcome counts. |
+| `/memory`                  | List saved memories. `/memory forget <name>` deletes one.                    |
+| `/recall <query>`          | Search across past sessions for prior context.                               |
+| `/learn [status\|reset]`   | Self-learning loop dashboard.                                                |
+| `/export [format]`         | Export the transcript (defaults to Markdown).                                |
+| `/params`                  | Open the sampling-parameter editor for the active model.                     |
+| `/resume`                  | Reopen a previous session for this project.                                   |
+| `/find <query>`            | In-transcript search; `/findnext` (`/fn`), `/findprev` (`/fp`), `/findclear` (`/fc`). |
+| `/quit` (`/q`, `/exit`)    | Exit wingman.                                                                 |
 
 The file-tree sidebar toggles with `Ctrl+B`: `j`/`k` move, `Tab` descends,
 `Enter` inserts the path into the composer. Mouse-wheel scrolling is enabled.

@@ -14,10 +14,22 @@ wingman config init
 This writes a starter `~/.wingman/config.toml` populated with entries for every
 supported provider, each pointing at a `${ENV_VAR}` placeholder for the API key.
 
-## 2. Set an API key
+## 2. Connect a provider
 
-Pick one of the supported providers and export its key. Anthropic is the
-default:
+The guided way is `wingman login` (or `/login` in the TUI). It probes the key,
+stores it in the OS keyring, and records the provider + default model. As of the
+recent login hardening, the credential and default are **persisted
+synchronously** on login, so the very next command already sees them (the
+keyring write is best-effort in the background).
+
+```bash
+wingman login anthropic        # prompts for the key, probes it, saves the default
+wingman login --list           # list connectable provider ids
+wingman login chatgpt --oauth  # browser OAuth flow instead of an API key
+wingman logout anthropic       # remove the stored credential
+```
+
+Prefer environment variables? Export the key instead — Anthropic is the default:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -42,10 +54,14 @@ wingman --print "explain the agent loop in crates/wingman-core"
 # Headless, streaming JSON events (newline-delimited)
 wingman --print "list the public types in wingman-core" --json
 
+# Run a file of prompts non-interactively
+wingman --batch prompts.jsonl --json
+
 # Pick a model for this session only
 wingman --model anthropic/claude-opus-4-7
 wingman --model openai/gpt-4.1
 wingman --model gemini/gemini-2.5-pro
+wingman --model openrouter/anthropic/claude-opus-4-7
 
 # Loosen the permission model for this session
 wingman --mode auto-edit
@@ -55,7 +71,14 @@ wingman --mode yolo            # no prompts; per-session only
 ## Inside the TUI
 
 - Type a prompt and hit Enter to send.
-- `/model <provider>/<model-id>` — swap the active model live.
+- `/model [<provider>/<model-id>]` — swap the active model live, history
+  preserved. With an empty argument it opens the **dynamic model picker**,
+  which lists only the providers you're connected to (the ones in your
+  `[providers]` config plus the active one) and fetches each provider's live
+  model catalog via its `list_models()` — an OpenAI-compatible `GET /models`
+  for compat backends, or the provider's native listing endpoint. A
+  mid-session `/login` is reflected the next time you open the picker.
+- `/login` (`/connect`) — guided provider-connect wizard; `/logout [name]`.
 - `/memory` — list saved memories. `/memory forget <name>` to delete one.
 - `/recall <query>` — search across past sessions for prior context.
 - `/skill stats [name]` — show skill usage and outcome counts.

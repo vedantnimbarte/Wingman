@@ -23,7 +23,7 @@ const tiers = [
 ];
 
 const flow = [
-  { step: "Plan", detail: "decompose the goal into tasks.jsonl" },
+  { step: "Plan", detail: "decompose into a validated task DAG (tasks.jsonl)" },
   { step: "Workers", detail: "specialised agents in isolated git worktrees" },
   { step: "Converge", detail: "squash-merge + reviewer + verification" },
   { step: "PR", detail: "open a single pull request via gh" },

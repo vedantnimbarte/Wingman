@@ -9,7 +9,7 @@ const pillars = [
   },
   {
     title: "Skills",
-    body: "Every invoke_skill call is recorded with an outcome. When a skill drifts past a correction threshold, the next session suggests a rewrite.",
+    body: "Skills are created and refined from observed work. Every invoke_skill call is recorded with an outcome; when a skill drifts past a correction threshold, the next session suggests a rewrite and skill extract mines a fresh draft.",
   },
   {
     title: "Session recall",

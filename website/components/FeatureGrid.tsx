@@ -33,22 +33,44 @@ const features: Feature[] = [
   },
   {
     title: "73+ providers, one shape",
-    body: "Anthropic, OpenAI, Gemini, ChatGPT (OAuth), OpenRouter, LiteLLM, Ollama, vLLM and dozens more — all behind one streaming Message contract.",
+    body: "Anthropic, OpenAI, Gemini, ChatGPT (OAuth), OpenRouter, LiteLLM, Ollama, vLLM and dozens more — all behind one streaming Message contract. Guided login probes your key and stores it in the OS keyring.",
     icon: I(["M3 12h18", "M3 6h18", "M3 18h18"]),
   },
   {
-    title: "Two surfaces",
-    body: "A ratatui TUI for interactive coding and a headless --print mode that emits text or newline-delimited JSON, ready to pipe into CI.",
+    title: "Three surfaces",
+    body: "A ratatui TUI for interactive coding, a headless --print mode that emits text or newline-delimited JSON, and --batch to run a JSONL file of prompts — all ready to pipe into CI.",
     icon: I(["M3 4h18v16H3z", "m7 9 3 3-3 3", "M13 15h4"]),
   },
   {
+    title: "Multi-agent pilot mode",
+    body: "wingman pilot run plans a goal, delegates to worker agents in isolated git worktrees, and converges their output into a single reviewable pull request.",
+    icon: I([
+      "M6 3v8",
+      "M6 21a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
+      "M6 5a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
+      "M18 9a2 2 0 1 0 0-4 2 2 0 0 0 0 4Z",
+      "M18 7c0 6-6 4-6 10",
+    ]),
+  },
+  {
+    title: "MCP host",
+    body: "Declare Model Context Protocol servers under [mcp.<name>] (stdio or HTTP); their tools show up namespaced as mcp__<server>__<tool> and dispatch like built-ins. Manage them live with /mcp.",
+    icon: I([
+      "M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
+      "M12 3v3",
+      "M12 18v3",
+      "M3 12h3",
+      "M18 12h3",
+    ]),
+  },
+  {
     title: "Built-in tool layer",
-    body: "Read, write, edit, glob, grep, list, shell, semantic search and the learning tools — each gated by the active permission mode.",
+    body: "20+ tools — read, write, edit, apply_patch, glob, grep, list, shell, web fetch/search, semantic search and the learning tools — each gated by the active permission mode.",
     icon: I(["m14.7 6.3 3 3", "M3 21l3.5-1 11-11a2.1 2.1 0 0 0-3-3l-11 11L3 21Z"]),
   },
   {
-    title: "Live model swap",
-    body: "Change provider/model mid-session with /model — no restart, history preserved. Fallback chains walk in order on failure.",
+    title: "Dynamic /model picker",
+    body: "Swap provider/model mid-session with /model — the picker is scoped to the providers you've actually connected. No restart, history preserved, and fallback chains walk in order on failure.",
     icon: I(["M21 12a9 9 0 1 1-3-6.7", "M21 3v6h-6"]),
   },
   {

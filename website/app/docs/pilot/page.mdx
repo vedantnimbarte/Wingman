@@ -5,9 +5,15 @@ export const metadata = {
 
 # Pilot mode
 
-`wingman pilot run "<goal>"` plans a multi-task piece of work, spawns
-specialised worker agents in isolated git worktrees, and converges their output
-into a single PR.
+`wingman pilot run "<goal>"` plans a multi-task piece of work, validates the
+task dependency graph, spawns specialised worker agents in isolated git
+worktrees, and converges their output into a single PR.
+
+The plan is a DAG: before any worker is dispatched, the scheduler rejects a
+task that depends on itself, a dep pointing at an unknown id, or a dependency
+cycle. The check runs again on every manager- or splitter-issued edge, so a bad
+edge can never wedge a run on a graph the scheduler would wait on forever — it
+fails fast instead.
 
 ## Capability tiers
 
@@ -26,7 +32,7 @@ Pick a tier in `~/.wingman/config.toml`:
 ```toml
 [pilot]
 tier                  = "copilot"
-default_model         = "anthropic/claude-opus-4-7"   # manager + reviewers
+default_model         = "anthropic/claude-opus-4-8"   # manager + reviewers
 worker_model          = "anthropic/claude-haiku-4-5"  # workers
 max_concurrent_agents = 4
 max_usd               = 10.0
@@ -61,12 +67,22 @@ Per-run artefacts land under `<project>/.wingman/autonomous/<run-id>/`:
   state.json    # latest snapshot (rewritten after every event)
 ```
 
+## Token accounting
+
+At the end of a run, Pilot prints a per-phase token breakdown — planner,
+manager, reviewer, critic, and each worker — bucketed from the run's `agent.usd`
+events and sorted by total tokens. The manager loop's own usage is captured
+rather than dropped, so the totals reflect every LLM pass the run made. One-shot
+passes (planner, reviewer) set an `AfterSystem` cache breakpoint so the reused
+system prompt is read back from cache on the second call instead of re-billed.
+
 ## Status
 
-M1 phases 1–7 are implemented (RunStore, planner, worker subprocess with
+M1 is shipped: RunStore, planner with DAG validation, worker subprocess with a
 cross-platform supervisor, manager + orchestrator, git worktrees +
-squash-merge, gh PR creation, dashboard). Phase 8 ships cost-cap enforcement,
-the provider-support gate, and documentation; end-to-end runs need real API
-keys and are user-validated for now. M2 enhancements (E1–E13) and M3 autonomy
-(J1–J15) are roadmap. See [pilot provider support](/docs/pilot-providers) for
-which backends can drive it.
+squash-merge, `gh` PR creation, the live dashboard, cost-cap enforcement, and
+the provider-support gate. End-to-end runs need real API keys and are
+user-validated. The higher tiers layer in M2/M3 machinery (critic, sandbox,
+knowledge graph, tool synthesis, multi-channel intake, daemon) — scaffolded in
+`wingman-autonomous` and rolling out per tier. See
+[pilot provider support](/docs/pilot-providers) for which backends can drive it.

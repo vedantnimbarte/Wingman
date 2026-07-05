@@ -16,10 +16,11 @@ provider and model.
 
 | Flag               | Description                                                          |
 | ------------------ | -------------------------------------------------------------------- |
-| `--mode <MODE>`    | `read-only` \| `auto-edit` \| `yolo`.                                |
-| `--model <MODEL>`  | Model id, optionally prefixed: `anthropic/claude-opus-4-7`.          |
+| `--mode <MODE>`    | `read-only` \| `plan` \| `auto-edit` \| `yolo`.                      |
+| `--model <MODEL>`  | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Also reads `WINGMAN_MODEL`. |
 | `--print <PROMPT>` | Run a single prompt and exit (non-interactive).                      |
-| `--json`           | Emit newline-delimited JSON events instead of text. Use with `--print`. |
+| `--batch <FILE>`   | Run prompts from a JSONL file non-interactively, one turn per line.  |
+| `--json`           | Emit newline-delimited JSON events instead of text. Use with `--print` or `--batch`. |
 | `-v`, `-vv`        | Increase log verbosity.                                              |
 | `--quiet`          | Suppress non-error stderr output.                                    |
 | `--version`        | Print version and exit.                                              |
@@ -29,6 +30,8 @@ provider and model.
 
 | Command                            | Description                                                       |
 | ---------------------------------- | ----------------------------------------------------------------- |
+| `login [provider]`                 | Non-interactive provider auth: probe the key and store it in the OS keyring + config (the TUI `/login` equivalent). `--list` prints known provider ids; `--oauth` runs the browser flow; `--api-key`, `--model`, `--base-url`, `--no-probe`, `--no-default` refine it. |
+| `logout <provider>`                | Delete a provider's stored credential from the OS keyring.        |
 | `config init`                      | Write a starter `~/.wingman/config.toml`. `--force` to overwrite. |
 | `config show`                      | Print the merged effective configuration. `--json` for JSON.      |
 | `config paths`                     | Print the resolved global and project config paths.               |
@@ -48,7 +51,10 @@ provider and model.
 | `review-multi`                     | Run a review across multiple `provider/model` reviewers in parallel. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer.                  |
 | `discover`                         | Probe localhost for Ollama / LM Studio / vLLM and list models.    |
+| `knows`                            | Report what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
 | `schedule [--all]`                 | Run any `[[schedule]]` entries whose cadence is due.              |
 | `skill extract`                    | Mine recent sessions for repeated tool-call sequences.            |
 | `pilot run "<goal>"`               | Plan and orchestrate a multi-agent run into a PR.                 |
 | `pilot status` / `pilot watch`     | Summary / live dashboard for pilot runs.                          |
+| `pilot resume <run>` / `daemon`    | Resume an interrupted run; `daemon` runs the always-on discovery loop. |
+| `pilot abort` / `retry` / `approve` / `veto` | Control a live run: cancel, retry a task, or approve/reject a run waiting at the plan gate. |

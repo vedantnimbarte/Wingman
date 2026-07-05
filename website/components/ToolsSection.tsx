@@ -4,22 +4,22 @@ import { RevealGroup, RevealItem } from "./Reveal";
 const groups = [
   {
     label: "Files & edits",
-    tools: ["read_file", "write_file", "edit_file", "apply_patch", "spawn_subagent"],
+    tools: ["read_file", "write_file", "edit_file", "edit_symbol", "apply_patch"],
   },
   {
-    label: "Search",
-    tools: ["glob_tool", "grep_tool", "list_dir", "semantic_search"],
+    label: "Search & symbols",
+    tools: ["glob_tool", "grep_tool", "list_dir", "find_symbol", "outline", "semantic_search"],
   },
   {
     label: "Shell & web",
     tools: ["run_shell", "web_fetch", "web_search"],
   },
   {
-    label: "Planning",
-    tools: ["present_plan"],
+    label: "Plan & agents",
+    tools: ["present_plan", "spawn_subagent", "task_complete"],
   },
   {
-    label: "Learning",
+    label: "Memory & skills",
     tools: [
       "save_memory",
       "recall_memory",
@@ -28,6 +28,10 @@ const groups = [
       "recall_session",
       "read_session",
     ],
+  },
+  {
+    label: "MCP",
+    tools: ["mcp__<server>__<tool>"],
   },
 ];
 

@@ -46,6 +46,16 @@ Nebius, HF Inference, Snowflake, Databricks, Writer, Qwen, Zhipu GLM, Moonshot
 Kimi, MiniMax, Doubao, SiliconFlow, Vercel AI Gateway, and many local servers.
 See the project `README.md` for the complete table.
 
+## Connecting and listing models
+
+Run `wingman login <provider>` (or `/login` in the TUI) to probe a key, store
+it in the OS keyring, and record the default model — credentials persist
+synchronously on login. Every adapter implements `list_models()`, which queries
+the provider's API for the models available to your key (an OpenAI-compatible
+`GET /models` for compat backends, native endpoints for Anthropic and Gemini).
+The TUI `/model` picker uses this to show a live catalog scoped to the providers
+you're connected to.
+
 ## Enterprise providers
 
 - **AWS Bedrock** ships via the OpenAI-compat surface — set

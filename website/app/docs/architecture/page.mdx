@@ -11,7 +11,7 @@ responsibility.
 | Crate                | Role                                                                 |
 | -------------------- | ------------------------------------------------------------------- |
 | `wingman-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode. |
-| `wingman-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
+| `wingman-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation, prompt caching (Anthropic `AfterMessage`/`AfterSystem` breakpoints, rolling a conversation cache breakpoint each turn). |
 | `wingman-config`     | TOML config loading, layered merge, env-var resolution, permission model. |
 | `wingman-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
 | `wingman-tools`      | Built-in tool implementations and the `ToolRegistry`.               |
@@ -22,7 +22,7 @@ responsibility.
 | `wingman-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks. |
 | `wingman-mcp`        | MCP host scaffolding.                                               |
 | `wingman-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs. |
-| `wingman-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR. |
+| `wingman-autonomous` | Pilot mode: multi-agent orchestrator that plans a goal, validates the task DAG (self-deps, unknown deps, cycles — fails fast on a wedged graph), delegates to worker agents in isolated worktrees, converges into a PR, and reports a per-phase token breakdown at run end. |
 
 ## On-disk layout
 

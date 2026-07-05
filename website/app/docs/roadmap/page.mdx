@@ -17,10 +17,40 @@ The project is being built milestone by milestone.
 | **M5**    | Skills, ChatGPT OAuth, TUI polish (welcome screen, slash autocomplete). | shipped   |
 | **M6**    | Self-improving learning loop: memories, skill stats, recall, nudges.  | shipped     |
 | **M7**    | Tree-sitter integration across RAG, tools, diff/review, TUI.          | shipped     |
-| **M8**    | Autonomous / pilot mode: multi-task planning, worker agents, merge + PR. | in progress |
+| **M8**    | Pilot mode: multi-task planning, DAG validation, worker agents, merge + PR. | M1 shipped; higher tiers in progress |
+
+## Pilot mode
+
+Pilot ships as `wingman pilot`. M1 is done end-to-end: planning with DAG
+validation, worker subprocesses in isolated worktrees, squash-merge, `gh` PR
+creation, the live dashboard, cost caps, and a per-phase token breakdown at run
+end. The `copilot`/`autopilot` tiers layer in M2/M3 machinery (critic, sandbox,
+knowledge graph, tool synthesis, daemon) scaffolded in `wingman-autonomous`.
+
+## Single-agent differentiation
+
+Tracking `docs/DIFFERENTIATION.md` — the everyday single-agent pillars.
+
+| Phase  | Scope                                                                     | Status      |
+| ------ | ------------------------------------------------------------------------- | ----------- |
+| **D1** | Task-class router + fast-model defaults for compaction/summaries/titles.  | shipped     |
+| **D2** | `wingman indexd` daemon + search escalation + symbol-graph tool.          | not started |
+| **D3** | Default-loop turn gate + affected tests + verification receipts.          | core shipped |
+| **D4** | Post-session distillation + `wingman knows` + team memory sync.           | partial     |
+| **D5** | Learned routing, speculative parallelism, rewind timeline.                | not started |
+
+- **D1** ships `[router.classes]` config with `RouterConfig::resolve_class`;
+  `spawn_subagent` routes through a `task_class`.
+- **D3** ships the `TurnGate` trait and gate-retry loop in `AgentLoop`,
+  `Verification` receipts in the TUI/headless output, and `[verify]` config
+  (`turn_gate = "auto"/"off"/<cmd>`) with per-ecosystem auto-detection.
+  Affected-test discovery waits on D2's symbol graph.
+- **D4** ships `wingman knows` and `wingman memory export/import/diff` for pack
+  sharing; post-session distillation and staleness scoring remain.
 
 ## Next
 
 - Interactive TUI approval modal for skill/memory proposals.
-- Session logging from the TUI (currently headless-only).
+- `wingman indexd` warm-repo daemon and symbol-graph tool (D2).
+- Post-session distillation and memory staleness scoring (D4).
 - Full MCP host.

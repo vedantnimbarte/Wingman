@@ -32,10 +32,12 @@ when relevant.
 ### Skill usage
 
 Skill usage is stored at `~/.wingman/learn.db` (SQLite). Every `invoke_skill`
-call is recorded; the next user turn flips its outcome to `success` or
-`corrected` based on negation heuristics ("no,", "wait,", "wrong,",
-"actually,"…). When a skill crosses 3 invocations with ≥50% correction rate, the
-next session's system prompt suggests a rewrite.
+call is recorded; the next user turn flips its outcome to `success`,
+`corrected`, or `unclear` based on negation heuristics ("no,", "wait,",
+"wrong,", "actually,"…). When a skill crosses 3 invocations with ≥50%
+correction rate, the next session's system prompt suggests a rewrite, and
+`wingman skill extract` mines a fresh draft from recent sessions — skills are
+created and refined from observed work, not just hand-written.
 
 ### Session embeddings
 
