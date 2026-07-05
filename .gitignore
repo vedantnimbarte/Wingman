@@ -13,6 +13,10 @@ Thumbs.db
 
 # wingman local state / config (created in user repos, but ignore here too)
 .wingman/
+# wingman local state (created in user repos, but ignore here too)
+.wingman/sessions/
+.wingman/index.db*
+.wingman/*.log
 
 # Claude Code local state
 .claude/
