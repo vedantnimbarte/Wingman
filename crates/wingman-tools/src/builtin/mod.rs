@@ -12,6 +12,7 @@ mod grep_tool;
 mod invoke_skill;
 mod list_dir;
 mod present_plan;
+mod update_tasks;
 
 mod read_file;
 mod read_session;
@@ -41,6 +42,7 @@ pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
 pub use list_dir::ListDir;
 pub use present_plan::PresentPlan;
+pub use update_tasks::UpdateTasks;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;
 pub use recall_memory::RecallMemory;

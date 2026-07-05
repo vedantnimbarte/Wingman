@@ -341,6 +341,8 @@ struct UiState {
     slash: SlashSuggest,
     /// Toggleable left sidebar file tree.
     sidebar: Option<FileTree>,
+    /// Live checklist from the model's `update_tasks` tool. Empty = hidden.
+    tasks: Vec<crate::widgets::TaskItem>,
 }
 
 async fn run_inner(
@@ -363,6 +365,7 @@ async fn run_inner(
         pending_skill: None,
         slash: SlashSuggest::default(),
         sidebar: None,
+        tasks: Vec::new(),
     };
     let mut events = EventStream::new();
     loop {
@@ -1243,6 +1246,14 @@ async fn run_turn(
             evt = stream.next() => {
                 match evt {
                     Some(event) => {
+                        // The task panel is driven by the model's update_tasks
+                        // tool: grab its args off the ToolStart before the
+                        // generic handler turns it into a transcript line.
+                        if let AgentEvent::ToolStart { name, input, .. } = &event {
+                            if name == "update_tasks" {
+                                ui.tasks = crate::widgets::tasks::parse(input);
+                            }
+                        }
                         apply_event(&event, &mut ui.transcript, &mut ui.status);
                         draw(terminal, ui)?;
                         if matches!(event, AgentEvent::Stop { .. }) {
@@ -1593,7 +1604,7 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
             ])
             .split(area);
         // Optional left sidebar.
-        let (sidebar_area, body_area) = if ui.sidebar.is_some() {
+        let (sidebar_area, mut body_area) = if ui.sidebar.is_some() {
             let h = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(32), Constraint::Min(20)])
@@ -1602,8 +1613,22 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
         } else {
             (None, vchunks[0])
         };
+        // Optional right task panel, carved out of whatever body remains.
+        let tasks_area = if !ui.tasks.is_empty() {
+            let h = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Min(20), Constraint::Length(34)])
+                .split(body_area);
+            body_area = h[0];
+            Some(h[1])
+        } else {
+            None
+        };
         if let (Some(area_l), Some(tree)) = (sidebar_area, ui.sidebar.as_ref()) {
             FileTreeView { tree }.render(area_l, f.buffer_mut());
+        }
+        if let Some(area_r) = tasks_area {
+            crate::widgets::TasksView { tasks: &ui.tasks }.render(area_r, f.buffer_mut());
         }
         let chunks = [body_area, vchunks[1], vchunks[2]];
         if ui.transcript.items.is_empty() && !ui.composer.busy {
