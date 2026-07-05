@@ -35,7 +35,7 @@ export function PilotTiers() {
       <SectionHeading
         eyebrow="Pilot mode"
         title="From single goal to a reviewed pull request."
-        lead="arccode pilot run plans a multi-task piece of work, spawns specialised worker agents in isolated worktrees, and converges their output into one PR. Pick a capability tier in config."
+        lead="wingman pilot run plans a multi-task piece of work, spawns specialised worker agents in isolated worktrees, and converges their output into one PR. Pick a capability tier in config."
       />
 
       <RevealGroup className="mt-12 grid gap-4 md:grid-cols-3">

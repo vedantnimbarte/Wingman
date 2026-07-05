@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 
 /** macOS-style terminal chrome wrapper. */
 export function TerminalWindow({
-  title = "arccode",
+  title = "wingman",
   children,
   className,
 }: {

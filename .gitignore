@@ -11,10 +11,8 @@ Cargo.lock.bak
 .DS_Store
 Thumbs.db
 
-# arccode local state (created in user repos, but ignore here too)
-.arccode/sessions/
-.arccode/index.db*
-.arccode/*.log
+# wingman local state / config (created in user repos, but ignore here too)
+.wingman/
 
 # Claude Code local state
 .claude/

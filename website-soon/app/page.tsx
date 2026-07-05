@@ -283,7 +283,7 @@ export default function ComingSoonPage() {
               </h3>
               <p className="mt-2 max-w-md text-sm leading-6 text-[var(--text-muted)]">
                 Drop your email and we&rsquo;ll send a single note the moment
-                Arc-Code is live.
+                Wingman is live.
               </p>
             </div>
             <div className="w-full max-w-sm sm:shrink-0">

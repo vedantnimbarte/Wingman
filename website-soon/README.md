@@ -1,10 +1,10 @@
-# Arc-Code — Coming Soon
+# Wingman — Coming Soon
 
 A standalone "coming soon" / pre-launch landing page for
-[Arc-Code](../README.md), built with the **same stack and theme** as the main
+[Wingman](../README.md), built with the **same stack and theme** as the main
 [`website`](../website) (Next.js App Router, Tailwind CSS v4, Motion).
 
-It surfaces the full Arc-Code story — learning loop, 73+ providers, pilot mode,
+It surfaces the full Wingman story — learning loop, 73+ providers, pilot mode,
 two surfaces, tooling — framed as a pre-launch announcement, with a waitlist
 email capture and a launch roadmap.
 

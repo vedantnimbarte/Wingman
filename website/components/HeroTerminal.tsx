@@ -9,9 +9,9 @@ type Step =
   | { kind: "pause"; ms: number };
 
 const SCRIPT: Step[] = [
-  { kind: "type", text: 'arccode --print "add a --version-only flag"' },
+  { kind: "type", text: 'wingman --print "add a --version-only flag"' },
   { kind: "pause", ms: 400 },
-  { kind: "out", text: "● planning · reading crates/arccode-cli", tone: "dim" },
+  { kind: "out", text: "● planning · reading crates/wingman-cli", tone: "dim" },
   { kind: "out", text: "  ↳ recall_memory(user-prefers-terse)", tone: "dim" },
   { kind: "out", text: "✎ edit_file  src/main.rs   (+12 −1)", tone: "out" },
   { kind: "out", text: "✎ edit_file  src/args.rs   (+7  −0)", tone: "out" },
@@ -19,7 +19,7 @@ const SCRIPT: Step[] = [
   { kind: "out", text: "✓ done — opened PR #214", tone: "ok" },
 ];
 
-const PROMPT = "~/Arc-Code ❯ ";
+const PROMPT = "~/Wingman ❯ ";
 
 export function HeroTerminal() {
   const [typed, setTyped] = useState("");
@@ -90,7 +90,7 @@ export function HeroTerminal() {
   };
 
   return (
-    <TerminalWindow title="arccode — headless run">
+    <TerminalWindow title="wingman — headless run">
       <div className="min-h-[15.5rem]">
         <div className="flex flex-wrap">
           <span className="text-[var(--text-dim)]">{PROMPT}</span>

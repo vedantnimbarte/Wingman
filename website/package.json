@@ -1,8 +1,8 @@
 {
-  "name": "arccode-website",
+  "name": "wingman-website",
   "version": "0.1.0",
   "private": true,
-  "description": "Marketing + documentation site for the Arc-Code CLI",
+  "description": "Marketing + documentation site for the Wingman CLI",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

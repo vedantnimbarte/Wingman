@@ -1,10 +1,10 @@
 # Autonomous Mode (M8 - Planned)
 
-This document describes the planned autonomous mode feature for Arc-Code. As of now, this is a **design specification** in the planning phase. See `/plan.md` in the repository root for the full implementation roadmap.
+This document describes the planned autonomous mode feature for Wingman. As of now, this is a **design specification** in the planning phase. See `/plan.md` in the repository root for the full implementation roadmap.
 
 ## Vision
 
-`arccode autonomous "<goal>"` will allow you to describe a multi-task piece of work in natural language, and the system will:
+`wingman autonomous "<goal>"` will allow you to describe a multi-task piece of work in natural language, and the system will:
 
 1. **Plan** the work into discrete, parallel-friendly tasks with dependencies.
 2. **Spawn** a manager agent that orchestrates worker agents.
@@ -19,13 +19,13 @@ All work happens locally. No cloud upload. Cross-platform (Windows and Unix from
 ### Basic Invocation
 
 ```bash
-$ arccode autonomous "add dark-mode toggle to the TUI"
+$ wingman autonomous "add dark-mode toggle to the TUI"
 
 [autonomous] planning…
 [autonomous] proposed 7 tasks (run id: 2026-05-27-1430-a3f):
   1. [developer] Add `theme.mode` field to tui config (deps: —)
   2. [developer] Wire toggle key (`Ctrl+T`) into composer
-  3. [designer]  Define dark palette in arccode-tui::theme
+  3. [designer]  Define dark palette in wingman-tui::theme
   4. [developer] Update welcome screen for dark mode
   5. [tester]    Write integration test for dark-mode toggle
   6. [tester]    Manual testing checklist
@@ -39,14 +39,14 @@ Approve plan? [y / e (edit) / n] y
 [autonomous] task 1 done (developer, 2m18s, $0.07)
 [autonomous] task 3 done (designer,  3m02s, $0.11)
 …
-[autonomous] all tasks done. merging worktrees into arccode/auto/2026-05-27-1430-a3f…
-[autonomous] PR opened: https://github.com/vedantnimbarte/Arc-Code/pull/42
+[autonomous] all tasks done. merging worktrees into wingman/auto/2026-05-27-1430-a3f…
+[autonomous] PR opened: https://github.com/vedantnimbarte/Wingman/pull/42
 ```
 
 ### Plan-Only Mode
 
 ```bash
-$ arccode autonomous --plan-only "refactor error handling in arccode-core"
+$ wingman autonomous --plan-only "refactor error handling in wingman-core"
 
 [autonomous] planning…
 [autonomous] wrote tasks.jsonl (4 tasks, 0 dependencies)
@@ -57,7 +57,7 @@ Useful for review before committing to the work.
 ### Resume an Interrupted Run
 
 ```bash
-$ arccode autonomous --resume 2026-05-27-1430-a3f
+$ wingman autonomous --resume 2026-05-27-1430-a3f
 
 [autonomous] resuming run 2026-05-27-1430-a3f (3/7 tasks done)
 [autonomous] task #4 status was in_progress; restarting…
@@ -104,7 +104,7 @@ blocked (merge conflict or merge error)
 Each autonomous run creates:
 
 ```
-<project>/.arccode/autonomous/<run-id>/
+<project>/.wingman/autonomous/<run-id>/
 ├── tasks.jsonl              # append-only event log
 ├── state.json               # latest state snapshot (atomic writes)
 ├── worktrees/
@@ -140,7 +140,7 @@ Each autonomous run creates:
   "run_id": "2026-05-27-1430-a3f",
   "goal": "add dark-mode toggle to the TUI",
   "base_commit": "346077d…",
-  "integration_branch": "arccode/auto/2026-05-27-1430-a3f",
+  "integration_branch": "wingman/auto/2026-05-27-1430-a3f",
   "status": "running",
   "tasks": [
     {"id":"t1","role":"developer","title":"…","status":"done","deps":[],"agent":"agent-7f3a","worktree":"…","usd":0.07,"commits":["abc123"]},
@@ -160,10 +160,10 @@ Each autonomous run creates:
 
 ### Crate Structure
 
-New crate: `arccode-autonomous`
+New crate: `wingman-autonomous`
 
 ```
-crates/arccode-autonomous/
+crates/wingman-autonomous/
 ├── Cargo.toml
 └── src/
     ├── lib.rs              # public Orchestrator API
@@ -175,7 +175,7 @@ crates/arccode-autonomous/
     ├── model.rs            # Task, Agent, Run, Status, Role
     ├── worktree.rs         # create / cleanup / merge helpers
     ├── pr.rs               # gh integration (with fallback)
-    ├── role.rs             # AgentRole loader (~/.arccode/agents/)
+    ├── role.rs             # AgentRole loader (~/.wingman/agents/)
     └── tools/              # manager-only tools
         ├── mod.rs
         ├── add_task.rs
@@ -197,12 +197,12 @@ Predefined roles with system prompts:
 | `tester`    | Test writing, test execution, quality assurance.              |
 | `reviewer`  | Code review, changelog, PR description, final QA.             |
 
-Custom roles can be added at `~/.arccode/agents/<role>.md` with a user-defined system prompt.
+Custom roles can be added at `~/.wingman/agents/<role>.md` with a user-defined system prompt.
 
 ### Process Model
 
 ```
-User invokes: arccode autonomous "<goal>"
+User invokes: wingman autonomous "<goal>"
     ↓
 [Planner] call manager model with planning prompt
     ↓
@@ -215,7 +215,7 @@ Manager returns: structured task list (JSON)
 Manager loop runs continuously:
   1. Scan state.json for eligible tasks (deps met, under concurrency cap)
   2. For each: call assign_task tool → Orchestrator spawns worker
-  3. Worker runs as subprocess: `arccode --print --json --worker-mode --task-file <path>`
+  3. Worker runs as subprocess: `wingman --print --json --worker-mode --task-file <path>`
   4. Manager receives tool outcomes, calls finalize_task when worker done
   5. Exit when all tasks done or error
     ↓
@@ -231,7 +231,7 @@ Run done, integration branch left behind for user inspection
 ### Subcommand
 
 ```bash
-arccode autonomous <GOAL> [OPTIONS]
+wingman autonomous <GOAL> [OPTIONS]
 
 OPTIONS:
   --plan-only              Plan and write tasks.jsonl, don't spawn workers
@@ -265,14 +265,14 @@ max_usd = 10.0
 task_timeout_secs = 1800
 
 # Worktree base directory (relative to project root)
-worktree_base = ".arccode/worktrees"
+worktree_base = ".wingman/worktrees"
 
 # Integration branch prefix
-integration_branch_prefix = "arccode/auto"
+integration_branch_prefix = "wingman/auto"
 
 # Custom role definitions (per role.md file)
-# Defaults to ~/.arccode/agents/
-agents_dir = "~/.arccode/agents"
+# Defaults to ~/.wingman/agents/
+agents_dir = "~/.wingman/agents"
 
 # gh path (for PR creation fallback)
 gh_path = "gh"
@@ -287,7 +287,7 @@ When a run is active, the TUI shows:
 
 ### Dashboard Layout
 
-`arccode pilot watch` renders a live, colour-coded, 2-column grid: **Tasks |
+`wingman pilot watch` renders a live, colour-coded, 2-column grid: **Tasks |
 Agents** on the top row, with the **Live log** spanning the full width below.
 The header carries the run summary (progress by status, elapsed, spend, and
 the git anchors). Each row surfaces the details worth watching — per-task cost,
@@ -331,7 +331,7 @@ signal to estimate them.
 
 Terminals that can't render the unicode glyphs (legacy Windows console,
 non-UTF-8 locales) are auto-detected and fall back to a plain-ASCII glyph set;
-pass `--ascii` to force it, or set `ARCCODE_ASCII=0` to force unicode.
+pass `--ascii` to force it, or set `WINGMAN_ASCII=0` to force unicode.
 
 **Multiple runs.** When more than one run is active, a **Runs sidebar** appears
 on the left of the top row (Runs | Tasks | Agents) listing each active run with
@@ -373,7 +373,7 @@ run selection, the highlighted task, or the log scroll position.
 - `?` toggles a keybinding overlay; `q`/`Esc`/`Ctrl-C` exits.
 
 The terminal **bell** rings once on a new task failure and once when the
-watched run finishes (mute with `ARCCODE_NO_BELL`).
+watched run finishes (mute with `WINGMAN_NO_BELL`).
 
 When stdout is not a terminal (CI, `| tee`, redirected logs), `pilot watch`
 falls back to a plain reprint of the current run's grid (no sidebar, no
@@ -454,7 +454,7 @@ The feature is complete when:
 
 1. **Reviewer placement:** Should the reviewer task gate each task individually, or just the final PR?
 2. **Conflict resolution UX:** When a merge conflict occurs, should the run pause and show the conflict to the user, or auto-revert the conflicting task and mark it for retry?
-3. **Custom roles:** Should Arc-Code ship with default roles, or encourage users to define their own? (Current plan: ship defaults, make user override easy.)
+3. **Custom roles:** Should Wingman ship with default roles, or encourage users to define their own? (Current plan: ship defaults, make user override easy.)
 4. **Manager fallibility:** If the manager agent makes a bad plan, can the user edit it interactively? (Current plan: render + approve/edit/reject; edit opens `$EDITOR` on task JSON.)
 
 ## Related Documentation

@@ -5,12 +5,12 @@ export const metadata = {
 
 # Configuration
 
-`arccode` resolves configuration in this order (lowest to highest precedence):
+`wingman` resolves configuration in this order (lowest to highest precedence):
 
 1. Built-in defaults.
-2. `~/.arccode/config.toml` (global).
-3. `<project>/.arccode/config.toml` (project-local).
-4. `ARCCODE_*` environment variables.
+2. `~/.wingman/config.toml` (global).
+3. `<project>/.wingman/config.toml` (project-local).
+4. `WINGMAN_*` environment variables.
 5. CLI flags.
 
 TOML sub-tables are merged at the raw-TOML level, so an absent section in the
@@ -47,7 +47,7 @@ base_url = "http://localhost:11434/v1"
 model = "llama3.1:8b"
 
 [logging]
-filter = "info,arccode=info"
+filter = "info,wingman=info"
 file = true
 ```
 
@@ -58,13 +58,13 @@ at load time.
 
 | Variable                     | Effect                                               |
 | ---------------------------- | ---------------------------------------------------- |
-| `ARCCODE_MODEL`              | Overrides `default_model`. Same syntax as `--model`. |
-| `ARCCODE_PROVIDER`           | Overrides `default_provider`.                        |
-| `ARCCODE_PERMISSION_MODE`    | `read-only` \| `auto-edit` \| `yolo`.                |
-| `ARCCODE_LOG`                | `tracing-subscriber` env-filter directive.           |
-| `ARCCODE_<PROVIDER>_API_KEY` | Sets `providers.<provider>.api_key`.                 |
-| `ARCCODE_<PROVIDER>_BASE_URL`| Sets `providers.<provider>.base_url`.                |
-| `ARCCODE_<PROVIDER>_MODEL`   | Sets `providers.<provider>.model`.                   |
+| `WINGMAN_MODEL`              | Overrides `default_model`. Same syntax as `--model`. |
+| `WINGMAN_PROVIDER`           | Overrides `default_provider`.                        |
+| `WINGMAN_PERMISSION_MODE`    | `read-only` \| `auto-edit` \| `yolo`.                |
+| `WINGMAN_LOG`                | `tracing-subscriber` env-filter directive.           |
+| `WINGMAN_<PROVIDER>_API_KEY` | Sets `providers.<provider>.api_key`.                 |
+| `WINGMAN_<PROVIDER>_BASE_URL`| Sets `providers.<provider>.base_url`.                |
+| `WINGMAN_<PROVIDER>_MODEL`   | Sets `providers.<provider>.model`.                   |
 
 ## Model fallback
 

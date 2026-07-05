@@ -69,7 +69,7 @@ export function FeatureGrid() {
       <SectionHeading
         eyebrow="Highlights"
         title="Everything a coding agent should be — and a memory on top."
-        lead="Arc-Code pairs a fast, scriptable agent loop with a learning layer that quietly gets to know how you work."
+        lead="Wingman pairs a fast, scriptable agent loop with a learning layer that quietly gets to know how you work."
       />
       <RevealGroup className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {features.map((f) => (

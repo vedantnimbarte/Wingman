@@ -60,7 +60,7 @@ export function Hero() {
             transition={{ duration: 0.7, ease: EASE, delay: 0.14 }}
           >
             <p className="mt-6 max-w-xl text-pretty text-lg leading-8 text-[var(--text-muted)]">
-              <span className="font-mono text-[var(--text)]">arccode</span> talks
+              <span className="font-mono text-[var(--text)]">wingman</span> talks
               to 73+ LLM providers behind one streaming interface, edits your
               project with a built-in tool layer, and builds a persistent memory
               of you and your codebase — all from the terminal, all local-first.

@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 /* ------------------------------------------------------------------ *
- * Arc-Code palette — full grayscale system mapped to Tailwind v4
+ * Wingman palette — full grayscale system mapped to Tailwind v4
  * @theme tokens. Note: the source palette had a duplicate `pale_slate`
  * key (#ced4da and #adb5bd); the #adb5bd scale is preserved here as
  * `french_grey` so both survive.

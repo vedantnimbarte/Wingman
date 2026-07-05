@@ -1,10 +1,10 @@
 # Built-in Tools Reference
 
-Arc-Code provides a comprehensive suite of built-in tools. This document describes each tool's signature, behavior, permission requirements, and use cases.
+Wingman provides a comprehensive suite of built-in tools. This document describes each tool's signature, behavior, permission requirements, and use cases.
 
 ## Overview
 
-Tools are registered in `ToolRegistry` (`crates/arccode-tools/src/registry.rs`). When the agent calls a tool:
+Tools are registered in `ToolRegistry` (`crates/wingman-tools/src/registry.rs`). When the agent calls a tool:
 1. Registry looks up the tool by name.
 2. Checks permission mode (read-only, plan, auto-edit, yolo).
 3. Runs pre-tool hooks (if configured).
@@ -182,9 +182,9 @@ Find files matching a glob pattern.
 
 **Returns:**
 ```
-crates/arccode-cli/src/main.rs
-crates/arccode-cli/src/cli.rs
-crates/arccode-core/src/lib.rs
+crates/wingman-cli/src/main.rs
+crates/wingman-cli/src/cli.rs
+crates/wingman-core/src/lib.rs
 …
 ```
 
@@ -218,9 +218,9 @@ Search file contents using ripgrep semantics.
 
 **Returns:**
 ```
-crates/arccode-core/src/agent.rs:52:pub async fn stream(
-crates/arccode-core/src/agent.rs:53:    request: &CompletionRequest,
-crates/arccode-core/src/agent.rs:54-) -> Result<ProviderEventStream> {
+crates/wingman-core/src/agent.rs:52:pub async fn stream(
+crates/wingman-core/src/agent.rs:53:    request: &CompletionRequest,
+crates/wingman-core/src/agent.rs:54-) -> Result<ProviderEventStream> {
 …
 ```
 
@@ -256,9 +256,9 @@ List directory contents.
 
 **Returns:**
 ```
-arccode-cli/          (dir)
-arccode-core/         (dir)
-arccode-config/       (dir)
+wingman-cli/          (dir)
+wingman-core/         (dir)
+wingman-config/       (dir)
 Cargo.toml            (file, 2.4 KB)
 README.md             (file, 30.5 KB)
 ```
@@ -287,7 +287,7 @@ Execute a shell command. Blocked by denylist on `auto-edit` mode.
 
 **Returns:**
 ```
-Compiling arccode v0.0.1
+Compiling wingman v0.0.1
 Finished release [optimized] target(s) in 42.5s
 ```
 
@@ -384,7 +384,7 @@ Search the project RAG index for relevant code chunks.
 
 **Returns:**
 ```
-1. File: crates/arccode-core/src/agent.rs (lines 120-150)
+1. File: crates/wingman-core/src/agent.rs (lines 120-150)
    Relevance: 0.87
    Symbol: AgentLoop::run
    Preview: pub async fn run(&mut self, request: ...) { … }
@@ -559,7 +559,7 @@ Search past sessions across projects for relevant context.
 
 **Returns:**
 ```
-1. Project: Arc-Code (2024-05-27)
+1. Project: Wingman (2024-05-27)
    Relevance: 0.91
    Session: 2024-05-27-143015.jsonl
    Snippet: "We use tokio::sync::Mutex for shared state…"
@@ -571,7 +571,7 @@ Search past sessions across projects for relevant context.
 ```
 
 **Notes:**
-- Searches `~/.arccode/sessions.db` (embeddings of past sessions).
+- Searches `~/.wingman/sessions.db` (embeddings of past sessions).
 - Cross-project; helpful for pattern recall.
 - Top 5 results returned.
 

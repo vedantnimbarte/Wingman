@@ -1,10 +1,10 @@
 # Tree-Sitter Integration Guide
 
-Arc-Code integrates tree-sitter (`arccode-ts` crate) for language-aware code understanding across multiple subsystems.
+Wingman integrates tree-sitter (`wingman-ts` crate) for language-aware code understanding across multiple subsystems.
 
 ## Overview
 
-The `arccode-ts` crate provides a minimal facade over tree-sitter and language grammars, hiding transitive dependencies and allowing feature-gated opt-out for builds that don't need parsing.
+The `wingman-ts` crate provides a minimal facade over tree-sitter and language grammars, hiding transitive dependencies and allowing feature-gated opt-out for builds that don't need parsing.
 
 **Supported languages:**
 - Rust, Python, JavaScript, TypeScript, Go
@@ -25,7 +25,7 @@ The `arccode-ts` crate provides a minimal facade over tree-sitter and language g
 
 ### Key Types
 
-**`Language` enum** (`crates/arccode-ts/src/lang.rs`):
+**`Language` enum** (`crates/wingman-ts/src/lang.rs`):
 ```rust
 pub enum Language {
     Rust,
@@ -42,7 +42,7 @@ impl Language {
 }
 ```
 
-**`SymbolKind` enum** (`crates/arccode-ts/src/symbol.rs`):
+**`SymbolKind` enum** (`crates/wingman-ts/src/symbol.rs`):
 ```rust
 pub enum SymbolKind {
     Function, Method, Struct, Enum, Trait, Impl,
@@ -54,7 +54,7 @@ impl SymbolKind {
 }
 ```
 
-**`Symbol` struct** (`crates/arccode-ts/src/symbol.rs`):
+**`Symbol` struct** (`crates/wingman-ts/src/symbol.rs`):
 ```rust
 pub struct Symbol {
     pub name: String,
@@ -96,7 +96,7 @@ When feature disabled, all return empty Vec/None (inert fallbacks).
 
 ## Integration Points
 
-### 1. RAG Indexing (`arccode-rag`)
+### 1. RAG Indexing (`wingman-rag`)
 
 **Purpose:** Tree-sitter powers semantic chunking so the index groups related code together.
 
@@ -117,10 +117,10 @@ Insert into SQLite with embedding vector
 ```
 
 **Relevant code:**
-- `crates/arccode-rag/src/index.rs` — calls `arccode_ts::semantic_chunks()`.
+- `crates/wingman-rag/src/index.rs` — calls `wingman_ts::semantic_chunks()`.
 - RAG index queries return chunks with symbol context (e.g., "in function foo()").
 
-### 2. Tool Layer (`arccode-tools`)
+### 2. Tool Layer (`wingman-tools`)
 
 **Purpose:** Tree-sitter supports AST-aware diffs and symbol replacement.
 
@@ -129,11 +129,11 @@ Insert into SQLite with embedding vector
 - Diff review tools — AST-aware hunks (coming in M8).
 
 **Relevant code:**
-- `crates/arccode-tools/src/builtin/edit_file.rs` — calls `replace_function_body()`.
+- `crates/wingman-tools/src/builtin/edit_file.rs` — calls `replace_function_body()`.
 
-### 3. Diff/Review (`arccode-cli` commands)
+### 3. Diff/Review (`wingman-cli` commands)
 
-**Purpose:** `arccode diff` and `arccode review` use tree-sitter for syntax-aware hunk review.
+**Purpose:** `wingman diff` and `wingman review` use tree-sitter for syntax-aware hunk review.
 
 **Features:**
 - Display only changed function signatures (not full diff).
@@ -141,10 +141,10 @@ Insert into SQLite with embedding vector
 - Language-aware hunk boundaries.
 
 **Relevant code:**
-- `crates/arccode-cli/src/commands/diff.rs` — interactive hunk review.
-- `crates/arccode-cli/src/commands/diff_annotate.rs` — tree-sitter outline generation.
+- `crates/wingman-cli/src/commands/diff.rs` — interactive hunk review.
+- `crates/wingman-cli/src/commands/diff_annotate.rs` — tree-sitter outline generation.
 
-### 4. TUI Sidebar (`arccode-tui`)
+### 4. TUI Sidebar (`wingman-tui`)
 
 **Purpose:** File sidebar shows code outline (symbols in the open file).
 
@@ -153,9 +153,9 @@ Insert into SQLite with embedding vector
 - Symbol kind icons (fn, struct, class, etc.).
 
 **Relevant code:**
-- `crates/arccode-tui/src/views/sidebar.rs` — calls `arccode_ts::outline()`.
+- `crates/wingman-tui/src/views/sidebar.rs` — calls `wingman_ts::outline()`.
 
-### 5. Learning Loop (`arccode-learn`)
+### 5. Learning Loop (`wingman-learn`)
 
 **Purpose:** Extract skill patterns from session logs using tree-sitter context.
 
@@ -164,14 +164,14 @@ Insert into SQLite with embedding vector
 - Skills include symbol-scoped instructions (e.g., "when refactoring a function, call this sequence").
 
 **Relevant code:**
-- `crates/arccode-learn/src/extract.rs` — mine repeated patterns from sessions.
+- `crates/wingman-learn/src/extract.rs` — mine repeated patterns from sessions.
 
 ## Usage Examples
 
 ### Example 1: Extract Symbols from a Rust File
 
 ```rust
-use arccode_ts::{Language, extract_symbols};
+use wingman_ts::{Language, extract_symbols};
 
 let src = r#"
 fn main() {
@@ -196,7 +196,7 @@ let symbols = extract_symbols(Language::Rust, src);
 ### Example 2: Generate an Outline
 
 ```rust
-use arccode_ts::{Language, outline};
+use wingman_ts::{Language, outline};
 
 let src = "fn foo() { } struct Bar { }";
 let md = outline(Language::Rust, src);
@@ -206,7 +206,7 @@ let md = outline(Language::Rust, src);
 ### Example 3: Semantic Chunking
 
 ```rust
-use arccode_ts::{Language, semantic_chunks};
+use wingman_ts::{Language, semantic_chunks};
 
 let src = "fn foo() { a(); } fn bar() { b(); }";
 let chunks = semantic_chunks(Language::Rust, src);
@@ -222,7 +222,7 @@ If you're building a tool that doesn't need parsing, disable the feature:
 
 ```bash
 # In a dependent crate's Cargo.toml:
-arccode-ts = { workspace = true, default-features = false }
+wingman-ts = { workspace = true, default-features = false }
 ```
 
 All functions will return empty Vec/None. Your code stays branch-free:
@@ -258,11 +258,11 @@ If tree-sitter parsing fails (e.g., syntax error in the source), the system fall
 
 ## Testing
 
-Tree-sitter parsing is tested in `crates/arccode-ts/tests/`:
+Tree-sitter parsing is tested in `crates/wingman-ts/tests/`:
 
 ```bash
 # Run tree-sitter tests (requires feature enabled)
-cargo test --features treesitter -p arccode-ts
+cargo test --features treesitter -p wingman-ts
 ```
 
 Test cases cover:
@@ -288,7 +288,7 @@ Test cases cover:
 
 **A:** In `Cargo.toml`:
 ```toml
-arccode-ts = { workspace = true, default-features = false }
+wingman-ts = { workspace = true, default-features = false }
 ```
 
 Or at the workspace level:
@@ -300,10 +300,10 @@ This removes the C toolchain dependency. All tree-sitter functions become no-ops
 
 ### Q: Can I add support for language X?
 
-**A:** Yes. In `crates/arccode-ts/src/lang.rs`:
+**A:** Yes. In `crates/wingman-ts/src/lang.rs`:
 1. Add variant to `Language` enum.
 2. Update `from_path()` and `from_content()`.
 3. Add grammar crate to `Cargo.toml` (behind `treesitter` feature).
-4. Update language detection in `crates/arccode-ts/src/parse.rs`.
+4. Update language detection in `crates/wingman-ts/src/parse.rs`.
 
 The rest of the codebase is language-agnostic.

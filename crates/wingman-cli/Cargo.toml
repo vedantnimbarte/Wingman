@@ -1,0 +1,66 @@
+[package]
+name = "wingman-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wingman — a multi-provider terminal coding agent"
+
+[[bin]]
+name = "wingman"
+path = "src/main.rs"
+
+[dependencies]
+wingman-config = { workspace = true }
+wingman-core = { workspace = true }
+wingman-providers = { workspace = true }
+wingman-tools = { workspace = true }
+wingman-session = { workspace = true }
+wingman-tui = { workspace = true }
+wingman-rag = { workspace = true, default-features = false }
+wingman-mcp = { workspace = true }
+wingman-learn = { workspace = true }
+wingman-skills = { workspace = true }
+wingman-autonomous = { workspace = true }
+wingman-ts = { workspace = true, optional = true }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+urlencoding = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ratatui = "0.29"
+crossterm = "0.28"
+
+[features]
+default = ["embeddings", "treesitter"]
+# Pulls in fastembed-rs + ONNX runtime for real semantic search. Disable
+# this to ship a smaller binary that falls back to a deterministic
+# hash-based embedder (poor recall but fast and dep-free).
+embeddings = ["wingman-rag/embeddings"]
+# Pulls in tree-sitter grammars for symbol-aware diff/review annotation,
+# semantic chunking, and TUI highlighting.
+treesitter = [
+    "dep:wingman-ts",
+    "wingman-ts/treesitter",
+    "wingman-rag/treesitter",
+    "wingman-tools/treesitter",
+    "wingman-learn/treesitter",
+    "wingman-tui/treesitter",
+]
+
+[dev-dependencies]
+tempfile = "3"

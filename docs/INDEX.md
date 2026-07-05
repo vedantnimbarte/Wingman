@@ -1,20 +1,20 @@
-# Arc-Code Documentation Index
+# Wingman Documentation Index
 
-Welcome to Arc-Code's technical documentation. This index guides you to the right resource based on what you're trying to do.
+Welcome to Wingman's technical documentation. This index guides you to the right resource based on what you're trying to do.
 
 ## Getting Started
 
-- **New to Arc-Code?** Start with the [README.md](../README.md) for an overview, quick start, and highlights.
+- **New to Wingman?** Start with the [README.md](../README.md) for an overview, quick start, and highlights.
 - **Installation issues?** See the [Installation](#installation) section in README.
-- **First run?** See the [Quick Start](#quick-start) section in README, then try `arccode --help`.
+- **First run?** See the [Quick Start](#quick-start) section in README, then try `wingman --help`.
 
-## Understanding Arc-Code
+## Understanding Wingman
 
 ### Architecture & Design
 
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — System overview, core crates, data flow diagrams, threading model, feature flags.
   - Best for: Understanding how components fit together, design decisions, module responsibilities.
-  - Read this if: You're extending Arc-Code, debugging, or understanding the agent loop.
+  - Read this if: You're extending Wingman, debugging, or understanding the agent loop.
 
 ### Major Subsystems
 
@@ -23,7 +23,7 @@ Welcome to Arc-Code's technical documentation. This index guides you to the righ
   - Read this if: You're working with the RAG index, diff tools, or adding new languages.
 
 - **[LEARNING-LOOP.md](LEARNING-LOOP.md)** — Self-improving mechanism (memories, skill stats, session recall, nudges).
-  - Best for: Understanding how Arc-Code learns from sessions, persists across projects, and builds institutional knowledge.
+  - Best for: Understanding how Wingman learns from sessions, persists across projects, and builds institutional knowledge.
   - Read this if: You're using memory features, skill extraction, or cross-project recall.
 
 - **[TOOLS.md](TOOLS.md)** — Reference for all 20+ built-in tools (file I/O, search, shell, semantic search, memory, skills, session management).
@@ -32,33 +32,33 @@ Welcome to Arc-Code's technical documentation. This index guides you to the righ
 
 ### Pilot Mode & Roadmap
 
-- **[AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md)** — Design doc for multi-task agent orchestration, now shipped as **Pilot mode** (`arccode pilot`).
+- **[AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md)** — Design doc for multi-task agent orchestration, now shipped as **Pilot mode** (`wingman pilot`).
   - Best for: Understanding the vision, data model, architecture, TUI integration.
   - Read this if: You're using pilot mode, contributing to it, or interested in the roadmap.
   - See also: **Pilot mode** in [README.md](../README.md#pilot-mode) for the shipped command surface.
 
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
-  - Best for: Understanding how Arc-Code plans to beat Claude Code/Codex on speed, trust, and retention.
+  - Best for: Understanding how Wingman plans to beat Claude Code/Codex on speed, trust, and retention.
   - Read this if: You're prioritizing single-agent features or positioning the product.
 
-## Using Arc-Code
+## Using Wingman
 
 ### Command Reference
 
 See **CLI Reference** in [README.md](../README.md#cli-reference) for all subcommands.
 
 Key commands:
-- `arccode` — launch TUI.
-- `arccode --print "<prompt>"` — one-shot headless mode.
-- `arccode config init` — scaffold config.
-- `arccode login <provider>` — connect a provider (OS keyring); `arccode logout <provider>` to remove.
-- `arccode review <pr#>` — code review.
-- `arccode session list` — browse past sessions.
-- `arccode memory export/import/diff` — share memory packs.
-- `arccode knows` — show what Arc-Code knows about this project (memories, skills, routing, verification gate, index freshness).
-- `arccode skill extract` — mine skills from sessions.
-- `arccode discover` — find local LLMs.
-- `arccode pilot run "<goal>"` — multi-agent orchestration → PR (see [README.md](../README.md#pilot-mode)).
+- `wingman` — launch TUI.
+- `wingman --print "<prompt>"` — one-shot headless mode.
+- `wingman config init` — scaffold config.
+- `wingman login <provider>` — connect a provider (OS keyring); `wingman logout <provider>` to remove.
+- `wingman review <pr#>` — code review.
+- `wingman session list` — browse past sessions.
+- `wingman memory export/import/diff` — share memory packs.
+- `wingman knows` — show what Wingman knows about this project (memories, skills, routing, verification gate, index freshness).
+- `wingman skill extract` — mine skills from sessions.
+- `wingman discover` — find local LLMs.
+- `wingman pilot run "<goal>"` — multi-agent orchestration → PR (see [README.md](../README.md#pilot-mode)).
 
 ### Configuration
 
@@ -87,13 +87,13 @@ See **Self-improving loop** in [README.md](../README.md#self-improving-loop) for
 
 Then read **[LEARNING-LOOP.md](LEARNING-LOOP.md)** for deep dives into each subsystem.
 
-## Contributing to Arc-Code
+## Contributing to Wingman
 
 ### Development Setup
 
 ```bash
-git clone https://github.com/vedantnimbarte/Arc-Code.git
-cd Arc-Code
+git clone https://github.com/vedantnimbarte/Wingman.git
+cd Wingman
 cargo build --release
 cargo test
 ```
@@ -111,47 +111,47 @@ Read **[ARCHITECTURE.md](ARCHITECTURE.md)** → **Crate Responsibilities** for:
 
 | Crate                | Purpose                                                |
 |----------------------|--------------------------------------------------------|
-| `arccode-cli`        | Binary entry point, CLI args, command dispatch.        |
-| `arccode-core`       | Agent loop, Provider trait, tool dispatch.             |
-| `arccode-config`     | Layered config loading, permission model.              |
-| `arccode-providers`  | 73+ LLM provider adapters (native + OpenAI-compat).    |
-| `arccode-tools`      | 20+ built-in tools + registry.                         |
-| `arccode-tui`        | Interactive ratatui surface.                           |
-| `arccode-session`    | Append-only JSONL session logging.                     |
-| `arccode-rag`        | Semantic code index (SQLite + embeddings).             |
-| `arccode-skills`     | Markdown skill library (global + project).             |
-| `arccode-learn`      | Memory store, skill stats, session embedding.          |
-| `arccode-ts`         | Tree-sitter facade (language parsing).                 |
-| `arccode-mcp`        | MCP host: stdio/HTTP servers → `mcp__<server>__<tool>`. |
-| `arccode-autonomous` | Pilot mode: multi-agent orchestrator → PR.             |
+| `wingman-cli`        | Binary entry point, CLI args, command dispatch.        |
+| `wingman-core`       | Agent loop, Provider trait, tool dispatch.             |
+| `wingman-config`     | Layered config loading, permission model.              |
+| `wingman-providers`  | 73+ LLM provider adapters (native + OpenAI-compat).    |
+| `wingman-tools`      | 20+ built-in tools + registry.                         |
+| `wingman-tui`        | Interactive ratatui surface.                           |
+| `wingman-session`    | Append-only JSONL session logging.                     |
+| `wingman-rag`        | Semantic code index (SQLite + embeddings).             |
+| `wingman-skills`     | Markdown skill library (global + project).             |
+| `wingman-learn`      | Memory store, skill stats, session embedding.          |
+| `wingman-ts`         | Tree-sitter facade (language parsing).                 |
+| `wingman-mcp`        | MCP host: stdio/HTTP servers → `mcp__<server>__<tool>`. |
+| `wingman-autonomous` | Pilot mode: multi-agent orchestrator → PR.             |
 
 ### Adding a New Tool
 
-1. Create a new file in `crates/arccode-tools/src/builtin/<tool_name>.rs`.
+1. Create a new file in `crates/wingman-tools/src/builtin/<tool_name>.rs`.
 2. Implement the `Tool` trait (`spec()` and `run()`).
-3. Register in `crates/arccode-tools/src/registry.rs`.
+3. Register in `crates/wingman-tools/src/registry.rs`.
 4. Update **[TOOLS.md](TOOLS.md)** with the tool signature and examples.
 
 ### Adding Support for a Language
 
-1. Update `crates/arccode-ts/Cargo.toml` — add grammar crate.
-2. Update `crates/arccode-ts/src/lang.rs` — add Language variant, detection.
-3. Update `crates/arccode-ts/src/parse.rs` — add parser initialization.
+1. Update `crates/wingman-ts/Cargo.toml` — add grammar crate.
+2. Update `crates/wingman-ts/src/lang.rs` — add Language variant, detection.
+3. Update `crates/wingman-ts/src/parse.rs` — add parser initialization.
 4. Update **[TREE-SITTER.md](TREE-SITTER.md)** with the new language.
 
 ## Feature Flags
 
-Arc-Code uses feature flags to reduce build time and dependencies for builds that don't need certain subsystems.
+Wingman uses feature flags to reduce build time and dependencies for builds that don't need certain subsystems.
 
 ```bash
 # Build with all features (default)
 cargo build --release
 
 # Build without tree-sitter (faster, but no language parsing)
-cargo build --release --no-default-features -p arccode-ts
+cargo build --release --no-default-features -p wingman-ts
 
 # Build without embeddings (uses hash fallback for RAG)
-cargo build --release --no-features embeddings -p arccode-rag
+cargo build --release --no-features embeddings -p wingman-rag
 ```
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** → **Feature Flags** for details.
@@ -175,11 +175,11 @@ cargo build --release --no-default-features
 
 **"No such file or directory" errors**
 
-Arc-Code expects absolute paths. Use `glob_tool` or `list_dir` to find files, then pass absolute paths to other tools.
+Wingman expects absolute paths. Use `glob_tool` or `list_dir` to find files, then pass absolute paths to other tools.
 
 **Permission errors**
 
-Check your permission mode (`arccode config show | grep permission_mode`). Adjust in config.toml or pass `--mode auto-edit`.
+Check your permission mode (`wingman config show | grep permission_mode`). Adjust in config.toml or pass `--mode auto-edit`.
 
 **Token limit exceeded**
 
@@ -222,7 +222,7 @@ docs/
 ├── TREE-SITTER.md           (language parsing integration)
 ├── LEARNING-LOOP.md         (memories, skills, session recall)
 ├── TOOLS.md                 (complete tool reference)
-├── AUTONOMOUS-MODE.md       (pilot mode design — shipped as `arccode pilot`)
+├── AUTONOMOUS-MODE.md       (pilot mode design — shipped as `wingman pilot`)
 └── DIFFERENTIATION.md       (single-agent differentiation roadmap)
 
 ../README.md                 (main project overview)
@@ -235,10 +235,10 @@ docs/
 Looking for:
 
 - **How to save a memory?** → [LEARNING-LOOP.md](LEARNING-LOOP.md#saving-memories) or [TOOLS.md](TOOLS.md#save_memory).
-- **How to use semantic search?** → [TOOLS.md](TOOLS.md#semantic_search) or [ARCHITECTURE.md](ARCHITECTURE.md#arccode-rag).
-- **How permissions work?** → [README.md](../README.md#permission-modes) or [ARCHITECTURE.md](ARCHITECTURE.md#arccode-config).
-- **How to add a new provider?** → See `crates/arccode-providers/src/` and read [ARCHITECTURE.md](ARCHITECTURE.md#arccode-providers).
-- **What's tree-sitter doing?** → [TREE-SITTER.md](TREE-SITTER.md) or [ARCHITECTURE.md](ARCHITECTURE.md#arccode-ts).
+- **How to use semantic search?** → [TOOLS.md](TOOLS.md#semantic_search) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-rag).
+- **How permissions work?** → [README.md](../README.md#permission-modes) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-config).
+- **How to add a new provider?** → See `crates/wingman-providers/src/` and read [ARCHITECTURE.md](ARCHITECTURE.md#wingman-providers).
+- **What's tree-sitter doing?** → [TREE-SITTER.md](TREE-SITTER.md) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-ts).
 - **How does the agent loop work?** → [ARCHITECTURE.md](ARCHITECTURE.md#agent-loop).
 - **What's planned next?** → [AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md) or `../plan.md`.
 
@@ -251,4 +251,4 @@ If this documentation is unclear or missing something:
 
 ---
 
-**Last updated:** 2026-07-01 | **Arc-Code v0.0.1**
+**Last updated:** 2026-07-01 | **Wingman v0.0.1**

@@ -1,0 +1,365 @@
+//! J2 — autonomous goal discovery (daemon scoring core).
+//!
+//! The daemon polls GitHub issues, failing CI, dependabot PRs, recent
+//! TODO/FIXME comments, coverage gaps, and stale deps. For each candidate
+//! it computes a `value × confidence ÷ risk` score and decides whether to
+//! auto-run, propose, or ignore. The polling/adapters are I/O (and need
+//! tokens the plan defers to the user); this module is the scoring +
+//! decision core that's testable today.
+
+use std::path::Path;
+
+use crate::intake::TrustLevel;
+use crate::pr::CommandRunner;
+
+/// A discovered unit of potential work.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Candidate {
+    /// Discovery source label (e.g. "github_issues", "ci_failures").
+    pub source: String,
+    pub title: String,
+    /// Estimated value of doing it, in `[0,1]`.
+    pub value: f64,
+    /// Confidence the agent can do it correctly, in `[0,1]`.
+    pub confidence: f64,
+    /// Risk if it goes wrong, in `(0,1]` (higher = riskier).
+    pub risk: f64,
+    /// Trust of the source channel/author (J3).
+    pub trust: TrustLevel,
+}
+
+impl Candidate {
+    /// `value × confidence ÷ risk`, with risk floored so a near-zero risk
+    /// can't produce an infinite score.
+    pub fn score(&self) -> f64 {
+        let risk = self.risk.max(0.01);
+        (self.value.clamp(0.0, 1.0) * self.confidence.clamp(0.0, 1.0)) / risk
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonAction {
+    /// Score clears the auto threshold *and* the source is trusted — run
+    /// it without asking.
+    AutoRun,
+    /// Worth surfacing for a human 👍 before running.
+    Propose,
+    /// Below the propose floor — log and drop.
+    Ignore,
+}
+
+/// Decide what to do with a candidate.
+///
+/// - `AutoRun` requires `score >= auto_threshold` **and**
+///   `trust == Trusted` — untrusted work never auto-runs regardless of
+///   score (the J15 framing: trust is built by visibly *not* crossing
+///   that line).
+/// - `Propose` when `score >= propose_floor`.
+/// - `Ignore` otherwise.
+pub fn decide(candidate: &Candidate, auto_threshold: f64, propose_floor: f64) -> DaemonAction {
+    let score = candidate.score();
+    if score >= auto_threshold && candidate.trust == TrustLevel::Trusted {
+        DaemonAction::AutoRun
+    } else if score >= propose_floor {
+        DaemonAction::Propose
+    } else {
+        DaemonAction::Ignore
+    }
+}
+
+/// J2 discovery shell: fetch open issues carrying `label` via
+/// `gh issue list` and map each to a [`Candidate`]. The polling cadence
+/// and the long-running daemon loop are the runtime's concern; this is the
+/// one-shot fetch+map, testable with a mock runner. Author trust is
+/// resolved against `trusted_authors`.
+pub fn fetch_issue_candidates(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    label: &str,
+    trusted_authors: &[String],
+) -> Result<Vec<Candidate>, String> {
+    let out = runner
+        .run(
+            "gh",
+            &[
+                "issue",
+                "list",
+                "--label",
+                label,
+                "--json",
+                "number,title,author",
+            ],
+            repo_root,
+        )
+        .map_err(|e| format!("gh issue list failed: {e}"))?;
+    if !out.success() {
+        return Err(format!(
+            "gh issue list exited non-zero: {}",
+            out.stderr.trim()
+        ));
+    }
+    let items: serde_json::Value =
+        serde_json::from_str(&out.stdout).map_err(|e| format!("bad gh json: {e}"))?;
+    let arr = items.as_array().cloned().unwrap_or_default();
+    let mut candidates = Vec::new();
+    for it in arr {
+        let number = it.get("number").and_then(|n| n.as_u64()).unwrap_or(0);
+        let title = it
+            .get("title")
+            .and_then(|t| t.as_str())
+            .unwrap_or("(untitled)")
+            .to_string();
+        let author = it
+            .pointer("/author/login")
+            .and_then(|a| a.as_str())
+            .map(|s| s.to_string());
+        let trust = match author {
+            Some(ref a) if trusted_authors.iter().any(|t| t.eq_ignore_ascii_case(a)) => {
+                TrustLevel::Trusted
+            }
+            Some(_) => TrustLevel::Known,
+            None => TrustLevel::Untrusted,
+        };
+        candidates.push(Candidate {
+            source: format!("github_issue#{number}"),
+            title,
+            // Neutral priors until a richer scorer (J9) is plumbed in.
+            value: 0.6,
+            confidence: 0.6,
+            risk: 0.4,
+            trust,
+        });
+    }
+    Ok(candidates)
+}
+
+/// J2 discovery cycle: one full pass of the daemon — fetch candidates
+/// from the configured sources, rank them, and decide an action for each.
+/// The infinite scheduling (sleep `poll_interval_secs`, repeat) is trivial
+/// process supervision layered on top; this is the testable unit of work.
+///
+/// `propose_floor` is the score below which a candidate is ignored
+/// entirely (typically `auto_threshold * 0.4`).
+pub fn run_cycle(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    cfg: &wingman_config::PilotDaemonConfig,
+    propose_floor: f64,
+) -> Vec<(Candidate, DaemonAction)> {
+    let mut candidates = Vec::new();
+    if cfg.sources.iter().any(|s| s == "github_issues") {
+        for label in &cfg.trusted_labels {
+            if let Ok(found) =
+                fetch_issue_candidates(runner, repo_root, label, &cfg.trusted_authors)
+            {
+                candidates.extend(found);
+            }
+        }
+    }
+    rank(candidates)
+        .into_iter()
+        .map(|c| {
+            let action = decide(&c, cfg.auto_threshold, propose_floor);
+            (c, action)
+        })
+        .collect()
+}
+
+/// Bounded form of the daemon's poll loop: run [`run_cycle`] `cycles`
+/// times, invoking `on_actions` with each pass's results. This is the
+/// testable core of the long-running daemon; production wraps it as
+/// `loop { run_cycle(...); on_actions(...); sleep(poll_interval) }`. We
+/// expose the bounded variant so the loop body is unit-tested and the only
+/// untested part is the literal `sleep` + non-termination.
+pub fn run_n_cycles<F>(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    cfg: &wingman_config::PilotDaemonConfig,
+    propose_floor: f64,
+    cycles: usize,
+    mut on_actions: F,
+) where
+    F: FnMut(usize, Vec<(Candidate, DaemonAction)>),
+{
+    for i in 0..cycles {
+        let actions = run_cycle(runner, repo_root, cfg, propose_floor);
+        on_actions(i, actions);
+    }
+}
+
+/// Rank candidates best-first by score (ties broken by title for
+/// determinism). Useful for the daemon's `queue list`.
+pub fn rank(mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+    candidates.sort_by(|a, b| {
+        b.score()
+            .partial_cmp(&a.score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.title.cmp(&b.title))
+    });
+    candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cand(value: f64, confidence: f64, risk: f64, trust: TrustLevel) -> Candidate {
+        Candidate {
+            source: "github_issues".into(),
+            title: "fix #142".into(),
+            value,
+            confidence,
+            risk,
+            trust,
+        }
+    }
+
+    #[test]
+    fn score_is_value_times_confidence_over_risk() {
+        let c = cand(0.8, 0.9, 0.2, TrustLevel::Trusted);
+        assert!((c.score() - (0.8 * 0.9 / 0.2)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_is_floored() {
+        let c = cand(1.0, 1.0, 0.0, TrustLevel::Trusted);
+        assert!(c.score().is_finite());
+        assert!((c.score() - 100.0).abs() < 1e-9); // 1/0.01
+    }
+
+    #[test]
+    fn high_score_trusted_auto_runs() {
+        let c = cand(0.9, 0.9, 0.5, TrustLevel::Trusted); // score 1.62
+        assert_eq!(decide(&c, 0.75, 0.3), DaemonAction::AutoRun);
+    }
+
+    #[test]
+    fn high_score_untrusted_only_proposes() {
+        let c = cand(0.9, 0.9, 0.5, TrustLevel::Known); // score 1.62 but not trusted
+        assert_eq!(decide(&c, 0.75, 0.3), DaemonAction::Propose);
+    }
+
+    #[test]
+    fn untrusted_never_auto_runs_even_at_max_score() {
+        let c = cand(1.0, 1.0, 0.01, TrustLevel::Untrusted); // huge score
+        assert_eq!(decide(&c, 0.75, 0.3), DaemonAction::Propose);
+    }
+
+    #[test]
+    fn mid_score_proposes() {
+        let c = cand(0.5, 0.5, 0.5, TrustLevel::Trusted); // score 0.5
+        assert_eq!(decide(&c, 0.75, 0.3), DaemonAction::Propose);
+    }
+
+    #[test]
+    fn low_score_ignored() {
+        let c = cand(0.2, 0.2, 0.9, TrustLevel::Trusted); // score ~0.044
+        assert_eq!(decide(&c, 0.75, 0.3), DaemonAction::Ignore);
+    }
+
+    use crate::pr::{CommandOut, CommandRunner};
+    use std::path::Path as StdPath;
+
+    struct FakeIssueGh;
+    impl CommandRunner for FakeIssueGh {
+        fn run(&self, program: &str, args: &[&str], _cwd: &StdPath) -> std::io::Result<CommandOut> {
+            let stdout = if program == "gh" && args.first().copied() == Some("issue") {
+                r#"[{"number":142,"title":"fix the parser","author":{"login":"vedant"}},
+                    {"number":7,"title":"typo","author":{"login":"stranger"}}]"#
+                    .to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_issue_candidates_maps_and_trusts() {
+        let cands = fetch_issue_candidates(
+            &FakeIssueGh,
+            StdPath::new("."),
+            "wingman:auto",
+            &["vedant".to_string()],
+        )
+        .unwrap();
+        assert_eq!(cands.len(), 2);
+        let parser = cands.iter().find(|c| c.title == "fix the parser").unwrap();
+        assert_eq!(parser.trust, TrustLevel::Trusted);
+        let typo = cands.iter().find(|c| c.title == "typo").unwrap();
+        assert_eq!(typo.trust, TrustLevel::Known);
+    }
+
+    #[test]
+    fn run_cycle_fetches_scores_and_decides() {
+        let cfg = wingman_config::PilotDaemonConfig {
+            sources: vec!["github_issues".into()],
+            trusted_labels: vec!["wingman:auto".into()],
+            trusted_authors: vec!["vedant".into()],
+            auto_threshold: 0.75,
+            ..Default::default()
+        };
+        let results = run_cycle(&FakeIssueGh, StdPath::new("."), &cfg, 0.3);
+        assert_eq!(results.len(), 2);
+        // Both score 0.6*0.6/0.4 = 0.9 ≥ auto_threshold; the trusted one
+        // auto-runs, the unknown one only proposes.
+        let parser = results
+            .iter()
+            .find(|(c, _)| c.title == "fix the parser")
+            .unwrap();
+        assert_eq!(parser.1, DaemonAction::AutoRun);
+        let typo = results.iter().find(|(c, _)| c.title == "typo").unwrap();
+        assert_eq!(typo.1, DaemonAction::Propose);
+    }
+
+    #[test]
+    fn run_n_cycles_invokes_callback_per_pass() {
+        let cfg = wingman_config::PilotDaemonConfig {
+            sources: vec!["github_issues".into()],
+            trusted_labels: vec!["wingman:auto".into()],
+            trusted_authors: vec!["vedant".into()],
+            auto_threshold: 0.75,
+            ..Default::default()
+        };
+        let mut passes = 0;
+        let mut total_actions = 0;
+        run_n_cycles(
+            &FakeIssueGh,
+            StdPath::new("."),
+            &cfg,
+            0.3,
+            3,
+            |_, actions| {
+                passes += 1;
+                total_actions += actions.len();
+            },
+        );
+        assert_eq!(passes, 3);
+        assert_eq!(total_actions, 6); // 2 candidates × 3 cycles
+    }
+
+    #[test]
+    fn rank_orders_by_score_desc() {
+        let cands = vec![
+            Candidate {
+                title: "low".into(),
+                ..cand(0.2, 0.2, 0.9, TrustLevel::Trusted)
+            },
+            Candidate {
+                title: "high".into(),
+                ..cand(0.9, 0.9, 0.2, TrustLevel::Trusted)
+            },
+            Candidate {
+                title: "mid".into(),
+                ..cand(0.5, 0.5, 0.5, TrustLevel::Trusted)
+            },
+        ];
+        let ranked = rank(cands);
+        assert_eq!(ranked[0].title, "high");
+        assert_eq!(ranked[2].title, "low");
+    }
+}
