@@ -56,6 +56,18 @@ impl LifetimeUsage {
         }
     }
 
+    /// Wipe lifetime totals in memory and delete the on-disk file.
+    pub fn clear(&mut self) {
+        self.totals.clear();
+        if let Some(path) = file_path() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("usage.json delete failed: {e}");
+                }
+            }
+        }
+    }
+
     /// View used by the `/usage` modal's "Lifetime" tab: lifetime + session.
     pub fn combined(&self, session: &BTreeMap<String, Usage>) -> BTreeMap<String, Usage> {
         let mut out = self.totals.clone();

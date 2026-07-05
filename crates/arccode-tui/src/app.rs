@@ -128,7 +128,7 @@ enum Cmd {
     Login,
     Logout(Option<String>),
     Add(String),
-    Usage,
+    Usage(String),
     Skills,
     SkillsNew(String),
     Skill(String),
@@ -174,7 +174,7 @@ fn parse_slash(line: &str) -> Cmd {
             Some(arg.to_string())
         }),
         "/add" if !arg.is_empty() => Cmd::Add(arg.to_string()),
-        "/usage" => Cmd::Usage,
+        "/usage" => Cmd::Usage(arg.to_string()),
         "/skills" => {
             if let Some(rest) = arg.strip_prefix("new") {
                 let name = rest.trim().to_string();
@@ -261,10 +261,6 @@ struct UiState {
     /// Snapshot of `~/.arccode/usage.json` as it was at startup. The
     /// `/usage` modal's "Lifetime" tab renders `lifetime + status.usage`.
     lifetime: LifetimeUsage,
-    /// Last time we flushed merged usage to disk. Used to debounce writes
-    /// at the end of each turn so an interactive session that fires
-    /// many short turns doesn't hammer the disk.
-    last_lifetime_flush: std::time::Instant,
     /// Skill chosen via `/skill <name>` or the skills modal; its body is
     /// prepended to the next user prompt and then cleared.
     pending_skill: Option<arccode_skills::Skill>,
@@ -291,7 +287,6 @@ async fn run_inner(
         },
         modal: ActiveModal::None,
         lifetime: LifetimeUsage::load(),
-        last_lifetime_flush: std::time::Instant::now(),
         pending_skill: None,
         slash: SlashSuggest::default(),
         sidebar: None,
@@ -358,12 +353,13 @@ async fn run_inner(
                         ui.composer.busy = true;
                         draw(terminal, &ui)?;
                         run_turn(terminal, a, &mut events, &mut ui, final_prompt).await?;
-                        // Persist lifetime usage at most once every 5s so
-                        // bursts of small turns don't churn the file.
-                        if ui.last_lifetime_flush.elapsed() >= std::time::Duration::from_secs(5) {
-                            ui.lifetime.save_merged(&ui.status.usage);
-                            ui.last_lifetime_flush = std::time::Instant::now();
-                        }
+                        // Persist after every turn: an LLM round-trip already
+                        // took seconds, so one small atomic write is noise, and
+                        // it means an external kill/SIGHUP between turns can't
+                        // lose recorded usage. ponytail: only usage from a turn
+                        // interrupted mid-stream is at risk, not worth a global
+                        // signal-handler mirror to recover.
+                        ui.lifetime.save_merged(&ui.status.usage);
                     }
                     None => {
                         ui.transcript.push(TranscriptItem::Error(
@@ -676,12 +672,20 @@ async fn idle_step(
                             Cmd::Add(path) => {
                                 ui.composer.input.push_str(&format!("@{} ", path.trim()));
                             }
-                            Cmd::Usage => {
-                                let lifetime = ui.lifetime.combined(&ui.status.usage);
-                                ui.modal = ActiveModal::Usage(UsageView::new(
-                                    ui.status.usage.clone(),
-                                    lifetime,
-                                ));
+                            Cmd::Usage(arg) => {
+                                if arg.trim().eq_ignore_ascii_case("clear") {
+                                    ui.lifetime.clear();
+                                    ui.status.usage.clear();
+                                    ui.transcript.push(TranscriptItem::System(
+                                        "usage cleared (session + lifetime)".into(),
+                                    ));
+                                } else {
+                                    let lifetime = ui.lifetime.combined(&ui.status.usage);
+                                    ui.modal = ActiveModal::Usage(UsageView::new(
+                                        ui.status.usage.clone(),
+                                        lifetime,
+                                    ));
+                                }
                             }
                             Cmd::Skills => {
                                 let skills = arccode_skills::load_all(project_root);
