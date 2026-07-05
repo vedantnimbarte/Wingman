@@ -1,6 +1,6 @@
 # Pilot Watch UI — Enhancement Plan
 
-A backlog of user-friendliness enhancements for `arccode pilot watch` and the
+A backlog of user-friendliness enhancements for `wingman pilot watch` and the
 run-control channel, written so a fresh session (with no prior context) can
 pick up any item and implement it. Each feature lists the files to touch, the
 existing structs/functions to build on, concrete implementation notes, tests,
@@ -18,12 +18,12 @@ and an effort estimate.
 
 | Area | File | Key items |
 | --- | --- | --- |
-| Interactive TUI | `crates/arccode-cli/src/commands/pilot_watch_tui.rs` | `WatchUi`, `draw`, `run_loop`, all `render_*`, key handling |
-| Pilot CLI commands | `crates/arccode-cli/src/commands/pilot.rs` | `watch`, `status`, `run`, `resume`, `control_*`, `pick_run`, `resolve_ascii`, `wait_for_approval`, `run_notify_window` |
-| CLI arg definitions | `crates/arccode-cli/src/cli.rs` | `PilotAction` enum + dispatch |
-| Dashboard model (shared) | `crates/arccode-autonomous/src/dashboard.rs` | `DashboardModel`, `TaskRow`, `AgentRow`, `HeaderInfo`, `LogRow`, `RunSummary`, `build_model`, `list_runs`, `load_state`, `tail_events`, `state_mtime` |
-| Control channel | `crates/arccode-autonomous/src/control.rs` | `ControlCommand`, `ControlReader`, `append`, `control_path` |
-| Orchestrator | `crates/arccode-autonomous/src/orchestrator.rs` | `control_watchdog`, `OrchestratorCommand::AbortRun`, `handle_abort_run` |
+| Interactive TUI | `crates/wingman-cli/src/commands/pilot_watch_tui.rs` | `WatchUi`, `draw`, `run_loop`, all `render_*`, key handling |
+| Pilot CLI commands | `crates/wingman-cli/src/commands/pilot.rs` | `watch`, `status`, `run`, `resume`, `control_*`, `pick_run`, `resolve_ascii`, `wait_for_approval`, `run_notify_window` |
+| CLI arg definitions | `crates/wingman-cli/src/cli.rs` | `PilotAction` enum + dispatch |
+| Dashboard model (shared) | `crates/wingman-autonomous/src/dashboard.rs` | `DashboardModel`, `TaskRow`, `AgentRow`, `HeaderInfo`, `LogRow`, `RunSummary`, `build_model`, `list_runs`, `load_state`, `tail_events`, `state_mtime` |
+| Control channel | `crates/wingman-autonomous/src/control.rs` | `ControlCommand`, `ControlReader`, `append`, `control_path` |
+| Orchestrator | `crates/wingman-autonomous/src/orchestrator.rs` | `control_watchdog`, `OrchestratorCommand::AbortRun`, `handle_abort_run` |
 | Docs | `docs/AUTONOMOUS-MODE.md` | "Dashboard Layout", "Controlling a live run" |
 
 ### `WatchUi` (the TUI state object)
@@ -99,7 +99,7 @@ appends to `current_dir()` and sets `toast`.
   `summary(id, status)`, `sample_model()`, and
   `render_to_string(&mut ui, w, h) -> String` (renders via ratatui
   `TestBackend`, returns screen text). `UNI`/`ASC` are `Glyphs` consts.
-  `tempfile` is a dev-dependency of `arccode-cli`.
+  `tempfile` is a dev-dependency of `wingman-cli`.
 - **ASCII safety**: every glyph the UI can emit must have an ASCII variant via
   `Glyphs::pick`. The test `ascii_glyphs_avoid_non_ascii_codepoints` fails if a
   new glyph leaks non-ASCII in ascii mode — extend it.
@@ -131,7 +131,7 @@ run…" path is unhelpful; `pilot status` just errors.
 **Plan:**
 - In `pilot.rs::watch`, when `list_runs` is empty and stdout is a terminal,
   print a friendly block: *"No pilot runs yet. Start one with:
-  `arccode pilot run \"<goal>\"`"* and return 0.
+  `wingman pilot run \"<goal>\"`"* and return 0.
 - In `draw`, when `model` is `None` but `runs` is non-empty keep "loading run…";
   when a run has zero tasks, render "plan pending…" in the Tasks pane.
 - Mirror the empty message in `pilot.rs::status`.
@@ -180,7 +180,7 @@ to `Failed` and assert only failed rows appear.
 
 #### B1. Copy-to-clipboard (`y` yank)
 **Value:** Grab the selected task id / run id / PR URL without mousing.
-**Plan:** add `arboard = "3"` to `arccode-cli`; bind `y` to copy a
+**Plan:** add `arboard = "3"` to `wingman-cli`; bind `y` to copy a
 context-sensitive value (Tasks → task id; Runs → run id; prefer a PR URL if
 present); toast "copied t3"; guard headless failures.
 **Test:** factor `yank_target(&WatchUi) -> Option<String>` (pure) and test it.
@@ -239,7 +239,7 @@ per run for spend/elapsed.
 **Effort:** ~1–2 h.
 
 #### C2. Real desktop notifications
-**Plan:** add `notify-rust` (opt-in via `--notify` / `ARCCODE_NOTIFY`); fire
+**Plan:** add `notify-rust` (opt-in via `--notify` / `WINGMAN_NOTIFY`); fire
 alongside `WatchUi::note_bell_events`. Best-effort; never fail the run.
 **Effort:** ~1–2 h (cross-platform testing is the cost).
 

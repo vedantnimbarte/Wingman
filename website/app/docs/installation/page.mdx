@@ -1,6 +1,6 @@
 export const metadata = {
   title: "Installation",
-  description: "Prerequisites and building Arc-Code from source.",
+  description: "Prerequisites and building Wingman from source.",
 };
 
 # Installation
@@ -14,22 +14,22 @@ export const metadata = {
 ## Build from source
 
 ```bash
-git clone https://github.com/vedantnimbarte/Arc-Code.git
-cd Arc-Code
+git clone https://github.com/vedantnimbarte/Wingman.git
+cd Wingman
 cargo build --release
 ```
 
-The resulting binary is at `target/release/arccode` (or `arccode.exe` on
+The resulting binary is at `target/release/wingman` (or `wingman.exe` on
 Windows).
 
 ## Install onto your PATH
 
 ```bash
-cargo install --path crates/arccode-cli
+cargo install --path crates/wingman-cli
 ```
 
-Once installed, run `arccode` from any project directory to launch the
-interactive TUI, or `arccode --print "<prompt>"` for a headless one-shot.
+Once installed, run `wingman` from any project directory to launch the
+interactive TUI, or `wingman --print "<prompt>"` for a headless one-shot.
 
 ## Tree-sitter (optional)
 

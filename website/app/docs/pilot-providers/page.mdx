@@ -33,6 +33,6 @@ quality depends on the local model's tool-use training.
 | Ollama        | `untested`      | `/v1` shim; picks up whatever model you've pulled.   |
 | llama.cpp     | `untested`      | `./server`'s `/v1` shim; depends on the loaded gguf. |
 
-`arccode pilot run` prints a one-line support notice at startup and refuses to
+`wingman pilot run` prints a one-line support notice at startup and refuses to
 start when the planner provider is `unsupported` (no current backends are; the
 tier exists for future providers that can't emit tool calls at all).

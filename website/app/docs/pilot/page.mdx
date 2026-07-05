@@ -5,7 +5,7 @@ export const metadata = {
 
 # Pilot mode
 
-`arccode pilot run "<goal>"` plans a multi-task piece of work, spawns
+`wingman pilot run "<goal>"` plans a multi-task piece of work, spawns
 specialised worker agents in isolated git worktrees, and converges their output
 into a single PR.
 
@@ -21,7 +21,7 @@ autopilot  Agent flies and navigates. Daemon mode, multi-channel intake,
            critic agent, knowledge graph, tool synthesis, sandboxed execution.
 ```
 
-Pick a tier in `~/.arccode/config.toml`:
+Pick a tier in `~/.wingman/config.toml`:
 
 ```toml
 [pilot]
@@ -37,23 +37,23 @@ task_timeout_secs     = 1800
 
 ```bash
 # One-shot: plan, approve, spawn workers, open PR
-arccode pilot run "add a --version-only flag to arccode-cli"
+wingman pilot run "add a --version-only flag to wingman-cli"
 
 # Plan only — write tasks.jsonl and exit
-arccode pilot run --plan-only "<goal>"
+wingman pilot run --plan-only "<goal>"
 
 # Auto-approve the plan (skip the y/e/n gate)
-arccode pilot run --yes "<goal>"
+wingman pilot run --yes "<goal>"
 
 # Dashboard
-arccode pilot status              # one-shot summary of the latest run
-arccode pilot watch               # live ASCII dashboard, polls state.json
-arccode pilot watch <run-id>      # specific run
+wingman pilot status              # one-shot summary of the latest run
+wingman pilot watch               # live ASCII dashboard, polls state.json
+wingman pilot watch <run-id>      # specific run
 ```
 
 ## Per-run artefacts
 
-Per-run artefacts land under `<project>/.arccode/autonomous/<run-id>/`:
+Per-run artefacts land under `<project>/.wingman/autonomous/<run-id>/`:
 
 ```text
 <run-id>/

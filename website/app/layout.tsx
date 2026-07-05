@@ -26,15 +26,15 @@ const mono = JetBrains_Mono({
 });
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://arccode.dev"),
+  metadataBase: new URL("https://wingman.dev"),
   title: {
-    default: "Arc-Code — the self-improving, terminal-first coding agent",
-    template: "%s · Arc-Code",
+    default: "Wingman — the self-improving, terminal-first coding agent",
+    template: "%s · Wingman",
   },
   description:
-    "Arc-Code (arccode) is a multi-provider, terminal-first, self-improving coding agent written in Rust. 73+ LLM providers behind one streaming interface, a built-in tool layer, and a learning loop that gets to know you and your projects.",
+    "Wingman (wingman) is a multi-provider, terminal-first, self-improving coding agent written in Rust. 73+ LLM providers behind one streaming interface, a built-in tool layer, and a learning loop that gets to know you and your projects.",
   keywords: [
-    "arccode",
+    "wingman",
     "coding agent",
     "Rust CLI",
     "LLM",
@@ -44,7 +44,7 @@ export const metadata: Metadata = {
     "AI pair programmer",
   ],
   openGraph: {
-    title: "Arc-Code — the self-improving, terminal-first coding agent",
+    title: "Wingman — the self-improving, terminal-first coding agent",
     description:
       "Multi-provider, terminal-first, self-improving coding agent in Rust. 73+ providers, one shape.",
     type: "website",

@@ -16,7 +16,7 @@ type Row = {
 
 // Column order is shared by the header and every row's `marks` array.
 const tools: Tool[] = [
-  { name: "Arc-Code", tag: "Autonomous · Rust", highlight: true },
+  { name: "Wingman", tag: "Autonomous · Rust", highlight: true },
   { name: "Hermes", tag: "Open-model agent" },
   { name: "Devin", tag: "Autonomous SWE" },
   { name: "Cursor", tag: "AI editor" },
@@ -89,8 +89,8 @@ export function Comparison() {
     <Section id="compare">
       <SectionHeading
         eyebrow="Compare"
-        title="How Arc-Code holds the line"
-        lead="Most tools help you type faster. Arc-Code closes the loop on its own — planning, sandboxed execution, self-correcting tests, and a reviewable pull request. Here is how it measures against the field, open-model agents like Hermes included."
+        title="How Wingman holds the line"
+        lead="Most tools help you type faster. Wingman closes the loop on its own — planning, sandboxed execution, self-correcting tests, and a reviewable pull request. Here is how it measures against the field, open-model agents like Hermes included."
       />
 
       <Reveal className="mt-10">

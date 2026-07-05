@@ -5,16 +5,16 @@ export const metadata = {
 
 # Self-improving loop
 
-Every session contributes to a small set of files under `~/.arccode/` and
-`<project>/.arccode/` that subsequent runs read on startup. There is no cloud
+Every session contributes to a small set of files under `~/.wingman/` and
+`<project>/.wingman/` that subsequent runs read on startup. There is no cloud
 component — everything is local-first.
 
 ## What's persisted
 
 ### Memories
 
-Memories live at `~/.arccode/memory/<slug>.md` (global) or
-`<project>/.arccode/memory/<slug>.md` (project), indexed by a sibling
+Memories live at `~/.wingman/memory/<slug>.md` (global) or
+`<project>/.wingman/memory/<slug>.md` (project), indexed by a sibling
 `MEMORY.md`. Each memory is markdown with YAML frontmatter (`name`,
 `description`, `type`). Four types:
 
@@ -31,7 +31,7 @@ when relevant.
 
 ### Skill usage
 
-Skill usage is stored at `~/.arccode/learn.db` (SQLite). Every `invoke_skill`
+Skill usage is stored at `~/.wingman/learn.db` (SQLite). Every `invoke_skill`
 call is recorded; the next user turn flips its outcome to `success` or
 `corrected` based on negation heuristics ("no,", "wait,", "wrong,",
 "actually,"…). When a skill crosses 3 invocations with ≥50% correction rate, the
@@ -41,7 +41,7 @@ next session's system prompt suggests a rewrite.
 
 Finished session JSONLs are chunked into thread-shaped windows and embedded
 using the same `fastembed`/hash backend that powers `semantic_search`, stored at
-`~/.arccode/sessions.db`. The CLI backfills any unindexed sessions in the
+`~/.wingman/sessions.db`. The CLI backfills any unindexed sessions in the
 background at startup.
 
 ## Learning tools

@@ -1,8 +1,8 @@
-# Arc-Code
+# Wingman
 
-[![ci](https://github.com/vedantnimbarte/ArcCode/actions/workflows/ci.yml/badge.svg)](https://github.com/vedantnimbarte/ArcCode/actions/workflows/ci.yml)
+[![ci](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml)
 
-`arccode` is a multi-provider, terminal-first **self-improving** coding agent
+`wingman` is a multi-provider, terminal-first **self-improving** coding agent
 written in Rust. It runs as a TUI for interactive sessions and as a headless
 one-shot (`--print "prompt"`) for scripting, talks to 73+ LLM providers behind
 a single streaming interface, ships a built-in tool layer for reading,
@@ -38,7 +38,7 @@ worker agents in isolated worktrees, and converges into a PR.
 ## Highlights
 
 - **Self-improving learning loop.** Persistent memories (markdown +
-  frontmatter under `~/.arccode/memory/` and `<project>/.arccode/memory/`),
+  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/`),
   skill usage stats with outcome scoring, cross-session semantic recall via
   the existing RAG pipeline, and quiet-session nudges that ask the agent to
   consider persisting something when it's been a while since a save. See
@@ -47,7 +47,7 @@ worker agents in isolated worktrees, and converges into a PR.
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
   adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.
   Gemini and ChatGPT (OAuth) have their own adapters. All speak the same
-  `arccode_core::Message` contract.
+  `wingman_core::Message` contract.
 - **Three surfaces.** A `ratatui`-based TUI for interactive coding, a
   headless `--print` mode that emits either text or newline-delimited JSON
   events, and a `--batch <file.jsonl>` mode that runs a file of prompts
@@ -56,14 +56,14 @@ worker agents in isolated worktrees, and converges into a PR.
   in config (stdio or HTTP transport); their tools are namespaced as
   `mcp__<server>__<tool>` and dispatched like built-ins. Manage them live
   from the TUI with `/mcp`.
-- **Guided provider login.** `arccode login <provider>` (or `/login` in the
+- **Guided provider login.** `wingman login <provider>` (or `/login` in the
   TUI) probes the key, stores it in the OS keyring, and records the default
-  model; `arccode logout <provider>` clears it. ChatGPT uses a browser
+  model; `wingman logout <provider>` clears it. ChatGPT uses a browser
   OAuth flow.
-- **Multi-agent pilot mode.** `arccode pilot run "<goal>"` plans, spawns
+- **Multi-agent pilot mode.** `wingman pilot run "<goal>"` plans, spawns
   worker agents in isolated worktrees, and opens a PR. See
   [Pilot mode](#pilot-mode).
-- **`arccode knows`.** Prints what Arc-Code knows about the current project:
+- **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
   freshness.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
@@ -76,8 +76,8 @@ worker agents in isolated worktrees, and converges into a PR.
   truncation, history token estimation, and a compaction trigger
   (`compact_at_tokens`) so long sessions stay inside the active model's
   context window.
-- **Layered configuration.** Defaults → global `~/.arccode/config.toml` →
-  project `.arccode/config.toml` → `ARCCODE_*` env vars → CLI flags. TOML
+- **Layered configuration.** Defaults → global `~/.wingman/config.toml` →
+  project `.wingman/config.toml` → `WINGMAN_*` env vars → CLI flags. TOML
   sub-tables merge instead of clobbering.
 - **Permission modes.** `read-only` (default), `plan` (read-only + the
   agent must call `present_plan` before any edit), `auto-edit` (writes/shell
@@ -90,16 +90,16 @@ worker agents in isolated worktrees, and converges into a PR.
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a
   multi-file edit block atomically — no partial writes on failure.
-- **Working-tree checkpoints.** `arccode checkpoint` snapshots the tree
-  into a tagged `git stash`; `arccode undo` restores the most recent one.
-- **`arccode init`.** Scans the project (Cargo.toml, package.json,
-  pyproject.toml, go.mod, …) and writes a starter `ARCCODE.md`.
-- **`arccode cost`.** Per-model token + USD spend table derived from
-  `~/.arccode/usage.json` and `pricing.rs`.
-- **`arccode session list / fork`.** Browse recent session JSONLs;
+- **Working-tree checkpoints.** `wingman checkpoint` snapshots the tree
+  into a tagged `git stash`; `wingman undo` restores the most recent one.
+- **`wingman init`.** Scans the project (Cargo.toml, package.json,
+  pyproject.toml, go.mod, …) and writes a starter `WINGMAN.md`.
+- **`wingman cost`.** Per-model token + USD spend table derived from
+  `~/.wingman/usage.json` and `pricing.rs`.
+- **`wingman session list / fork`.** Browse recent session JSONLs;
   fork an old session (optionally truncating to N records) and resume it.
 - **User-defined slash commands.** Drop a markdown file at
-  `~/.arccode/commands/<name>.md` (or `<project>/.arccode/commands/`) and
+  `~/.wingman/commands/<name>.md` (or `<project>/.wingman/commands/`) and
   it becomes `/<name>` in the TUI. `$ARGS` is substituted.
 - **In-transcript search.** `/find <query>`, `/findnext`, `/findprev`,
   `/findclear` walk hits inside the current transcript. Mouse wheel
@@ -116,28 +116,28 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Notebook reads.** `read_file` on a `.ipynb` returns cells as fenced
   code blocks + markdown, not raw JSON.
 - **Scheduled tasks.** `[[schedule]]` config entries fire from
-  `arccode schedule` (call from cron / Task Scheduler).
-- **Memory packs.** `arccode memory export/import/diff` for sharing
+  `wingman schedule` (call from cron / Task Scheduler).
+- **Memory packs.** `wingman memory export/import/diff` for sharing
   team-level memory.
-- **Worktree sandbox.** `arccode worktree create <branch>` spins up an
-  isolated working copy under `.arccode/worktrees/`.
-- **PR review.** `arccode review <pr#>` (or `--local <base>`) runs a
+- **Worktree sandbox.** `wingman worktree create <branch>` spins up an
+  isolated working copy under `.wingman/worktrees/`.
+- **PR review.** `wingman review <pr#>` (or `--local <base>`) runs a
   one-shot review prompt against the diff.
-- **Local model auto-discovery.** `arccode discover` probes localhost
+- **Local model auto-discovery.** `wingman discover` probes localhost
   Ollama / LM Studio / vLLM and prints available models.
-- **Skill auto-extraction.** `arccode skill extract` scans recent session
+- **Skill auto-extraction.** `wingman skill extract` scans recent session
   JSONLs for repeated tool-call sequences (e.g. `grep_tool → read_file →
   edit_file`) and writes draft skill markdown files under
-  `~/.arccode/skills/proposed/` for you to review.
+  `~/.wingman/skills/proposed/` for you to review.
 - **Tree-sitter powered code understanding.** Deep language-aware parsing
   (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
   index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
   so the workspace builds without the C toolchain if you don't need parsing.
-- **Multi-model code review.** `arccode review-multi <pr#> --models
+- **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by
   file:line, marking which ones each reviewer raised.
-- **Interactive hunk review.** `arccode diff <file>` walks each hunk of
+- **Interactive hunk review.** `wingman diff <file>` walks each hunk of
   the working-tree diff one at a time with `[a]ccept / [r]eject / [s]kip
   / [q]uit`, then writes the merged result. Also accepts `--patch
   <file.patch>` for an arbitrary unified diff.
@@ -150,25 +150,25 @@ This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
 
 | Crate                | Role                                                                                                  |
 | -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `arccode-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode.                          |
-| `arccode-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
-| `arccode-config`     | TOML config loading, layered merge, env-var resolution, permission model.                              |
-| `arccode-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
-| `arccode-tools`      | Built-in tool implementations (`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir`, `run_shell`) and the `ToolRegistry`. |
-| `arccode-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands.                       |
-| `arccode-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`.                                   |
-| `arccode-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback.       |
-| `arccode-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt.               |
-| `arccode-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
-| `arccode-mcp`        | MCP host: connects to stdio/HTTP MCP servers and adapts their tools as `arccode_core` tool dispatchers, namespaced `mcp__<server>__<tool>`. |
-| `arccode-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
-| `arccode-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR — planner, manager, control channel, sandbox tiers, discovery daemon. |
+| `wingman-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode.                          |
+| `wingman-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
+| `wingman-config`     | TOML config loading, layered merge, env-var resolution, permission model.                              |
+| `wingman-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
+| `wingman-tools`      | Built-in tool implementations (`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir`, `run_shell`) and the `ToolRegistry`. |
+| `wingman-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands.                       |
+| `wingman-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`.                                   |
+| `wingman-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback.       |
+| `wingman-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt.               |
+| `wingman-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
+| `wingman-mcp`        | MCP host: connects to stdio/HTTP MCP servers and adapts their tools as `wingman_core` tool dispatchers, namespaced `mcp__<server>__<tool>`. |
+| `wingman-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
+| `wingman-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR — planner, manager, control channel, sandbox tiers, discovery daemon. |
 
 ---
 
 ## Pilot mode
 
-`arccode pilot run "<goal>"` plans a multi-task piece of work, spawns
+`wingman pilot run "<goal>"` plans a multi-task piece of work, spawns
 specialised worker agents in isolated git worktrees, and converges their
 output into a single PR. The full design lives in [`plan.md`](plan.md).
 
@@ -184,7 +184,7 @@ autopilot  Agent flies and navigates. Daemon mode, multi-channel intake,
            critic agent, knowledge graph, tool synthesis, sandboxed execution.
 ```
 
-Pick a tier in `~/.arccode/config.toml`:
+Pick a tier in `~/.wingman/config.toml`:
 
 ```toml
 [pilot]
@@ -200,28 +200,28 @@ task_timeout_secs     = 1800
 
 ```bash
 # One-shot: plan, approve, spawn workers, open PR
-arccode pilot run "add a --version-only flag to arccode-cli"
+wingman pilot run "add a --version-only flag to wingman-cli"
 
 # Plan only — write tasks.jsonl and exit
-arccode pilot run --plan-only "<goal>"
+wingman pilot run --plan-only "<goal>"
 
 # Auto-approve the plan (skip the y/e/n gate)
-arccode pilot run --yes "<goal>"
+wingman pilot run --yes "<goal>"
 
 # Dashboard
-arccode pilot status              # one-shot summary of the latest run
-arccode pilot watch               # live ASCII dashboard, polls state.json
-arccode pilot watch <run-id>      # specific run
+wingman pilot status              # one-shot summary of the latest run
+wingman pilot watch               # live ASCII dashboard, polls state.json
+wingman pilot watch <run-id>      # specific run
 
 # Control a live run (via the control channel)
-arccode pilot approve             # release a run waiting at the plan gate
-arccode pilot veto                # reject a gated run
-arccode pilot abort [--task <id>] # abort the whole run or one task
-arccode pilot retry <task>        # retry a failed/blocked task
-arccode pilot resume <run-id>     # resume an interrupted run
+wingman pilot approve             # release a run waiting at the plan gate
+wingman pilot veto                # reject a gated run
+wingman pilot abort [--task <id>] # abort the whole run or one task
+wingman pilot retry <task>        # retry a failed/blocked task
+wingman pilot resume <run-id>     # resume an interrupted run
 ```
 
-Per-run artefacts land under `<project>/.arccode/autonomous/<run-id>/`:
+Per-run artefacts land under `<project>/.wingman/autonomous/<run-id>/`:
 
 ```
 <run-id>/
@@ -299,7 +299,7 @@ used, but quality depends on the local model's tool-use training.
 | KoboldCpp    | `untested`      | Local OpenAI shim on `:5001/v1`.                                       |
 | Oobabooga    | `untested`      | text-generation-webui OpenAI shim on `:5000/v1`.                       |
 
-`arccode pilot run` prints a one-line support notice at startup and
+`wingman pilot run` prints a one-line support notice at startup and
 refuses to start when the planner provider is `unsupported` (no current
 backends are; the tier exists for future providers that can't emit
 tool calls at all).
@@ -385,7 +385,7 @@ tool calls at all).
 | IBM watsonx.ai     | `watsonx`   | `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` | `https://<region>.ml.cloud.ibm.com` |
 
 All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
-`OpenAiCompatProvider` adapter (`crates/arccode-providers/src/openai_compat.rs`).
+`OpenAiCompatProvider` adapter (`crates/wingman-providers/src/openai_compat.rs`).
 Add a new hosted OpenAI-shape clone by extending its `Variant` enum and the
 mapper functions in `runtime.rs` + `login.rs`.
 
@@ -420,18 +420,18 @@ mapper functions in `runtime.rs` + `login.rs`.
 ### Build from source
 
 ```bash
-git clone git@github.com:vedantnimbarte/Arc-Code.git
-cd Arc-Code
+git clone git@github.com:vedantnimbarte/Wingman.git
+cd Wingman
 cargo build --release
 ```
 
-The resulting binary is at `target/release/arccode` (or `arccode.exe` on
+The resulting binary is at `target/release/wingman` (or `wingman.exe` on
 Windows).
 
 To install onto your `PATH`:
 
 ```bash
-cargo install --path crates/arccode-cli
+cargo install --path crates/wingman-cli
 ```
 
 ---
@@ -441,10 +441,10 @@ cargo install --path crates/arccode-cli
 ### 1. Scaffold a config
 
 ```bash
-arccode config init
+wingman config init
 ```
 
-This writes a starter `~/.arccode/config.toml` populated with entries for every
+This writes a starter `~/.wingman/config.toml` populated with entries for every
 supported provider, each pointing at a `${ENV_VAR}` placeholder for the API
 key.
 
@@ -468,23 +468,23 @@ the `base_url` at the running instance.
 
 ```bash
 # Interactive TUI in the current project
-arccode
+wingman
 
 # Headless one-shot
-arccode --print "explain the agent loop in crates/arccode-core"
+wingman --print "explain the agent loop in crates/wingman-core"
 
 # Headless, streaming JSON events (newline-delimited)
-arccode --print "list the public types in arccode-core" --json
+wingman --print "list the public types in wingman-core" --json
 
 # Pick a model for this session only
-arccode --model anthropic/claude-opus-4-7
-arccode --model openai/gpt-4.1
-arccode --model gemini/gemini-2.5-pro
-arccode --model openrouter/anthropic/claude-opus-4-7
+wingman --model anthropic/claude-opus-4-7
+wingman --model openai/gpt-4.1
+wingman --model gemini/gemini-2.5-pro
+wingman --model openrouter/anthropic/claude-opus-4-7
 
 # Loosen the permission model for this session
-arccode --mode auto-edit
-arccode --mode yolo            # no prompts; per-session only
+wingman --mode auto-edit
+wingman --mode yolo            # no prompts; per-session only
 ```
 
 ### Inside the TUI
@@ -518,14 +518,14 @@ and the next session will see it in the system prompt.
 
 ## Self-improving loop
 
-Every session contributes to a small set of files under `~/.arccode/` and
-`<project>/.arccode/` that subsequent runs read on startup. There is no
+Every session contributes to a small set of files under `~/.wingman/` and
+`<project>/.wingman/` that subsequent runs read on startup. There is no
 cloud component — everything is local-first.
 
 ### What's persisted
 
-- **Memories** at `~/.arccode/memory/<slug>.md` (global) or
-  `<project>/.arccode/memory/<slug>.md` (project), indexed by a sibling
+- **Memories** at `~/.wingman/memory/<slug>.md` (global) or
+  `<project>/.wingman/memory/<slug>.md` (project), indexed by a sibling
   `MEMORY.md`. Each memory is markdown with YAML frontmatter
   (`name`, `description`, `type`). Four types:
 
@@ -540,13 +540,13 @@ cloud component — everything is local-first.
   prompt every turn. Full bodies stay on disk; the agent fetches them via
   `recall_memory` when relevant.
 
-- **Skill usage** at `~/.arccode/learn.db` (SQLite). Every `invoke_skill`
+- **Skill usage** at `~/.wingman/learn.db` (SQLite). Every `invoke_skill`
   call is recorded; the next user turn flips its outcome to `success` or
   `corrected` based on negation heuristics ("no,", "wait,", "wrong,",
   "actually,"…). When a skill crosses 3 invocations with ≥50% correction
   rate, the next session's system prompt suggests a rewrite.
 
-- **Session embeddings** at `~/.arccode/sessions.db`. Finished session
+- **Session embeddings** at `~/.wingman/sessions.db`. Finished session
   JSONLs are chunked into thread-shaped windows and embedded using the
   same `fastembed`/hash backend that powers `semantic_search`. The CLI
   backfills any unindexed sessions in the background at startup.
@@ -584,19 +584,19 @@ block = true                  # exit != 0 cancels the tool call
 timeout_secs = 10
 
 [[hooks.post_tool_use]]
-command = "echo \"$ARCCODE_TOOL_NAME ran\""
+command = "echo \"$WINGMAN_TOOL_NAME ran\""
 
 [[hooks.stop]]
-command = "notify-send 'arccode done'"
+command = "notify-send 'wingman done'"
 
 [[hooks.user_prompt_submit]]
-command = "grep -qiv secret <<< \"$ARCCODE_USER_PROMPT\""
+command = "grep -qiv secret <<< \"$WINGMAN_USER_PROMPT\""
 block = true                  # reject prompts containing 'secret'
 ```
 
 The agent loop populates per-event environment variables
-(`ARCCODE_TOOL_NAME`, `ARCCODE_TOOL_INPUT`, `ARCCODE_TOOL_OUTPUT`,
-`ARCCODE_TOOL_IS_ERROR`, `ARCCODE_STOP_REASON`, `ARCCODE_USER_PROMPT`).
+(`WINGMAN_TOOL_NAME`, `WINGMAN_TOOL_INPUT`, `WINGMAN_TOOL_OUTPUT`,
+`WINGMAN_TOOL_IS_ERROR`, `WINGMAN_STOP_REASON`, `WINGMAN_USER_PROMPT`).
 Hooks run via `sh -c` on Unix and `cmd /C` on Windows, with the
 configured `timeout_secs` (default 10).
 
@@ -604,13 +604,13 @@ configured `timeout_secs` (default 10).
 
 ## User-defined slash commands
 
-Place markdown files at `~/.arccode/commands/<name>.md` (global) or
-`<project>/.arccode/commands/<name>.md` (project). When the user types
+Place markdown files at `~/.wingman/commands/<name>.md` (global) or
+`<project>/.wingman/commands/<name>.md` (project). When the user types
 `/<name> rest of line` in the TUI, the markdown body is expanded into the
 prompt with the literal token `$ARGS` replaced by `rest of line`, and
 submitted as if typed directly. Project-local commands shadow globals.
 
-Example `~/.arccode/commands/refactor.md`:
+Example `~/.wingman/commands/refactor.md`:
 
 ```markdown
 Refactor the following Rust code with these constraints:
@@ -627,18 +627,18 @@ Then in the TUI: `/refactor crates/foo/src/lib.rs` expands to a complete prompt.
 
 ## Configuration
 
-`arccode` resolves configuration in this order (lowest to highest precedence):
+`wingman` resolves configuration in this order (lowest to highest precedence):
 
 1. Built-in defaults.
-2. `~/.arccode/config.toml` (global).
-3. `<project>/.arccode/config.toml` (project-local).
-4. `ARCCODE_*` environment variables.
+2. `~/.wingman/config.toml` (global).
+3. `<project>/.wingman/config.toml` (project-local).
+4. `WINGMAN_*` environment variables.
 5. CLI flags.
 
 TOML sub-tables are merged at the raw-TOML level, so an absent section in the
 project file does **not** wipe out the global values for that section.
 
-### Example `~/.arccode/config.toml`
+### Example `~/.wingman/config.toml`
 
 ```toml
 default_provider = "anthropic"
@@ -700,7 +700,7 @@ transport = "http"
 url = "http://localhost:9000/mcp"
 
 [logging]
-filter = "info,arccode=info"
+filter = "info,wingman=info"
 file = true
 ```
 
@@ -708,13 +708,13 @@ file = true
 
 | Variable                            | Effect                                                              |
 | ----------------------------------- | ------------------------------------------------------------------- |
-| `ARCCODE_MODEL`                     | Overrides `default_model`. Same syntax as `--model`.                |
-| `ARCCODE_PROVIDER`                  | Overrides `default_provider`.                                       |
-| `ARCCODE_PERMISSION_MODE`           | `read-only` \| `auto-edit` \| `yolo`.                               |
-| `ARCCODE_LOG`                       | `tracing-subscriber` env-filter directive.                          |
-| `ARCCODE_<PROVIDER>_API_KEY`        | Sets `providers.<provider>.api_key`.                                |
-| `ARCCODE_<PROVIDER>_BASE_URL`       | Sets `providers.<provider>.base_url`.                               |
-| `ARCCODE_<PROVIDER>_MODEL`          | Sets `providers.<provider>.model`.                                  |
+| `WINGMAN_MODEL`                     | Overrides `default_model`. Same syntax as `--model`.                |
+| `WINGMAN_PROVIDER`                  | Overrides `default_provider`.                                       |
+| `WINGMAN_PERMISSION_MODE`           | `read-only` \| `auto-edit` \| `yolo`.                               |
+| `WINGMAN_LOG`                       | `tracing-subscriber` env-filter directive.                          |
+| `WINGMAN_<PROVIDER>_API_KEY`        | Sets `providers.<provider>.api_key`.                                |
+| `WINGMAN_<PROVIDER>_BASE_URL`       | Sets `providers.<provider>.base_url`.                               |
+| `WINGMAN_<PROVIDER>_MODEL`          | Sets `providers.<provider>.model`.                                  |
 
 Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
 is resolved against the environment at load time.
@@ -740,7 +740,7 @@ plan mode (it just won't gate anything in that case).
 ## CLI reference
 
 ```text
-arccode [OPTIONS] [COMMAND]
+wingman [OPTIONS] [COMMAND]
 ```
 
 **Top-level flags**
@@ -748,7 +748,7 @@ arccode [OPTIONS] [COMMAND]
 | Flag                     | Description                                                                 |
 | ------------------------ | --------------------------------------------------------------------------- |
 | `--mode <MODE>`          | `read-only` \| `auto-edit` \| `yolo`.                                       |
-| `--model <MODEL>`        | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Env: `ARCCODE_MODEL`. |
+| `--model <MODEL>`        | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Env: `WINGMAN_MODEL`. |
 | `--print <PROMPT>`       | Run a single prompt and exit (non-interactive).                              |
 | `--batch <FILE>`         | Run a JSONL file of prompts non-interactively. Pairs with `--json`.          |
 | `--json`                 | Emit newline-delimited JSON events instead of text. Use with `--print`/`--batch`. |
@@ -761,19 +761,19 @@ arccode [OPTIONS] [COMMAND]
 
 | Command              | Description                                            |
 | -------------------- | ------------------------------------------------------ |
-| `config init`        | Write a starter `~/.arccode/config.toml`. `--force` to overwrite. |
+| `config init`        | Write a starter `~/.wingman/config.toml`. `--force` to overwrite. |
 | `config show`        | Print the merged effective configuration. `--json` for JSON output. |
 | `config paths`       | Print the resolved global and project config paths.    |
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
-| `knows`              | Show what Arc-Code knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
-| `init`               | Scan the current project and write a starter `ARCCODE.md`. `--force` to overwrite. |
+| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
+| `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
-| `undo`               | Restore the most recent `arccode checkpoint` via `git stash pop`. |
+| `undo`               | Restore the most recent `wingman checkpoint` via `git stash pop`. |
 | `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. |
 | `session list`       | List recent session JSONL files for this project.       |
 | `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
-| `worktree create <branch>` | Create a `git worktree` under `.arccode/worktrees/<branch>` for sandboxed experiments. |
+| `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
 | `worktree list`      | `git worktree list` passthrough.                        |
 | `worktree remove <path>` | Remove a worktree by path.                          |
 | `memory export <out>` | Export the global memory dir to a directory or `.json` pack. |
@@ -782,7 +782,7 @@ arccode [OPTIONS] [COMMAND]
 | `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
 | `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
 | `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
-| `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.arccode/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
+| `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
@@ -793,10 +793,10 @@ arccode [OPTIONS] [COMMAND]
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 
-Running `arccode` with no subcommand launches the TUI against the resolved
+Running `wingman` with no subcommand launches the TUI against the resolved
 provider and model.
 
-> `arccode autonomous "<goal>"` is a deprecated alias for `arccode pilot
+> `wingman autonomous "<goal>"` is a deprecated alias for `wingman pilot
 > run` — kept through M3, removed at M4.
 
 ---
@@ -841,21 +841,21 @@ The project is being built milestone by milestone:
 - **M0** — Workspace scaffold, CLI surface, layered config loader. *(shipped)*
 - **M1** — Headless and TUI agent loop against Anthropic with built-in tools. *(shipped)*
 - **M2** — Six more providers, token pipeline, live `/model` swap. *(shipped)*
-- **M3** — Session persistence (`arccode-session`), `/resume`, MCP host
-  (`arccode-mcp`): stdio/HTTP transports, `[mcp]` config, `/mcp` management,
+- **M3** — Session persistence (`wingman-session`), `/resume`, MCP host
+  (`wingman-mcp`): stdio/HTTP transports, `[mcp]` config, `/mcp` management,
   tools namespaced as `mcp__<server>__<tool>`. *(shipped)*
-- **M4** — Repo index / RAG (`arccode-rag`) with SQLite store and `fastembed`
+- **M4** — Repo index / RAG (`wingman-rag`) with SQLite store and `fastembed`
   or hash-embedder fallback. *(shipped)*
-- **M5** — Skills (`arccode-skills`), ChatGPT OAuth, TUI polish (welcome
+- **M5** — Skills (`wingman-skills`), ChatGPT OAuth, TUI polish (welcome
   screen, slash autocomplete). *(shipped)*
-- **M6** — Self-improving learning loop (`arccode-learn`): persistent
+- **M6** — Self-improving learning loop (`wingman-learn`): persistent
   memories, skill usage stats with outcome scoring, cross-session recall,
   nudges. *(shipped)*
 - **M7** — Tree-sitter integration across RAG, tools, diff/review, TUI. *(shipped)*
-- **Pilot mode** — Multi-agent orchestration (`arccode pilot`): multi-task
+- **Pilot mode** — Multi-agent orchestration (`wingman pilot`): multi-task
   planning, worker agents in isolated worktrees, squash-merge + PR, capability
   tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
-  end-to-end runs are user-validated)* `arccode autonomous` is a deprecated
+  end-to-end runs are user-validated)* `wingman autonomous` is a deprecated
   alias.
 - **Next** — Interactive TUI approval modal for skill/memory proposals,
   session logging from the TUI (currently headless-only), autopilot-tier
@@ -884,13 +884,13 @@ cargo run -- --mode auto-edit
 ### Run a headless one-shot from source
 
 ```bash
-cargo run -- --print "what does crates/arccode-core do?"
+cargo run -- --print "what does crates/wingman-core do?"
 ```
 
 ### Logs
 
-By default, logs are written to `~/.arccode/logs/`. Override with
-`ARCCODE_LOG=debug` or via the `[logging]` block in config.
+By default, logs are written to `~/.wingman/logs/`. Override with
+`WINGMAN_LOG=debug` or via the `[logging]` block in config.
 
 ---
 
@@ -902,24 +902,24 @@ By default, logs are written to `~/.arccode/logs/`. Override with
 ├── Cargo.lock
 ├── rustfmt.toml
 ├── crates/
-│   ├── arccode-cli/        # binary entry point
-│   ├── arccode-config/     # config loading + merge
-│   ├── arccode-core/       # provider-agnostic types + agent loop + LearningHook
-│   ├── arccode-learn/      # memory, skill stats, session recall, hooks
-│   ├── arccode-mcp/        # MCP host (M3)
-│   ├── arccode-providers/  # Anthropic, ChatGPT, Gemini, OpenAI-compat
-│   ├── arccode-rag/        # repo + session index (SQLite + fastembed/hash)
-│   ├── arccode-session/    # JSONL session log + replay
-│   ├── arccode-skills/     # markdown-frontmatter skills loader
-│   ├── arccode-tools/      # built-in tools + registry
-│   └── arccode-tui/        # ratatui surface
+│   ├── wingman-cli/        # binary entry point
+│   ├── wingman-config/     # config loading + merge
+│   ├── wingman-core/       # provider-agnostic types + agent loop + LearningHook
+│   ├── wingman-learn/      # memory, skill stats, session recall, hooks
+│   ├── wingman-mcp/        # MCP host (M3)
+│   ├── wingman-providers/  # Anthropic, ChatGPT, Gemini, OpenAI-compat
+│   ├── wingman-rag/        # repo + session index (SQLite + fastembed/hash)
+│   ├── wingman-session/    # JSONL session log + replay
+│   ├── wingman-skills/     # markdown-frontmatter skills loader
+│   ├── wingman-tools/      # built-in tools + registry
+│   └── wingman-tui/        # ratatui surface
 └── target/                 # build output (gitignored)
 ```
 
 On the user's machine:
 
 ```
-~/.arccode/
+~/.wingman/
 ├── config.toml             # global config
 ├── credentials.toml        # provider credentials (optional)
 ├── logs/                   # tracing output
@@ -932,7 +932,7 @@ On the user's machine:
 ```
 
 ```
-<project-root>/.arccode/
+<project-root>/.wingman/
 ├── config.toml             # project-local overrides
 ├── sessions/               # per-session JSONL logs (append-only)
 ├── index.db                # project RAG index (SQLite + embeddings)

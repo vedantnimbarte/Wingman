@@ -16,13 +16,13 @@ block = true                  # exit != 0 cancels the tool call
 timeout_secs = 10
 
 [[hooks.post_tool_use]]
-command = "echo \"$ARCCODE_TOOL_NAME ran\""
+command = "echo \"$WINGMAN_TOOL_NAME ran\""
 
 [[hooks.stop]]
-command = "notify-send 'arccode done'"
+command = "notify-send 'wingman done'"
 
 [[hooks.user_prompt_submit]]
-command = "grep -qiv secret <<< \"$ARCCODE_USER_PROMPT\""
+command = "grep -qiv secret <<< \"$WINGMAN_USER_PROMPT\""
 block = true                  # reject prompts containing 'secret'
 ```
 
@@ -32,12 +32,12 @@ The agent loop populates per-event environment variables:
 
 | Variable                | Available in                          |
 | ----------------------- | ------------------------------------- |
-| `ARCCODE_TOOL_NAME`     | `pre_tool_use`, `post_tool_use`       |
-| `ARCCODE_TOOL_INPUT`    | `pre_tool_use`, `post_tool_use`       |
-| `ARCCODE_TOOL_OUTPUT`   | `post_tool_use`                       |
-| `ARCCODE_TOOL_IS_ERROR` | `post_tool_use`                       |
-| `ARCCODE_STOP_REASON`   | `stop`                                |
-| `ARCCODE_USER_PROMPT`   | `user_prompt_submit`                  |
+| `WINGMAN_TOOL_NAME`     | `pre_tool_use`, `post_tool_use`       |
+| `WINGMAN_TOOL_INPUT`    | `pre_tool_use`, `post_tool_use`       |
+| `WINGMAN_TOOL_OUTPUT`   | `post_tool_use`                       |
+| `WINGMAN_TOOL_IS_ERROR` | `post_tool_use`                       |
+| `WINGMAN_STOP_REASON`   | `stop`                                |
+| `WINGMAN_USER_PROMPT`   | `user_prompt_submit`                  |
 
 Hooks run via `sh -c` on Unix and `cmd /C` on Windows, with the configured
 `timeout_secs` (default 10). A hook with `block = true` cancels the action when

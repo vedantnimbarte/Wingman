@@ -1,0 +1,29 @@
+[package]
+name = "wingman-learn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Self-improving learning loop for wingman: memory, skill proposals, usage stats, session search."
+
+[dependencies]
+wingman-config = { workspace = true }
+wingman-core = { workspace = true }
+wingman-skills = { workspace = true }
+wingman-session = { workspace = true }
+wingman-rag = { workspace = true }
+wingman-ts = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+
+[features]
+default = ["treesitter"]
+treesitter = ["dep:wingman-ts", "wingman-ts/treesitter"]
+
+[dev-dependencies]
+tokio = { workspace = true }

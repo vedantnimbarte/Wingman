@@ -1,19 +1,19 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/arccode-cli",
-    "crates/arccode-config",
-    "crates/arccode-core",
-    "crates/arccode-tui",
-    "crates/arccode-providers",
-    "crates/arccode-tools",
-    "crates/arccode-session",
-    "crates/arccode-rag",
-    "crates/arccode-mcp",
-    "crates/arccode-skills",
-    "crates/arccode-learn",
-    "crates/arccode-ts",
-    "crates/arccode-autonomous",
+    "crates/wingman-cli",
+    "crates/wingman-config",
+    "crates/wingman-core",
+    "crates/wingman-tui",
+    "crates/wingman-providers",
+    "crates/wingman-tools",
+    "crates/wingman-session",
+    "crates/wingman-rag",
+    "crates/wingman-mcp",
+    "crates/wingman-skills",
+    "crates/wingman-learn",
+    "crates/wingman-ts",
+    "crates/wingman-autonomous",
 ]
 
 [workspace.package]
@@ -21,23 +21,23 @@ version = "0.0.1"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-org/arccode"
-authors = ["arccode contributors"]
+repository = "https://github.com/your-org/wingman"
+authors = ["wingman contributors"]
 
 [workspace.dependencies]
-arccode-cli = { path = "crates/arccode-cli", version = "0.0.1" }
-arccode-config = { path = "crates/arccode-config", version = "0.0.1" }
-arccode-core = { path = "crates/arccode-core", version = "0.0.1" }
-arccode-tui = { path = "crates/arccode-tui", version = "0.0.1" }
-arccode-providers = { path = "crates/arccode-providers", version = "0.0.1" }
-arccode-tools = { path = "crates/arccode-tools", version = "0.0.1" }
-arccode-session = { path = "crates/arccode-session", version = "0.0.1" }
-arccode-rag = { path = "crates/arccode-rag", version = "0.0.1", default-features = false }
-arccode-mcp = { path = "crates/arccode-mcp", version = "0.0.1" }
-arccode-skills = { path = "crates/arccode-skills", version = "0.0.1" }
-arccode-learn = { path = "crates/arccode-learn", version = "0.0.1" }
-arccode-ts = { path = "crates/arccode-ts", version = "0.0.1", default-features = false }
-arccode-autonomous = { path = "crates/arccode-autonomous", version = "0.0.1" }
+wingman-cli = { path = "crates/wingman-cli", version = "0.0.1" }
+wingman-config = { path = "crates/wingman-config", version = "0.0.1" }
+wingman-core = { path = "crates/wingman-core", version = "0.0.1" }
+wingman-tui = { path = "crates/wingman-tui", version = "0.0.1" }
+wingman-providers = { path = "crates/wingman-providers", version = "0.0.1" }
+wingman-tools = { path = "crates/wingman-tools", version = "0.0.1" }
+wingman-session = { path = "crates/wingman-session", version = "0.0.1" }
+wingman-rag = { path = "crates/wingman-rag", version = "0.0.1", default-features = false }
+wingman-mcp = { path = "crates/wingman-mcp", version = "0.0.1" }
+wingman-skills = { path = "crates/wingman-skills", version = "0.0.1" }
+wingman-learn = { path = "crates/wingman-learn", version = "0.0.1" }
+wingman-ts = { path = "crates/wingman-ts", version = "0.0.1", default-features = false }
+wingman-autonomous = { path = "crates/wingman-autonomous", version = "0.0.1" }
 
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
 async-trait = "0.1"

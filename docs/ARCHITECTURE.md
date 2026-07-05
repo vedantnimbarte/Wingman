@@ -1,14 +1,14 @@
-# Arc-Code Architecture Overview
+# Wingman Architecture Overview
 
-Arc-Code is a modular, multi-provider coding agent written in Rust. This document describes its high-level architecture, core abstractions, and how subsystems interact.
+Wingman is a modular, multi-provider coding agent written in Rust. This document describes its high-level architecture, core abstractions, and how subsystems interact.
 
 ## System Overview
 
-Arc-Code operates on two surfaces:
+Wingman operates on two surfaces:
 1. **Interactive TUI** (`ratatui`-based) for long-lived sessions with state persistence and live interaction.
 2. **Headless mode** (`--print`) for one-shot prompts that emit text or newline-delimited JSON events.
 
-Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`, which orchestrates:
+Both surfaces feed the same **agent loop** at `crates/wingman-core/src/agent.rs`, which orchestrates:
 - **Provider abstraction** — speak to nine LLM backends (Anthropic, OpenAI, Gemini, etc.) through a unified `Provider` trait.
 - **Tool dispatch** — route model tool calls to built-in tools (file I/O, shell, search, memory, skills, etc.).
 - **Token management** — track token usage, estimate context, compact history when needed.
@@ -16,7 +16,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 
 ## Core Crates
 
-### `arccode-cli`
+### `wingman-cli`
 **Purpose:** Binary entry point, argument parsing, logging setup, surface selection.
 
 **Key files:**
@@ -27,12 +27,12 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 
 **Responsibilities:**
 - Parse CLI args and environment.
-- Load global/project-local config via `arccode-config`.
+- Load global/project-local config via `wingman-config`.
 - Select TUI or headless surface.
 - Wire up tracing/logging.
 - Dispatch to command handlers.
 
-### `arccode-core`
+### `wingman-core`
 **Purpose:** Provider-agnostic types, agent loop, tool dispatch, token pipeline.
 
 **Key types:**
@@ -59,14 +59,14 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 - `Compactor` — when history token count exceeds `compact_at_tokens`, summarize old turns.
 - `ToolOutputBudget` — per-tool output size limits (head/tail truncation).
 
-### `arccode-config`
+### `wingman-config`
 **Purpose:** Layered config resolution, permission model, hook system.
 
 **Config resolution (ascending priority):**
 1. Built-in defaults.
-2. `~/.arccode/config.toml` (global).
-3. `<project>/.arccode/config.toml` (project).
-4. `ARCCODE_*` environment variables.
+2. `~/.wingman/config.toml` (global).
+3. `<project>/.wingman/config.toml` (project).
+4. `WINGMAN_*` environment variables.
 5. CLI flags.
 
 **Key sections:**
@@ -88,7 +88,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 
 (*except denylist)
 
-### `arccode-providers`
+### `wingman-providers`
 **Purpose:** Concrete `Provider` implementations for nine backends.
 
 **Provider implementations:**
@@ -110,7 +110,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 - All providers return the same `Message` shape, allowing seamless model swaps.
 - OpenAI-compatible backends share code via `OpenAiCompatProvider::new(variant)`.
 
-### `arccode-tools`
+### `wingman-tools`
 **Purpose:** Built-in tool implementations and registry.
 
 **Tool registry (`ToolRegistry`):**
@@ -143,7 +143,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 | `recall_session`  | Semantic search over past sessions.      |
 | `read_session`    | Fetch full session JSONL by id.           |
 
-### `arccode-tui`
+### `wingman-tui`
 **Purpose:** Interactive `ratatui` surface with composer, transcript, sidebar, themes.
 
 **Key components:**
@@ -160,7 +160,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 - Agent events (ContentBlock, ToolCall, Stop) update transcript in real time.
 - `Ctrl+C` or `Ctrl+D` exits.
 
-### `arccode-session`
+### `wingman-session`
 **Purpose:** Append-only JSONL session log for reproducibility and recall.
 
 **Session format (one JSON object per line):**
@@ -172,15 +172,15 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 ```
 
 **Features:**
-- `arccode session list` — browse recent session files.
-- `arccode session fork [--at N]` — copy and optionally truncate.
+- `wingman session list` — browse recent session files.
+- `wingman session fork [--at N]` — copy and optionally truncate.
 - Sessions are embedded and indexed for `/recall` and cross-project search.
 
-### `arccode-rag`
+### `wingman-rag`
 **Purpose:** Semantic code index via embeddings (SQLite + fastembed or hash fallback).
 
 **Storage:**
-- `<project>/.arccode/index.db` (SQLite with vec support).
+- `<project>/.wingman/index.db` (SQLite with vec support).
 - Schema: documents (file:// URIs, line ranges), embeddings (1536-dim or hash).
 
 **Chunking:**
@@ -192,7 +192,7 @@ Both surfaces feed the same **agent loop** at `crates/arccode-core/src/agent.rs`
 - `semantic_search` tool (callable by agent) → top-K cosine/hash-distance hits.
 - Session transcript embedding for `recall_session` cross-project search.
 
-### `arccode-skills`
+### `wingman-skills`
 **Purpose:** Markdown skill library (global + project-scoped).
 
 **Skill file format:**
@@ -209,12 +209,12 @@ When the user asks for Y, respond with Z and call these tools:
 ```
 
 **How it works:**
-- Skills auto-load from `~/.arccode/skills/*.md` and `<project>/.arccode/skills/*.md`.
+- Skills auto-load from `~/.wingman/skills/*.md` and `<project>/.wingman/skills/*.md`.
 - Names in the catalog are injected into the system prompt at every turn.
 - Agent can call `invoke_skill` to fetch and use a skill body.
 - Project-scoped skills override globals by name.
 
-### `arccode-learn`
+### `wingman-learn`
 **Purpose:** Self-improving loop — persistent memories, skill stats, session recall, hooks.
 
 **Four modules:**
@@ -236,7 +236,7 @@ When the user asks for Y, respond with Z and call these tools:
 
 **Memory files (example):**
 ```
-~/.arccode/memory/
+~/.wingman/memory/
 ├── MEMORY.md
 │   ├── [user-role](user_role.md) — Senior Rust engineer
 │   ├── [feedback-testing](feedback_testing.md) — Avoid mocks; use real DB
@@ -245,22 +245,22 @@ When the user asks for Y, respond with Z and call these tools:
 ├── feedback_testing.md
 └── …
 
-<project>/.arccode/memory/
+<project>/.wingman/memory/
 ├── MEMORY.md
 ├── project_build_command.md
 └── …
 ```
 
-**Skill stats (`~/.arccode/learn.db`):**
+**Skill stats (`~/.wingman/learn.db`):**
 - Every `invoke_skill` recorded with outcome (success/corrected/unclear).
 - Outcomes derived from heuristics ("no,", "wait,", "wrong," in next turn).
 - Skills crossing 3 invocations + 50% correction rate flagged for rewrite.
 
 **Session embedding:**
-- Finished sessions chunked and embedded into `~/.arccode/sessions.db`.
+- Finished sessions chunked and embedded into `~/.wingman/sessions.db`.
 - `recall_session` tool searches this index across projects.
 
-### `arccode-ts`
+### `wingman-ts`
 **Purpose:** Tree-sitter facade for language-aware parsing.
 
 **Supported languages:**
@@ -279,9 +279,9 @@ When the user asks for Y, respond with Z and call these tools:
 **Design:**
 - Hidden behind `#[cfg(feature = "treesitter")]` so workspace builds without the C toolchain if not needed.
 - Fallback functions return empty Vec/None when feature disabled.
-- Used by `arccode-rag` for semantic chunking, `arccode-diff` for AST-aware diffs.
+- Used by `wingman-rag` for semantic chunking, `wingman-diff` for AST-aware diffs.
 
-### `arccode-mcp`
+### `wingman-mcp`
 **Purpose:** MCP host scaffolding (planned for M8+).
 
 **Current state:** Early-stage framework for MCP tool integration. Not yet functional.
@@ -293,9 +293,9 @@ When the user asks for Y, respond with Z and call these tools:
 ```
 User Input (TUI or --print)
     ↓
-[arccode-cli] parse args, load config
+[wingman-cli] parse args, load config
     ↓
-[arccode-core AgentLoop] start
+[wingman-core AgentLoop] start
     ↓
 Build CompletionRequest
     ├─ system prompt (+ skills index, memories index, nudges)
@@ -335,13 +335,13 @@ On Stop (no more tool calls):
 ```
 Built-in defaults (in code)
     ↓
-Load global ~/.arccode/config.toml
+Load global ~/.wingman/config.toml
     ↓
-Load project ./.arccode/config.toml (TOML sub-tables merge)
+Load project ./.wingman/config.toml (TOML sub-tables merge)
     ↓
 Resolve ${ENV_VAR} placeholders
     ↓
-Apply ARCCODE_* environment variables (override)
+Apply WINGMAN_* environment variables (override)
     ↓
 Apply CLI flags (highest priority)
     ↓
@@ -355,7 +355,7 @@ User: "Remember that I use pnpm"
     ↓
 Agent calls save_memory("user-pkg-manager", type=feedback, body="...")
     ↓
-[arccode-learn] MemoryStore::save()
+[wingman-learn] MemoryStore::save()
     ├─ Write to <scope>/memory/<slug>.md
     └─ Update <scope>/memory/MEMORY.md index
     ↓
@@ -368,7 +368,7 @@ Next session:
 
 ## Threading Model
 
-Arc-Code uses Tokio for async execution:
+Wingman uses Tokio for async execution:
 
 - **TUI:** spawns agent loop in a Tokio task, updates on event streams.
 - **Headless:** single-threaded Tokio runtime, streams events to stdout/JSON.
@@ -379,11 +379,11 @@ Arc-Code uses Tokio for async execution:
 
 | Crate           | Flag            | Effect                                                |
 |-----------------|-----------------|-------------------------------------------------------|
-| `arccode-rag`   | `embeddings`    | Enable fastembed; disable to use hash fallback.       |
-| `arccode-rag`   | `treesitter`    | Enable semantic chunking; disable for line-window.    |
-| `arccode-ts`    | `treesitter`    | Enable tree-sitter parsing; disable for No-op.        |
-| `arccode-ts`    | `highlight`     | Enable syntax highlighting (tree-sitter-highlight).  |
-| `arccode-learn` | `treesitter`    | Enable tree-sitter in learning hooks.                 |
+| `wingman-rag`   | `embeddings`    | Enable fastembed; disable to use hash fallback.       |
+| `wingman-rag`   | `treesitter`    | Enable semantic chunking; disable for line-window.    |
+| `wingman-ts`    | `treesitter`    | Enable tree-sitter parsing; disable for No-op.        |
+| `wingman-ts`    | `highlight`     | Enable syntax highlighting (tree-sitter-highlight).  |
+| `wingman-learn` | `treesitter`    | Enable tree-sitter in learning hooks.                 |
 
 ## Error Handling
 
