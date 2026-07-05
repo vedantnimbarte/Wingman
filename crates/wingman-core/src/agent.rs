@@ -263,6 +263,21 @@ impl AgentLoop {
         self.history.clear();
     }
 
+    /// Force a compaction pass now, regardless of the token threshold: fold
+    /// everything but the most recent messages into a single recap. Returns
+    /// the number of messages folded, or `None` if history is too short.
+    pub fn compact_now(&mut self) -> Option<usize> {
+        let plan = self.config.compactor.plan_forced(&self.history)?;
+        let replaced = plan.replaced;
+        self.history.splice(0..replaced, std::iter::once(plan.recap));
+        Some(replaced)
+    }
+
+    /// Estimated tokens currently held in history (plus the system prompt).
+    pub fn context_tokens(&self) -> u32 {
+        crate::tokens::estimate_history_tokens(&self.history, self.config.system.as_deref())
+    }
+
     /// Swap in a different provider. Conversation history is preserved so
     /// the new model picks up mid-stream — providers translate `Message`s
     /// through their own adapter on the next request.

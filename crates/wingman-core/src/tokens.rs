@@ -132,10 +132,16 @@ impl Compactor {
     /// Returns a plan if compaction should run, or `None` if the history
     /// is under budget or too short to be worth folding.
     pub fn plan(&self, history: &[Message], system: Option<&str>) -> Option<CompactPlan> {
-        let used = estimate_history_tokens(history, system);
-        if used < self.trigger_tokens {
+        if estimate_history_tokens(history, system) < self.trigger_tokens {
             return None;
         }
+        self.plan_forced(history)
+    }
+
+    /// Build a compaction plan ignoring the token threshold — used by an
+    /// on-demand `/compact`. Still returns `None` when there's nothing worth
+    /// folding (history no longer than `keep_recent`).
+    pub fn plan_forced(&self, history: &[Message]) -> Option<CompactPlan> {
         if history.len() <= self.keep_recent {
             return None;
         }
@@ -282,6 +288,26 @@ mod tests {
         } else {
             panic!("recap should be text");
         }
+    }
+
+    #[test]
+    fn plan_forced_ignores_threshold() {
+        let c = Compactor {
+            trigger_tokens: 1_000_000, // unreachably high
+            keep_recent: 2,
+        };
+        let history = vec![
+            Message::user_text("one"),
+            Message::assistant(vec![ContentBlock::text("two")]),
+            Message::user_text("three"),
+            Message::assistant(vec![ContentBlock::text("four")]),
+        ];
+        // Under threshold, the automatic path does nothing…
+        assert!(c.plan(&history, None).is_none());
+        // …but forced compaction folds all but keep_recent.
+        assert_eq!(c.plan_forced(&history).unwrap().replaced, 2);
+        // Too little to fold → None even when forced.
+        assert!(c.plan_forced(&history[..2]).is_none());
     }
 
     #[test]

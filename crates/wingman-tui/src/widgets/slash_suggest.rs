@@ -24,6 +24,10 @@ pub const CATALOG: &[Command] = &[
         description: "show command list",
     },
     Command {
+        name: "/compact",
+        description: "summarize old history into a recap to free context",
+    },
+    Command {
         name: "/clear",
         description: "reset the conversation",
     },

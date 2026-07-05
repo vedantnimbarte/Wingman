@@ -130,6 +130,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 enum Cmd {
     Quit,
     Clear,
+    Compact,
     Help,
     Mode(Option<String>),
     Model(Option<String>),
@@ -169,6 +170,7 @@ fn parse_slash(line: &str) -> Cmd {
     match head {
         "/quit" | "/exit" | "/q" => Cmd::Quit,
         "/clear" => Cmd::Clear,
+        "/compact" => Cmd::Compact,
         "/help" | "/?" => Cmd::Help,
         "/mode" => Cmd::Mode(if arg.is_empty() {
             None
@@ -722,6 +724,25 @@ async fn idle_step(
                             Cmd::Clear => {
                                 ui.transcript.clear();
                             }
+                            Cmd::Compact => match agent.as_mut() {
+                                Some(a) => {
+                                    let before = a.context_tokens();
+                                    match a.compact_now() {
+                                        Some(n) => {
+                                            let after = a.context_tokens();
+                                            ui.transcript.push(TranscriptItem::System(format!(
+                                                "compacted {n} message(s) into a recap · context ~{before} → ~{after} tokens"
+                                            )));
+                                        }
+                                        None => ui.transcript.push(TranscriptItem::System(
+                                            "nothing to compact yet".into(),
+                                        )),
+                                    }
+                                }
+                                None => ui.transcript.push(TranscriptItem::Error(
+                                    "no provider — run /login first".into(),
+                                )),
+                            },
                             Cmd::Mode(None) => {
                                 ui.modal =
                                     ActiveModal::ModePicker(ModePicker::new(&ui.status.mode));
