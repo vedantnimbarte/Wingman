@@ -780,8 +780,23 @@ async fn handle_assign(
             .iter()
             .filter(|t| t.status == TaskStatus::InProgress)
             .count() as u32;
-        if live >= cfg.max_concurrent_agents {
-            return Err(OrchestratorError::ConcurrencyCap(cfg.max_concurrent_agents));
+        // E9 — adaptive cap: scale the live ceiling down as the run's budget
+        // burns, rather than always allowing `max_concurrent_agents`. Rate-
+        // limit and CPU signals aren't sampled yet, so those inputs are 0 (a
+        // no-op); budget burn is real (`totals.usd` vs `max_usd`).
+        // ponytail: no 429 counter or host-load sampler wired from workers
+        // yet — add them to tighten the cap under provider backoff.
+        let cap = crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
+            max_agents: cfg.max_concurrent_agents,
+            min_agents: 1,
+            recent_rate_limit_hits: 0,
+            active_retry_after_secs: 0,
+            cpu_load: 0.0,
+            usd_spent: store_g.state().totals.usd,
+            max_usd: cfg.max_usd,
+        });
+        if live >= cap {
+            return Err(OrchestratorError::ConcurrencyCap(cap));
         }
 
         // E4 — write-set conflict avoidance: never run two tasks whose
