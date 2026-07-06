@@ -1172,6 +1172,9 @@ fn build_real_worker_spawner(
                      before reporting `task_complete`.\n",
                     );
                 }
+                // E10 — take the manager→worker command receiver so
+                // run_worker can drain it into the child's stdin.
+                let cmd_rx = ctx.cmd_rx.lock().await.take();
                 let spec = wingman_autonomous::worker::WorkerSpec {
                     wingman_bin,
                     role: task.role.clone(),
@@ -1180,6 +1183,7 @@ fn build_real_worker_spawner(
                     session_id: ctx.session_id.clone(),
                     model,
                     timeout: std::time::Duration::from_secs(1800),
+                    cmd_rx,
                 };
                 let mut store_guard = ctx.store.lock().await;
                 let result =

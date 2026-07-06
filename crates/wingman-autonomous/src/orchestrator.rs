@@ -159,6 +159,12 @@ pub struct SpawnContext {
     /// Spawners can splice this into the system prompt so the next
     /// worker doesn't repeat the same mistake blindly.
     pub failure_history: Vec<String>,
+    /// E10 — the receive end of the manager→worker command channel. A
+    /// spawner takes it once and drains it into the child's stdin so the
+    /// manager can pivot/cancel/clarify a live worker. Wrapped in
+    /// `Arc<Mutex<Option<_>>>` so [`SpawnContext`] stays `Clone`; `None`
+    /// disables the live channel (tests, fake spawners).
+    pub cmd_rx: Arc<Mutex<Option<mpsc::Receiver<crate::ipc::ManagerCommand>>>>,
 }
 
 /// Commands the manager's tools send to the orchestrator. Each command
@@ -592,6 +598,12 @@ async fn run_actor(
     // join everything cleanly on shutdown.
     let active: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
         Arc::new(Mutex::new(HashMap::new()));
+    // E10 — the send end of each live worker's command channel, keyed by
+    // agent id. Parallel to `active` so the abort/kill paths that `.remove`
+    // JoinHandles stay untouched; a stale sender just fails to send once the
+    // worker is gone.
+    let senders: Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
     let mut next_agent_seq: u64 = 0;
     let mut next_task_seq: u64 = 0;
     // E5 retry ladder state, per task.
@@ -619,6 +631,7 @@ async fn run_actor(
                     &cfg,
                     &spawner,
                     &active,
+                    &senders,
                     &task_id,
                     &mut next_agent_seq,
                     &retries,
@@ -638,6 +651,7 @@ async fn run_actor(
                     &spawner,
                     splitter.as_ref(),
                     &active,
+                    &senders,
                     &task_id,
                     &mut next_agent_seq,
                     &mut retries,
@@ -675,27 +689,47 @@ async fn run_actor(
                 body,
                 reply,
             } => {
-                // E10 IPC stub: persist the message as a synthetic event for
-                // now. Real stdin-channel injection lands in Phase 7.5.
-                let result = {
-                    let mut store = store.lock().await;
-                    let current_task = store
+                // E10 — deliver the message to the live worker over its stdin
+                // command channel when the body parses as an IPC command and
+                // the worker is still up. Anything that isn't a structured
+                // command (or a message to a departed worker) falls back to
+                // recording a synthetic event so the intent is still logged.
+                let current_task = {
+                    let store = store.lock().await;
+                    store
                         .state()
                         .agent(&agent_id)
-                        .map(|a| a.current_task.clone());
-                    match current_task {
-                        None => Err(OrchestratorError::UnknownAgent(agent_id.clone())),
-                        Some(task_id) => store
+                        .map(|a| a.current_task.clone())
+                };
+                let result = match current_task {
+                    None => Err(OrchestratorError::UnknownAgent(agent_id.clone())),
+                    Some(task_id) => {
+                        let delivered = match crate::ipc::parse_command(&body) {
+                            Ok(cmd) => {
+                                let tx = senders.lock().await.get(&agent_id).cloned();
+                                match tx {
+                                    Some(tx) => tx.send(cmd).await.is_ok(),
+                                    None => false,
+                                }
+                            }
+                            Err(_) => false,
+                        };
+                        let mut store = store.lock().await;
+                        store
                             .append(Event::TaskTool {
                                 t: RunStore::now(),
                                 id: task_id.unwrap_or_default(),
                                 agent: agent_id.clone(),
-                                tool: format!("message:{body}"),
+                                tool: if delivered {
+                                    format!("ipc:{body}")
+                                } else {
+                                    format!("message:{body}")
+                                },
                                 input_hash: None,
                                 ok: true,
                             })
                             .await
-                            .map_err(OrchestratorError::from),
+                            .map_err(OrchestratorError::from)
                     }
                 };
                 let _ = reply.send(result);
@@ -750,11 +784,13 @@ async fn handle_add_task(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_assign(
     store: &Arc<Mutex<RunStore>>,
     cfg: &OrchestratorConfig,
     spawner: &WorkerSpawner,
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    senders: &Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>>,
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &HashMap<String, RetryState>,
@@ -893,6 +929,13 @@ async fn handle_assign(
             .await?;
     }
 
+    // E10 — create the manager→worker command channel. The send end is kept
+    // in `senders` (keyed by agent) for `message_agent`; the receive end
+    // rides in the SpawnContext so the spawner can drain it into the child's
+    // stdin. A small bounded buffer is plenty — commands are rare.
+    let (cmd_tx, cmd_rx) = mpsc::channel::<crate::ipc::ManagerCommand>(8);
+    senders.lock().await.insert(agent_id.clone(), cmd_tx);
+
     let retry = retries.get(task_id).cloned().unwrap_or_default();
     let ctx = SpawnContext {
         task,
@@ -903,6 +946,7 @@ async fn handle_assign(
         rung: retry.rung,
         escalate_model: retry.escalate_model,
         failure_history: retry.failure_history,
+        cmd_rx: Arc::new(Mutex::new(Some(cmd_rx))),
     };
     let spawner = spawner.clone();
     let task_id_for_log = task_id.to_string();
@@ -928,6 +972,7 @@ async fn handle_reassign(
     spawner: &WorkerSpawner,
     splitter: Option<&TaskSplitter>,
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    senders: &Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>>,
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &mut HashMap<String, RetryState>,
@@ -1043,6 +1088,7 @@ async fn handle_reassign(
         cfg,
         spawner,
         active,
+        senders,
         task_id,
         next_agent_seq,
         retries,
@@ -2495,6 +2541,97 @@ mod tests {
             }
             other => panic!("expected BadTransition, got {other:?}"),
         }
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// E10 — `message_agent` delivers a parsed IPC command to the live
+    /// worker's stdin channel: the spawner that holds the receiver observes
+    /// the command, and the orchestrator records it as an `ipc:` event.
+    #[tokio::test]
+    async fn e10_message_agent_delivers_ipc_command_to_worker() {
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/e10-run"),
+            "e10-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/e10-run",
+        )
+        .await
+        .unwrap();
+
+        // The spawner takes the command receiver and records the first
+        // command it receives into a shared slot the test can read.
+        let received: Arc<Mutex<Vec<crate::ipc::ManagerCommand>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_spawner = received.clone();
+        let hold: WorkerSpawner = Arc::new(move |ctx: SpawnContext| {
+            let received = received_for_spawner.clone();
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = store
+                        .append(Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        })
+                        .await;
+                }
+                let rx = ctx.cmd_rx.lock().await.take();
+                if let Some(mut rx) = rx {
+                    if let Some(cmd) = rx.recv().await {
+                        received.lock().await.push(cmd);
+                    }
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        });
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), hold);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+
+        let agent_id = handle.snapshot().await.unwrap().agents[0].id.clone();
+        let body = crate::ipc::encode_command(&crate::ipc::ManagerCommand::Cancel {
+            reason: "stop".into(),
+        });
+        handle.message_agent(&agent_id, &body).await.unwrap();
+
+        // The spawner received the exact command.
+        for _ in 0..200 {
+            if !received.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let got = received.lock().await.clone();
+        assert_eq!(
+            got,
+            vec![crate::ipc::ManagerCommand::Cancel {
+                reason: "stop".into()
+            }]
+        );
+        // The orchestrator logged it as a delivered `ipc:` event.
+        let events = {
+            let s = RunStore::load(dir.path().join(".wingman/autonomous/e10-run"))
+                .await
+                .unwrap();
+            s.read_events().await.unwrap()
+        };
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::TaskTool { tool, .. } if tool.starts_with("ipc:")
+        )));
+
         handle.shutdown().await;
         let _ = join.await;
     }

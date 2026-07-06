@@ -123,6 +123,36 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     };
     let mut agent = AgentLoop::new(provider, registry, agent_cfg);
 
+    // E10 — read manager→worker IPC commands from stdin. A `cancel` sets a
+    // shared flag the run loop checks so the manager can stop a live worker;
+    // pivot/clarify are logged (mid-stream injection into the running agent
+    // isn't supported by the loop API yet). The reader exits on EOF, which
+    // the parent triggers by dropping the worker's stdin.
+    // ponytail: cancel is the actionable command today; pivot/clarify need an
+    // agent-loop message-injection hook that doesn't exist — add when it does.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        // Blocking stdin read on a dedicated thread (avoids depending on
+        // tokio's io-std feature). Exits on EOF when the parent drops stdin.
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let Ok(line) = line else { break };
+                match wingman_autonomous::ipc::parse_command(line.trim()) {
+                    Ok(wingman_autonomous::ipc::ManagerCommand::Cancel { reason }) => {
+                        eprintln!("[worker] IPC cancel: {reason}");
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(other) => eprintln!("[worker] IPC command (not injected): {other:?}"),
+                    Err(_) => {}
+                }
+            }
+        });
+    }
+
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     let mut exit = ExitCode::SUCCESS;
@@ -147,6 +177,19 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             .unwrap_or_else(|_| "{\"type\":\"serialize_error\"}".into());
         writeln!(stdout, "{line}").ok();
         stdout.flush().ok();
+        // E10 — honor a manager cancel between turns: emit a Blocked message
+        // so the parent records why, then stop.
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let msg = wingman_autonomous::ipc::encode_message(
+                &wingman_autonomous::ipc::WorkerMessage::Blocked {
+                    on: "cancelled by manager".into(),
+                },
+            );
+            writeln!(stdout, "{msg}").ok();
+            stdout.flush().ok();
+            exit = ExitCode::from(1);
+            break;
+        }
         match event {
             AgentEvent::Error { .. } => {
                 exit = ExitCode::from(1);
