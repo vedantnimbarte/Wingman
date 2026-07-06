@@ -1525,6 +1525,14 @@ pub struct PilotDaemonConfig {
     /// `${ENV_VAR}` placeholder so the secret isn't stored in plaintext.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// J2 — when true, a candidate the daemon scores as `AutoRun` is
+    /// dispatched into a real nested pilot run (plans, spawns workers, opens
+    /// a PR) instead of only being queued. Default false so enabling the
+    /// daemon surfaces work without silently opening PRs; flip it on once the
+    /// trust config (`trusted_authors`/`trusted_labels`, `auto_threshold`) is
+    /// tuned.
+    #[serde(default)]
+    pub auto_dispatch: bool,
 }
 
 impl Default for PilotDaemonConfig {
@@ -1536,6 +1544,7 @@ impl Default for PilotDaemonConfig {
             max_concurrent_runs: 2,
             trusted_authors: Vec::new(),
             trusted_labels: vec!["wingman:auto".into()],
+            auto_dispatch: false,
             sources: vec![
                 "github_issues".into(),
                 "ci_failures".into(),

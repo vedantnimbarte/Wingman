@@ -141,6 +141,7 @@ fn load_routing_aggregates(
 }
 
 /// Options forwarded from the clap subcommand.
+#[derive(Default)]
 pub struct PilotOptions {
     pub goal: String,
     pub tier: Option<String>,
@@ -1345,6 +1346,11 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
     );
 
+    // Durable dedup across cycles (and restarts): every candidate ever
+    // queued is remembered by source+title, so the same issue isn't
+    // re-queued or re-dispatched every poll.
+    let mut seen: std::collections::HashSet<String> = load_queued_keys(&queue_path);
+
     let mut n = 0usize;
     loop {
         let results = wingman_autonomous::daemon::run_cycle(
@@ -1364,13 +1370,41 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
                 cand.score(),
                 cand.source
             );
-            if matches!(
+            let key = format!("{}\u{1}{}", cand.source, cand.title);
+            if !matches!(
                 action,
                 wingman_autonomous::daemon::DaemonAction::AutoRun
                     | wingman_autonomous::daemon::DaemonAction::Propose
             ) {
-                if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
-                    eprintln!("[pilot] daemon: failed to queue candidate: {e}");
+                continue;
+            }
+            if seen.contains(&key) {
+                continue; // already handled in a prior cycle/run
+            }
+            seen.insert(key);
+            if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
+                eprintln!("[pilot] daemon: failed to queue candidate: {e}");
+            }
+            // J2 — auto-dispatch a trusted AutoRun candidate into a real
+            // nested pilot run, if the operator opted in. Propose stays
+            // queued for a human. Runs sequentially: one goal to completion
+            // before the next.
+            // ponytail: sequential dispatch honours "one at a time"; true
+            // parallel nested runs (daemon.max_concurrent_runs) is future work.
+            if pilot.daemon.auto_dispatch
+                && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun)
+            {
+                eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
+                let opts = PilotOptions {
+                    goal: cand.title.clone(),
+                    yes: true, // trusted, already scored above threshold
+                    ..PilotOptions::default()
+                };
+                match run(cfg.clone(), opts).await {
+                    Ok(code) => {
+                        eprintln!("[pilot] daemon: dispatched run exited {code:?}")
+                    }
+                    Err(e) => eprintln!("[pilot] daemon: dispatched run failed: {e}"),
                 }
             }
         }
@@ -1382,6 +1416,24 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// Load the `source\x01title` keys already present in the daemon queue so a
+/// restarted daemon doesn't re-queue or re-dispatch work it already handled.
+/// Missing/unreadable queue → empty set (nothing seen yet).
+fn load_queued_keys(path: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for line in content.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("");
+            let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("");
+            out.insert(format!("{source}\u{1}{title}"));
+        }
+    }
+    out
 }
 
 /// Append one accepted daemon candidate to the queue log.
@@ -1413,6 +1465,25 @@ mod tests {
     use super::*;
     use wingman_autonomous::control::{append, ControlCommand};
     use std::time::Duration;
+
+    #[test]
+    fn j2_load_queued_keys_dedups_by_source_and_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon-queue.jsonl");
+        // missing file → empty
+        assert!(load_queued_keys(&path).is_empty());
+        std::fs::write(
+            &path,
+            "{\"source\":\"github_issues\",\"title\":\"fix bug\",\"score\":0.9,\"action\":\"AutoRun\"}\n\
+             {\"source\":\"todos\",\"title\":\"fix bug\",\"score\":0.5,\"action\":\"Propose\"}\n\
+             garbage-line\n",
+        )
+        .unwrap();
+        let keys = load_queued_keys(&path);
+        assert_eq!(keys.len(), 2); // same title, different source ⇒ distinct
+        assert!(keys.contains(&"github_issues\u{1}fix bug".to_string()));
+        assert!(keys.contains(&"todos\u{1}fix bug".to_string()));
+    }
 
     #[tokio::test]
     async fn wait_for_approval_returns_true_on_approve() {
