@@ -89,6 +89,27 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let system = compose_worker_system_prompt(&role, &task);
     let user_prompt = compose_worker_user_prompt(&task);
 
+    // E5.5 — per-turn sanity gate. When `[pilot].turn_gate_cmd` is set, the
+    // worker's agent loop runs it after any turn that mutated files and feeds
+    // failures back to the model (bounded by gate_max_retries) so it
+    // self-corrects before reporting the task complete. Fail-open: a gate
+    // that can't spawn passes. Empty cmd disables it.
+    // ponytail: this is the "gate progress" half. True per-turn rollback of a
+    // failed turn needs a checkpoint snapshot/restore primitive that doesn't
+    // exist yet (E11 verifies checkpoints but never captures a restorable
+    // one); until then the loop re-prompts rather than reverts.
+    let gate: Option<Arc<dyn wingman_core::TurnGate>> = {
+        let cmd = cfg.pilot.turn_gate_cmd.trim();
+        if cmd.is_empty() {
+            None
+        } else {
+            Some(Arc::new(runtime::ShellTurnGate::new(
+                cmd.to_string(),
+                paths.root.clone(),
+            )))
+        }
+    };
+
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
         system: Some(system),
@@ -97,9 +118,40 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             trigger_tokens: cfg.tokens.compact_at_tokens,
             ..Default::default()
         },
+        gate,
         ..Default::default()
     };
     let mut agent = AgentLoop::new(provider, registry, agent_cfg);
+
+    // E10 — read manager→worker IPC commands from stdin. A `cancel` sets a
+    // shared flag the run loop checks so the manager can stop a live worker;
+    // pivot/clarify are logged (mid-stream injection into the running agent
+    // isn't supported by the loop API yet). The reader exits on EOF, which
+    // the parent triggers by dropping the worker's stdin.
+    // ponytail: cancel is the actionable command today; pivot/clarify need an
+    // agent-loop message-injection hook that doesn't exist — add when it does.
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        // Blocking stdin read on a dedicated thread (avoids depending on
+        // tokio's io-std feature). Exits on EOF when the parent drops stdin.
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let Ok(line) = line else { break };
+                match wingman_autonomous::ipc::parse_command(line.trim()) {
+                    Ok(wingman_autonomous::ipc::ManagerCommand::Cancel { reason }) => {
+                        eprintln!("[worker] IPC cancel: {reason}");
+                        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(other) => eprintln!("[worker] IPC command (not injected): {other:?}"),
+                    Err(_) => {}
+                }
+            }
+        });
+    }
 
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -125,6 +177,19 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             .unwrap_or_else(|_| "{\"type\":\"serialize_error\"}".into());
         writeln!(stdout, "{line}").ok();
         stdout.flush().ok();
+        // E10 — honor a manager cancel between turns: emit a Blocked message
+        // so the parent records why, then stop.
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            let msg = wingman_autonomous::ipc::encode_message(
+                &wingman_autonomous::ipc::WorkerMessage::Blocked {
+                    on: "cancelled by manager".into(),
+                },
+            );
+            writeln!(stdout, "{msg}").ok();
+            stdout.flush().ok();
+            exit = ExitCode::from(1);
+            break;
+        }
         match event {
             AgentEvent::Error { .. } => {
                 exit = ExitCode::from(1);

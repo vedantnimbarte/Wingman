@@ -97,6 +97,47 @@ pub fn parse_proposal(json: &str) -> Result<ToolProposal, String> {
     serde_json::from_str(json).map_err(|e| format!("invalid tool proposal: {e}"))
 }
 
+/// J7 — persist the validated, de-duplicated proposals to `dir` as
+/// `<name>.json` scaffolds for the tool-smith to flesh out, and append their
+/// manifest lines to `dir/registry.jsonl`. `existing` is the set of tool
+/// names already present so duplicates are dropped. Returns the accepted
+/// names actually written.
+///
+/// ponytail: this writes scaffolds + a registry line, not a live tool —
+/// compiling a synthesized tool into the binary needs a rebuild (or a plugin
+/// loader). The registry line is the seam a rebuild reads. Upgrade path: a
+/// `dlopen`/wasm plugin host if restart-to-register proves too slow.
+pub fn persist_accepted(
+    proposals: &[ToolProposal],
+    existing: &[String],
+    dir: &std::path::Path,
+) -> std::io::Result<Vec<String>> {
+    use std::io::Write;
+    let accepted = accept_batch(proposals, existing);
+    if accepted.is_empty() {
+        return Ok(Vec::new());
+    }
+    std::fs::create_dir_all(dir)?;
+    let mut registry = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("registry.jsonl"))?;
+    let mut names = Vec::with_capacity(accepted.len());
+    for p in &accepted {
+        let path = dir.join(format!("{}.json", p.name));
+        std::fs::write(&path, serde_json::to_vec_pretty(p)?)?;
+        let manifest = serde_json::json!({
+            "name": p.name,
+            "description": p.description,
+            "schema": p.schema,
+            "path": path.to_string_lossy(),
+        });
+        writeln!(registry, "{manifest}")?;
+        names.push(p.name.clone());
+    }
+    Ok(names)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -115,6 +156,22 @@ mod tests {
         assert!(is_valid_tool_name("query_db"));
         assert!(is_valid_tool_name("grep2"));
         assert!(is_valid_tool_name("a"));
+    }
+
+    #[test]
+    fn j7_persist_accepted_writes_scaffolds_and_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("tools");
+        // query_db is new; "read_file" collides with an existing tool and
+        // is dropped; a second query_db in-batch is de-duped.
+        let props = vec![proposal("query_db"), proposal("read_file"), proposal("query_db")];
+        let names = persist_accepted(&props, &["read_file".to_string()], &out).unwrap();
+        assert_eq!(names, vec!["query_db".to_string()]);
+        assert!(out.join("query_db.json").exists());
+        assert!(!out.join("read_file.json").exists());
+        let registry = std::fs::read_to_string(out.join("registry.jsonl")).unwrap();
+        assert_eq!(registry.lines().count(), 1);
+        assert!(registry.contains("query_db"));
     }
 
     #[test]

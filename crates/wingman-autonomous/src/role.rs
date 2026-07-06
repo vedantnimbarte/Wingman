@@ -21,6 +21,9 @@ const TESTER_DEFAULT: &str = include_str!("prompts/tester.md");
 const REVIEWER_DEFAULT: &str = include_str!("prompts/reviewer.md");
 const REFACTORER_DEFAULT: &str = include_str!("prompts/refactorer.md");
 const MERGE_FIXER_DEFAULT: &str = include_str!("prompts/merge-fixer.md");
+/// J7 — the tool-smith role turns approved ToolProposals into real tools.
+/// Reached via `Role::Custom("tool-smith")` so no enum change is needed.
+const TOOL_SMITH_DEFAULT: &str = include_str!("prompts/tool-smith.md");
 
 /// Resolve the system prompt for a role.
 ///
@@ -103,6 +106,8 @@ fn builtin_default(role: &Role) -> &'static str {
         Role::Reviewer => REVIEWER_DEFAULT,
         Role::Refactorer => REFACTORER_DEFAULT,
         Role::MergeFixer => MERGE_FIXER_DEFAULT,
+        // J7 — the tool-smith is a known custom role with a compiled default.
+        Role::Custom(s) if s == "tool-smith" => TOOL_SMITH_DEFAULT,
         Role::Custom(_) => DEVELOPER_DEFAULT, // best-effort fallback
     }
 }
@@ -126,6 +131,11 @@ mod tests {
         }
         assert!(!load_planner_prompt().trim().is_empty());
         assert!(!load_manager_prompt().trim().is_empty());
+        // J7 — the tool-smith custom role resolves to its own compiled
+        // default, not the developer fallback.
+        let smith = load_role_prompt(&Role::Custom("tool-smith".into()));
+        assert!(smith.contains("tool-smith"));
+        assert_ne!(smith, load_role_prompt(&Role::Developer));
     }
 
     #[test]

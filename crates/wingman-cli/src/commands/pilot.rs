@@ -141,6 +141,7 @@ fn load_routing_aggregates(
 }
 
 /// Options forwarded from the clap subcommand.
+#[derive(Default)]
 pub struct PilotOptions {
     pub goal: String,
     pub tier: Option<String>,
@@ -393,6 +394,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         use_real_worktrees: true,
         max_usd: pilot.max_usd,
         max_retries_per_task: 1,
+        enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
@@ -600,6 +602,8 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
     match key {
         // Per-task reviewer (E7): on for copilot and autopilot.
         "per_task_reviewer" => matches!(pilot.tier, Copilot | Autopilot),
+        // Mandatory checkpoint hygiene (E11): on for copilot and autopilot.
+        "checkpoint_hygiene" => matches!(pilot.tier, Copilot | Autopilot),
         // Critic (J10): autopilot-only by default.
         "critic" => matches!(pilot.tier, Autopilot),
         // Goal refinement / negotiation (J1): autopilot-only by default.
@@ -1046,6 +1050,7 @@ pub async fn resume(
         use_real_worktrees: true,
         max_usd: cfg.pilot.max_usd,
         max_retries_per_task: 1,
+        enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
@@ -1167,6 +1172,9 @@ fn build_real_worker_spawner(
                      before reporting `task_complete`.\n",
                     );
                 }
+                // E10 — take the manager→worker command receiver so
+                // run_worker can drain it into the child's stdin.
+                let cmd_rx = ctx.cmd_rx.lock().await.take();
                 let spec = wingman_autonomous::worker::WorkerSpec {
                     wingman_bin,
                     role: task.role.clone(),
@@ -1175,6 +1183,7 @@ fn build_real_worker_spawner(
                     session_id: ctx.session_id.clone(),
                     model,
                     timeout: std::time::Duration::from_secs(1800),
+                    cmd_rx,
                 };
                 let mut store_guard = ctx.store.lock().await;
                 let result =
@@ -1341,6 +1350,11 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
     );
 
+    // Durable dedup across cycles (and restarts): every candidate ever
+    // queued is remembered by source+title, so the same issue isn't
+    // re-queued or re-dispatched every poll.
+    let mut seen: std::collections::HashSet<String> = load_queued_keys(&queue_path);
+
     let mut n = 0usize;
     loop {
         let results = wingman_autonomous::daemon::run_cycle(
@@ -1360,13 +1374,41 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
                 cand.score(),
                 cand.source
             );
-            if matches!(
+            let key = format!("{}\u{1}{}", cand.source, cand.title);
+            if !matches!(
                 action,
                 wingman_autonomous::daemon::DaemonAction::AutoRun
                     | wingman_autonomous::daemon::DaemonAction::Propose
             ) {
-                if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
-                    eprintln!("[pilot] daemon: failed to queue candidate: {e}");
+                continue;
+            }
+            if seen.contains(&key) {
+                continue; // already handled in a prior cycle/run
+            }
+            seen.insert(key);
+            if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
+                eprintln!("[pilot] daemon: failed to queue candidate: {e}");
+            }
+            // J2 — auto-dispatch a trusted AutoRun candidate into a real
+            // nested pilot run, if the operator opted in. Propose stays
+            // queued for a human. Runs sequentially: one goal to completion
+            // before the next.
+            // ponytail: sequential dispatch honours "one at a time"; true
+            // parallel nested runs (daemon.max_concurrent_runs) is future work.
+            if pilot.daemon.auto_dispatch
+                && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun)
+            {
+                eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
+                let opts = PilotOptions {
+                    goal: cand.title.clone(),
+                    yes: true, // trusted, already scored above threshold
+                    ..PilotOptions::default()
+                };
+                match run(cfg.clone(), opts).await {
+                    Ok(code) => {
+                        eprintln!("[pilot] daemon: dispatched run exited {code:?}")
+                    }
+                    Err(e) => eprintln!("[pilot] daemon: dispatched run failed: {e}"),
                 }
             }
         }
@@ -1378,6 +1420,372 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// R2 — post-merge feedback poll. Each cycle walks every recorded run that
+/// opened a PR but has no recorded outcome yet, queries the PR's terminal
+/// state via `gh`, and appends a `pr.outcome` event (merged / reverted /
+/// hotfix-followed / closed) that the E6 cross-run learner later weights.
+/// `cycles == 0` runs forever on `[pilot.daemon].poll_interval_secs`; a
+/// positive value runs that many cycles then exits (CI / one-shot backfill).
+pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
+    use std::time::Duration;
+
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let interval = Duration::from_secs(cfg.pilot.daemon.poll_interval_secs.max(1));
+
+    eprintln!(
+        "[pilot] feedback poller starting (interval: {}s){}",
+        cfg.pilot.daemon.poll_interval_secs,
+        if cycles == 0 {
+            " — Ctrl-C to stop".to_string()
+        } else {
+            format!(" — {cycles} cycle(s)")
+        }
+    );
+
+    let mut n = 0usize;
+    loop {
+        let pending = feedback_pending_runs(&project.root).await;
+        if pending.is_empty() {
+            eprintln!("[pilot] feedback cycle {n}: no open PRs awaiting outcome");
+        }
+        for (dir, pr_url) in pending {
+            let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
+                    continue;
+                }
+            };
+            match wingman_autonomous::feedback::poll_and_record(
+                &runner,
+                &mut store,
+                &project.root,
+                &pr_url,
+            )
+            .await
+            {
+                Ok(Some(kind)) => {
+                    eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
+                }
+                Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
+                Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
+            }
+        }
+
+        n += 1;
+        if cycles != 0 && n >= cycles {
+            eprintln!("[pilot] feedback: completed {n} cycle(s), exiting.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Runs that opened a PR (`pr_url` set) but have no `pr.outcome` event yet.
+/// Skipping already-recorded runs is the whole idempotency story — otherwise
+/// `poll_and_record` re-appends an outcome on every terminal poll.
+async fn feedback_pending_runs(
+    project_root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let Ok(runs) = wingman_autonomous::dashboard::list_runs(project_root) else {
+        return out;
+    };
+    for r in runs {
+        let Ok(state) = wingman_autonomous::dashboard::load_state(&r.dir) else {
+            continue;
+        };
+        let Some(pr_url) = state.pr_url.clone() else {
+            continue;
+        };
+        // Skip runs that already have a recorded outcome.
+        let already = match wingman_autonomous::store::RunStore::load(&r.dir).await {
+            Ok(s) => s
+                .read_events()
+                .await
+                .map(|evs| {
+                    evs.iter().any(|e| {
+                        matches!(e, wingman_autonomous::model::Event::PrOutcome { .. })
+                    })
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !already {
+            out.push((r.dir, pr_url));
+        }
+    }
+    out
+}
+
+/// J12 — install the skill packs listed in `[pilot.skills].packs`. Each
+/// `owner/name@version` spec is fetched from `https://github.com/owner/name`
+/// (tag `v<version>`) into `~/.wingman/packs/<slug>/` and its role/lessons
+/// files are copied into `~/.wingman/agents/` so the role loader picks them
+/// up. Already-installed packs (exact version present) only re-install files.
+pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let (refs, errs) = skillpack::parse_pack_list(&cfg.pilot.skills.packs);
+    for e in &errs {
+        eprintln!("[pilot] skills: bad spec — {e}");
+    }
+    if refs.is_empty() {
+        eprintln!("[pilot] skills: no valid packs in [pilot.skills].packs");
+        return Ok(if errs.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        });
+    }
+    let home = wingman_config::global_dir()
+        .ok()
+        .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+        .or_else(dirs_home)
+        .ok_or_else(|| anyhow!("cannot resolve home directory for pack install"))?;
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let mut failures = 0;
+    for r in &refs {
+        let url = format!("https://github.com/{}/{}", r.owner, r.name);
+        match skillpack::fetch_pack(&runner, r, &url, &home) {
+            Ok(dest) => eprintln!("[pilot] skills: installed {} → {}", r.slug(), dest.display()),
+            Err(e) => {
+                eprintln!("[pilot] skills: {} failed — {e}", r.slug());
+                failures += 1;
+            }
+        }
+    }
+    Ok(if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// Best-effort home dir from `$HOME` / `%USERPROFILE%` without pulling in the
+/// `dirs` crate.
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(std::path::PathBuf::from)
+}
+
+/// R4 — eval / regression harness + CI gate.
+///
+/// Two modes:
+/// - `--goals <FILE>` runs each goal line live through the pilot pipeline,
+///   harvesting success/usd/wall, and writes `<eval>/results.jsonl`.
+/// - otherwise reads an existing `<eval>/results.jsonl` (produced earlier or
+///   hand-authored).
+///
+/// Then it summarizes, compares to `<eval>/baseline.json`, prints the
+/// markdown report, and **exits non-zero on regression** — that exit code is
+/// the CI gate. `--update-baseline` rewrites the baseline from the current
+/// results and skips gating.
+pub async fn eval(
+    cfg: Config,
+    goals_file: Option<std::path::PathBuf>,
+    threshold: f64,
+    update_baseline: bool,
+) -> Result<ExitCode> {
+    use wingman_autonomous::eval::EvalResult;
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let eval_dir = project.root.join(".wingman").join("eval");
+    let results_path = eval_dir.join("results.jsonl");
+    let baseline_path = eval_dir.join("baseline.json");
+
+    // Gather this run's results: live if --goals given, else from disk.
+    let results: Vec<EvalResult> = if let Some(gf) = goals_file {
+        let goals: Vec<String> = std::fs::read_to_string(&gf)
+            .with_context(|| format!("reading goals file {}", gf.display()))?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        if goals.is_empty() {
+            eprintln!("[pilot] eval: no goals in {}", gf.display());
+            return Ok(ExitCode::from(1));
+        }
+        eprintln!("[pilot] eval: running {} canned goal(s) live…", goals.len());
+        let res = run_eval_goals(&cfg, &project.root, &goals).await;
+        write_eval_results(&results_path, &res)?;
+        res
+    } else {
+        read_eval_results(&results_path)?
+    };
+
+    if results.is_empty() {
+        eprintln!(
+            "[pilot] eval: no results (run with --goals <FILE>, or populate {})",
+            results_path.display()
+        );
+        return Ok(ExitCode::from(1));
+    }
+
+    if update_baseline {
+        write_eval_results(&baseline_path, &results)?;
+        eprintln!(
+            "[pilot] eval: baseline updated ({} result(s)) → {}",
+            results.len(),
+            baseline_path.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let baseline = read_eval_results(&baseline_path).unwrap_or_default();
+    let baseline_ref = if baseline.is_empty() {
+        None
+    } else {
+        Some(baseline.as_slice())
+    };
+    let (report, regressed) = eval_gate(&results, baseline_ref, threshold);
+    print!("{report}");
+    if regressed {
+        eprintln!("[pilot] eval: REGRESSION detected — failing the gate.");
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Pure CI-gate core: summarize current results, compare to baseline, render
+/// the markdown report, and report whether the gate should fail. Split out
+/// so the summarize→compare→gate wiring is unit-testable without any I/O.
+fn eval_gate(
+    current: &[wingman_autonomous::eval::EvalResult],
+    baseline: Option<&[wingman_autonomous::eval::EvalResult]>,
+    threshold: f64,
+) -> (String, bool) {
+    use wingman_autonomous::eval;
+    let cur = eval::summarize(current);
+    match baseline {
+        None => (
+            format!(
+                "# Eval report\n\nNo baseline to compare against. {} result(s), \
+                 {:.0}% success, avg ${:.2}.\n\nRun `wingman pilot eval --update-baseline` \
+                 to set one.\n",
+                cur.n,
+                cur.success_rate * 100.0,
+                cur.avg_usd
+            ),
+            false,
+        ),
+        Some(base) => {
+            let b = eval::summarize(base);
+            let report = eval::compare(&cur, &b, threshold);
+            (eval::render_report(&report), report.regressed)
+        }
+    }
+}
+
+/// Run each canned goal live through the pilot pipeline, harvesting metrics
+/// from the resulting run state. success = the run reached Done; usd from the
+/// run's recorded totals; wall from the wall clock around the call.
+/// ponytail: quality is success-proxied (1.0/0.0) — a real LLM-judge needs a
+/// golden diff per goal, which doesn't exist yet. Add it when golden refs do.
+async fn run_eval_goals(
+    cfg: &Config,
+    project_root: &std::path::Path,
+    goals: &[String],
+) -> Vec<wingman_autonomous::eval::EvalResult> {
+    use std::time::Instant;
+    use wingman_autonomous::eval::EvalResult;
+    let mut out = Vec::with_capacity(goals.len());
+    for goal in goals {
+        let before: std::collections::HashSet<String> =
+            wingman_autonomous::dashboard::list_runs(project_root)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.run_id)
+                .collect();
+        let started = Instant::now();
+        let opts = PilotOptions {
+            goal: goal.clone(),
+            yes: true,
+            ..PilotOptions::default()
+        };
+        let _ = run(cfg.clone(), opts).await;
+        let wall_min = started.elapsed().as_secs_f64() / 60.0;
+
+        // Find the run this goal produced (newest id not seen before) and
+        // read its terminal status + spend.
+        let (success, usd) = wingman_autonomous::dashboard::list_runs(project_root)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| !before.contains(&r.run_id))
+            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok())
+            .map(|s| (s.status == wingman_autonomous::RunStatus::Done, s.totals.usd))
+            .unwrap_or((false, 0.0));
+
+        out.push(EvalResult {
+            goal: goal.clone(),
+            success,
+            usd,
+            wall_min,
+            quality: if success { 1.0 } else { 0.0 },
+        });
+        eprintln!(
+            "[pilot] eval: {goal:?} → {} (${usd:.2}, {wall_min:.1}m)",
+            if success { "ok" } else { "fail" }
+        );
+    }
+    out
+}
+
+fn read_eval_results(
+    path: &std::path::Path,
+) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(r) = serde_json::from_str(line) {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+fn write_eval_results(
+    path: &std::path::Path,
+    results: &[wingman_autonomous::eval::EvalResult],
+) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    for r in results {
+        writeln!(f, "{}", serde_json::to_string(r)?)?;
+    }
+    Ok(())
+}
+
+/// Load the `source\x01title` keys already present in the daemon queue so a
+/// restarted daemon doesn't re-queue or re-dispatch work it already handled.
+/// Missing/unreadable queue → empty set (nothing seen yet).
+fn load_queued_keys(path: &std::path::Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return out;
+    };
+    for line in content.lines() {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let source = v.get("source").and_then(|s| s.as_str()).unwrap_or("");
+            let title = v.get("title").and_then(|s| s.as_str()).unwrap_or("");
+            out.insert(format!("{source}\u{1}{title}"));
+        }
+    }
+    out
 }
 
 /// Append one accepted daemon candidate to the queue log.
@@ -1409,6 +1817,101 @@ mod tests {
     use super::*;
     use wingman_autonomous::control::{append, ControlCommand};
     use std::time::Duration;
+
+    #[test]
+    fn r4_eval_gate_flags_regression_and_passes_on_parity() {
+        use wingman_autonomous::eval::EvalResult;
+        let good = |g: &str| EvalResult {
+            goal: g.into(),
+            success: true,
+            usd: 0.10,
+            wall_min: 1.0,
+            quality: 1.0,
+        };
+        let baseline = vec![good("a"), good("b")];
+
+        // no baseline → never gates
+        let (_r, fail) = eval_gate(&baseline, None, 0.10);
+        assert!(!fail);
+
+        // parity → no regression
+        let (_r, fail) = eval_gate(&baseline, Some(&baseline), 0.10);
+        assert!(!fail);
+
+        // success rate halved → regression
+        let mut worse = baseline.clone();
+        worse[0].success = false;
+        let (report, fail) = eval_gate(&worse, Some(&baseline), 0.10);
+        assert!(fail, "halved success rate must fail the gate");
+        assert!(report.contains("REGRESSED"));
+
+        // baseline round-trips through disk
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("baseline.json");
+        write_eval_results(&p, &baseline).unwrap();
+        assert_eq!(read_eval_results(&p).unwrap(), baseline);
+    }
+
+    #[tokio::test]
+    async fn r2_feedback_pending_skips_norpr_and_already_recorded() {
+        use wingman_autonomous::model::{Event, PrOutcomeKind};
+        use wingman_autonomous::store::RunStore;
+        let dir = tempfile::tempdir().unwrap();
+        let auto = dir.path().join(".wingman").join("autonomous");
+
+        async fn seed(auto: &std::path::Path, id: &str, pr: Option<&str>, recorded: bool) {
+            let mut s = RunStore::create(auto.join(id), id, "g", "base", "wingman/auto")
+                .await
+                .unwrap();
+            if let Some(url) = pr {
+                s.append(Event::RunPr {
+                    t: RunStore::now(),
+                    url: url.into(),
+                })
+                .await
+                .unwrap();
+            }
+            if recorded {
+                s.append(Event::PrOutcome {
+                    t: RunStore::now(),
+                    run_id: id.into(),
+                    kind: PrOutcomeKind::Merged,
+                    revert_sha: None,
+                    hours_to_revert: None,
+                    hotfix_pr: None,
+                    hours_to_hotfix: None,
+                })
+                .await
+                .unwrap();
+            }
+        }
+        seed(&auto, "run-open", Some("https://gh/pr/1"), false).await; // included
+        seed(&auto, "run-done", Some("https://gh/pr/2"), true).await; // skipped (recorded)
+        seed(&auto, "run-nopr", None, false).await; // skipped (no PR)
+
+        let pending = feedback_pending_runs(dir.path()).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "https://gh/pr/1");
+    }
+
+    #[test]
+    fn j2_load_queued_keys_dedups_by_source_and_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon-queue.jsonl");
+        // missing file → empty
+        assert!(load_queued_keys(&path).is_empty());
+        std::fs::write(
+            &path,
+            "{\"source\":\"github_issues\",\"title\":\"fix bug\",\"score\":0.9,\"action\":\"AutoRun\"}\n\
+             {\"source\":\"todos\",\"title\":\"fix bug\",\"score\":0.5,\"action\":\"Propose\"}\n\
+             garbage-line\n",
+        )
+        .unwrap();
+        let keys = load_queued_keys(&path);
+        assert_eq!(keys.len(), 2); // same title, different source ⇒ distinct
+        assert!(keys.contains(&"github_issues\u{1}fix bug".to_string()));
+        assert!(keys.contains(&"todos\u{1}fix bug".to_string()));
+    }
 
     #[tokio::test]
     async fn wait_for_approval_returns_true_on_approve() {

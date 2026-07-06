@@ -46,7 +46,7 @@ pub enum WorkerError {
 
 /// Spec for one worker launch. All paths absolute; relative paths confuse
 /// `current_dir` once the supervised child runs.
-#[derive(Debug, Clone)]
+// Not Clone/Debug — carries a one-shot IPC command Receiver (E10).
 pub struct WorkerSpec {
     /// Path to the wingman binary. Usually `std::env::current_exe()`.
     pub wingman_bin: PathBuf,
@@ -62,6 +62,11 @@ pub struct WorkerSpec {
     pub model: Option<String>,
     /// Hard timeout for the whole task.
     pub timeout: Duration,
+    /// E10 — receive end of the manager→worker command channel. When set,
+    /// `run_worker` drains it into the child's stdin (one `encode_command`
+    /// line per command). `None` leaves the channel unused (stdin is closed
+    /// so the child sees EOF).
+    pub cmd_rx: Option<tokio::sync::mpsc::Receiver<crate::ipc::ManagerCommand>>,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -93,7 +98,7 @@ pub struct WorkerResult {
 pub async fn run_worker(
     store: &mut RunStore,
     agent_id: &str,
-    spec: WorkerSpec,
+    mut spec: WorkerSpec,
 ) -> Result<WorkerResult, WorkerError> {
     // Write the task spec to a temp file the child will read. We use a
     // file rather than stdin so the worker's stdin stays free for the IPC
@@ -141,6 +146,27 @@ pub async fn run_worker(
     let stdout = child.stdout.take().ok_or(WorkerError::EarlyExit(None))?;
     let stderr = child.stderr.take();
 
+    // E10 — drain the manager→worker command channel into the child's stdin
+    // as newline-delimited IPC commands. When there's no channel, drop the
+    // stdin handle so the child reads EOF and its own stdin reader exits.
+    if let Some(stdin) = child.stdin.take() {
+        if let Some(mut cmd_rx) = spec.cmd_rx.take() {
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let mut stdin = stdin;
+                while let Some(cmd) = cmd_rx.recv().await {
+                    let line = format!("{}\n", crate::ipc::encode_command(&cmd));
+                    if stdin.write_all(line.as_bytes()).await.is_err() {
+                        break;
+                    }
+                    let _ = stdin.flush().await;
+                }
+                // Channel closed → drop stdin → child sees EOF.
+            });
+        }
+        // else: `stdin` drops here, closing the pipe (EOF for the child).
+    }
+
     let mut reader = BufReader::new(stdout).lines();
 
     // Drain stderr in the background so the child doesn't block on a full
@@ -161,6 +187,24 @@ pub async fn run_worker(
         while let Some(line) = reader.next_line().await? {
             let line = line.trim();
             if line.is_empty() {
+                continue;
+            }
+            // E10 — worker→manager leg: an IPC `WorkerMessage` line
+            // (question/ack/blocked) is recorded as an event for visibility
+            // and does not flow through the normal task-event parser.
+            // `parse_message` returns Ok(None) for ordinary event lines, so
+            // the same stdout stream carries both.
+            if let Ok(Some(msg)) = crate::ipc::parse_message(line) {
+                let _ = store
+                    .append(Event::TaskTool {
+                        t: RunStore::now(),
+                        id: spec.task.id.clone(),
+                        agent: agent_id.to_string(),
+                        tool: format!("worker_msg:{}", crate::ipc::encode_message(&msg)),
+                        input_hash: None,
+                        ok: true,
+                    })
+                    .await;
                 continue;
             }
             match parse_line(line) {

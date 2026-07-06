@@ -42,7 +42,10 @@ impl SupervisedCommand {
     /// (diagnostics); the caller may override before [`spawn`].
     pub fn new<S: AsRef<std::ffi::OsStr>>(program: S) -> Self {
         let mut cmd = Command::new(program);
-        cmd.stdin(Stdio::null())
+        // E10: stdin is piped so the manager can push IPC commands to a live
+        // worker. `run_worker` either drains a command channel into it or
+        // drops the handle immediately (child sees EOF) when there's none.
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         Self { cmd }

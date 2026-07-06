@@ -60,6 +60,10 @@ pub enum OrchestratorError {
     Aborting,
     #[error("worker spawn failed: {0}")]
     Spawn(String),
+    #[error("task {0} failed checkpoint hygiene: {1}")]
+    CheckpointViolation(String, String),
+    #[error("task {0} sent back for rework by the inline reviewer (E7)")]
+    ReviewRework(String),
     #[error("invalid task graph: {0}")]
     InvalidDag(String),
 }
@@ -122,6 +126,16 @@ pub type TaskSplitter = Arc<
         + Sync,
 >;
 
+/// E7 — per-task inline reviewer (E7). Given a task that just reached
+/// `Review`, returns `None` to approve it (finalize proceeds to `Done`) or
+/// `Some(notes)` to send it back for rework. The block-gate severity logic
+/// lives inside the closure (built in the pipeline from `pr` config), so the
+/// orchestrator stays config-agnostic. Runs at the finalize choke point so it
+/// can't race the manager. `None` reviewer disables inline review.
+pub type Reviewer = Arc<
+    dyn Fn(Task) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync,
+>;
+
 /// Per-spawn context handed to a [`WorkerSpawner`].
 #[derive(Clone)]
 pub struct SpawnContext {
@@ -145,6 +159,12 @@ pub struct SpawnContext {
     /// Spawners can splice this into the system prompt so the next
     /// worker doesn't repeat the same mistake blindly.
     pub failure_history: Vec<String>,
+    /// E10 — the receive end of the manager→worker command channel. A
+    /// spawner takes it once and drains it into the child's stdin so the
+    /// manager can pivot/cancel/clarify a live worker. Wrapped in
+    /// `Arc<Mutex<Option<_>>>` so [`SpawnContext`] stays `Clone`; `None`
+    /// disables the live channel (tests, fake spawners).
+    pub cmd_rx: Arc<Mutex<Option<mpsc::Receiver<crate::ipc::ManagerCommand>>>>,
 }
 
 /// Commands the manager's tools send to the orchestrator. Each command
@@ -342,6 +362,12 @@ pub struct OrchestratorConfig {
     /// at most one initial attempt + 3 retries before the task is
     /// marked Blocked.
     pub max_retries_per_task: u32,
+    /// E11 — when true, a task cannot leave Review for Done unless its
+    /// recorded tool stream satisfies checkpoint hygiene (multi-file work
+    /// checkpointed at least once). A violation makes `finalize_task` fail,
+    /// bouncing the task back for rework. Default false so the gate is
+    /// opt-in (copilot+ turns it on via the `checkpoint_hygiene` capability).
+    pub enforce_checkpoint_hygiene: bool,
 }
 
 impl Default for OrchestratorConfig {
@@ -355,6 +381,7 @@ impl Default for OrchestratorConfig {
             use_real_worktrees: false,
             max_usd: 10.0,
             max_retries_per_task: 3,
+            enforce_checkpoint_hygiene: false,
         }
     }
 }
@@ -386,6 +413,18 @@ pub fn spawn_with_splitter(
     cfg: OrchestratorConfig,
     spawner: WorkerSpawner,
     splitter: Option<TaskSplitter>,
+) -> (OrchestratorHandle, tokio::task::JoinHandle<()>) {
+    spawn_full(store, cfg, spawner, splitter, None)
+}
+
+/// Fullest [`spawn`] variant: register both a [`TaskSplitter`] (E5 rung 3)
+/// and an inline [`Reviewer`] (E7). Either `None` disables that feature.
+pub fn spawn_full(
+    store: RunStore,
+    cfg: OrchestratorConfig,
+    spawner: WorkerSpawner,
+    splitter: Option<TaskSplitter>,
+    reviewer: Option<Reviewer>,
 ) -> (OrchestratorHandle, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(64);
     let handle = OrchestratorHandle { tx: tx.clone() };
@@ -431,7 +470,7 @@ pub fn spawn_with_splitter(
         drop(retry_rx);
     }
 
-    let join = tokio::spawn(run_actor(store, cfg, spawner, splitter, rx));
+    let join = tokio::spawn(run_actor(store, cfg, spawner, splitter, reviewer, rx));
     (handle, join)
 }
 
@@ -552,11 +591,18 @@ async fn run_actor(
     cfg: OrchestratorConfig,
     spawner: WorkerSpawner,
     splitter: Option<TaskSplitter>,
+    reviewer: Option<Reviewer>,
     mut rx: mpsc::Receiver<OrchestratorCommand>,
 ) {
     // Track active worker tasks so we can enforce the concurrency cap and
     // join everything cleanly on shutdown.
     let active: Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+    // E10 — the send end of each live worker's command channel, keyed by
+    // agent id. Parallel to `active` so the abort/kill paths that `.remove`
+    // JoinHandles stay untouched; a stale sender just fails to send once the
+    // worker is gone.
+    let senders: Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>> =
         Arc::new(Mutex::new(HashMap::new()));
     let mut next_agent_seq: u64 = 0;
     let mut next_task_seq: u64 = 0;
@@ -585,6 +631,7 @@ async fn run_actor(
                     &cfg,
                     &spawner,
                     &active,
+                    &senders,
                     &task_id,
                     &mut next_agent_seq,
                     &retries,
@@ -604,6 +651,7 @@ async fn run_actor(
                     &spawner,
                     splitter.as_ref(),
                     &active,
+                    &senders,
                     &task_id,
                     &mut next_agent_seq,
                     &mut retries,
@@ -617,7 +665,14 @@ async fn run_actor(
                 merge_commit,
                 reply,
             } => {
-                let result = handle_finalize(&store, &task_id, merge_commit).await;
+                let result = handle_finalize(
+                    &store,
+                    &task_id,
+                    merge_commit,
+                    cfg.enforce_checkpoint_hygiene,
+                    reviewer.as_ref(),
+                )
+                .await;
                 let _ = reply.send(result);
             }
             OrchestratorCommand::AbortTask { task_id, reply } => {
@@ -634,27 +689,47 @@ async fn run_actor(
                 body,
                 reply,
             } => {
-                // E10 IPC stub: persist the message as a synthetic event for
-                // now. Real stdin-channel injection lands in Phase 7.5.
-                let result = {
-                    let mut store = store.lock().await;
-                    let current_task = store
+                // E10 — deliver the message to the live worker over its stdin
+                // command channel when the body parses as an IPC command and
+                // the worker is still up. Anything that isn't a structured
+                // command (or a message to a departed worker) falls back to
+                // recording a synthetic event so the intent is still logged.
+                let current_task = {
+                    let store = store.lock().await;
+                    store
                         .state()
                         .agent(&agent_id)
-                        .map(|a| a.current_task.clone());
-                    match current_task {
-                        None => Err(OrchestratorError::UnknownAgent(agent_id.clone())),
-                        Some(task_id) => store
+                        .map(|a| a.current_task.clone())
+                };
+                let result = match current_task {
+                    None => Err(OrchestratorError::UnknownAgent(agent_id.clone())),
+                    Some(task_id) => {
+                        let delivered = match crate::ipc::parse_command(&body) {
+                            Ok(cmd) => {
+                                let tx = senders.lock().await.get(&agent_id).cloned();
+                                match tx {
+                                    Some(tx) => tx.send(cmd).await.is_ok(),
+                                    None => false,
+                                }
+                            }
+                            Err(_) => false,
+                        };
+                        let mut store = store.lock().await;
+                        store
                             .append(Event::TaskTool {
                                 t: RunStore::now(),
                                 id: task_id.unwrap_or_default(),
                                 agent: agent_id.clone(),
-                                tool: format!("message:{body}"),
+                                tool: if delivered {
+                                    format!("ipc:{body}")
+                                } else {
+                                    format!("message:{body}")
+                                },
                                 input_hash: None,
                                 ok: true,
                             })
                             .await
-                            .map_err(OrchestratorError::from),
+                            .map_err(OrchestratorError::from)
                     }
                 };
                 let _ = reply.send(result);
@@ -709,11 +784,13 @@ async fn handle_add_task(
     Ok(id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_assign(
     store: &Arc<Mutex<RunStore>>,
     cfg: &OrchestratorConfig,
     spawner: &WorkerSpawner,
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    senders: &Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>>,
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &HashMap<String, RetryState>,
@@ -765,8 +842,23 @@ async fn handle_assign(
             .iter()
             .filter(|t| t.status == TaskStatus::InProgress)
             .count() as u32;
-        if live >= cfg.max_concurrent_agents {
-            return Err(OrchestratorError::ConcurrencyCap(cfg.max_concurrent_agents));
+        // E9 — adaptive cap: scale the live ceiling down as the run's budget
+        // burns, rather than always allowing `max_concurrent_agents`. Rate-
+        // limit and CPU signals aren't sampled yet, so those inputs are 0 (a
+        // no-op); budget burn is real (`totals.usd` vs `max_usd`).
+        // ponytail: no 429 counter or host-load sampler wired from workers
+        // yet — add them to tighten the cap under provider backoff.
+        let cap = crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
+            max_agents: cfg.max_concurrent_agents,
+            min_agents: 1,
+            recent_rate_limit_hits: 0,
+            active_retry_after_secs: 0,
+            cpu_load: 0.0,
+            usd_spent: store_g.state().totals.usd,
+            max_usd: cfg.max_usd,
+        });
+        if live >= cap {
+            return Err(OrchestratorError::ConcurrencyCap(cap));
         }
 
         // E4 — write-set conflict avoidance: never run two tasks whose
@@ -837,6 +929,13 @@ async fn handle_assign(
             .await?;
     }
 
+    // E10 — create the manager→worker command channel. The send end is kept
+    // in `senders` (keyed by agent) for `message_agent`; the receive end
+    // rides in the SpawnContext so the spawner can drain it into the child's
+    // stdin. A small bounded buffer is plenty — commands are rare.
+    let (cmd_tx, cmd_rx) = mpsc::channel::<crate::ipc::ManagerCommand>(8);
+    senders.lock().await.insert(agent_id.clone(), cmd_tx);
+
     let retry = retries.get(task_id).cloned().unwrap_or_default();
     let ctx = SpawnContext {
         task,
@@ -847,6 +946,7 @@ async fn handle_assign(
         rung: retry.rung,
         escalate_model: retry.escalate_model,
         failure_history: retry.failure_history,
+        cmd_rx: Arc::new(Mutex::new(Some(cmd_rx))),
     };
     let spawner = spawner.clone();
     let task_id_for_log = task_id.to_string();
@@ -872,6 +972,7 @@ async fn handle_reassign(
     spawner: &WorkerSpawner,
     splitter: Option<&TaskSplitter>,
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
+    senders: &Arc<Mutex<HashMap<String, mpsc::Sender<crate::ipc::ManagerCommand>>>>,
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &mut HashMap<String, RetryState>,
@@ -987,6 +1088,7 @@ async fn handle_reassign(
         cfg,
         spawner,
         active,
+        senders,
         task_id,
         next_agent_seq,
         retries,
@@ -1185,19 +1287,70 @@ async fn handle_finalize(
     store: &Arc<Mutex<RunStore>>,
     task_id: &str,
     merge_commit: Option<String>,
+    enforce_checkpoint_hygiene: bool,
+    reviewer: Option<&Reviewer>,
 ) -> Result<(), OrchestratorError> {
-    let mut store = store.lock().await;
-    let task = store
-        .state()
-        .task(task_id)
-        .ok_or_else(|| OrchestratorError::UnknownTask(task_id.to_string()))?;
-    if task.status != TaskStatus::Review {
-        return Err(OrchestratorError::BadTransition(
-            task_id.to_string(),
-            task.status,
-            "finalize",
-        ));
+    // Phase 1 — validate the transition + E11 gate under the lock, and clone
+    // the task for the (async, lock-free) reviewer call.
+    let task = {
+        let store = store.lock().await;
+        let task = store
+            .state()
+            .task(task_id)
+            .ok_or_else(|| OrchestratorError::UnknownTask(task_id.to_string()))?
+            .clone();
+        if task.status != TaskStatus::Review {
+            return Err(OrchestratorError::BadTransition(
+                task_id.to_string(),
+                task.status,
+                "finalize",
+            ));
+        }
+        // E11 hard gate — a Review task may not become Done until its recorded
+        // tool stream satisfies checkpoint hygiene. Rejecting finalize leaves
+        // the task in Review so the manager reworks it instead of merging
+        // unchecked multi-file work. Same `checkpoint::verify` the advisory
+        // pipeline pass uses — one shared verdict, enforced here.
+        if enforce_checkpoint_hygiene {
+            let events = store.read_events().await.unwrap_or_default();
+            let calls = crate::checkpoint::tool_calls_for_task(&events, task_id);
+            if let crate::checkpoint::CheckpointVerdict::Violation { reason } =
+                crate::checkpoint::verify(&calls)
+            {
+                return Err(OrchestratorError::CheckpointViolation(
+                    task_id.to_string(),
+                    reason,
+                ));
+            }
+        }
+        task
+    };
+
+    // Phase 2 — E7 inline reviewer at the finalize choke point (race-free vs
+    // the manager). A rework verdict marks the task Failed with the reviewer's
+    // notes as the outcome summary, which the retry watchdog picks up and
+    // threads into the next attempt's failure history (bounded by
+    // max_retries). No new rework channel — it reuses the E5 ladder.
+    if let Some(reviewer) = reviewer {
+        if let Some(notes) = reviewer(task.clone()).await {
+            let mut store = store.lock().await;
+            store
+                .append(Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: task_id.to_string(),
+                    status: TaskStatus::Failed,
+                    outcome: Some(crate::model::TaskOutcome {
+                        summary: format!("reviewer requested rework: {notes}"),
+                        files_changed: Vec::new(),
+                    }),
+                })
+                .await?;
+            return Err(OrchestratorError::ReviewRework(task_id.to_string()));
+        }
     }
+
+    // Phase 3 — approved: commit the Done/merge transition under the lock.
+    let mut store = store.lock().await;
     if let Some(sha) = merge_commit {
         store
             .append(Event::RunMergeTask {
@@ -1494,6 +1647,7 @@ mod tests {
             use_real_worktrees: false,
             max_usd: 0.0,            // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
+            enforce_checkpoint_hygiene: false,
         }
     }
 
@@ -2387,6 +2541,274 @@ mod tests {
             }
             other => panic!("expected BadTransition, got {other:?}"),
         }
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// E10 — `message_agent` delivers a parsed IPC command to the live
+    /// worker's stdin channel: the spawner that holds the receiver observes
+    /// the command, and the orchestrator records it as an `ipc:` event.
+    #[tokio::test]
+    async fn e10_message_agent_delivers_ipc_command_to_worker() {
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/e10-run"),
+            "e10-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/e10-run",
+        )
+        .await
+        .unwrap();
+
+        // The spawner takes the command receiver and records the first
+        // command it receives into a shared slot the test can read.
+        let received: Arc<Mutex<Vec<crate::ipc::ManagerCommand>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_spawner = received.clone();
+        let hold: WorkerSpawner = Arc::new(move |ctx: SpawnContext| {
+            let received = received_for_spawner.clone();
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = store
+                        .append(Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        })
+                        .await;
+                }
+                let rx = ctx.cmd_rx.lock().await.take();
+                if let Some(mut rx) = rx {
+                    if let Some(cmd) = rx.recv().await {
+                        received.lock().await.push(cmd);
+                    }
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        });
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), hold);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+
+        let agent_id = handle.snapshot().await.unwrap().agents[0].id.clone();
+        let body = crate::ipc::encode_command(&crate::ipc::ManagerCommand::Cancel {
+            reason: "stop".into(),
+        });
+        handle.message_agent(&agent_id, &body).await.unwrap();
+
+        // The spawner received the exact command.
+        for _ in 0..200 {
+            if !received.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let got = received.lock().await.clone();
+        assert_eq!(
+            got,
+            vec![crate::ipc::ManagerCommand::Cancel {
+                reason: "stop".into()
+            }]
+        );
+        // The orchestrator logged it as a delivered `ipc:` event.
+        let events = {
+            let s = RunStore::load(dir.path().join(".wingman/autonomous/e10-run"))
+                .await
+                .unwrap();
+            s.read_events().await.unwrap()
+        };
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::TaskTool { tool, .. } if tool.starts_with("ipc:")
+        )));
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// E7 — an inline reviewer that requests rework makes finalize fail and
+    /// bounces the task to Failed (which the retry ladder then re-runs). An
+    /// approving reviewer lets it reach Done.
+    #[tokio::test]
+    async fn e7_inline_reviewer_reworks_on_finalize() {
+        async fn seed_review(dir: &std::path::Path) -> RunStore {
+            let mut store = RunStore::create(
+                dir.join(".wingman/autonomous/e7-run"),
+                "e7-run",
+                "g",
+                "abc",
+                "wingman/auto/e7-run",
+            )
+            .await
+            .unwrap();
+            for ev in [
+                Event::TaskCreate {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    role: Role::Developer,
+                    title: "t1".into(),
+                    goal: String::new(),
+                    deps: vec![],
+                    writes: vec![],
+                    acceptance: vec![],
+                    reversibility: Default::default(),
+                    reversibility_reason: None,
+                },
+                Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                },
+                Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    status: TaskStatus::Review,
+                    outcome: None,
+                },
+            ] {
+                store.append(ev).await.unwrap();
+            }
+            store
+        }
+
+        // Reviewer that always requests rework.
+        let rework: Reviewer = std::sync::Arc::new(|_task| {
+            Box::pin(async { Some("add tests".to_string()) })
+        });
+        let dir = tempdir().unwrap();
+        let store = seed_review(dir.path()).await;
+        let (handle, join) =
+            spawn_full(store, cfg(dir.path().to_path_buf()), fake_happy_spawner(), None, Some(rework));
+        let err = handle.finalize_task("t1", None).await.unwrap_err();
+        assert!(matches!(err, OrchestratorError::ReviewRework(ref id) if id == "t1"), "got {err:?}");
+        // The rework bounced it to Failed with the reviewer notes as summary.
+        let t = handle.snapshot().await.unwrap().task("t1").unwrap().clone();
+        assert_eq!(t.status, TaskStatus::Failed);
+        assert!(t.outcome.unwrap().summary.contains("add tests"));
+        handle.shutdown().await;
+        let _ = join.await;
+
+        // Approving reviewer lets the same task finalize to Done.
+        let approve: Reviewer = std::sync::Arc::new(|_task| Box::pin(async { None }));
+        let dir = tempdir().unwrap();
+        let store = seed_review(dir.path()).await;
+        let (handle, join) =
+            spawn_full(store, cfg(dir.path().to_path_buf()), fake_happy_spawner(), None, Some(approve));
+        handle.finalize_task("t1", None).await.unwrap();
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Done
+        );
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// E11 hard gate — a Review task that edited two files without a
+    /// checkpoint is refused finalize when the flag is on, and accepted when
+    /// it's off. Seeds the event stream directly, then drives finalize.
+    #[tokio::test]
+    async fn e11_finalize_blocks_unchecked_multifile_task() {
+        async fn seed(dir: &std::path::Path) -> RunStore {
+            let mut store = RunStore::create(
+                dir.join(".wingman/autonomous/e11-run"),
+                "e11-run",
+                "g",
+                "abc",
+                "wingman/auto/e11-run",
+            )
+            .await
+            .unwrap();
+            for ev in [
+                Event::TaskCreate {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    role: Role::Developer,
+                    title: "t1".into(),
+                    goal: String::new(),
+                    deps: vec![],
+                    writes: vec![],
+                    acceptance: vec![],
+                    reversibility: Default::default(),
+                    reversibility_reason: None,
+                },
+                Event::TaskAssign {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    agent: "a1".into(),
+                    worktree: "wt".into(),
+                },
+                Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                },
+                Event::TaskTool {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    agent: "a1".into(),
+                    tool: "edit_file".into(),
+                    input_hash: None,
+                    ok: true,
+                },
+                Event::TaskTool {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    agent: "a1".into(),
+                    tool: "edit_file".into(),
+                    input_hash: None,
+                    ok: true,
+                },
+                Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    status: TaskStatus::Review,
+                    outcome: None,
+                },
+            ] {
+                store.append(ev).await.unwrap();
+            }
+            store
+        }
+
+        // enforce on → violation is refused, task stays in Review.
+        let dir = tempdir().unwrap();
+        let store = seed(dir.path()).await;
+        let mut c = cfg(dir.path().to_path_buf());
+        c.enforce_checkpoint_hygiene = true;
+        let (handle, join) = spawn(store, c, fake_happy_spawner());
+        let err = handle.finalize_task("t1", None).await.unwrap_err();
+        assert!(
+            matches!(err, OrchestratorError::CheckpointViolation(ref id, _) if id == "t1"),
+            "got {err:?}"
+        );
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Review
+        );
+        handle.shutdown().await;
+        let _ = join.await;
+
+        // enforce off → same task finalizes to Done.
+        let dir = tempdir().unwrap();
+        let store = seed(dir.path()).await;
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        handle.finalize_task("t1", None).await.unwrap();
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Done
+        );
         handle.shutdown().await;
         let _ = join.await;
     }

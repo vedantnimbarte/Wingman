@@ -129,9 +129,146 @@ pub fn parse_pack_list(specs: &[String]) -> (Vec<PackRef>, Vec<String>) {
     (ok, errs)
 }
 
+/// Scan an installed pack directory into a [`PackManifest`]: `<role>.md`
+/// role files (excluding `.lessons.md`), `<role>.lessons.md` lessons,
+/// anything under `tools/`, and `*.acceptance.json` templates. Paths are
+/// relative to `pack_dir`.
+pub fn scan_manifest(pack_dir: &Path) -> std::io::Result<PackManifest> {
+    let mut m = PackManifest::default();
+    let Ok(entries) = std::fs::read_dir(pack_dir) else {
+        return Ok(m);
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let is_file = e.file_type().map(|t| t.is_file()).unwrap_or(false);
+        if is_file && name.ends_with(".lessons.md") {
+            m.lessons.push(name);
+        } else if is_file && name.ends_with(".acceptance.json") {
+            m.acceptance_templates.push(name);
+        } else if is_file && name.ends_with(".md") {
+            m.roles.push(name);
+        } else if name == "tools" && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if let Ok(tools) = std::fs::read_dir(e.path()) {
+                for t in tools.flatten() {
+                    m.tools.push(format!("tools/{}", t.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+    m.roles.sort();
+    m.lessons.sort();
+    m.tools.sort();
+    m.acceptance_templates.sort();
+    Ok(m)
+}
+
+/// Install a fetched pack's role + lessons files into `<home>/.wingman/agents/`
+/// so the existing [`crate::role`] loader picks them up with no code change.
+/// Returns the agent-file names written. Tool registrations and acceptance
+/// templates stay in the pack dir (loaded lazily by their own consumers).
+pub fn install_pack_files(pack_dir: &Path, home: &Path) -> std::io::Result<Vec<String>> {
+    let manifest = scan_manifest(pack_dir)?;
+    let agents = home.join(".wingman").join("agents");
+    std::fs::create_dir_all(&agents)?;
+    let mut written = Vec::new();
+    for rel in manifest.roles.iter().chain(manifest.lessons.iter()) {
+        std::fs::copy(pack_dir.join(rel), agents.join(rel))?;
+        written.push(rel.clone());
+    }
+    Ok(written)
+}
+
+/// Fetch a pack into its versioned install path and install its agent files.
+/// A git `source` is `git clone --depth 1 --branch v<version>`-ed via the
+/// [`CommandRunner`] seam; a local `source` (existing directory) is copied.
+/// Idempotent: an install path that already exists is treated as satisfied
+/// (the slug pins the exact version) and only re-installs its agent files.
+///
+/// ponytail: no registry/index, no signature verification, no transitive
+/// deps — a direct git clone or local copy. Add verification (reuse
+/// webhook.rs's sha2 HMAC pattern) when packs come from untrusted sources.
+pub fn fetch_pack(
+    runner: &dyn crate::pr::CommandRunner,
+    pack: &PackRef,
+    source: &str,
+    home: &Path,
+) -> Result<PathBuf, String> {
+    let dest = pack.install_path(home);
+    if !dest.exists() {
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
+        }
+        let local = Path::new(source);
+        if local.is_dir() {
+            copy_dir_recursive(local, &dest).map_err(|e| format!("local copy failed: {e}"))?;
+        } else {
+            let tag = format!("v{}", pack.version);
+            let dest_str = dest.to_string_lossy().to_string();
+            let out = runner
+                .run(
+                    "git",
+                    &["clone", "--depth", "1", "--branch", &tag, source, &dest_str],
+                    home,
+                )
+                .map_err(|e| format!("git clone spawn failed: {e}"))?;
+            if !out.success() {
+                return Err(format!("git clone failed: {}", out.stderr.trim()));
+            }
+        }
+    }
+    install_pack_files(&dest, home).map_err(|e| format!("install failed: {e}"))?;
+    Ok(dest)
+}
+
+/// Recursively copy a directory tree (skipping `.git`).
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for e in std::fs::read_dir(src)? {
+        let e = e?;
+        let name = e.file_name();
+        if name == ".git" {
+            continue;
+        }
+        let from = e.path();
+        let to = dst.join(&name);
+        if e.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn j12_fetch_local_pack_installs_roles_into_agents() {
+        // A local "pack" dir with a role + lessons + a tool + a stray file.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("tool-smith.md"), "# custom smith").unwrap();
+        std::fs::write(src.path().join("developer.lessons.md"), "- lesson").unwrap();
+        std::fs::create_dir(src.path().join("tools")).unwrap();
+        std::fs::write(src.path().join("tools").join("query_db.json"), "{}").unwrap();
+        std::fs::write(src.path().join("README"), "ignore me").unwrap();
+
+        let m = scan_manifest(src.path()).unwrap();
+        assert_eq!(m.roles, vec!["tool-smith.md"]);
+        assert_eq!(m.lessons, vec!["developer.lessons.md"]);
+        assert_eq!(m.tools, vec!["tools/query_db.json"]);
+
+        // Install via the local-source path (no git); files land in agents/.
+        let home = tempfile::tempdir().unwrap();
+        let pack = parse_pack_ref("acme/smithpack@1.0").unwrap();
+        let runner = crate::pr::SystemCommandRunner;
+        let dest = fetch_pack(&runner, &pack, &src.path().to_string_lossy(), home.path()).unwrap();
+        assert!(dest.ends_with("acme__smithpack@1.0.0"));
+        let agents = home.path().join(".wingman").join("agents");
+        assert!(agents.join("tool-smith.md").exists());
+        assert!(agents.join("developer.lessons.md").exists());
+    }
 
     #[test]
     fn parse_full_spec() {

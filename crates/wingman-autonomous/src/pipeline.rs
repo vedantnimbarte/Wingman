@@ -135,12 +135,43 @@ pub async fn run_to_completion(
     let integration_branch = state_at_start.integration_branch.clone();
     let project_root = inputs.project_root.clone();
     let run_id = state_at_start.run_id.clone();
+    // Captured before the cfg is moved into the orchestrator — J15's runtime
+    // cost trigger needs the cap at run end.
+    let max_usd = inputs.orchestrator_cfg.max_usd;
 
-    let (handle, join) = orchestrator::spawn(store, inputs.orchestrator_cfg, inputs.worker_spawner);
-
-    // Keep a handle to the provider for the post-run reviewer (E7) and
-    // critic (J10) passes — `build_manager` consumes the original Arc.
+    // Keep a handle to the provider for the post-run critic (J10) pass and
+    // the E7 inline reviewer — `build_manager` consumes the original Arc.
     let aux_provider = inputs.provider.clone();
+
+    // E7 — build the inline reviewer that gates each task's finalize. When
+    // set, `run_reviewer` runs the reviewer at the Review→Done choke point
+    // (race-free vs the manager) and sends rework verdicts back through the
+    // retry ladder, instead of a batched post-run pass.
+    let reviewer: Option<orchestrator::Reviewer> = if inputs.run_reviewer {
+        let provider = aux_provider.clone();
+        let model = inputs.reviewer_model.clone();
+        let gate = inputs
+            .pr_config
+            .auto_merge_max_severity
+            .parse::<crate::severity::Severity>()
+            .unwrap_or(crate::severity::Severity::Medium);
+        Some(std::sync::Arc::new(move |task: crate::model::Task| {
+            let provider = provider.clone();
+            let model = model.clone();
+            Box::pin(async move { review_task_inline(provider.as_ref(), &model, &task, gate).await })
+                as std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+        }))
+    } else {
+        None
+    };
+
+    let (handle, join) = orchestrator::spawn_full(
+        store,
+        inputs.orchestrator_cfg,
+        inputs.worker_spawner,
+        None,
+        reviewer,
+    );
 
     // Drive the manager loop. Manager system prompt is loaded inside
     // build_manager; the per-tick state block is injected by
@@ -250,14 +281,55 @@ pub async fn run_to_completion(
     let mut store = RunStore::load(&run_dir).await?;
 
     let merge_outcome = if need_merge {
-        let outcome = worktree::merge_integration(
+        match worktree::merge_integration(
             &project_root,
             &final_state.base_commit,
             &integration_branch,
             &final_state,
-        )?;
-        pr::finalize_all_review_tasks(&mut store, &final_state, &outcome.commits).await?;
-        Some(outcome)
+        ) {
+            Ok(outcome) => {
+                pr::finalize_all_review_tasks(&mut store, &final_state, &outcome.commits).await?;
+                Some(outcome)
+            }
+            Err(crate::worktree::WorktreeError::Conflict { task_id, files }) => {
+                // E4 auto-merge-fixer: a merge conflict no longer hard-errors
+                // the run. Record a merge-fixer task capturing the conflicted
+                // files so the conflict is structured, resumable work (a
+                // `pilot resume` picks it up), then write the R3 escalation
+                // packet and return a blocked outcome instead of a raw error.
+                // ponytail: this queues the fix as a visible task; fully
+                // autonomous live resolution (spawning a merge-fixer agent on
+                // the conflicted checkout and retrying the merge in-process)
+                // is the remaining provider-backed leaf — untestable headless.
+                tracing::warn!(
+                    target: "pilot::pipeline",
+                    task = %task_id, files = ?files,
+                    "merge conflict — recording a merge-fixer task and blocking the run"
+                );
+                record_merge_fixer_task(&mut store, &task_id, &files).await;
+                let blocked_state = store.state().clone();
+                let packet = write_escalation_packet(
+                    &project_root,
+                    &run_id,
+                    &blocked_state,
+                    inputs.tier,
+                    &[],
+                );
+                return Ok(PipelineOutcome {
+                    merged: None,
+                    pr: None,
+                    failed_tasks: vec![task_id],
+                    escalation_packet: packet,
+                    auto_merge: None,
+                    checkpoint_violations,
+                    reviews: Vec::new(),
+                    critic_vetoed: false,
+                    sandbox_tiers,
+                    escalation_triggers: Vec::new(),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
     } else {
         // Manager finalized tasks incrementally. The integration branch
         // may not exist yet (orchestrator.handle_finalize emits a
@@ -335,7 +407,7 @@ pub async fn run_to_completion(
     // J15 — hard escalation triggers over the plan + integration diff
     // (dangerous-path-without-goal-mention, secrets, license-header edits).
     // Any blocking trigger vetoes auto-merge regardless of the other gates.
-    let escalation_triggers = detect_escalation_triggers(
+    let mut escalation_triggers = detect_escalation_triggers(
         inputs.command_runner.as_ref(),
         &project_root,
         &snapshot_for_pr.base_commit,
@@ -343,6 +415,27 @@ pub async fn run_to_completion(
         &snapshot_for_pr,
         &inputs.dangerous_paths,
     );
+    // J15 — fold the runtime escalation triggers (cost warn/halt, three
+    // consecutive related-run failures, irreversible-task-ran) into the same
+    // vec the E8 gate already vetoes on. `tests_before/after` stay `None`
+    // until a cargo-test counter exists (that's the one signal with no live
+    // producer); the other three fire from data already in scope.
+    // ponytail: no test-count capture — NetNegativeTests stays dormant until
+    // someone's willing to pay two full `cargo test` runs per pilot run.
+    let recent_run_outcomes = recent_run_outcomes(&project_root, &run_id);
+    escalation_triggers.extend(crate::escalation::check_runtime(
+        &crate::escalation::RuntimeSignals {
+            state: &snapshot_for_pr,
+            task: snapshot_for_pr
+                .tasks
+                .iter()
+                .find(|t| matches!(t.reversibility, crate::model::Reversibility::Irreversible)),
+            tests_before: None,
+            tests_after: None,
+            max_usd,
+            recent_run_outcomes: &recent_run_outcomes,
+        },
+    ));
     let dangerous_paths_touched = escalation_triggers.iter().any(|t| {
         matches!(
             t,
@@ -359,29 +452,18 @@ pub async fn run_to_completion(
         );
     }
 
-    // E7 — per-task reviewer pass (opt-in). Runs a reviewer agent per
-    // task and records its verdict; the worst finding severity feeds the
-    // auto-merge gate.
-    let mut reviewer_usage = wingman_core::Usage::default();
-    let reviews = if inputs.run_reviewer {
-        run_reviewer_pass(
-            aux_provider.as_ref(),
-            &inputs.reviewer_model,
-            &snapshot_for_pr,
-            &mut reviewer_usage,
-        )
-        .await
-    } else {
-        Vec::new()
-    };
-    record_phase_usage(&mut store, "reviewer", &reviewer_usage).await;
-    let review_max_severity = reviews
-        .iter()
-        .filter_map(|(_, v)| match v {
-            crate::review::Verdict::Rework => Some(crate::severity::Severity::High),
-            crate::review::Verdict::Approve => None,
-        })
-        .max();
+    // E7 — the per-task reviewer now runs INLINE at each task's finalize
+    // choke point (see the `reviewer` closure + `spawn_full` above), so a
+    // rework verdict bounces the task back through the retry ladder during
+    // the run instead of only annotating the gate afterward. By the time a
+    // task is Done here it has already passed inline review, so there's no
+    // separate post-run pass and the gate's review severity is None.
+    // ponytail: a task that was batch-finalized by the pipeline (rather than
+    // the manager calling finalize_task) skips the inline gate — that path is
+    // only hit when the manager never finalized incrementally, which the
+    // common flow avoids.
+    let reviews: Vec<(String, crate::review::Verdict)> = Vec::new();
+    let review_max_severity: Option<crate::severity::Severity> = None;
 
     // J10 — critic pass (opt-in). A high+ risk vetoes auto-merge.
     let mut critic_usage = wingman_core::Usage::default();
@@ -414,6 +496,13 @@ pub async fn run_to_completion(
         dangerous_paths_touched,
         &pr_outcome,
     );
+
+    // J8 — regenerate the durable project knowledge layer now that the run
+    // merged: an architecture map from the crates' `pub mod`s + one decision
+    // record. Best-effort; a knowledge write must never fail the run.
+    // ponytail: a plain function call, not a "knowledge-keeper agent" —
+    // render_architecture is deterministic; an LLM to invoke it is ceremony.
+    regenerate_knowledge(&project_root, &snapshot_for_pr);
 
     Ok(PipelineOutcome {
         merged: merge_outcome,
@@ -756,53 +845,44 @@ fn extract_json(s: &str) -> &str {
 /// E7 — run a reviewer agent per task and collect verdicts. Parse
 /// failures default to Approve (a broken reviewer must not wedge the run);
 /// the orchestrator still has the security + critic gates.
-async fn run_reviewer_pass(
+/// E7 — review one task inline at its finalize choke point. Returns
+/// `Some(rework_notes)` when the task should go back for rework (verdict
+/// Rework, or a finding at/above `block_gate`), or `None` to approve. A
+/// call/parse failure defaults to approve (fail-open, same as the post-run
+/// pass) so a flaky reviewer can't wedge the run.
+async fn review_task_inline(
     provider: &dyn Provider,
     model: &str,
-    state: &crate::model::RunState,
-    usage: &mut wingman_core::Usage,
-) -> Vec<(String, crate::review::Verdict)> {
+    task: &crate::model::Task,
+    block_gate: crate::severity::Severity,
+) -> Option<String> {
     const SYSTEM: &str = "You are a meticulous code reviewer. Review the described task's \
         diff and reply with ONLY a JSON object: {\"verdict\":\"approve\"|\"rework\", \
         \"summary\":\"...\", \"findings\":[{\"severity\":\"low|medium|high|critical\", \
         \"message\":\"...\"}]}.";
-    let mut out = Vec::new();
-    for task in &state.tasks {
-        if !matches!(task.status, TaskStatus::Done | TaskStatus::Review) {
-            continue;
-        }
-        let summary = task
-            .outcome
+    let summary = task
+        .outcome
+        .as_ref()
+        .map(|o| o.summary.as_str())
+        .unwrap_or("(no summary)");
+    let user = format!(
+        "Task #{}: {}\nRole: {}\nOutcome: {}\nFiles: {}",
+        task.id,
+        task.title,
+        task.role.as_str(),
+        summary,
+        task.outcome
             .as_ref()
-            .map(|o| o.summary.as_str())
-            .unwrap_or("(no summary)");
-        let user = format!(
-            "Task #{}: {}\nRole: {}\nOutcome: {}\nFiles: {}",
-            task.id,
-            task.title,
-            task.role.as_str(),
-            summary,
-            task.outcome
-                .as_ref()
-                .map(|o| o.files_changed.join(", "))
-                .unwrap_or_default()
-        );
-        let verdict = match complete_text(provider, model, SYSTEM, &user).await {
-            Ok((text, u)) => {
-                usage.add(&u);
-                match crate::review::parse_review(extract_json(&text)) {
-                    Ok(report) => report.verdict,
-                    Err(_) => crate::review::Verdict::Approve,
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: "pilot::pipeline", task = %task.id, error = %e, "reviewer call failed");
-                crate::review::Verdict::Approve
-            }
-        };
-        out.push((task.id.clone(), verdict));
+            .map(|o| o.files_changed.join(", "))
+            .unwrap_or_default()
+    );
+    let (text, _usage) = complete_text(provider, model, SYSTEM, &user).await.ok()?;
+    let report = crate::review::parse_review(extract_json(&text)).ok()?;
+    if report.next_status(block_gate) == TaskStatus::Todo {
+        Some(report.rework_notes(block_gate))
+    } else {
+        None
     }
-    out
 }
 
 /// J10 — run a critic on the whole run; returns true if it vetoes
@@ -889,6 +969,133 @@ fn record_run_stats(
             tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append stat record");
         }
     }
+}
+
+/// E4 — record a merge-fixer task on a merge conflict. Appends a
+/// `task.create` for a [`crate::model::Role::MergeFixer`] whose `writes` are
+/// the conflicted files and whose goal points at the conflicting task, so the
+/// conflict is durable, resumable work rather than a lost hard error.
+/// Best-effort: a failed append is logged, not surfaced (the run is already
+/// blocking on the conflict).
+async fn record_merge_fixer_task(
+    store: &mut RunStore,
+    conflicting_task_id: &str,
+    files: &[String],
+) {
+    let id = format!("merge-fixer-{conflicting_task_id}");
+    let ev = crate::Event::TaskCreate {
+        t: RunStore::now(),
+        id,
+        role: crate::model::Role::MergeFixer,
+        title: format!("Resolve merge conflict from task {conflicting_task_id}"),
+        goal: format!(
+            "Task {conflicting_task_id} conflicts with earlier integration work in: {}. \
+             Resolve the conflict preserving both sides' intent, re-run acceptance, and commit.",
+            files.join(", ")
+        ),
+        deps: Vec::new(),
+        writes: files.to_vec(),
+        acceptance: Vec::new(),
+        reversibility: Default::default(),
+        reversibility_reason: None,
+    };
+    if let Err(e) = store.append(ev).await {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to record merge-fixer task");
+    }
+}
+
+/// J15 — the last-3 (run_id, ok) outcomes from run history, newest last,
+/// excluding the current run (still Running). Feeds
+/// [`crate::escalation::check_runtime`]'s RepeatedFailures trigger. Reads
+/// what `dashboard::load_all_run_states` already persists — no new store.
+fn recent_run_outcomes(
+    project_root: &std::path::Path,
+    current_run_id: &str,
+) -> Vec<(String, bool)> {
+    let mut states = crate::dashboard::load_all_run_states(project_root);
+    // run ids are timestamp-prefixed, so a lexical sort is chronological.
+    states.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    states
+        .into_iter()
+        .filter(|s| s.run_id != current_run_id)
+        .map(|s| (s.run_id, s.status == crate::model::RunStatus::Done))
+        .collect()
+}
+
+/// J8 — regenerate the durable knowledge layer under `.wingman/knowledge/`
+/// after a run merges: an `architecture.md` module map + one appended
+/// decision record. Best-effort; every failure is logged and swallowed so a
+/// knowledge write can never fail the run.
+fn regenerate_knowledge(project_root: &std::path::Path, state: &crate::model::RunState) {
+    let dir = crate::knowledge::knowledge_dir(project_root);
+
+    // Module map: each `crates/<name>/src/lib.rs` → its `pub mod`s.
+    let crates = discover_crate_modules(&project_root.join("crates"));
+    let arch = crate::knowledge::render_architecture(&crates);
+    if let Err(e) = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join("architecture.md"), arch))
+    {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to write architecture.md");
+    }
+
+    // One decision record for the run: the goal is what was decided, the
+    // top task summaries the rationale.
+    let rationale = state
+        .tasks
+        .iter()
+        .filter_map(|t| t.outcome.as_ref().map(|o| o.summary.clone()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let rec = crate::knowledge::DecisionRecord {
+        run_id: state.run_id.clone(),
+        t: RunStore::now(),
+        decision: state.goal.clone(),
+        rationale,
+    };
+    if let Err(e) = crate::knowledge::append_decision(&crate::knowledge::decisions_path(&dir), &rec)
+    {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append decision record");
+    }
+    // ponytail: hotspots are computed by knowledge::hotspots_from_observations
+    // but nothing reads a persisted hotspots file yet (the E4 scheduler takes
+    // them in-memory), so persisting one here would be write-only. Add it when
+    // the scheduler learns to load cross-run hotspots.
+}
+
+/// Walk `crates/*/src/lib.rs` and extract each crate's `pub mod <name>;`
+/// declarations. Pure-ish (reads the filesystem); returns
+/// `(crate_name, sorted module names)` for `render_architecture`.
+fn discover_crate_modules(crates_dir: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(crates_dir) else {
+        return out;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let lib = e.path().join("src").join("lib.rs");
+        let Ok(src) = std::fs::read_to_string(&lib) else {
+            continue;
+        };
+        let mut mods: Vec<String> = src
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("pub mod ")
+                    .map(|rest| rest.trim_end_matches(';').split_whitespace().next().unwrap_or(""))
+                    .filter(|m| !m.is_empty())
+                    .map(|m| m.to_string())
+            })
+            .collect();
+        mods.sort();
+        mods.dedup();
+        out.push((name, mods));
+    }
+    out
 }
 
 /// R3 — render + write the escalation packet for a blocked run. Returns
@@ -1308,6 +1515,7 @@ mod tests {
                 use_real_worktrees: true,
                 max_usd: 0.0,
                 max_retries_per_task: 0,
+                enforce_checkpoint_hygiene: false,
             },
             max_ticks: 32,
             tier: wingman_config::PilotTier::Copilot,
@@ -1978,28 +2186,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e7_reviewer_pass_parses_verdict() {
+    async fn e7_inline_reviewer_rework_returns_notes() {
         let provider = CannedTextProvider {
             text: r#"{"verdict":"rework","summary":"needs tests","findings":[{"severity":"high","message":"no error handling"}]}"#.into(),
         };
-        let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
-        state.tasks = vec![done_task("t1")];
-        let reviews =
-            run_reviewer_pass(&provider, "m", &state, &mut wingman_core::Usage::default()).await;
-        assert_eq!(reviews.len(), 1);
-        assert_eq!(reviews[0].1, crate::review::Verdict::Rework);
+        let task = done_task("t1");
+        // High finding at the Medium gate → rework, with notes.
+        let notes =
+            review_task_inline(&provider, "m", &task, crate::severity::Severity::Medium).await;
+        assert!(notes.is_some(), "rework verdict must return notes");
+        assert!(notes.unwrap().contains("no error handling"));
     }
 
     #[tokio::test]
-    async fn e7_reviewer_pass_defaults_to_approve_on_garbage() {
+    async fn e7_inline_reviewer_defaults_to_approve_on_garbage() {
         let provider = CannedTextProvider {
             text: "not json at all".into(),
         };
-        let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
-        state.tasks = vec![done_task("t1")];
-        let reviews =
-            run_reviewer_pass(&provider, "m", &state, &mut wingman_core::Usage::default()).await;
-        assert_eq!(reviews[0].1, crate::review::Verdict::Approve);
+        let task = done_task("t1");
+        // Unparseable → fail-open approve → None (finalize proceeds).
+        let notes =
+            review_task_inline(&provider, "m", &task, crate::severity::Severity::Medium).await;
+        assert!(notes.is_none(), "garbage must fail open to approve");
     }
 
     #[tokio::test]
@@ -2104,6 +2312,52 @@ mod tests {
         assert!(s.iter().any(|(id, st)| id == "t1" && st == "Done"));
         assert!(s.iter().any(|(id, st)| id == "t2" && st == "Review"));
         assert!(s.iter().any(|(id, st)| id == "t3" && st == "Pending"));
+    }
+
+    #[tokio::test]
+    async fn e4_record_merge_fixer_task_captures_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::create(
+            dir.path().join(".wingman/autonomous/mf-run"),
+            "mf-run",
+            "g",
+            "base",
+            "wingman/auto/mf-run",
+        )
+        .await
+        .unwrap();
+        record_merge_fixer_task(&mut store, "t2", &["src/a.rs".into(), "src/b.rs".into()]).await;
+        let t = store
+            .state()
+            .task("merge-fixer-t2")
+            .expect("merge-fixer task recorded");
+        assert_eq!(t.role, crate::model::Role::MergeFixer);
+        assert_eq!(t.writes, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        assert!(t.goal.contains("t2") && t.goal.contains("src/a.rs"));
+    }
+
+    #[test]
+    fn j8_discover_crate_modules_extracts_pub_mods() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crates = tmp.path().join("crates");
+        let src = crates.join("wingman-foo").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            "//! doc\npub mod alpha;\nmod private;\n  pub mod beta ;\npub mod alpha;\n",
+        )
+        .unwrap();
+        // a non-crate file at the top level must be ignored
+        std::fs::write(crates.join("README"), "x").unwrap();
+
+        let got = discover_crate_modules(&crates);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "wingman-foo");
+        // deduped, sorted, private `mod` excluded
+        assert_eq!(got[0].1, vec!["alpha".to_string(), "beta".to_string()]);
+        // renders without panicking and names the crate
+        let md = crate::knowledge::render_architecture(&got);
+        assert!(md.contains("wingman-foo") && md.contains("alpha"));
     }
 
     // Silence unused-import warnings if the test gates above ever skip.

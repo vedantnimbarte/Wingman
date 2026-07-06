@@ -567,6 +567,15 @@ pub struct ShellTurnGate {
     cwd: std::path::PathBuf,
 }
 
+impl ShellTurnGate {
+    /// Build a gate that runs `cmd` in `cwd`. Used by the E5.5 pilot worker
+    /// path, which gates on `[pilot].turn_gate_cmd` rather than
+    /// `[verify].turn_gate`.
+    pub fn new(cmd: String, cwd: std::path::PathBuf) -> Self {
+        Self { cmd, cwd }
+    }
+}
+
 #[async_trait::async_trait]
 impl TurnGate for ShellTurnGate {
     fn label(&self) -> String {

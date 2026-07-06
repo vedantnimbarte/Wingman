@@ -254,6 +254,53 @@ pub struct TaskMergeCommit {
     pub commit_sha: String,
 }
 
+/// E4 — rebase `branch` onto `onto`, then restore HEAD to `onto` regardless
+/// of outcome so the caller can carry on merging from a known checkout.
+/// Returns `Ok` when the rebase applied cleanly, `Err` when it conflicted
+/// (in which case the rebase is aborted and `branch` is left untouched).
+///
+/// The HEAD-restoration postcondition is the important invariant: `git
+/// rebase <onto> <branch>` checks out `branch`, so without the final switch
+/// the merge loop would be on the wrong branch for the squash.
+fn rebase_branch_onto(repo_root: &Path, branch: &str, onto: &str) -> Result<(), WorktreeError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rebase")
+        .arg(onto)
+        .arg(branch)
+        .output()?;
+    let ok = out.status.success();
+    if !ok {
+        let _ = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .arg("rebase")
+            .arg("--abort")
+            .output();
+    }
+    // Restore HEAD to the integration branch either way.
+    let switch = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("switch")
+        .arg(onto)
+        .output()?;
+    if !switch.status.success() {
+        return Err(WorktreeError::Git(format!(
+            "git switch {onto} after rebase failed: {}",
+            String::from_utf8_lossy(&switch.stderr).trim()
+        )));
+    }
+    if ok {
+        Ok(())
+    } else {
+        Err(WorktreeError::Git(format!(
+            "rebase of {branch} onto {onto} conflicted"
+        )))
+    }
+}
+
 /// Build the integration branch.
 ///
 /// 1. Create / reset `integration_branch` to point at `base_commit`.
@@ -295,6 +342,14 @@ pub fn merge_integration(
             continue;
         }
         let branch = task_branch(&state.run_id, task_id);
+        // E4 rebase-as-you-go: replay this task's branch onto the current
+        // integration tip before squashing, so its diff is computed against
+        // the work already merged rather than the run's base commit. This
+        // designs out spurious conflicts from base-relative diffs. A rebase
+        // that genuinely conflicts is aborted (HEAD restored to the
+        // integration branch) and we fall through to the squash path, which
+        // surfaces the real conflict exactly as before. Best-effort.
+        let _ = rebase_branch_onto(repo_root, &branch, integration_branch);
         let squash = Command::new("git")
             .arg("-C")
             .arg(repo_root)
@@ -548,6 +603,51 @@ mod tests {
             .trim()
             .to_string();
         Some((root, head))
+    }
+
+    /// E4 rebase-as-you-go: `rebase_branch_onto` replays a non-conflicting
+    /// branch onto the integration tip and restores HEAD to it; a conflicting
+    /// branch aborts cleanly and still restores HEAD.
+    #[test]
+    fn e4_rebase_branch_onto_restores_head_both_ways() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, _base)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        // integration branch adds a.txt on top of seed.
+        git(&repo, &["switch", "-c", "integration"]);
+        std::fs::write(repo.join("a.txt"), "from integration").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "int: a"]);
+
+        // A non-conflicting feature branch off the seed touches b.txt.
+        git(&repo, &["switch", "-c", "feat-clean", "main"]);
+        std::fs::write(repo.join("b.txt"), "from feat").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "feat: b"]);
+        git(&repo, &["switch", "integration"]);
+
+        rebase_branch_onto(&repo, "feat-clean", "integration").expect("clean rebase");
+        let head = String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        assert_eq!(head, "integration", "HEAD must be restored after clean rebase");
+
+        // A conflicting branch also edits a.txt.
+        git(&repo, &["switch", "-c", "feat-conflict", "main"]);
+        std::fs::write(repo.join("a.txt"), "from feat conflict").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-m", "feat: a-conflict"]);
+        git(&repo, &["switch", "integration"]);
+
+        assert!(rebase_branch_onto(&repo, "feat-conflict", "integration").is_err());
+        let head = String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
+            .trim()
+            .to_string();
+        assert_eq!(head, "integration", "HEAD must be restored after aborted rebase");
+        // No rebase in progress left dangling.
+        assert!(!repo.join(".git").join("rebase-merge").exists());
     }
 
     /// Phase 5 acceptance (plan.md line 675): a clean 3-task run produces
