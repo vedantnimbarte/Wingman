@@ -78,13 +78,9 @@ fn run_one(check: &Acceptance, cwd: &Path) -> AcceptanceResult {
     match check {
         Acceptance::Shell { cmd } => run_shell(cmd, cwd),
         Acceptance::Grep { pattern, path } => run_grep(pattern, path, cwd),
-        // Http checks need async I/O; we skip them in this synchronous
-        // runner and surface that explicitly. A separate async runner
-        // handles them.
-        Acceptance::Http { url, .. } => AcceptanceResult::fail(
-            format!("http: {url}"),
-            "HTTP acceptance not yet supported in the synchronous runner (E3 scope is shell+grep)",
-        ),
+        // J6 — real HTTP GET via `curl` (no async runtime, no new dep). The
+        // status line proves reachability; `must_match` asserts on body/code.
+        Acceptance::Http { url, must_match } => run_http(url, must_match, cwd),
         // J6 — run the app: execute the script (or the target as a
         // command) like a shell check, but label it as a run.
         Acceptance::Run { target, script } => {
@@ -101,8 +97,107 @@ fn run_one(check: &Acceptance, cwd: &Path) -> AcceptanceResult {
     }
 }
 
+/// J6 — real HTTP GET, shelling to `curl` so the sync runner stays
+/// dependency-free (no reqwest, no tokio). `curl` prints the body followed
+/// by a final `\n<status>` line (via `-w`); we split that off and assert:
+///
+/// - `must_match` is a **number** → the HTTP status must equal it.
+/// - `must_match` is a **string** → the body must contain it (and status
+///   must be < 400).
+/// - `must_match` is **null/absent** → status must be < 400.
+/// - anything else (object/array) → its compact JSON form must appear in the
+///   body (and status < 400) — a coarse "shape present" check.
+///
+/// ponytail: substring/status checks, not a JSON-schema match. Add a real
+/// JSON-path assertion when a canned string-contains proves too blunt.
+fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> AcceptanceResult {
+    let label = format!("http: {url}");
+    // -sS quiet-but-show-errors, -L follow redirects, -m 30 hard timeout,
+    // -w appends the numeric status on its own trailing line.
+    let output = Command::new("curl")
+        .args([
+            "-sSL",
+            "-m",
+            "30",
+            "-o",
+            "-",
+            "-w",
+            "\n%{http_code}",
+            url,
+        ])
+        .current_dir(cwd)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => return AcceptanceResult::fail(label, format!("curl spawn failed: {e}")),
+    };
+    if !output.status.success() {
+        return AcceptanceResult::fail(
+            label,
+            format!(
+                "curl exited non-zero: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        );
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let (body, status_str) = match raw.rsplit_once('\n') {
+        Some((b, s)) => (b, s.trim()),
+        None => ("", raw.trim()),
+    };
+    let status: u32 = status_str.parse().unwrap_or(0);
+    assert_http(label, status, body, must_match)
+}
+
+/// Pure assertion half of [`run_http`] — separated so the match/status
+/// logic is unit-testable without a live network.
+fn assert_http(
+    label: String,
+    status: u32,
+    body: &str,
+    must_match: &serde_json::Value,
+) -> AcceptanceResult {
+    match must_match {
+        serde_json::Value::Number(n) => {
+            let want = n.as_u64().unwrap_or(0) as u32;
+            if status == want {
+                AcceptanceResult::ok(label, format!("status {status}"))
+            } else {
+                AcceptanceResult::fail(label, format!("status {status}, wanted {want}"))
+            }
+        }
+        serde_json::Value::Null => {
+            if (200..400).contains(&status) {
+                AcceptanceResult::ok(label, format!("status {status}"))
+            } else {
+                AcceptanceResult::fail(label, format!("status {status} (not 2xx/3xx)"))
+            }
+        }
+        other => {
+            let needle = match other {
+                serde_json::Value::String(s) => s.clone(),
+                v => v.to_string(),
+            };
+            if !(200..400).contains(&status) {
+                return AcceptanceResult::fail(label, format!("status {status} (not 2xx/3xx)"));
+            }
+            if body.contains(&needle) {
+                AcceptanceResult::ok(label, format!("status {status}, body matched"))
+            } else {
+                AcceptanceResult::fail(label, format!("status {status}, body missing {needle:?}"))
+            }
+        }
+    }
+}
+
 /// J6 — verify a rendered artifact (screenshot / SVG dump) exists and
 /// contains every expected text fragment.
+///
+/// Screenshot *capture* is intentionally not embedded here: an
+/// [`Acceptance::Run`] step renders the artifact first (e.g.
+/// `chromium --headless --dump-dom <url> > page.html`, or a ratatui SVG
+/// dump), and this `Assert` checks it. That composition needs no browser
+/// crate and keeps the runner synchronous and dependency-free.
 fn run_assert(path: &str, must_contain: &[String], cwd: &Path) -> AcceptanceResult {
     let label = format!("assert: {path}");
     let full = cwd.join(path);
@@ -414,5 +509,21 @@ mod tests {
         let s = summarize(&r);
         assert!(s.contains("2/3 green"));
         assert!(s.contains("b: bad"));
+    }
+
+    #[test]
+    fn j6_http_assert_covers_status_string_and_null() {
+        use serde_json::json;
+        let lbl = || "http: x".to_string();
+        // number → exact status
+        assert!(assert_http(lbl(), 200, "hi", &json!(200)).ok);
+        assert!(!assert_http(lbl(), 404, "hi", &json!(200)).ok);
+        // null → any 2xx/3xx passes, 4xx/5xx fails
+        assert!(assert_http(lbl(), 204, "", &json!(null)).ok);
+        assert!(!assert_http(lbl(), 500, "", &json!(null)).ok);
+        // string → body must contain it AND status < 400
+        assert!(assert_http(lbl(), 200, "welcome home", &json!("welcome")).ok);
+        assert!(!assert_http(lbl(), 200, "welcome home", &json!("missing")).ok);
+        assert!(!assert_http(lbl(), 503, "welcome home", &json!("welcome")).ok);
     }
 }
