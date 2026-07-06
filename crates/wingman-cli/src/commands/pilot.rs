@@ -1517,6 +1517,204 @@ async fn feedback_pending_runs(
     out
 }
 
+/// R4 — eval / regression harness + CI gate.
+///
+/// Two modes:
+/// - `--goals <FILE>` runs each goal line live through the pilot pipeline,
+///   harvesting success/usd/wall, and writes `<eval>/results.jsonl`.
+/// - otherwise reads an existing `<eval>/results.jsonl` (produced earlier or
+///   hand-authored).
+///
+/// Then it summarizes, compares to `<eval>/baseline.json`, prints the
+/// markdown report, and **exits non-zero on regression** — that exit code is
+/// the CI gate. `--update-baseline` rewrites the baseline from the current
+/// results and skips gating.
+pub async fn eval(
+    cfg: Config,
+    goals_file: Option<std::path::PathBuf>,
+    threshold: f64,
+    update_baseline: bool,
+) -> Result<ExitCode> {
+    use wingman_autonomous::eval::EvalResult;
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let eval_dir = project.root.join(".wingman").join("eval");
+    let results_path = eval_dir.join("results.jsonl");
+    let baseline_path = eval_dir.join("baseline.json");
+
+    // Gather this run's results: live if --goals given, else from disk.
+    let results: Vec<EvalResult> = if let Some(gf) = goals_file {
+        let goals: Vec<String> = std::fs::read_to_string(&gf)
+            .with_context(|| format!("reading goals file {}", gf.display()))?
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        if goals.is_empty() {
+            eprintln!("[pilot] eval: no goals in {}", gf.display());
+            return Ok(ExitCode::from(1));
+        }
+        eprintln!("[pilot] eval: running {} canned goal(s) live…", goals.len());
+        let res = run_eval_goals(&cfg, &project.root, &goals).await;
+        write_eval_results(&results_path, &res)?;
+        res
+    } else {
+        read_eval_results(&results_path)?
+    };
+
+    if results.is_empty() {
+        eprintln!(
+            "[pilot] eval: no results (run with --goals <FILE>, or populate {})",
+            results_path.display()
+        );
+        return Ok(ExitCode::from(1));
+    }
+
+    if update_baseline {
+        write_eval_results(&baseline_path, &results)?;
+        eprintln!(
+            "[pilot] eval: baseline updated ({} result(s)) → {}",
+            results.len(),
+            baseline_path.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let baseline = read_eval_results(&baseline_path).unwrap_or_default();
+    let baseline_ref = if baseline.is_empty() {
+        None
+    } else {
+        Some(baseline.as_slice())
+    };
+    let (report, regressed) = eval_gate(&results, baseline_ref, threshold);
+    print!("{report}");
+    if regressed {
+        eprintln!("[pilot] eval: REGRESSION detected — failing the gate.");
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Pure CI-gate core: summarize current results, compare to baseline, render
+/// the markdown report, and report whether the gate should fail. Split out
+/// so the summarize→compare→gate wiring is unit-testable without any I/O.
+fn eval_gate(
+    current: &[wingman_autonomous::eval::EvalResult],
+    baseline: Option<&[wingman_autonomous::eval::EvalResult]>,
+    threshold: f64,
+) -> (String, bool) {
+    use wingman_autonomous::eval;
+    let cur = eval::summarize(current);
+    match baseline {
+        None => (
+            format!(
+                "# Eval report\n\nNo baseline to compare against. {} result(s), \
+                 {:.0}% success, avg ${:.2}.\n\nRun `wingman pilot eval --update-baseline` \
+                 to set one.\n",
+                cur.n,
+                cur.success_rate * 100.0,
+                cur.avg_usd
+            ),
+            false,
+        ),
+        Some(base) => {
+            let b = eval::summarize(base);
+            let report = eval::compare(&cur, &b, threshold);
+            (eval::render_report(&report), report.regressed)
+        }
+    }
+}
+
+/// Run each canned goal live through the pilot pipeline, harvesting metrics
+/// from the resulting run state. success = the run reached Done; usd from the
+/// run's recorded totals; wall from the wall clock around the call.
+/// ponytail: quality is success-proxied (1.0/0.0) — a real LLM-judge needs a
+/// golden diff per goal, which doesn't exist yet. Add it when golden refs do.
+async fn run_eval_goals(
+    cfg: &Config,
+    project_root: &std::path::Path,
+    goals: &[String],
+) -> Vec<wingman_autonomous::eval::EvalResult> {
+    use std::time::Instant;
+    use wingman_autonomous::eval::EvalResult;
+    let mut out = Vec::with_capacity(goals.len());
+    for goal in goals {
+        let before: std::collections::HashSet<String> =
+            wingman_autonomous::dashboard::list_runs(project_root)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| r.run_id)
+                .collect();
+        let started = Instant::now();
+        let opts = PilotOptions {
+            goal: goal.clone(),
+            yes: true,
+            ..PilotOptions::default()
+        };
+        let _ = run(cfg.clone(), opts).await;
+        let wall_min = started.elapsed().as_secs_f64() / 60.0;
+
+        // Find the run this goal produced (newest id not seen before) and
+        // read its terminal status + spend.
+        let (success, usd) = wingman_autonomous::dashboard::list_runs(project_root)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| !before.contains(&r.run_id))
+            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok())
+            .map(|s| (s.status == wingman_autonomous::RunStatus::Done, s.totals.usd))
+            .unwrap_or((false, 0.0));
+
+        out.push(EvalResult {
+            goal: goal.clone(),
+            success,
+            usd,
+            wall_min,
+            quality: if success { 1.0 } else { 0.0 },
+        });
+        eprintln!(
+            "[pilot] eval: {goal:?} → {} (${usd:.2}, {wall_min:.1}m)",
+            if success { "ok" } else { "fail" }
+        );
+    }
+    out
+}
+
+fn read_eval_results(
+    path: &std::path::Path,
+) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut out = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(r) = serde_json::from_str(line) {
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+fn write_eval_results(
+    path: &std::path::Path,
+    results: &[wingman_autonomous::eval::EvalResult],
+) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::File::create(path)?;
+    for r in results {
+        writeln!(f, "{}", serde_json::to_string(r)?)?;
+    }
+    Ok(())
+}
+
 /// Load the `source\x01title` keys already present in the daemon queue so a
 /// restarted daemon doesn't re-queue or re-dispatch work it already handled.
 /// Missing/unreadable queue → empty set (nothing seen yet).
@@ -1564,6 +1762,40 @@ mod tests {
     use super::*;
     use wingman_autonomous::control::{append, ControlCommand};
     use std::time::Duration;
+
+    #[test]
+    fn r4_eval_gate_flags_regression_and_passes_on_parity() {
+        use wingman_autonomous::eval::EvalResult;
+        let good = |g: &str| EvalResult {
+            goal: g.into(),
+            success: true,
+            usd: 0.10,
+            wall_min: 1.0,
+            quality: 1.0,
+        };
+        let baseline = vec![good("a"), good("b")];
+
+        // no baseline → never gates
+        let (_r, fail) = eval_gate(&baseline, None, 0.10);
+        assert!(!fail);
+
+        // parity → no regression
+        let (_r, fail) = eval_gate(&baseline, Some(&baseline), 0.10);
+        assert!(!fail);
+
+        // success rate halved → regression
+        let mut worse = baseline.clone();
+        worse[0].success = false;
+        let (report, fail) = eval_gate(&worse, Some(&baseline), 0.10);
+        assert!(fail, "halved success rate must fail the gate");
+        assert!(report.contains("REGRESSED"));
+
+        // baseline round-trips through disk
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("baseline.json");
+        write_eval_results(&p, &baseline).unwrap();
+        assert_eq!(read_eval_results(&p).unwrap(), baseline);
+    }
 
     #[tokio::test]
     async fn r2_feedback_pending_skips_norpr_and_already_recorded() {
