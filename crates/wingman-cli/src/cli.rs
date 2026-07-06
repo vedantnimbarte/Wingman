@@ -307,6 +307,14 @@ pub enum PilotAction {
         #[arg(long, default_value_t = 0)]
         cycles: usize,
     },
+    /// R2 — post-merge feedback poller: for every run that opened a PR,
+    /// query its terminal state (`gh`) and record a `pr.outcome` event the
+    /// cross-run learner weights. Requires `gh` auth.
+    Feedback {
+        /// Run this many poll cycles then exit; 0 = run forever.
+        #[arg(long, default_value_t = 0)]
+        cycles: usize,
+    },
     /// Abort a live run (or one of its tasks) via the control channel.
     Abort {
         /// Run id; defaults to the most recently updated.
@@ -564,6 +572,10 @@ pub async fn run() -> Result<ExitCode> {
             PilotAction::Resume { run_id, no_pr } => {
                 let cfg = load_config()?;
                 commands::pilot::resume(cfg, run_id, no_pr, cli.model).await
+            }
+            PilotAction::Feedback { cycles } => {
+                let cfg = load_config()?;
+                commands::pilot::feedback(cfg, cycles).await
             }
             PilotAction::Daemon { cycles } => {
                 let cfg = load_config()?;

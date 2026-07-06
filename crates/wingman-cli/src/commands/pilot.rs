@@ -1418,6 +1418,105 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
     }
 }
 
+/// R2 — post-merge feedback poll. Each cycle walks every recorded run that
+/// opened a PR but has no recorded outcome yet, queries the PR's terminal
+/// state via `gh`, and appends a `pr.outcome` event (merged / reverted /
+/// hotfix-followed / closed) that the E6 cross-run learner later weights.
+/// `cycles == 0` runs forever on `[pilot.daemon].poll_interval_secs`; a
+/// positive value runs that many cycles then exits (CI / one-shot backfill).
+pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
+    use std::time::Duration;
+
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let interval = Duration::from_secs(cfg.pilot.daemon.poll_interval_secs.max(1));
+
+    eprintln!(
+        "[pilot] feedback poller starting (interval: {}s){}",
+        cfg.pilot.daemon.poll_interval_secs,
+        if cycles == 0 {
+            " — Ctrl-C to stop".to_string()
+        } else {
+            format!(" — {cycles} cycle(s)")
+        }
+    );
+
+    let mut n = 0usize;
+    loop {
+        let pending = feedback_pending_runs(&project.root).await;
+        if pending.is_empty() {
+            eprintln!("[pilot] feedback cycle {n}: no open PRs awaiting outcome");
+        }
+        for (dir, pr_url) in pending {
+            let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
+                    continue;
+                }
+            };
+            match wingman_autonomous::feedback::poll_and_record(
+                &runner,
+                &mut store,
+                &project.root,
+                &pr_url,
+            )
+            .await
+            {
+                Ok(Some(kind)) => {
+                    eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
+                }
+                Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
+                Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
+            }
+        }
+
+        n += 1;
+        if cycles != 0 && n >= cycles {
+            eprintln!("[pilot] feedback: completed {n} cycle(s), exiting.");
+            return Ok(ExitCode::SUCCESS);
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Runs that opened a PR (`pr_url` set) but have no `pr.outcome` event yet.
+/// Skipping already-recorded runs is the whole idempotency story — otherwise
+/// `poll_and_record` re-appends an outcome on every terminal poll.
+async fn feedback_pending_runs(
+    project_root: &std::path::Path,
+) -> Vec<(std::path::PathBuf, String)> {
+    let mut out = Vec::new();
+    let Ok(runs) = wingman_autonomous::dashboard::list_runs(project_root) else {
+        return out;
+    };
+    for r in runs {
+        let Ok(state) = wingman_autonomous::dashboard::load_state(&r.dir) else {
+            continue;
+        };
+        let Some(pr_url) = state.pr_url.clone() else {
+            continue;
+        };
+        // Skip runs that already have a recorded outcome.
+        let already = match wingman_autonomous::store::RunStore::load(&r.dir).await {
+            Ok(s) => s
+                .read_events()
+                .await
+                .map(|evs| {
+                    evs.iter().any(|e| {
+                        matches!(e, wingman_autonomous::model::Event::PrOutcome { .. })
+                    })
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        if !already {
+            out.push((r.dir, pr_url));
+        }
+    }
+    out
+}
+
 /// Load the `source\x01title` keys already present in the daemon queue so a
 /// restarted daemon doesn't re-queue or re-dispatch work it already handled.
 /// Missing/unreadable queue → empty set (nothing seen yet).
@@ -1465,6 +1564,48 @@ mod tests {
     use super::*;
     use wingman_autonomous::control::{append, ControlCommand};
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn r2_feedback_pending_skips_norpr_and_already_recorded() {
+        use wingman_autonomous::model::{Event, PrOutcomeKind};
+        use wingman_autonomous::store::RunStore;
+        let dir = tempfile::tempdir().unwrap();
+        let auto = dir.path().join(".wingman").join("autonomous");
+
+        async fn seed(auto: &std::path::Path, id: &str, pr: Option<&str>, recorded: bool) {
+            let mut s = RunStore::create(auto.join(id), id, "g", "base", "wingman/auto")
+                .await
+                .unwrap();
+            if let Some(url) = pr {
+                s.append(Event::RunPr {
+                    t: RunStore::now(),
+                    url: url.into(),
+                })
+                .await
+                .unwrap();
+            }
+            if recorded {
+                s.append(Event::PrOutcome {
+                    t: RunStore::now(),
+                    run_id: id.into(),
+                    kind: PrOutcomeKind::Merged,
+                    revert_sha: None,
+                    hours_to_revert: None,
+                    hotfix_pr: None,
+                    hours_to_hotfix: None,
+                })
+                .await
+                .unwrap();
+            }
+        }
+        seed(&auto, "run-open", Some("https://gh/pr/1"), false).await; // included
+        seed(&auto, "run-done", Some("https://gh/pr/2"), true).await; // skipped (recorded)
+        seed(&auto, "run-nopr", None, false).await; // skipped (no PR)
+
+        let pending = feedback_pending_runs(dir.path()).await;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1, "https://gh/pr/1");
+    }
 
     #[test]
     fn j2_load_queued_keys_dedups_by_source_and_title() {
