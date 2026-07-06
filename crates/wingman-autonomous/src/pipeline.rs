@@ -135,6 +135,9 @@ pub async fn run_to_completion(
     let integration_branch = state_at_start.integration_branch.clone();
     let project_root = inputs.project_root.clone();
     let run_id = state_at_start.run_id.clone();
+    // Captured before the cfg is moved into the orchestrator — J15's runtime
+    // cost trigger needs the cap at run end.
+    let max_usd = inputs.orchestrator_cfg.max_usd;
 
     let (handle, join) = orchestrator::spawn(store, inputs.orchestrator_cfg, inputs.worker_spawner);
 
@@ -335,7 +338,7 @@ pub async fn run_to_completion(
     // J15 — hard escalation triggers over the plan + integration diff
     // (dangerous-path-without-goal-mention, secrets, license-header edits).
     // Any blocking trigger vetoes auto-merge regardless of the other gates.
-    let escalation_triggers = detect_escalation_triggers(
+    let mut escalation_triggers = detect_escalation_triggers(
         inputs.command_runner.as_ref(),
         &project_root,
         &snapshot_for_pr.base_commit,
@@ -343,6 +346,27 @@ pub async fn run_to_completion(
         &snapshot_for_pr,
         &inputs.dangerous_paths,
     );
+    // J15 — fold the runtime escalation triggers (cost warn/halt, three
+    // consecutive related-run failures, irreversible-task-ran) into the same
+    // vec the E8 gate already vetoes on. `tests_before/after` stay `None`
+    // until a cargo-test counter exists (that's the one signal with no live
+    // producer); the other three fire from data already in scope.
+    // ponytail: no test-count capture — NetNegativeTests stays dormant until
+    // someone's willing to pay two full `cargo test` runs per pilot run.
+    let recent_run_outcomes = recent_run_outcomes(&project_root, &run_id);
+    escalation_triggers.extend(crate::escalation::check_runtime(
+        &crate::escalation::RuntimeSignals {
+            state: &snapshot_for_pr,
+            task: snapshot_for_pr
+                .tasks
+                .iter()
+                .find(|t| matches!(t.reversibility, crate::model::Reversibility::Irreversible)),
+            tests_before: None,
+            tests_after: None,
+            max_usd,
+            recent_run_outcomes: &recent_run_outcomes,
+        },
+    ));
     let dangerous_paths_touched = escalation_triggers.iter().any(|t| {
         matches!(
             t,
@@ -414,6 +438,13 @@ pub async fn run_to_completion(
         dangerous_paths_touched,
         &pr_outcome,
     );
+
+    // J8 — regenerate the durable project knowledge layer now that the run
+    // merged: an architecture map from the crates' `pub mod`s + one decision
+    // record. Best-effort; a knowledge write must never fail the run.
+    // ponytail: a plain function call, not a "knowledge-keeper agent" —
+    // render_architecture is deterministic; an LLM to invoke it is ceremony.
+    regenerate_knowledge(&project_root, &snapshot_for_pr);
 
     Ok(PipelineOutcome {
         merged: merge_outcome,
@@ -889,6 +920,100 @@ fn record_run_stats(
             tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append stat record");
         }
     }
+}
+
+/// J15 — the last-3 (run_id, ok) outcomes from run history, newest last,
+/// excluding the current run (still Running). Feeds
+/// [`crate::escalation::check_runtime`]'s RepeatedFailures trigger. Reads
+/// what `dashboard::load_all_run_states` already persists — no new store.
+fn recent_run_outcomes(
+    project_root: &std::path::Path,
+    current_run_id: &str,
+) -> Vec<(String, bool)> {
+    let mut states = crate::dashboard::load_all_run_states(project_root);
+    // run ids are timestamp-prefixed, so a lexical sort is chronological.
+    states.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    states
+        .into_iter()
+        .filter(|s| s.run_id != current_run_id)
+        .map(|s| (s.run_id, s.status == crate::model::RunStatus::Done))
+        .collect()
+}
+
+/// J8 — regenerate the durable knowledge layer under `.wingman/knowledge/`
+/// after a run merges: an `architecture.md` module map + one appended
+/// decision record. Best-effort; every failure is logged and swallowed so a
+/// knowledge write can never fail the run.
+fn regenerate_knowledge(project_root: &std::path::Path, state: &crate::model::RunState) {
+    let dir = crate::knowledge::knowledge_dir(project_root);
+
+    // Module map: each `crates/<name>/src/lib.rs` → its `pub mod`s.
+    let crates = discover_crate_modules(&project_root.join("crates"));
+    let arch = crate::knowledge::render_architecture(&crates);
+    if let Err(e) = std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join("architecture.md"), arch))
+    {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to write architecture.md");
+    }
+
+    // One decision record for the run: the goal is what was decided, the
+    // top task summaries the rationale.
+    let rationale = state
+        .tasks
+        .iter()
+        .filter_map(|t| t.outcome.as_ref().map(|o| o.summary.clone()))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let rec = crate::knowledge::DecisionRecord {
+        run_id: state.run_id.clone(),
+        t: RunStore::now(),
+        decision: state.goal.clone(),
+        rationale,
+    };
+    if let Err(e) = crate::knowledge::append_decision(&crate::knowledge::decisions_path(&dir), &rec)
+    {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append decision record");
+    }
+    // ponytail: hotspots are computed by knowledge::hotspots_from_observations
+    // but nothing reads a persisted hotspots file yet (the E4 scheduler takes
+    // them in-memory), so persisting one here would be write-only. Add it when
+    // the scheduler learns to load cross-run hotspots.
+}
+
+/// Walk `crates/*/src/lib.rs` and extract each crate's `pub mod <name>;`
+/// declarations. Pure-ish (reads the filesystem); returns
+/// `(crate_name, sorted module names)` for `render_architecture`.
+fn discover_crate_modules(crates_dir: &std::path::Path) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(crates_dir) else {
+        return out;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        let lib = e.path().join("src").join("lib.rs");
+        let Ok(src) = std::fs::read_to_string(&lib) else {
+            continue;
+        };
+        let mut mods: Vec<String> = src
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                l.strip_prefix("pub mod ")
+                    .map(|rest| rest.trim_end_matches(';').split_whitespace().next().unwrap_or(""))
+                    .filter(|m| !m.is_empty())
+                    .map(|m| m.to_string())
+            })
+            .collect();
+        mods.sort();
+        mods.dedup();
+        out.push((name, mods));
+    }
+    out
 }
 
 /// R3 — render + write the escalation packet for a blocked run. Returns
@@ -2104,6 +2229,30 @@ mod tests {
         assert!(s.iter().any(|(id, st)| id == "t1" && st == "Done"));
         assert!(s.iter().any(|(id, st)| id == "t2" && st == "Review"));
         assert!(s.iter().any(|(id, st)| id == "t3" && st == "Pending"));
+    }
+
+    #[test]
+    fn j8_discover_crate_modules_extracts_pub_mods() {
+        let tmp = tempfile::tempdir().unwrap();
+        let crates = tmp.path().join("crates");
+        let src = crates.join("wingman-foo").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            "//! doc\npub mod alpha;\nmod private;\n  pub mod beta ;\npub mod alpha;\n",
+        )
+        .unwrap();
+        // a non-crate file at the top level must be ignored
+        std::fs::write(crates.join("README"), "x").unwrap();
+
+        let got = discover_crate_modules(&crates);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "wingman-foo");
+        // deduped, sorted, private `mod` excluded
+        assert_eq!(got[0].1, vec!["alpha".to_string(), "beta".to_string()]);
+        // renders without panicking and names the crate
+        let md = crate::knowledge::render_architecture(&got);
+        assert!(md.contains("wingman-foo") && md.contains("alpha"));
     }
 
     // Silence unused-import warnings if the test gates above ever skip.
