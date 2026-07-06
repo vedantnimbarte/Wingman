@@ -253,14 +253,55 @@ pub async fn run_to_completion(
     let mut store = RunStore::load(&run_dir).await?;
 
     let merge_outcome = if need_merge {
-        let outcome = worktree::merge_integration(
+        match worktree::merge_integration(
             &project_root,
             &final_state.base_commit,
             &integration_branch,
             &final_state,
-        )?;
-        pr::finalize_all_review_tasks(&mut store, &final_state, &outcome.commits).await?;
-        Some(outcome)
+        ) {
+            Ok(outcome) => {
+                pr::finalize_all_review_tasks(&mut store, &final_state, &outcome.commits).await?;
+                Some(outcome)
+            }
+            Err(crate::worktree::WorktreeError::Conflict { task_id, files }) => {
+                // E4 auto-merge-fixer: a merge conflict no longer hard-errors
+                // the run. Record a merge-fixer task capturing the conflicted
+                // files so the conflict is structured, resumable work (a
+                // `pilot resume` picks it up), then write the R3 escalation
+                // packet and return a blocked outcome instead of a raw error.
+                // ponytail: this queues the fix as a visible task; fully
+                // autonomous live resolution (spawning a merge-fixer agent on
+                // the conflicted checkout and retrying the merge in-process)
+                // is the remaining provider-backed leaf — untestable headless.
+                tracing::warn!(
+                    target: "pilot::pipeline",
+                    task = %task_id, files = ?files,
+                    "merge conflict — recording a merge-fixer task and blocking the run"
+                );
+                record_merge_fixer_task(&mut store, &task_id, &files).await;
+                let blocked_state = store.state().clone();
+                let packet = write_escalation_packet(
+                    &project_root,
+                    &run_id,
+                    &blocked_state,
+                    inputs.tier,
+                    &[],
+                );
+                return Ok(PipelineOutcome {
+                    merged: None,
+                    pr: None,
+                    failed_tasks: vec![task_id],
+                    escalation_packet: packet,
+                    auto_merge: None,
+                    checkpoint_violations,
+                    reviews: Vec::new(),
+                    critic_vetoed: false,
+                    sandbox_tiers,
+                    escalation_triggers: Vec::new(),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
     } else {
         // Manager finalized tasks incrementally. The integration branch
         // may not exist yet (orchestrator.handle_finalize emits a
@@ -919,6 +960,39 @@ fn record_run_stats(
         if let Err(e) = crate::learning::append_stat(stats_path, &rec) {
             tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append stat record");
         }
+    }
+}
+
+/// E4 — record a merge-fixer task on a merge conflict. Appends a
+/// `task.create` for a [`crate::model::Role::MergeFixer`] whose `writes` are
+/// the conflicted files and whose goal points at the conflicting task, so the
+/// conflict is durable, resumable work rather than a lost hard error.
+/// Best-effort: a failed append is logged, not surfaced (the run is already
+/// blocking on the conflict).
+async fn record_merge_fixer_task(
+    store: &mut RunStore,
+    conflicting_task_id: &str,
+    files: &[String],
+) {
+    let id = format!("merge-fixer-{conflicting_task_id}");
+    let ev = crate::Event::TaskCreate {
+        t: RunStore::now(),
+        id,
+        role: crate::model::Role::MergeFixer,
+        title: format!("Resolve merge conflict from task {conflicting_task_id}"),
+        goal: format!(
+            "Task {conflicting_task_id} conflicts with earlier integration work in: {}. \
+             Resolve the conflict preserving both sides' intent, re-run acceptance, and commit.",
+            files.join(", ")
+        ),
+        deps: Vec::new(),
+        writes: files.to_vec(),
+        acceptance: Vec::new(),
+        reversibility: Default::default(),
+        reversibility_reason: None,
+    };
+    if let Err(e) = store.append(ev).await {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to record merge-fixer task");
     }
 }
 
@@ -2230,6 +2304,28 @@ mod tests {
         assert!(s.iter().any(|(id, st)| id == "t1" && st == "Done"));
         assert!(s.iter().any(|(id, st)| id == "t2" && st == "Review"));
         assert!(s.iter().any(|(id, st)| id == "t3" && st == "Pending"));
+    }
+
+    #[tokio::test]
+    async fn e4_record_merge_fixer_task_captures_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = RunStore::create(
+            dir.path().join(".wingman/autonomous/mf-run"),
+            "mf-run",
+            "g",
+            "base",
+            "wingman/auto/mf-run",
+        )
+        .await
+        .unwrap();
+        record_merge_fixer_task(&mut store, "t2", &["src/a.rs".into(), "src/b.rs".into()]).await;
+        let t = store
+            .state()
+            .task("merge-fixer-t2")
+            .expect("merge-fixer task recorded");
+        assert_eq!(t.role, crate::model::Role::MergeFixer);
+        assert_eq!(t.writes, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        assert!(t.goal.contains("t2") && t.goal.contains("src/a.rs"));
     }
 
     #[test]
