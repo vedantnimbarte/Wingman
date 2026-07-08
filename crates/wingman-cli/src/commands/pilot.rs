@@ -1937,8 +1937,8 @@ mod tests {
         .unwrap();
         let keys = load_queued_keys(&path);
         assert_eq!(keys.len(), 2); // same title, different source ⇒ distinct
-        assert!(keys.contains(&"github_issues\u{1}fix bug".to_string()));
-        assert!(keys.contains(&"todos\u{1}fix bug".to_string()));
+        assert!(keys.contains("github_issues\u{1}fix bug"));
+        assert!(keys.contains("todos\u{1}fix bug"));
     }
 
     #[tokio::test]

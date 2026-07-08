@@ -1,0 +1,40 @@
+name: ci
+
+# Build, lint, and test the workspace on every PR and every push to main.
+# This is the required status check for the protected `main` branch.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel a stale run when new commits land on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test
+    # ubuntu-24.04 ships glibc 2.39: wingman embeds ONNX Runtime (fastembed
+    # -> ort), whose prebuilt binary needs glibc >= 2.38 to link — same floor
+    # as the release build.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --workspace
