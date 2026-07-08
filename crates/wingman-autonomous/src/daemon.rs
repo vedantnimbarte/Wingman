@@ -133,6 +133,57 @@ pub fn fetch_issue_candidates(
     Ok(candidates)
 }
 
+/// Cap on how many TODO/FIXME markers one poll surfaces, so a repo with
+/// hundreds of them doesn't flood the queue in a single cycle.
+const MAX_TODO_CANDIDATES: usize = 20;
+
+/// Local discovery source: scan the working tree for `TODO`/`FIXME`
+/// markers via `git grep` (respects `.gitignore`, no network) and map each
+/// to a [`Candidate`]. Unlike `github_issues` these carry no external
+/// author, so trust is [`TrustLevel::Known`] — they surface as proposals
+/// but never auto-run.
+pub fn fetch_todo_candidates(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<Vec<Candidate>, String> {
+    let out = runner
+        .run(
+            "git",
+            &["grep", "-n", "-I", "-E", "TODO|FIXME"],
+            repo_root,
+        )
+        .map_err(|e| format!("git grep failed: {e}"))?;
+    // git grep exits 1 with no matches — that's not an error, just no work.
+    if !out.success() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for line in out.stdout.lines() {
+        // Format: `path:linenum:content`.
+        let mut parts = line.splitn(3, ':');
+        let (Some(path), Some(_lineno), Some(content)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let title = content.trim();
+        let title = title.strip_prefix("//").unwrap_or(title).trim();
+        candidates.push(Candidate {
+            source: format!("todo:{path}"),
+            title: title.to_string(),
+            // A loose marker: modest value, medium confidence, low risk.
+            value: 0.4,
+            confidence: 0.5,
+            risk: 0.3,
+            trust: TrustLevel::Known,
+        });
+        if candidates.len() >= MAX_TODO_CANDIDATES {
+            break;
+        }
+    }
+    Ok(candidates)
+}
+
 /// J2 discovery cycle: one full pass of the daemon — fetch candidates
 /// from the configured sources, rank them, and decide an action for each.
 /// The infinite scheduling (sleep `poll_interval_secs`, repeat) is trivial
@@ -154,6 +205,11 @@ pub fn run_cycle(
             {
                 candidates.extend(found);
             }
+        }
+    }
+    if cfg.sources.iter().any(|s| s == "todos") {
+        if let Ok(found) = fetch_todo_candidates(runner, repo_root) {
+            candidates.extend(found);
         }
     }
     rank(candidates)
@@ -276,6 +332,52 @@ mod tests {
                 stderr: String::new(),
             })
         }
+    }
+
+    struct FakeTodoGrep;
+    impl CommandRunner for FakeTodoGrep {
+        fn run(&self, program: &str, args: &[&str], _cwd: &StdPath) -> std::io::Result<CommandOut> {
+            let stdout = if program == "git" && args.first().copied() == Some("grep") {
+                "src/a.rs:12:    // TODO: handle empty input\nsrc/b.rs:3:// FIXME broken parse\n"
+                    .to_string()
+            } else {
+                String::new()
+            };
+            Ok(CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_todo_candidates_parses_and_marks_known() {
+        let cands = fetch_todo_candidates(&FakeTodoGrep, StdPath::new(".")).unwrap();
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].source, "todo:src/a.rs");
+        assert_eq!(cands[0].title, "TODO: handle empty input");
+        // Local markers never carry enough trust to auto-run.
+        assert!(cands.iter().all(|c| c.trust == TrustLevel::Known));
+        assert!(cands.iter().all(|c| decide(c, 0.75, 0.3) != DaemonAction::AutoRun));
+    }
+
+    struct NoMatchGrep;
+    impl CommandRunner for NoMatchGrep {
+        fn run(&self, _p: &str, _a: &[&str], _cwd: &StdPath) -> std::io::Result<CommandOut> {
+            // git grep exits 1 with no matches.
+            Ok(CommandOut {
+                status: Some(1),
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn fetch_todo_candidates_empty_on_no_matches() {
+        let cands = fetch_todo_candidates(&NoMatchGrep, StdPath::new(".")).unwrap();
+        assert!(cands.is_empty());
     }
 
     #[test]

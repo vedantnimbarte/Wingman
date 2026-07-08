@@ -63,7 +63,7 @@ impl Tool for EditFile {
             return ToolOutcome::err(format!(
                 "edit denied for {} under permission mode {}",
                 path.display(),
-                ctx.mode
+                ctx.mode()
             ));
         }
 

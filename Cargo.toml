@@ -21,7 +21,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-org/wingman"
+repository = "https://github.com/vedantnimbarte/Wingman"
 authors = ["wingman contributors"]
 
 [workspace.dependencies]

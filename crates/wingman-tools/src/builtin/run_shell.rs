@@ -50,7 +50,7 @@ impl Tool for RunShell {
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
         if !ctx.allows_shell() {
-            return ToolOutcome::err(format!("shell denied under permission mode {}", ctx.mode));
+            return ToolOutcome::err(format!("shell denied under permission mode {}", ctx.mode()));
         }
         if ctx.is_shell_denied(&args.command) {
             return ToolOutcome::err(format!(

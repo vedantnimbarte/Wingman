@@ -1545,10 +1545,10 @@ impl Default for PilotDaemonConfig {
             trusted_authors: Vec::new(),
             trusted_labels: vec!["wingman:auto".into()],
             auto_dispatch: false,
-            // Only `github_issues` has a live discovery path today. The other
-            // sources (ci_failures, dependabot, todos, coverage_gaps) are
-            // planned but unimplemented, so the default no longer advertises
-            // them — the daemon warns if you configure one that doesn't exist.
+            // `github_issues` and `todos` have live discovery paths. The
+            // rest (ci_failures, dependabot, coverage_gaps) are planned but
+            // unimplemented, so the default doesn't advertise them — the
+            // daemon warns if you configure one that doesn't exist.
             sources: vec!["github_issues".into()],
             webhook_secret: None,
         }

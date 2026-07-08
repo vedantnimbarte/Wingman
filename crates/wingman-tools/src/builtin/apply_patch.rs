@@ -101,7 +101,7 @@ impl Tool for ApplyPatch {
                         return ToolOutcome::err(format!(
                             "write denied for {} under permission mode {}",
                             path.display(),
-                            ctx.mode
+                            ctx.mode()
                         ));
                     }
                     let original = match tokio::fs::read_to_string(path).await {
@@ -128,7 +128,7 @@ impl Tool for ApplyPatch {
                         return ToolOutcome::err(format!(
                             "write denied for {} under permission mode {}",
                             path.display(),
-                            ctx.mode
+                            ctx.mode()
                         ));
                     }
                     if path.exists() {
@@ -144,7 +144,7 @@ impl Tool for ApplyPatch {
                         return ToolOutcome::err(format!(
                             "write denied for {} under permission mode {}",
                             path.display(),
-                            ctx.mode
+                            ctx.mode()
                         ));
                     }
                     if !path.exists() {

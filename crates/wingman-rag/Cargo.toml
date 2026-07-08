@@ -30,7 +30,16 @@ rusqlite = { version = "0.31", features = ["bundled", "blob"] }
 
 # Embeddings (fastembed downloads ONNX models on first use; gated by feature
 # so the rest of the workspace builds without ONNX runtime present).
-fastembed = { version = "5", optional = true }
+# Pin the rustls TLS variants instead of fastembed's native-tls defaults:
+# native-tls pulls `openssl-sys`, whose C build fails on the musl / cross
+# release targets (and stalls macOS), which is what broke the prebuilt-binary
+# release. rustls is pure-Rust and cross-compiles cleanly. Mirrors the
+# default feature set (image-models) minus the TLS backend swap.
+fastembed = { version = "5", optional = true, default-features = false, features = [
+    "ort-download-binaries-rustls-tls",
+    "hf-hub-rustls-tls",
+    "image-models",
+] }
 
 # Tree-sitter-aware chunking. Gated so callers can opt out of the C
 # toolchain dependency.

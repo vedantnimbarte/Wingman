@@ -299,6 +299,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             tier: pilot.tier,
             force_auto: opts.yes,
             force_hard: opts.review,
+            estimate: Some(&estimate),
         });
     // R1 reversibility enforcement: layer the per-tier reversibility
     // gate over E1's trust decision. An irreversible task always forces a
@@ -1348,7 +1349,7 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
     // Honesty check: only `github_issues` has a live discovery path. Warn
     // (don't fail) for any configured source we can't actually poll, so the
     // daemon doesn't look broken when it silently finds nothing.
-    const IMPLEMENTED_SOURCES: &[&str] = &["github_issues"];
+    const IMPLEMENTED_SOURCES: &[&str] = &["github_issues", "todos"];
     for s in &pilot.daemon.sources {
         if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
             eprintln!(

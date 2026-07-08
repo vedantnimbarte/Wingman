@@ -60,6 +60,11 @@ pub type AgentBuilder = Arc<
         + Sync,
 >;
 
+/// Closure the host registers so `/mode` can re-gate the live session's
+/// tools. Applies the new [`PermissionMode`] to the running agent's shared
+/// tool registry; a no-op host closure means "display only".
+pub type ModeSetter = Arc<dyn Fn(wingman_config::PermissionMode) + Send + Sync>;
+
 /// Closure the host registers so the `/login` modal can ask it to perform
 /// async work (probe a freshly-entered key, persist credentials, etc.)
 /// without the TUI crate having to depend on `wingman-providers` or
@@ -96,6 +101,7 @@ pub struct AppCtx {
     pub mcp_runner: McpRunner,
     pub mcp_list_runner: McpListRunner,
     pub models_runner: ModelsRunner,
+    pub mode_setter: ModeSetter,
 }
 
 pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
@@ -291,13 +297,15 @@ fn connected_provider_ids(active: &str) -> Vec<String> {
 /// normalises `raw` via [`wingman_config::PermissionMode`]; on an unknown
 /// value it surfaces an error and leaves the current mode unchanged. Shared
 /// by the `/mode <name>` direct path and the `/mode` picker.
-fn apply_mode(ui: &mut UiState, raw: &str) {
+fn apply_mode(ui: &mut UiState, raw: &str, mode_setter: &ModeSetter) {
     match raw.parse::<wingman_config::PermissionMode>() {
         Ok(mode) => {
             let normalized = mode.to_string();
             ui.status.mode = normalized.clone();
+            // Re-gate the running agent's tools, not just the status line.
+            mode_setter(mode);
             ui.transcript.push(TranscriptItem::System(format!(
-                "mode set to {normalized} (display only for now)"
+                "mode set to {normalized}"
             )));
         }
         Err(e) => {
@@ -675,7 +683,7 @@ async fn idle_step(
                                     }
                                     ActiveModal::ModePicker(p) => {
                                         if let Some(mode) = p.take_selected() {
-                                            apply_mode(ui, &mode);
+                                            apply_mode(ui, &mode, &ctx.mode_setter);
                                         }
                                     }
                                     ActiveModal::Skills(v) => {
@@ -778,7 +786,7 @@ async fn idle_step(
                                     ActiveModal::ModePicker(ModePicker::new(&ui.status.mode));
                             }
                             Cmd::Mode(Some(arg)) => {
-                                apply_mode(ui, &arg);
+                                apply_mode(ui, &arg, &ctx.mode_setter);
                             }
                             Cmd::Model(None) => {
                                 let connected = connected_provider_ids(&ui.status.provider);
