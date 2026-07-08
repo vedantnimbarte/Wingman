@@ -43,13 +43,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ubuntu-22.04 (glibc 2.35) for broad compatibility on the native
-          # x86_64 build; the aarch64 build cross-compiles in an older
-          # container via `cross`, so its glibc floor is lower still.
+          # Build both Linux targets NATIVELY (no `cross`) on new-glibc
+          # runners. ort's prebuilt ONNX Runtime is compiled against glibc
+          # >= 2.38 (it references __isoc23_* symbols), so an older runner
+          # can't link it and `cross`'s container can't fetch the aarch64
+          # binary at all. ubuntu-24.04 (x64) and ubuntu-24.04-arm (aarch64,
+          # free on public repos) both ship glibc 2.39. Consequence: the
+          # Linux binaries require glibc >= 2.38 — documented in the README.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
             os: macos-13
           - target: aarch64-apple-darwin
@@ -62,10 +66,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      # taiki-e's action builds the binary (using `cross` for the aarch64
-      # cross-compile target), archives it, generates a SHA256 checksum, and
-      # uploads everything to the release for this tag. `archive` fixes the
-      # asset name so install.sh can predict the download URL.
+      # taiki-e's action builds the binary natively for the runner's target,
+      # archives it, generates a SHA256 checksum, and uploads everything to
+      # the release for this tag. `archive` fixes the asset name so
+      # install.sh can predict the download URL.
       - name: Build and upload
         uses: taiki-e/upload-rust-binary-action@v1
         with:
