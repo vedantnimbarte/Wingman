@@ -22,7 +22,7 @@ os="$(uname -s)"
 arch="$(uname -m)"
 
 case "$os" in
-  Linux)  os_part="unknown-linux-musl" ;;
+  Linux)  os_part="unknown-linux-gnu" ;;
   Darwin) os_part="apple-darwin" ;;
   *) err "unsupported OS '$os'. On Windows use scripts/install.ps1 instead." ;;
 esac
