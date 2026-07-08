@@ -831,6 +831,21 @@ pub async fn run() -> Result<ExitCode> {
                     })
                 });
 
+            // Live permission-mode setter: `/mode` re-gates the running
+            // agent by flipping the mode on the shared ToolRegistry (via the
+            // current McpRegistry). No-op until a provider is active.
+            let mcp_handle_for_mode = mcp_handle.clone();
+            let mode_setter: wingman_tui::ModeSetter =
+                std::sync::Arc::new(move |mode: wingman_config::PermissionMode| {
+                    if let Some(mcp) = mcp_handle_for_mode
+                        .lock()
+                        .expect("mcp_handle poisoned")
+                        .as_ref()
+                    {
+                        mcp.set_mode(mode);
+                    }
+                });
+
             let (provider_id, model) = selection
                 .as_ref()
                 .map(|s| (s.provider_id.clone(), s.model.clone()))
@@ -847,6 +862,7 @@ pub async fn run() -> Result<ExitCode> {
                 mcp_runner,
                 mcp_list_runner,
                 models_runner,
+                mode_setter,
             };
             wingman_tui::init_theme(&cfg.tui);
             wingman_tui::run(agent, ctx).await?;

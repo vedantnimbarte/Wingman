@@ -55,7 +55,7 @@ impl Tool for ReadFile {
                 "read denied for {} — outside the project tree under permission mode {} \
                  (use --yolo to allow reads anywhere)",
                 path.display(),
-                ctx.mode
+                ctx.mode()
             ));
         }
         let bytes = match tokio::fs::read(&path).await {

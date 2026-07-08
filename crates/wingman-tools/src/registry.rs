@@ -78,6 +78,13 @@ impl ToolRegistry {
         &self.ctx
     }
 
+    /// Switch the permission mode live. Takes `&self` (the mode lives behind
+    /// an atomic in [`ToolCtx`]) so it works through the `Arc<ToolRegistry>`
+    /// the running agent shares — the next tool call is gated by `mode`.
+    pub fn set_mode(&self, mode: wingman_config::PermissionMode) {
+        self.ctx.set_mode(mode);
+    }
+
     pub fn with_builtins(mut self) -> Self {
         self.register(crate::builtin::ReadFile);
         self.register(crate::builtin::WriteFile);

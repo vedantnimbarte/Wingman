@@ -1,9 +1,15 @@
 use wingman_config::PermissionMode;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
-    pub mode: PermissionMode,
+    /// Permission mode, held behind an atomic so a live session (e.g. the
+    /// TUI `/mode` picker) can re-gate the running agent's tools without
+    /// rebuilding the registry. Cloning a `ToolCtx` shares the same cell, so
+    /// a `set_mode` on any handle flips enforcement everywhere it's shared.
+    mode: Arc<AtomicU8>,
     pub cwd: PathBuf,
     pub project_root: PathBuf,
     /// Extra shell command patterns that are always denied, even in yolo mode.
@@ -12,10 +18,31 @@ pub struct ToolCtx {
     pub extra_denylist: Vec<String>,
 }
 
+/// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
+/// so the config enum stays free of storage concerns; an unknown byte
+/// decodes to the safe default (`ReadOnly`).
+fn mode_to_u8(m: PermissionMode) -> u8 {
+    match m {
+        PermissionMode::ReadOnly => 0,
+        PermissionMode::Plan => 1,
+        PermissionMode::AutoEdit => 2,
+        PermissionMode::Yolo => 3,
+    }
+}
+
+fn mode_from_u8(b: u8) -> PermissionMode {
+    match b {
+        1 => PermissionMode::Plan,
+        2 => PermissionMode::AutoEdit,
+        3 => PermissionMode::Yolo,
+        _ => PermissionMode::ReadOnly,
+    }
+}
+
 impl ToolCtx {
     pub fn new(mode: PermissionMode, cwd: PathBuf, project_root: PathBuf) -> Self {
         Self {
-            mode,
+            mode: Arc::new(AtomicU8::new(mode_to_u8(mode))),
             cwd,
             project_root,
             extra_denylist: Vec::new(),
@@ -30,11 +57,22 @@ impl ToolCtx {
         extra_denylist: Vec<String>,
     ) -> Self {
         Self {
-            mode,
+            mode: Arc::new(AtomicU8::new(mode_to_u8(mode))),
             cwd,
             project_root,
             extra_denylist,
         }
+    }
+
+    /// Current permission mode.
+    pub fn mode(&self) -> PermissionMode {
+        mode_from_u8(self.mode.load(Ordering::SeqCst))
+    }
+
+    /// Switch the permission mode live. Shared across clones of this ctx, so
+    /// the running agent's next tool call is gated by the new mode.
+    pub fn set_mode(&self, mode: PermissionMode) {
+        self.mode.store(mode_to_u8(mode), Ordering::SeqCst);
     }
 
     /// Returns `true` if `command` matches any entry in the project-level
@@ -96,7 +134,7 @@ impl ToolCtx {
 
     /// Permission for a write/edit operation on `path`.
     pub fn allows_write(&self, path: &Path) -> bool {
-        match self.mode {
+        match self.mode() {
             PermissionMode::Yolo => true,
             PermissionMode::AutoEdit => self.is_inside_project(path),
             PermissionMode::ReadOnly | PermissionMode::Plan => false,
@@ -110,7 +148,7 @@ impl ToolCtx {
     /// pull `~/.ssh/id_rsa`, `~/.aws/credentials`, etc. into tool output and
     /// exfiltrate them. `Yolo` is the explicit "no guardrails" escape hatch.
     pub fn allows_read(&self, path: &Path) -> bool {
-        match self.mode {
+        match self.mode() {
             PermissionMode::Yolo => true,
             PermissionMode::ReadOnly | PermissionMode::Plan | PermissionMode::AutoEdit => {
                 self.is_inside_project(path)
@@ -120,7 +158,7 @@ impl ToolCtx {
 
     /// Permission for any shell execution.
     pub fn allows_shell(&self) -> bool {
-        matches!(self.mode, PermissionMode::AutoEdit | PermissionMode::Yolo)
+        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
     }
 }
 
@@ -390,6 +428,25 @@ mod tests {
             PathBuf::from("/tmp"),
             patterns.iter().map(|s| s.to_string()).collect(),
         )
+    }
+
+    #[test]
+    fn set_mode_re_gates_live_and_is_shared_across_clones() {
+        let ctx = ToolCtx::new(
+            PermissionMode::ReadOnly,
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"),
+        );
+        assert_eq!(ctx.mode(), PermissionMode::ReadOnly);
+        assert!(!ctx.allows_shell());
+        assert!(!ctx.allows_write(Path::new("/tmp/x")));
+
+        // A clone (as the running agent's registry holds) sees the switch.
+        let shared = ctx.clone();
+        ctx.set_mode(PermissionMode::AutoEdit);
+        assert_eq!(shared.mode(), PermissionMode::AutoEdit);
+        assert!(shared.allows_shell());
+        assert!(shared.allows_write(Path::new("/tmp/x")));
     }
 
     #[test]

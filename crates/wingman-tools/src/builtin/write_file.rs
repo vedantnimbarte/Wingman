@@ -42,7 +42,7 @@ impl Tool for WriteFile {
             return ToolOutcome::err(format!(
                 "write denied for {} under permission mode {}",
                 path.display(),
-                ctx.mode
+                ctx.mode()
             ));
         }
         if let Some(parent) = path.parent() {

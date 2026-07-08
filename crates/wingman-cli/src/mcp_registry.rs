@@ -55,6 +55,13 @@ impl McpRegistry {
         }
     }
 
+    /// Switch the permission mode on the shared `ToolRegistry` — the same
+    /// one the running agent dispatches through, so `/mode` re-gates tools
+    /// mid-session.
+    pub fn set_mode(&self, mode: wingman_config::PermissionMode) {
+        self.tools.set_mode(mode);
+    }
+
     /// Seed the registry from an already-loaded config + best-effort
     /// connect-all (the runtime does this at startup so the TUI can later
     /// see what's there).

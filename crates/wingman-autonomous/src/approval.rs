@@ -50,6 +50,12 @@ pub struct ClassifyInputs<'a> {
     pub force_auto: bool,
     /// True when the user passed `--review`.
     pub force_hard: bool,
+    /// J9 cost/risk band for this plan. When present, auto-approval gates on
+    /// its **upper bound** (worst-case) — the only honest basis for firing
+    /// without asking — and the reported cost is the band's point estimate.
+    /// `None` falls back to the static per-role point estimate
+    /// ([`estimate_plan_cost_usd`]).
+    pub estimate: Option<&'a crate::estimate::Estimate>,
 }
 
 /// Human-readable justification of why the classifier landed where it
@@ -74,13 +80,20 @@ pub struct ClassificationReport {
 /// responsible for surfacing the result to the user (notification or
 /// prompt).
 pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
+    // Reported cost: the J9 band's point estimate when we have one, else the
+    // static per-role placeholder. Used for display/audit on every path.
+    let reported_usd = inputs
+        .estimate
+        .map(|e| e.usd_point)
+        .unwrap_or_else(|| estimate_plan_cost_usd(inputs.plan));
+
     // Override precedence: --review wins over --yes wins over tier
     // defaults. assist always lands in Hard regardless of risk.
     if inputs.force_hard {
         return ClassificationReport {
             tier: ApprovalTier::Hard,
             reason: "--review forced hard gate".into(),
-            estimated_usd: estimate_plan_cost_usd(inputs.plan),
+            estimated_usd: reported_usd,
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
             out_of_allowlist: writes_outside_allowlist(
                 inputs.plan,
@@ -92,7 +105,7 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
         return ClassificationReport {
             tier: ApprovalTier::Hard,
             reason: "assist tier always uses hard gate".into(),
-            estimated_usd: estimate_plan_cost_usd(inputs.plan),
+            estimated_usd: reported_usd,
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
             out_of_allowlist: writes_outside_allowlist(
                 inputs.plan,
@@ -106,7 +119,7 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
         return ClassificationReport {
             tier: ApprovalTier::Auto,
             reason: "--yes forced auto-approve".into(),
-            estimated_usd: estimate_plan_cost_usd(inputs.plan),
+            estimated_usd: reported_usd,
             dangerous_hits: matches_globs(inputs.plan, &inputs.config.dangerous_paths),
             out_of_allowlist: writes_outside_allowlist(
                 inputs.plan,
@@ -116,7 +129,7 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
     }
 
     // Compute the signals.
-    let estimated_usd = estimate_plan_cost_usd(inputs.plan);
+    let estimated_usd = reported_usd;
     let dangerous_hits = matches_globs(inputs.plan, &inputs.config.dangerous_paths);
     let out_of_allowlist = writes_outside_allowlist(inputs.plan, &inputs.config.auto_approve_globs);
     let task_count = inputs.plan.len() as u32;
@@ -136,7 +149,14 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
         };
     }
 
-    let cheap_enough = estimated_usd < inputs.config.auto_approve_usd;
+    // Auto-approval gates on the worst-case cost when we have a band (J9
+    // §"confidence bands matter more"): auto-fire only when even the upper
+    // bound clears the cap. With no band, fall back to the point estimate.
+    let cap = inputs.config.auto_approve_usd;
+    let cheap_enough = match inputs.estimate {
+        Some(e) => e.upper_bound_under(cap),
+        None => estimated_usd < cap,
+    };
     let small_enough = task_count <= inputs.config.auto_approve_max_tasks;
     let allowlisted = out_of_allowlist.is_empty();
 
@@ -159,10 +179,15 @@ pub fn classify(inputs: ClassifyInputs<'_>) -> ClassificationReport {
     // which is the M1 behaviour.
     let mut reasons = Vec::new();
     if !cheap_enough {
-        reasons.push(format!(
-            "estimated cost ${estimated_usd:.2} > ${cap:.2}",
-            cap = inputs.config.auto_approve_usd
-        ));
+        // Report the figure the gate actually tripped on: the band's upper
+        // bound when we have one, else the point estimate.
+        let tripped = inputs.estimate.map(|e| e.usd_high).unwrap_or(estimated_usd);
+        let basis = if inputs.estimate.is_some() {
+            "worst-case cost"
+        } else {
+            "estimated cost"
+        };
+        reasons.push(format!("{basis} ${tripped:.2} > ${cap:.2}"));
     }
     if !small_enough {
         reasons.push(format!(
@@ -346,6 +371,7 @@ mod tests {
             tier: PilotTier::Copilot,
             force_auto: false,
             force_hard: false,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::Hard);
         assert!(report.reason.contains("dangerous_paths"));
@@ -360,6 +386,7 @@ mod tests {
             tier: PilotTier::Assist,
             force_auto: false,
             force_hard: false,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::Hard);
         assert!(report.reason.contains("assist tier"));
@@ -382,6 +409,7 @@ mod tests {
             tier: PilotTier::Assist,
             force_auto: true,
             force_hard: false,
+            estimate: None,
         });
         // Plan.md is ambiguous; we pick "assist tier wins" (safer).
         assert_eq!(report.tier, ApprovalTier::Hard);
@@ -396,6 +424,7 @@ mod tests {
             tier: PilotTier::Autopilot,
             force_auto: true,
             force_hard: true,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::Hard);
         assert!(report.reason.contains("--review"));
@@ -417,6 +446,7 @@ mod tests {
             tier: PilotTier::Copilot,
             force_auto: false,
             force_hard: false,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::Auto);
         assert!(report.dangerous_hits.is_empty());
@@ -443,6 +473,7 @@ mod tests {
             tier: PilotTier::Copilot,
             force_auto: false,
             force_hard: false,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::NotifyOnly);
         assert!(report.reason.contains("estimated cost") || report.reason.contains("tasks >"));
@@ -457,8 +488,59 @@ mod tests {
             tier: PilotTier::Copilot,
             force_auto: false,
             force_hard: false,
+            estimate: None,
         });
         assert_eq!(report.tier, ApprovalTier::NotifyOnly);
         assert!(report.reason.contains("auto_approve_globs"));
+    }
+
+    fn band(point: f64, high: f64) -> crate::estimate::Estimate {
+        crate::estimate::Estimate {
+            task_count: 1,
+            usd_low: 0.0,
+            usd_point: point,
+            usd_high: high,
+            wall_min_low: 1.0,
+            wall_min_high: 2.0,
+            risk: crate::estimate::RiskLevel::Low,
+            confidence: crate::estimate::Confidence::Low,
+            sample_count: 0,
+        }
+    }
+
+    #[test]
+    fn band_upper_bound_gates_auto_approval() {
+        // Point estimate is well under the $1 cap, but the worst-case upper
+        // bound exceeds it — auto-approval must NOT fire (J9 §upper bound).
+        let plan = vec![task("t1", Role::Developer, vec!["crates/x/src/a.rs"])];
+        let cfg = PilotApprovalConfig {
+            auto_approve_globs: vec!["crates/**/*.rs".into()],
+            ..default_config()
+        };
+        let est = band(0.30, 1.20);
+        let report = classify(ClassifyInputs {
+            plan: &plan,
+            config: &cfg,
+            tier: PilotTier::Copilot,
+            force_auto: false,
+            force_hard: false,
+            estimate: Some(&est),
+        });
+        assert_eq!(report.tier, ApprovalTier::NotifyOnly);
+        assert!(report.reason.contains("worst-case cost"));
+        // Reported cost is the point estimate, not the placeholder.
+        assert!((report.estimated_usd - 0.30).abs() < 1e-9);
+
+        // Same plan, band fully under the cap → auto-approves.
+        let est = band(0.30, 0.90);
+        let report = classify(ClassifyInputs {
+            plan: &plan,
+            config: &cfg,
+            tier: PilotTier::Copilot,
+            force_auto: false,
+            force_hard: false,
+            estimate: Some(&est),
+        });
+        assert_eq!(report.tier, ApprovalTier::Auto);
     }
 }
