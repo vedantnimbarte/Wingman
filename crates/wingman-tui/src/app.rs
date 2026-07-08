@@ -521,39 +521,33 @@ async fn run_modal_task(
             ui.modal.task_completed(result.clone());
 
             if was_commit {
-                match result {
-                    Ok(()) => {
-                        let payload = payload_after.expect("commit task carries payload");
-                        ui.status.provider = payload.provider_id.clone();
-                        ui.status.model = payload.model.clone();
-                        ui.modal = ActiveModal::None;
-                        ui.transcript.push(TranscriptItem::System(format!(
-                            "saving credentials for {}/{}…",
-                            payload.provider_id, payload.model
-                        )));
+                if let Ok(()) = result {
+                    let payload = payload_after.expect("commit task carries payload");
+                    ui.status.provider = payload.provider_id.clone();
+                    ui.status.model = payload.model.clone();
+                    ui.modal = ActiveModal::None;
+                    ui.transcript.push(TranscriptItem::System(format!(
+                        "saving credentials for {}/{}…",
+                        payload.provider_id, payload.model
+                    )));
 
-                        match (ctx.agent_builder)(
-                            payload.provider_id.clone(),
-                            payload.model.clone(),
-                        )
+                    match (ctx.agent_builder)(payload.provider_id.clone(), payload.model.clone())
                         .await
-                        {
-                            Ok(new_agent) => {
-                                *agent = Some(new_agent);
-                                ui.status.connected = true;
-                                ui.transcript.push(TranscriptItem::System(format!(
-                                    "connected to {}/{}",
-                                    payload.provider_id, payload.model
-                                )));
-                            }
-                            Err(e) => {
-                                ui.transcript.push(TranscriptItem::System(format!(
-                                    "failed to build agent: {e}"
-                                )));
-                            }
+                    {
+                        Ok(new_agent) => {
+                            *agent = Some(new_agent);
+                            ui.status.connected = true;
+                            ui.transcript.push(TranscriptItem::System(format!(
+                                "connected to {}/{}",
+                                payload.provider_id, payload.model
+                            )));
+                        }
+                        Err(e) => {
+                            ui.transcript.push(TranscriptItem::System(format!(
+                                "failed to build agent: {e}"
+                            )));
                         }
                     }
-                    Err(_) => {}
                 }
             }
         }
