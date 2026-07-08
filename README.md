@@ -447,8 +447,9 @@ it on your `PATH` (default `~/.local/bin`; override with
 `WINGMAN_INSTALL_DIR`, pin a tag with `VERSION=v0.1.0`). Then run
 `wingman --help`.
 
-Supported prebuilt targets: Linux x86_64/aarch64 (gnu), macOS
-x86_64/Apple-silicon, Windows x86_64.
+Supported prebuilt targets: Linux x86_64/aarch64 (gnu, glibc >= 2.38 —
+e.g. Ubuntu 24.04+, Debian 13+, Fedora 39+; on older distros build from
+source), macOS x86_64/Apple-silicon, Windows x86_64.
 
 ### With Rust already installed
 
