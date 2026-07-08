@@ -34,6 +34,14 @@ case "$arch" in
 esac
 
 target="${arch_part}-${os_part}"
+
+# No prebuilt binary for Intel macOS — GitHub's Intel runners are being
+# retired, so we don't publish that asset. Point those users at cargo.
+if [ "$os_part" = "apple-darwin" ] && [ "$arch_part" = "x86_64" ]; then
+  err "no prebuilt binary for Intel macOS. Build from source instead:
+  cargo install --git https://github.com/${REPO} wingman-cli"
+fi
+
 asset="${BIN}-${target}.tar.gz"
 
 if [ -n "${VERSION:-}" ]; then

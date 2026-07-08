@@ -54,8 +54,10 @@ jobs:
             os: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-apple-darwin
-            os: macos-13
+          # No x86_64-apple-darwin: GitHub is winding down Intel `macos-13`
+          # runners, so those jobs starve in the queue (the "24h hang").
+          # Apple Silicon covers the current Mac fleet; Intel-Mac users
+          # `cargo install` from source (install.sh tells them so).
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-pc-windows-msvc

@@ -449,7 +449,9 @@ it on your `PATH` (default `~/.local/bin`; override with
 
 Supported prebuilt targets: Linux x86_64/aarch64 (gnu, glibc >= 2.38 —
 e.g. Ubuntu 24.04+, Debian 13+, Fedora 39+; on older distros build from
-source), macOS x86_64/Apple-silicon, Windows x86_64.
+source), macOS Apple-silicon, Windows x86_64. Intel macOS has no prebuilt
+binary (GitHub is retiring Intel runners) — install it with
+`cargo install --git https://github.com/vedantnimbarte/Wingman wingman-cli`.
 
 ### With Rust already installed
 
