@@ -31,7 +31,7 @@ const MODES: &[ModeEntry] = &[
     },
     ModeEntry {
         id: "plan",
-        desc: "Read-only until you approve a plan, then auto-edits for the rest of the turn.",
+        desc: "Read-only planning: proposes an approach and makes no edits. Switch to auto-edit to apply it.",
     },
     ModeEntry {
         id: "auto-edit",
