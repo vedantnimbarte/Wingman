@@ -78,16 +78,16 @@ impl Provider for CohereProvider {
         tracing::debug!(target: "wingman::cohere", "request: {body}");
 
         let url = format!("{}/v2/chat", self.base_url.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("authorization", format!("Bearer {}", self.api_key))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("cohere request: {e}")))?;
+        let response = crate::retry::send_with_retry("cohere", || {
+            self.http
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("authorization", format!("Bearer {}", self.api_key))
+                .json(&body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {

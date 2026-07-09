@@ -218,9 +218,6 @@ pub struct AgentLoop {
     config: AgentConfig,
     /// Conversation history that persists across calls to `run`.
     history: Vec<Message>,
-    /// Per-turn tool output cache. Keyed by (tool_name, canonical_json_args).
-    /// Cleared at the start of each call to `run`.
-    tool_cache: std::collections::HashMap<(String, String), ToolOutcome>,
 }
 
 impl AgentLoop {
@@ -234,7 +231,6 @@ impl AgentLoop {
             tools,
             config,
             history: Vec::new(),
-            tool_cache: Default::default(),
         }
     }
 
@@ -251,7 +247,6 @@ impl AgentLoop {
             tools,
             config,
             history,
-            tool_cache: Default::default(),
         }
     }
 
@@ -322,15 +317,12 @@ impl AgentLoop {
     /// Drive a single user turn to completion. The returned stream yields
     /// events live and terminates after a `Stop` event.
     pub fn run(&mut self, user_prompt: String) -> BoxStream<'_, AgentEvent> {
-        // Clear the per-turn tool cache at the start of each new user turn.
-        self.tool_cache.clear();
         self.history.push(Message::user_text(user_prompt));
 
         let provider = self.provider.clone();
         let tools = self.tools.clone();
         let config = self.config.clone();
         let history = &mut self.history;
-        let tool_cache = &mut self.tool_cache;
 
         let stream = async_stream::stream! {
             let specs = tools.specs();
@@ -512,15 +504,12 @@ impl AgentLoop {
                 // Dispatch tools and append their results as a user-role message.
                 let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
                 for (id, name, input) in tool_calls {
-                    let cache_key = (name.clone(), serde_json::to_string(&input).unwrap_or_default());
-                    let outcome = if let Some(cached) = tool_cache.get(&cache_key) {
-                        // Cache hit: reuse the previous result without re-dispatching.
-                        cached.clone()
-                    } else {
-                        let fresh = tools.dispatch(&name, input).await;
-                        tool_cache.insert(cache_key, fresh.clone());
-                        fresh
-                    };
+                    // Always dispatch fresh. A per-turn result cache was removed
+                    // because a cached read (`read_file`, `run_shell`) goes stale
+                    // the moment a later tool mutates the workspace — which
+                    // silently fed the model old output and defeated the
+                    // post-edit verification loop.
+                    let outcome = tools.dispatch(&name, input).await;
                     if !outcome.is_error && config.mutating_tools.iter().any(|t| t == &name) {
                         mutated = true;
                     }

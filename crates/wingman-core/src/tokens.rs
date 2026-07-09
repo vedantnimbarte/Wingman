@@ -145,7 +145,21 @@ impl Compactor {
         if history.len() <= self.keep_recent {
             return None;
         }
-        let split = history.len() - self.keep_recent;
+        let mut split = history.len() - self.keep_recent;
+        // Never let the fold boundary orphan a tool_result: a kept
+        // `tool_result` whose matching `tool_use` was folded into the recap is
+        // an API contract violation (Anthropic/OpenAI/Cohere all 400). Advance
+        // the boundary past any message that leads with a tool_result so the
+        // first kept message is a clean turn start.
+        while split < history.len() && leads_with_tool_result(&history[split]) {
+            split += 1;
+        }
+        if split >= history.len() {
+            // The entire tail is tool_result messages (pathological). Skip this
+            // round rather than fold everything away; the next turn adds a
+            // clean boundary to compact at.
+            return None;
+        }
         let to_fold = &history[..split];
 
         let summary = synthesize_recap(to_fold);
@@ -163,6 +177,15 @@ impl Compactor {
             replaced: split,
         })
     }
+}
+
+/// Whether `m` contains a `tool_result` block. Such a message is only valid
+/// when the preceding message held the matching `tool_use`, so it can't be the
+/// first message after a compaction recap.
+fn leads_with_tool_result(m: &Message) -> bool {
+    m.content
+        .iter()
+        .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
 }
 
 /// Plain-text summary of a span of messages. We don't call out to an LLM
@@ -308,6 +331,39 @@ mod tests {
         assert_eq!(c.plan_forced(&history).unwrap().replaced, 2);
         // Too little to fold → None even when forced.
         assert!(c.plan_forced(&history[..2]).is_none());
+    }
+
+    #[test]
+    fn plan_forced_never_orphans_a_tool_result() {
+        let c = Compactor {
+            trigger_tokens: 1_000_000,
+            keep_recent: 2,
+        };
+        // A tool-heavy tail: the natural split (len-2 = index 2) lands on the
+        // User(tool_result) whose ToolUse is at index 1 — folding there would
+        // orphan the result. The boundary must advance past it.
+        let history = vec![
+            Message::user_text("do a thing"),
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "a.rs"}),
+            }]),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    content: "contents".into(),
+                    is_error: false,
+                }],
+            },
+            Message::assistant(vec![ContentBlock::text("done")]),
+        ];
+        let plan = c.plan_forced(&history).unwrap();
+        // Folded past the tool_result (index 2), so the first kept message is
+        // the clean assistant "done" at index 3 — no orphaned result.
+        assert_eq!(plan.replaced, 3);
+        assert!(!leads_with_tool_result(&history[plan.replaced]));
     }
 
     #[test]

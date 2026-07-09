@@ -134,16 +134,16 @@ impl Provider for GeminiProvider {
             API_VERSION,
             req.model,
         );
-        let response = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("x-goog-api-key", &self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("gemini request: {e}")))?;
+        let response = crate::retry::send_with_retry("gemini", || {
+            self.http
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("x-goog-api-key", &self.api_key)
+                .json(&body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
@@ -292,6 +292,17 @@ fn clean_schema_for_gemini(v: &Value) -> Value {
 }
 
 fn encode_contents(messages: &[Message]) -> Value {
+    // Gemini matches a functionResponse to its functionCall BY NAME, so a
+    // result must carry the real function name — not a placeholder. Recover it
+    // from the tool_use_id via the ToolUse block that requested the call.
+    let mut name_by_id: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    for m in messages {
+        for b in &m.content {
+            if let ContentBlock::ToolUse { id, name, .. } = b {
+                name_by_id.insert(id.as_str(), name.as_str());
+            }
+        }
+    }
     let mut out: Vec<Value> = Vec::new();
     for m in messages {
         // Tool-results from a "user" role message map to model `function`
@@ -306,15 +317,21 @@ fn encode_contents(messages: &[Message]) -> Value {
                 .iter()
                 .filter_map(|b| match b {
                     ContentBlock::ToolResult {
-                        tool_use_id: _,
+                        tool_use_id,
                         content,
                         ..
-                    } => Some(json!({
-                        "functionResponse": {
-                            "name": "tool",
-                            "response": { "content": content }
-                        }
-                    })),
+                    } => {
+                        let name = name_by_id
+                            .get(tool_use_id.as_str())
+                            .copied()
+                            .unwrap_or("tool");
+                        Some(json!({
+                            "functionResponse": {
+                                "name": name,
+                                "response": { "content": content }
+                            }
+                        }))
+                    }
                     _ => None,
                 })
                 .collect();
@@ -398,6 +415,34 @@ mod tests {
         assert_eq!(
             body["contents"][0]["parts"][0]["functionCall"]["args"]["a"],
             1
+        );
+    }
+
+    #[test]
+    fn tool_result_carries_real_function_name() {
+        // Assistant calls `read_file` (id "call-1"); the following user
+        // tool_result must echo that name, not a "tool" placeholder, or Gemini
+        // can't match the response to the call.
+        let mut req = CompletionRequest::new("gemini-2.5-pro");
+        req.messages = vec![
+            Message::assistant(vec![ContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "read_file".into(),
+                input: json!({"path": "a.rs"}),
+            }]),
+            Message {
+                role: wingman_core::Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call-1".into(),
+                    content: "file contents".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let body = build_request_body(&req);
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "read_file"
         );
     }
 }

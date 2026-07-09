@@ -13,6 +13,7 @@ pub mod cohere;
 pub mod gemini;
 pub mod openai_compat;
 pub mod probe;
+mod retry;
 pub mod watsonx;
 
 pub use anthropic::AnthropicProvider;

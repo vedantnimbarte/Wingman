@@ -509,10 +509,14 @@ impl Provider for OpenAiCompatProvider {
                 .header("X-Title", "wingman");
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("request: {e}")))?;
+        let label = self.variant.id();
+        let response = crate::retry::send_with_retry(label, || {
+            builder
+                .try_clone()
+                .expect("json request body is always cloneable")
+                .send()
+        })
+        .await?;
 
         let status = response.status();
 

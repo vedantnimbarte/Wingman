@@ -168,16 +168,16 @@ impl Provider for WatsonxProvider {
             self.base_url.trim_end_matches('/'),
             WATSONX_VERSION,
         );
-        let response = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("authorization", format!("Bearer {token}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("watsonx request: {e}")))?;
+        let response = crate::retry::send_with_retry("watsonx", || {
+            self.http
+                .post(&url)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("authorization", format!("Bearer {token}"))
+                .json(&body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {

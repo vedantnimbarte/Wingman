@@ -108,17 +108,17 @@ impl Provider for AnthropicProvider {
         tracing::debug!(target: "wingman::anthropic", "request: {body}");
 
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("anthropic request: {e}")))?;
+        let response = crate::retry::send_with_retry("anthropic", || {
+            self.http
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .json(&body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
