@@ -45,6 +45,10 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
+# `setsid` for detaching a `-d` background run from the controlling terminal.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", default-features = false, features = ["process"] }
+
 [features]
 default = ["embeddings", "treesitter"]
 # Pulls in fastembed-rs + ONNX runtime for real semantic search. Disable

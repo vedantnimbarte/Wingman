@@ -244,6 +244,10 @@ pub enum PilotAction {
         /// Tail the run in this terminal.
         #[arg(long)]
         watch: bool,
+        /// Run in the background: print the run id and return the prompt.
+        /// Watch/control it with `pilot watch|abort <id>`.
+        #[arg(short = 'd', long, conflicts_with = "watch")]
+        detached: bool,
         /// Skip `gh pr create` (just push the branch).
         #[arg(long)]
         no_pr: bool,
@@ -545,6 +549,7 @@ pub async fn run() -> Result<ExitCode> {
                 yes,
                 review,
                 watch,
+                detached,
                 no_pr,
                 base,
                 max_agents,
@@ -564,6 +569,7 @@ pub async fn run() -> Result<ExitCode> {
                         yes,
                         review,
                         watch,
+                        detached,
                         no_pr,
                         base,
                         max_agents,
@@ -642,6 +648,7 @@ pub async fn run() -> Result<ExitCode> {
                     yes,
                     review,
                     watch: false,
+                    detached: false,
                     no_pr,
                     base,
                     max_agents,

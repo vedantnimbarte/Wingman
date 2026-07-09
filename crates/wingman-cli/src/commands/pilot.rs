@@ -150,6 +150,9 @@ pub struct PilotOptions {
     pub review: bool,
     /// E12 — tail the in-process run with a compact progress line.
     pub watch: bool,
+    /// Run detached: re-exec self in the background, print the run id, and
+    /// return the shell prompt. Watch/control via `pilot watch|abort <id>`.
+    pub detached: bool,
     pub no_pr: bool,
     pub base: Option<String>,
     pub max_agents: Option<u32>,
@@ -165,6 +168,23 @@ pub struct PilotOptions {
 }
 
 pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
+    // `-d`/`--detached`: if we're the top-level invocation (not the re-exec'd
+    // child), mint the run id, spawn a detached copy of ourselves writing to
+    // the run's log, print the id, and hand the shell back. The child re-enters
+    // this function with WINGMAN_DETACHED_CHILD set and runs the pipeline.
+    let detached_child = std::env::var_os("WINGMAN_DETACHED_CHILD").is_some();
+    if opts.detached && !detached_child {
+        let project = ProjectPaths::discover(&std::env::current_dir()?);
+        let run_id = new_run_id();
+        let run_path = run_dir(&project.root, &run_id);
+        return spawn_detached(&run_id, &run_path).map(|()| ExitCode::SUCCESS);
+    }
+
+    // Tree-kill live workers on Ctrl+C / SIGTERM instead of orphaning them.
+    // Covers both the plain foreground run and the detached child (where a
+    // `kill <pid>` should still reap the worker trees).
+    crate::shutdown::install();
+
     // Resolve the effective pilot config: tier override is the only flag the
     // user can flip without editing config. Other overrides (max_agents,
     // max_usd) get applied to a clone so the rest of the run sees them.
@@ -223,7 +243,12 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     // Pin the run to the current git HEAD (or the user's --base override).
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let base_commit = resolve_base_commit(&project.root, opts.base.as_deref())?;
-    let run_id = new_run_id();
+    // A detached child inherits the run id its parent minted (so the id it
+    // prints and the log path it writes to line up with the child's run).
+    let run_id = std::env::var("WINGMAN_RUN_ID")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(new_run_id);
     let integration = integration_branch(&run_id);
     let run_path = run_dir(&project.root, &run_id);
 
@@ -348,7 +373,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         wingman_autonomous::approval::ApprovalTier::Hard => {
             if std::io::stdin().is_terminal() {
                 prompt_for_approval(&plan, &goal)?
-            } else if opts.await_approval {
+            } else if opts.await_approval || detached_child {
                 // Headless hard gate, opted in: wait for an approve/veto over
                 // the control channel (`pilot approve` / `pilot veto` or the
                 // watch UI). Denies by default when the window elapses.
@@ -818,6 +843,71 @@ fn resolve_base_commit(repo_root: &std::path::Path, base: Option<&str>) -> Resul
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Re-exec the current binary as a detached background process for `-d`.
+///
+/// The child re-runs the same `pilot run` invocation (minus `-d`) with its
+/// stdio pointed at `<run_dir>/pilot.log`, in its own session (`setsid` on
+/// Unix / `DETACHED_PROCESS` on Windows) so it survives this shell. The run id
+/// is passed through so the child adopts it and the printed id matches the log.
+fn spawn_detached(run_id: &str, run_path: &std::path::Path) -> Result<()> {
+    use std::process::{Command, Stdio};
+
+    std::fs::create_dir_all(run_path)
+        .with_context(|| format!("creating run dir {}", run_path.display()))?;
+    let log_path = run_path.join("pilot.log");
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .with_context(|| format!("opening log {}", log_path.display()))?;
+
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    // Drop the detach flag so the child runs in the foreground path. `-d` and
+    // `--detached` are standalone clap tokens, so an exact-match filter is
+    // enough. ponytail: won't strip a bundled short flag like `-dv`; clap
+    // doesn't bundle bools here, so that combination never reaches us.
+    let args = std::env::args_os()
+        .skip(1)
+        .filter(|a| a != "-d" && a != "--detached");
+
+    let mut cmd = Command::new(exe);
+    cmd.args(args)
+        .env("WINGMAN_DETACHED_CHILD", "1")
+        .env("WINGMAN_RUN_ID", run_id)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().context("cloning log handle")?)
+        .stderr(log);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe; runs post-fork / pre-exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let _ = nix::unistd::setsid();
+                Ok(())
+            });
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // DETACHED_PROCESS (0x8) | CREATE_NEW_PROCESS_GROUP (0x200): no console,
+        // not part of this shell's Ctrl+C group.
+        cmd.creation_flags(0x0000_0008 | 0x0000_0200);
+    }
+
+    let child = cmd.spawn().context("spawning detached pilot run")?;
+    println!(
+        "[pilot] run {run_id} detached (pid {}, log: {})",
+        child.id(),
+        log_path.display()
+    );
+    println!("[pilot] watch:  wingman pilot watch {run_id}");
+    println!("[pilot] stop:   wingman pilot abort {run_id}");
+    Ok(())
 }
 
 /// Generate a run id of the form `YYYY-MM-DD-HHMM-<rand6>`.

@@ -1,0 +1,10 @@
+<svg width="480" height="120" viewBox="0 0 480 120" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Wingman">
+  <rect width="480" height="120" rx="18" fill="#0b0b0d"/>
+  <rect x="0.5" y="0.5" width="479" height="119" rx="17.5" stroke="#23252a"/>
+  <g transform="translate(44 36)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M0 34 L26 2 L52 34" stroke="#5e6ad2"/>
+    <path d="M11 46 L26 26 L41 46" stroke="#828fff" opacity="0.55"/>
+  </g>
+  <text x="132" y="58" font-family="'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif" font-size="40" font-weight="700" letter-spacing="-1.5" fill="#f7f8f8">wingman</text>
+  <text x="134" y="86" font-family="'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#8a8f98">the open coding agent for your terminal</text>
+</svg>

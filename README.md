@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="Wingman" width="440">
+</p>
+
 # Wingman
 
 [![ci](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml)
