@@ -16,10 +16,50 @@
 //! Callers see one trait — [`Supervisor`] — that hides the platform fork.
 
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use thiserror::Error;
 use tokio::process::{Child, Command};
+
+/// Pids (== pgid on Unix) of every supervised child that is spawned and not
+/// yet dropped. Populated at spawn, cleared on `Supervisor::drop`. The CLI's
+/// signal handler drains this on Ctrl+C / SIGTERM so an interrupted run
+/// doesn't leak orphaned worker/tool process trees — `Drop` doesn't run when
+/// the process dies from a signal, so the registry is the only thing that
+/// still knows what to kill.
+static LIVE_GROUPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+fn register_group(pid: u32) {
+    if let Ok(mut g) = LIVE_GROUPS.lock() {
+        g.push(pid);
+    }
+}
+
+fn deregister_group(pid: u32) {
+    if let Ok(mut g) = LIVE_GROUPS.lock() {
+        g.retain(|&p| p != pid);
+    }
+}
+
+/// Force-kill every still-live supervised child tree. Called from the CLI's
+/// Ctrl+C / SIGTERM handler (a tokio signal task, not a raw signal handler),
+/// so taking the lock is fine. Best-effort: a group that already exited just
+/// returns ESRCH. This is the hard-stop teardown — no grace period, because
+/// the process is about to exit anyway.
+pub fn kill_all_live_groups() {
+    let pids = LIVE_GROUPS.lock().map(|g| g.clone()).unwrap_or_default();
+    for pid in pids {
+        #[cfg(unix)]
+        {
+            let _ = unix_impl::signal_group(pid, nix::sys::signal::Signal::SIGKILL);
+        }
+        #[cfg(windows)]
+        {
+            let _ = windows_impl::taskkill_tree_force(pid);
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -87,6 +127,7 @@ impl SupervisedCommand {
         let pid = child
             .id()
             .ok_or_else(|| SupervisorError::Platform("spawned child has no pid".into()))?;
+        register_group(pid);
 
         #[cfg(windows)]
         let job = match windows_impl::assign_to_new_job(pid) {
@@ -220,6 +261,7 @@ impl Drop for Supervisor {
         // context in Drop; the OS will reap stragglers via the Job Object
         // / pgid signal regardless.
         let _ = self.signal_kill();
+        deregister_group(self.pid);
     }
 }
 
@@ -393,5 +435,43 @@ mod tests {
         sup.terminate(Duration::from_secs(2))
             .await
             .expect("terminate");
+    }
+
+    /// A spawned child is registered in LIVE_GROUPS, `kill_all_live_groups`
+    /// reaps it, and dropping the supervisor deregisters it. This is the path
+    /// the CLI's Ctrl+C handler relies on to avoid orphaning workers.
+    #[tokio::test]
+    async fn registry_tracks_and_kill_all_reaps() {
+        #[cfg(unix)]
+        let mut sup = {
+            let mut sc = SupervisedCommand::new("sleep");
+            sc.command_mut().arg("30");
+            sc.spawn().expect("spawn")
+        };
+        #[cfg(windows)]
+        let mut sup = {
+            let mut sc = SupervisedCommand::new("cmd");
+            sc.command_mut()
+                .arg("/c")
+                .arg("ping")
+                .arg("-n")
+                .arg("30")
+                .arg("127.0.0.1");
+            sc.spawn().expect("spawn")
+        };
+
+        let pid = sup.pid();
+        assert!(LIVE_GROUPS.lock().unwrap().contains(&pid), "registered");
+
+        kill_all_live_groups();
+        // The child should be dead; wait() returns rather than hanging.
+        if let Some(child) = sup.child_mut() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), child.wait())
+                .await
+                .expect("child reaped by kill_all_live_groups");
+        }
+
+        drop(sup);
+        assert!(!LIVE_GROUPS.lock().unwrap().contains(&pid), "deregistered");
     }
 }
