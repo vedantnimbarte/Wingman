@@ -1200,9 +1200,11 @@ fn build_real_worker_spawner(
                     timeout: std::time::Duration::from_secs(1800),
                     cmd_rx,
                 };
-                let mut store_guard = ctx.store.lock().await;
+                // Pass the shared store by reference; run_worker locks it only
+                // per event append, so workers actually run concurrently
+                // instead of serializing on a guard held for the whole run.
                 let result =
-                    wingman_autonomous::worker::run_worker(&mut store_guard, &ctx.agent_id, spec)
+                    wingman_autonomous::worker::run_worker(&ctx.store, &ctx.agent_id, spec)
                         .await
                         .map_err(|e| {
                             wingman_autonomous::orchestrator::OrchestratorError::Spawn(

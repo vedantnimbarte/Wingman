@@ -96,7 +96,7 @@ pub struct WorkerResult {
 /// has already emitted. The orchestrator chooses the id; the worker just
 /// inherits it.
 pub async fn run_worker(
-    store: &mut RunStore,
+    store: &tokio::sync::Mutex<RunStore>,
     agent_id: &str,
     mut spec: WorkerSpec,
 ) -> Result<WorkerResult, WorkerError> {
@@ -126,7 +126,14 @@ pub async fn run_worker(
     let mut supervisor = sc.spawn()?;
     let pid = supervisor.pid();
 
+    // The run store is shared across all workers, the orchestrator actor, and
+    // the budget watchdog. Lock it only for the duration of each append — the
+    // worker spends almost all its wall-clock awaiting child stdout, and
+    // holding the guard across that would serialize every other worker (and
+    // stall the manager loop) to an effective concurrency of one.
     let _ = store
+        .lock()
+        .await
         .append(Event::AgentSpawn {
             t: RunStore::now(),
             agent: agent_id.to_string(),
@@ -196,6 +203,8 @@ pub async fn run_worker(
             // the same stdout stream carries both.
             if let Ok(Some(msg)) = crate::ipc::parse_message(line) {
                 let _ = store
+                    .lock()
+                    .await
                     .append(Event::TaskTool {
                         t: RunStore::now(),
                         id: spec.task.id.clone(),
@@ -209,8 +218,9 @@ pub async fn run_worker(
             }
             match parse_line(line) {
                 WorkerLine::AgentEvent(ev) => {
+                    let mut guard = store.lock().await;
                     forward_agent_event(
-                        store,
+                        &mut guard,
                         &spec.task.id,
                         agent_id,
                         spec.model.as_deref().unwrap_or_default(),
@@ -220,6 +230,8 @@ pub async fn run_worker(
                 }
                 WorkerLine::WorkerStart { .. } => {
                     let _ = store
+                        .lock()
+                        .await
                         .append(Event::AgentStatus {
                             t: RunStore::now(),
                             agent: agent_id.to_string(),
@@ -227,6 +239,8 @@ pub async fn run_worker(
                         })
                         .await;
                     let _ = store
+                        .lock()
+                        .await
                         .append(Event::TaskStatus {
                             t: RunStore::now(),
                             id: spec.task.id.clone(),
@@ -287,6 +301,8 @@ pub async fn run_worker(
     }
 
     let _ = store
+        .lock()
+        .await
         .append(Event::TaskStatus {
             t: RunStore::now(),
             id: spec.task.id.clone(),
@@ -295,6 +311,8 @@ pub async fn run_worker(
         })
         .await;
     let _ = store
+        .lock()
+        .await
         .append(Event::AgentStatus {
             t: RunStore::now(),
             agent: agent_id.to_string(),
