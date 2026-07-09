@@ -1508,6 +1508,12 @@ pub struct PilotSandboxConfig {
     pub container_image: String,
     /// "firecracker" | "qemu" | "cloud".
     pub vm_provider: String,
+    /// Fail-closed switch for the untrusted/irreversible ("vm") tier.
+    /// Real sandboxed worker execution isn't wired yet, so by default pilot
+    /// *refuses* to run a vm-tier task (migrations, infra, irreversible, or
+    /// untrusted goals) rather than silently executing it unsandboxed on the
+    /// host. Set to true to accept host execution for those tasks.
+    pub allow_unsandboxed_vm_tasks: bool,
 }
 
 impl Default for PilotSandboxConfig {
@@ -1516,6 +1522,7 @@ impl Default for PilotSandboxConfig {
             default_tier: "host".into(),
             container_image: "wingman/sandbox:latest".into(),
             vm_provider: "firecracker".into(),
+            allow_unsandboxed_vm_tasks: false,
         }
     }
 }

@@ -14,6 +14,13 @@
 //! Docker/Firecracker the plan defers to the user). This module is the
 //! per-task tier *selection*, driven by the task's `writes` + acceptance
 //! commands + reversibility.
+//!
+//! Enforcement: because real sandboxed *worker* execution isn't wired yet,
+//! `pilot run` fails closed on the top (`vm`) tier — it refuses to start a
+//! vm-tier task rather than run it unsandboxed on the host, unless the
+//! operator sets `[pilot.sandbox].allow_unsandboxed_vm_tasks`. `container`-
+//! tier work still degrades to host (see [`resolve_effective_tier`]); only
+//! the untrusted/irreversible tier is hard-gated.
 
 use crate::model::{Acceptance, Reversibility, Task};
 use crate::pr::{CommandOut, CommandRunner};

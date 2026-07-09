@@ -385,6 +385,44 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // J11 — fail closed on the untrusted/irreversible ("vm") tier. Real
+    // sandboxed worker execution isn't wired yet, so a vm-tier task
+    // (migrations, infra, Dockerfile/terraform edits, or an irreversible
+    // goal) would otherwise run with full host access. Refuse rather than
+    // silently execute unsandboxed, unless the operator opted in. Container-
+    // tier tasks still degrade to host (annotated post-run) — this gate only
+    // guards the genuinely dangerous top tier.
+    if !pilot.sandbox.allow_unsandboxed_vm_tasks {
+        let default_tier =
+            wingman_autonomous::sandbox::SandboxTier::parse(&pilot.sandbox.default_tier);
+        let vm_tasks: Vec<String> = store
+            .state()
+            .tasks
+            .iter()
+            .filter(|t| {
+                wingman_autonomous::sandbox::select_tier(t, default_tier)
+                    == wingman_autonomous::sandbox::SandboxTier::Vm
+            })
+            .map(|t| t.id.clone())
+            .collect();
+        if !vm_tasks.is_empty() {
+            eprintln!(
+                "[pilot] refusing to run: {} task(s) need vm-tier isolation \
+                 (migrations / infra / irreversible / untrusted) but sandboxed \
+                 execution isn't available — they would run unsandboxed on the host:",
+                vm_tasks.len()
+            );
+            for id in &vm_tasks {
+                eprintln!("[pilot]   - {id}");
+            }
+            eprintln!(
+                "[pilot] relabel/split the task, or set [pilot.sandbox].\
+                 allow_unsandboxed_vm_tasks = true to accept host execution."
+            );
+            return Ok(ExitCode::from(2));
+        }
+    }
+
     let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH").unwrap_or_else(|_| "main".into());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
         max_concurrent_agents: pilot.max_concurrent_agents,
