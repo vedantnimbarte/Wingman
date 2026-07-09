@@ -436,6 +436,31 @@ fn parse_line(line: &str) -> WorkerLine {
     WorkerLine::Unknown
 }
 
+/// Warn (once per distinct model id) that a model has no entry in the price
+/// table, so its spend is counted as $0 and the `max_usd` cap can't protect
+/// against a runaway run on that model. Empty model ids (local/unknown) are
+/// skipped since they're expected to be unpriced.
+fn warn_unpriced_model(model: &str) {
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+    if model.is_empty() {
+        return;
+    }
+    static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let set = WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut set) = set.lock() {
+        if set.insert(model.to_string()) {
+            tracing::warn!(
+                target: "pilot::cost",
+                model,
+                "model has no price-table entry; its spend counts as $0, so the \
+                 max_usd cap does NOT bound this model — add it to \
+                 wingman_core::pricing or set a per-run agent limit"
+            );
+        }
+    }
+}
+
 async fn forward_agent_event(
     store: &mut RunStore,
     task_id: &str,
@@ -465,9 +490,13 @@ async fn forward_agent_event(
             // Price the usage so run totals reflect real spend — this is what
             // the max_usd cap and budget watchdog read. Unknown/local models
             // (no price table entry) fall back to 0.0.
-            let usd = wingman_core::pricing::price_for(model)
-                .map(|p| p.cost(usage))
-                .unwrap_or(0.0);
+            let usd = match wingman_core::pricing::price_for(model) {
+                Some(p) => p.cost(usage),
+                None => {
+                    warn_unpriced_model(model);
+                    0.0
+                }
+            };
             let _ = store
                 .append(Event::AgentUsd {
                     t: RunStore::now(),

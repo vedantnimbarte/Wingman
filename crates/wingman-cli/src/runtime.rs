@@ -508,6 +508,13 @@ pub async fn build_registry_with_learn(
         }
         reg.register(wingman_tools::builtin::ReadSession::new(paths.root.clone()));
     }
+    // Honor [tools].disabled_tools: a tool the user disabled must not be
+    // offered to the model. Applied last so it also removes builtins.
+    for name in &cfg.tools.disabled_tools {
+        if reg.unregister(name).is_some() {
+            tracing::info!(target: "wingman::tools", tool = %name, "disabled via config");
+        }
+    }
     // MCP servers are connected later via [`McpRegistry::seed`] so the
     // shared `Arc<ToolRegistry>` can be reached from the TUI for runtime
     // add / remove operations.
@@ -858,6 +865,20 @@ pub async fn build_agent_registry_learn(
     let skills = wingman_skills::load_all(&paths.root);
     let system = build_system_prompt_full(mode, &memory_store, &skills);
 
+    // Honor [tokens].prompt_cache: when off, drop the cache breakpoints and
+    // the rolling conversation-cache marker so no provider-side prompt caching
+    // is requested. (Previously this knob was ignored — caching was always on.)
+    let (cache_breakpoints, cache_conversation) = if cfg.tokens.prompt_cache {
+        (
+            vec![
+                wingman_core::CacheBreakpoint::AfterSystem,
+                wingman_core::CacheBreakpoint::AfterTools,
+            ],
+            true,
+        )
+    } else {
+        (Vec::new(), false)
+    };
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
         system: Some(system),
@@ -866,6 +887,8 @@ pub async fn build_agent_registry_learn(
             trigger_tokens: cfg.tokens.compact_at_tokens,
             ..Default::default()
         },
+        cache_breakpoints,
+        cache_conversation,
         learning: learn
             .as_ref()
             .map(|l| l.hook.clone() as Arc<dyn wingman_core::LearningHook>),

@@ -965,6 +965,11 @@ async fn handle_assign(
     // only reacts to Failed) never fires, and the run hangs to max_ticks.
     let store_for_fail = store.clone();
     let agent_for_fail = agent_id.clone();
+    // Dropped when the worker finishes so the IPC sender in `senders` goes
+    // away, which lets the stdin-pump task (parked on `cmd_rx.recv()`) exit.
+    // Without this both the sender entry and the pump task leak per worker.
+    let senders_for_cleanup = senders.clone();
+    let agent_for_cleanup = agent_id.clone();
     let handle = tokio::spawn(async move {
         use futures::FutureExt;
         let task_id = task_id_for_log;
@@ -981,6 +986,7 @@ async fn handle_assign(
                 mark_worker_failed(&store_for_fail, &task_id, &agent_for_fail).await;
             }
         }
+        senders_for_cleanup.lock().await.remove(&agent_for_cleanup);
     });
 
     {
@@ -1682,7 +1688,11 @@ async fn handle_abort(
             .append(Event::TaskStatus {
                 t: RunStore::now(),
                 id: task_id.to_string(),
-                status: TaskStatus::Failed,
+                // Blocked, not Failed: a deliberate abort is terminal. The
+                // retry watchdog reassigns on Failed, so marking an aborted
+                // task Failed would immediately resurrect it — defeating both
+                // `pilot abort <task>` and the budget-cap abort path.
+                status: TaskStatus::Blocked,
                 outcome: None,
             })
             .await?;

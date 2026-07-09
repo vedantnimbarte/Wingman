@@ -127,18 +127,42 @@ impl RunStore {
         // tasks back.
         let mut state = RunState::new(String::new(), String::new(), String::new(), String::new());
 
-        for (i, line) in body.lines().enumerate() {
-            let line = line.trim();
+        let lines: Vec<&str> = body.lines().collect();
+        let last_idx = lines.len().saturating_sub(1);
+        let mut parsed_any = false;
+        for (i, raw) in lines.iter().enumerate() {
+            let line = raw.trim();
             if line.is_empty() {
                 continue;
             }
-            let event: Event =
-                serde_json::from_str(line).map_err(|source| StoreError::BadEvent {
-                    path: log_path.clone(),
-                    line: i + 1,
-                    source,
-                })?;
-            apply(&mut state, &event);
+            match serde_json::from_str::<Event>(line) {
+                Ok(event) => {
+                    apply(&mut state, &event);
+                    parsed_any = true;
+                }
+                Err(source) => {
+                    // A torn final line is the expected result of a crash /
+                    // Ctrl+C mid-append (append writes the body and the newline
+                    // as separate syscalls). Tolerate it so the run stays
+                    // resumable — the lost event was never durably committed
+                    // anyway. Require a valid prefix first, so a wholly-garbage
+                    // log is still rejected as corruption rather than silently
+                    // read as an empty run.
+                    if i == last_idx && parsed_any {
+                        tracing::warn!(
+                            target: "pilot::store",
+                            path = %log_path.display(),
+                            "skipping torn final log line on load: {source}"
+                        );
+                    } else {
+                        return Err(StoreError::BadEvent {
+                            path: log_path.clone(),
+                            line: i + 1,
+                            source,
+                        });
+                    }
+                }
+            }
         }
 
         let log = tokio::fs::OpenOptions::new()
@@ -434,5 +458,48 @@ mod tests {
             Err(other) => panic!("expected BadEvent, got {other:?}"),
             Ok(_) => panic!("expected BadEvent error, got Ok"),
         }
+    }
+
+    #[tokio::test]
+    async fn load_tolerates_torn_final_line_after_valid_prefix() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("tasks.jsonl");
+        // A valid RunStart line, then a torn final line (crash mid-append).
+        let good = serde_json::to_string(&Event::RunStart {
+            t: RunStore::now(),
+            run_id: "r1".into(),
+            goal: "g".into(),
+            base_commit: "abc".into(),
+            integration_branch: "b".into(),
+        })
+        .unwrap();
+        tokio::fs::write(&log, format!("{good}\n{{\"ev\":\"task.crea"))
+            .await
+            .unwrap();
+        // Must load (skipping the torn tail), not reject the whole run.
+        let store = RunStore::load(dir.path()).await.expect("resumable");
+        assert_eq!(store.state().run_id, "r1");
+    }
+
+    #[tokio::test]
+    async fn load_still_rejects_malformed_middle_line() {
+        let dir = tempdir().unwrap();
+        let log = dir.path().join("tasks.jsonl");
+        let good = serde_json::to_string(&Event::RunStart {
+            t: RunStore::now(),
+            run_id: "r1".into(),
+            goal: "g".into(),
+            base_commit: "abc".into(),
+            integration_branch: "b".into(),
+        })
+        .unwrap();
+        // Garbage in the MIDDLE (a valid line follows) is real corruption.
+        tokio::fs::write(&log, format!("{good}\nGARBAGE\n{good}\n"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            RunStore::load(dir.path()).await,
+            Err(StoreError::BadEvent { .. })
+        ));
     }
 }
