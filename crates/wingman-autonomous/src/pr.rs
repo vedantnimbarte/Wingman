@@ -106,7 +106,7 @@ pub fn render_pr_title(state: &RunState) -> String {
     } else {
         first_line.to_string()
     };
-    format!("pilot({}): {truncated}", &state.run_id)
+    format!("pilot({}): {truncated}", state.run_id)
 }
 
 /// Abstraction over running shell commands. The default

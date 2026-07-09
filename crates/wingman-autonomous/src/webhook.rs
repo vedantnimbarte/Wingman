@@ -186,10 +186,8 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn header_boundary_and_len(buf: &[u8]) -> Option<(usize, usize)> {
     let (idx, sep) = if let Some(i) = find_subslice(buf, b"\r\n\r\n") {
         (i, 4)
-    } else if let Some(i) = find_subslice(buf, b"\n\n") {
-        (i, 2)
     } else {
-        return None;
+        (find_subslice(buf, b"\n\n")?, 2)
     };
     let content_len = parse_content_length(&String::from_utf8_lossy(&buf[..idx]));
     Some((idx + sep, content_len))
