@@ -664,16 +664,7 @@ pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn T
     }))
 }
 
-pub async fn build_agent(
-    cfg: &Config,
-    selection: &Selection,
-    mode: PermissionMode,
-) -> Result<AgentLoop> {
-    let (agent, _registry) = build_agent_and_registry(cfg, selection, mode).await?;
-    Ok(agent)
-}
-
-/// Like `build_agent` but, on failure, walks `cfg.router.fallback_models`
+/// On failure, walks `cfg.router.fallback_models`
 /// in order until one succeeds. The selection that actually built is
 /// printed to stderr so the user knows what's serving the request.
 pub async fn build_agent_with_fallback(
@@ -681,8 +672,21 @@ pub async fn build_agent_with_fallback(
     selection: &Selection,
     mode: PermissionMode,
 ) -> Result<AgentLoop> {
-    match build_agent(cfg, selection, mode).await {
-        Ok(a) => Ok(a),
+    let (agent, _registry) =
+        build_agent_registry_with_fallback(cfg, selection, mode).await?;
+    Ok(agent)
+}
+
+/// Like `build_agent_with_fallback` but also returns the shared tool registry
+/// so the caller can seed MCP tools into it (see [`seed_mcp`]). Headless and
+/// batch use this so `mcp__*` tools are available there too, not just the TUI.
+pub async fn build_agent_registry_with_fallback(
+    cfg: &Config,
+    selection: &Selection,
+    mode: PermissionMode,
+) -> Result<(AgentLoop, Arc<ToolRegistry>)> {
+    match build_agent_and_registry(cfg, selection, mode).await {
+        Ok(pair) => Ok(pair),
         Err(primary_err) => {
             for raw in &cfg.router.fallback_models {
                 let Some((p, m)) = raw.split_once('/') else {
@@ -693,13 +697,13 @@ pub async fn build_agent_with_fallback(
                     provider_id: p.to_string(),
                     model: m.to_string(),
                 };
-                match build_agent(cfg, &sel, mode).await {
-                    Ok(a) => {
+                match build_agent_and_registry(cfg, &sel, mode).await {
+                    Ok(pair) => {
                         eprintln!(
                             "wingman: primary failed ({primary_err}); falling back to {}/{}",
                             sel.provider_id, sel.model
                         );
-                        return Ok(a);
+                        return Ok(pair);
                     }
                     Err(e) => {
                         tracing::warn!("fallback {raw} failed: {e}");
@@ -709,6 +713,20 @@ pub async fn build_agent_with_fallback(
             Err(primary_err)
         }
     }
+}
+
+/// Spawn the configured MCP servers and register their tools into `registry`
+/// (the same `Arc` the agent dispatches through). Returns the registry handle,
+/// which the caller must keep alive for the duration of the run — dropping it
+/// tears down the MCP server subprocesses. Best-effort: a server that fails to
+/// start is logged by `seed` and simply contributes no tools.
+pub async fn seed_mcp(
+    cfg: &Config,
+    registry: Arc<ToolRegistry>,
+) -> Arc<crate::mcp_registry::McpRegistry> {
+    let mcp = Arc::new(crate::mcp_registry::McpRegistry::new(registry));
+    mcp.seed(&cfg.mcp).await;
+    mcp
 }
 
 /// Variant that also returns the shared `Arc<ToolRegistry>` so callers can

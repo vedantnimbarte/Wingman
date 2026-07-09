@@ -22,7 +22,11 @@ pub struct HeadlessOptions {
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
     let selection = runtime::resolve_selection(&cfg, opts.model_override.as_deref())?;
-    let mut agent = runtime::build_agent_with_fallback(&cfg, &selection, mode).await?;
+    let (mut agent, registry) =
+        runtime::build_agent_registry_with_fallback(&cfg, &selection, mode).await?;
+    // Seed MCP servers so `mcp__*` tools are available in headless mode too.
+    // Held for the whole run; dropping it tears down the server subprocesses.
+    let _mcp = runtime::seed_mcp(&cfg, registry).await;
 
     // Open session log under the project's .wingman/sessions/ dir.
     let cwd = std::env::current_dir()?;
@@ -64,11 +68,24 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let stderr = std::io::stderr();
     let mut stderr = stderr.lock();
     let mut exit = ExitCode::SUCCESS;
+    let mut assistant_text = String::new();
 
     while let Some(event) = events.next().await {
         // Log to session.
         if let Some(s) = session.as_mut() {
             let _ = s.record_agent_event(&event).await;
+        }
+
+        // Exit code + assistant-text capture, independent of output mode — a
+        // mid-stream error or an error stop must fail the process in `--json`
+        // mode too (previously it only did in the human-readable branch).
+        match &event {
+            AgentEvent::TextDelta { text } => assistant_text.push_str(text),
+            AgentEvent::Error { .. } => exit = ExitCode::from(1),
+            AgentEvent::Stop {
+                reason: wingman_core::AgentStop::Error,
+            } => exit = ExitCode::from(1),
+            _ => {}
         }
 
         if opts.json {
@@ -121,6 +138,18 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
 
         if matches!(event, AgentEvent::Stop { .. }) {
             break;
+        }
+    }
+
+    // Persist the assistant's reply so the session isn't just a prompt with no
+    // answer — recall_session and /resume both read this back.
+    if let Some(s) = session.as_mut() {
+        if !assistant_text.trim().is_empty() {
+            let _ = s
+                .record_message(&wingman_core::Message::assistant(vec![
+                    wingman_core::ContentBlock::text(assistant_text),
+                ]))
+                .await;
         }
     }
 
