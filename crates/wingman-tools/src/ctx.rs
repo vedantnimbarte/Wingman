@@ -432,21 +432,23 @@ mod tests {
 
     #[test]
     fn set_mode_re_gates_live_and_is_shared_across_clones() {
-        let ctx = ToolCtx::new(
-            PermissionMode::ReadOnly,
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp"),
-        );
+        // Use a real existing dir as the project root: containment canonicalizes
+        // both the root and the resolved path, and on Windows a non-existent
+        // root like "/tmp" fails to canonicalize (staying drive-less) while the
+        // resolved path gets drive-qualified, so `starts_with` spuriously fails.
+        let root = std::env::temp_dir();
+        let child = root.join("wingman-ctx-test-x");
+        let ctx = ToolCtx::new(PermissionMode::ReadOnly, root.clone(), root.clone());
         assert_eq!(ctx.mode(), PermissionMode::ReadOnly);
         assert!(!ctx.allows_shell());
-        assert!(!ctx.allows_write(Path::new("/tmp/x")));
+        assert!(!ctx.allows_write(&child));
 
         // A clone (as the running agent's registry holds) sees the switch.
         let shared = ctx.clone();
         ctx.set_mode(PermissionMode::AutoEdit);
         assert_eq!(shared.mode(), PermissionMode::AutoEdit);
         assert!(shared.allows_shell());
-        assert!(shared.allows_write(Path::new("/tmp/x")));
+        assert!(shared.allows_write(&child));
     }
 
     #[test]
