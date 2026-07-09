@@ -20,7 +20,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
+  matrix-test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -46,3 +46,19 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
         run: cargo test --workspace
+
+  # Aggregate gate: this is the single required status check on `main`. It
+  # passes only when every matrix leg passed, so the branch protection rule
+  # ("test") keeps working regardless of which platforms the matrix runs.
+  test:
+    name: test
+    needs: matrix-test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify all matrix legs passed
+        run: |
+          if [ "${{ needs.matrix-test.result }}" != "success" ]; then
+            echo "matrix tests did not all succeed: ${{ needs.matrix-test.result }}"
+            exit 1
+          fi
