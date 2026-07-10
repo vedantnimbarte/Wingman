@@ -189,9 +189,15 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
            Several autopilot capabilities are partial — see Maturity below.
 ```
 
-> **Maturity.** `assist` and `copilot` are the supported tiers. Pilot mode
-> has been validated by unit tests but **not yet run end-to-end against a
-> live provider** — do a smoke run on a throwaway goal before relying on it.
+> **Maturity.** `assist` and `copilot` are the supported tiers, and `copilot`
+> now runs **end-to-end against a live provider** — it plans, spawns workers
+> that write and commit code, reviews each task's real diff, squash-merges,
+> and opens a PR. Validated on OpenRouter/DeepSeek (any tool-use-capable
+> provider from the table below works). The per-task reviewer sends work back
+> only on **high-severity** findings — a task's acceptance checks already gate
+> functional correctness before it reaches review, so an over-eager reviewer
+> model can't loop a correct change. The PR base branch is configurable via
+> `[pilot.pr].base_branch` (default `main`).
 > `autopilot` is experimental and ships with known gaps: the discovery
 > daemon polls **GitHub issues only** (`ci_failures` / `dependabot` /
 > `todos` / `coverage_gaps` are planned, not implemented); Slack/email
@@ -256,10 +262,11 @@ provider-support gate). On top of that, the crate now ships the
 `veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
 sandbox tiers (`host` / `container` / `vm`, degrading to `host` when no
 Docker daemon is present), and the always-on discovery `daemon` (GitHub
-issues). End-to-end runs against the providers below need real API keys
-and are **user-validated, not CI-validated** — see Maturity above before
-launching. `autopilot`-only extras (multi-source discovery, Slack/email
-transports, voice) are partial or unimplemented.
+issues). End-to-end `copilot` runs have been validated on a live provider
+(OpenRouter/DeepSeek) — plan through PR; they need real API keys and are
+**user-validated, not CI-validated** (CI runs the unit suite). `autopilot`-only
+extras (multi-source discovery, Slack/email transports, voice) are partial or
+unimplemented.
 
 ### Provider support for pilot mode
 
