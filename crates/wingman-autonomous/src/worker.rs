@@ -123,6 +123,16 @@ pub async fn run_worker(
         .arg("--json")
         .current_dir(&spec.worktree);
 
+    // Forward the resolved model. The worker `cd`s into the worktree, which
+    // does not contain the project's untracked `.wingman/config.toml`, so it
+    // cannot rediscover `pilot.worker_model` on its own — without this the
+    // child falls back to global config and dies with "no default_provider
+    // configured", deadlocking every run. `--model` (env WINGMAN_MODEL) is
+    // read as `opts.model_override` by worker-mode.
+    if let Some(model) = &spec.model {
+        sc.command_mut().arg("--model").arg(model);
+    }
+
     let mut supervisor = sc.spawn()?;
     let pid = supervisor.pid();
 
@@ -281,6 +291,42 @@ pub async fn run_worker(
     let status = child.wait().await?;
     let exit_code = status.code();
 
+    // Salvage a silent-success worker. A worker can do everything right —
+    // edit files, commit, pass every acceptance check — yet stop on
+    // `max_turns` (or simply forget) without calling `task_complete`. Without
+    // that terminal signal `outcome` is None and the E3 gate below throws the
+    // correct, committed work away as Failed (then the run wastes tokens
+    // retrying it). When the worker exited cleanly and the task actually
+    // declared checks, re-run them authoritatively against the worktree: if
+    // they're all green, synthesize the outcome the worker never sent. This
+    // doubles as a trust check — the parent now verifies acceptance itself
+    // rather than taking the worker's self-report on faith.
+    let (outcome, acceptance) =
+        if should_reverify(outcome.is_some(), status.success(), &spec.task.acceptance) {
+            let verified =
+                crate::acceptance::run_acceptance_checks(&spec.task.acceptance, &spec.worktree);
+            if crate::acceptance::all_green(&verified) {
+                tracing::info!(
+                    target: "pilot::worker",
+                    task = %spec.task.id,
+                    "worker stopped without task_complete but acceptance is green; salvaging to Review"
+                );
+                (
+                    Some(TaskOutcome {
+                        summary: "completed without explicit task_complete; \
+                                  acceptance re-verified green by the supervisor"
+                            .into(),
+                        files_changed: spec.task.writes.clone(),
+                    }),
+                    verified,
+                )
+            } else {
+                (outcome, acceptance)
+            }
+        } else {
+            (outcome, acceptance)
+        };
+
     // E3 gate: if the task declared acceptance checks, the worker MUST
     // have returned green results in order to move to Review. Otherwise
     // the task lands in Failed for the retry watchdog to pick up.
@@ -349,6 +395,18 @@ enum WorkerLine {
         acceptance: Vec<crate::acceptance::AcceptanceResult>,
     },
     Unknown,
+}
+
+/// Should the supervisor re-verify acceptance to salvage a worker that
+/// exited without a terminal `task_complete`? Only when it exited cleanly
+/// (a crash/error is a real failure, not a forgotten signal) and the task
+/// actually declared checks worth re-running.
+fn should_reverify(
+    outcome_present: bool,
+    process_ok: bool,
+    declared: &[crate::model::Acceptance],
+) -> bool {
+    !outcome_present && process_ok && !declared.is_empty()
 }
 
 /// E3 status-gate function. Pure so the green/red transition is unit-testable.
@@ -790,6 +848,20 @@ mod tests {
             compute_final_status(&ok_outcome, true, &declared, &[]),
             TaskStatus::Failed
         );
+    }
+
+    #[test]
+    fn should_reverify_only_salvages_clean_exits_with_checks() {
+        use crate::model::Acceptance;
+        let checks = vec![Acceptance::Shell { cmd: "true".into() }];
+        // The salvage case: no terminal outcome, clean exit, checks declared.
+        assert!(should_reverify(false, true, &checks));
+        // Worker already reported completion → nothing to salvage.
+        assert!(!should_reverify(true, true, &checks));
+        // Non-zero exit is a real crash, not a forgotten signal → no salvage.
+        assert!(!should_reverify(false, false, &checks));
+        // No declared checks → nothing to re-verify against.
+        assert!(!should_reverify(false, true, &[]));
     }
 
     #[test]

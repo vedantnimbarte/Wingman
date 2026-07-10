@@ -74,6 +74,37 @@ pub fn task_branch(run_id: &str, task_id: &str) -> String {
     format!("wingman/auto-tasks/{run_id}/{}", task_slug(task_id))
 }
 
+/// The diff a task's branch adds on top of the run's base commit. The E7
+/// inline reviewer needs this to review the actual change instead of the
+/// worker's self-description. Best-effort: a missing branch, a git error, or
+/// an empty diff all yield `None` (the caller then approves rather than
+/// rejecting a change it cannot see).
+pub fn task_diff(
+    repo_root: &Path,
+    run_id: &str,
+    task_id: &str,
+    base_commit: &str,
+) -> Option<String> {
+    let branch = task_branch(run_id, task_id);
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("diff")
+        .arg(format!("{base_commit}..{branch}"))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let diff = String::from_utf8_lossy(&out.stdout);
+    let diff = diff.trim();
+    if diff.is_empty() {
+        None
+    } else {
+        Some(diff.to_string())
+    }
+}
+
 /// Create a fresh worktree for `task_id` rooted at `worktree_path`, on a
 /// new branch off `base_commit`. The branch name is
 /// `wingman/auto/<run-id>/<task-slug>`.
@@ -371,9 +402,12 @@ pub fn merge_integration(
         let task = state
             .task(task_id)
             .expect("topo_sort_tasks returned an id not in state");
-        // Tasks that aren't ready to merge get skipped — the caller is
-        // expected to gate merge_integration on every task being Review.
-        if task.status != TaskStatus::Review {
+        // Merge every successfully completed task. A task lands in Done when
+        // the manager finalizes it incrementally, or is left in Review for
+        // this end-of-run merge — either way its branch holds work to
+        // integrate. Anything else (Failed / still Pending / InProgress) has
+        // no mergeable branch and is skipped.
+        if !matches!(task.status, TaskStatus::Review | TaskStatus::Done) {
             continue;
         }
         let branch = task_branch(&state.run_id, task_id);
@@ -846,6 +880,69 @@ mod tests {
             leftovers.is_empty(),
             "expected zero worker worktrees after cleanup, found {leftovers:?}"
         );
+    }
+
+    /// Regression for the incremental-finalize merge gap: a task the manager
+    /// finalized to Done (not left in Review) must still be squash-merged, or
+    /// its committed work never reaches the integration branch and cleanup
+    /// then deletes the only copy.
+    #[test]
+    fn done_status_tasks_are_merged_not_skipped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, base)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let run_id = "test-run-done";
+        let branch = "wingman/auto/test-run-done";
+
+        let mut state = RunState::new(run_id, "demo goal", &base, branch);
+        let mut task = Task::new("t1", Role::Developer, "Add t1");
+        task.status = TaskStatus::Done; // finalized incrementally, not Review
+        state.tasks.push(task);
+
+        let wt_path = repo
+            .join(".wingman")
+            .join("worktrees")
+            .join(format!("auto-{run_id}-t1"));
+        create_worktree(&repo, &base, run_id, "t1", &wt_path).unwrap();
+        std::fs::write(wt_path.join("file-t1.txt"), b"hello t1").unwrap();
+        git(&wt_path, &["add", "-A"]);
+        git(&wt_path, &["commit", "-m", "add file-t1.txt"]);
+
+        let outcome = merge_integration(&repo, &base, branch, &state)
+            .expect("integration merge succeeded");
+        assert_eq!(outcome.commits.len(), 1, "the Done task should be merged");
+        assert!(
+            repo.join("file-t1.txt").exists(),
+            "Done task's file must land on the integration branch"
+        );
+    }
+
+    /// The E7 reviewer feeds on this: task_diff must return the branch's
+    /// change against base, and None when there's nothing (so the reviewer
+    /// approves rather than rejecting a change it can't see).
+    #[test]
+    fn task_diff_returns_branch_changes_or_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, base)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let run_id = "test-run-diff";
+        let wt_path = repo
+            .join(".wingman")
+            .join("worktrees")
+            .join(format!("auto-{run_id}-t1"));
+        create_worktree(&repo, &base, run_id, "t1", &wt_path).unwrap();
+        std::fs::write(wt_path.join("new.txt"), b"added line\n").unwrap();
+        git(&wt_path, &["add", "-A"]);
+        git(&wt_path, &["commit", "-m", "add new.txt"]);
+
+        let diff = task_diff(&repo, run_id, "t1", &base).expect("diff present");
+        assert!(diff.contains("new.txt") && diff.contains("added line"));
+        // A task with no branch → None (reviewer then approves, not rejects).
+        assert!(task_diff(&repo, run_id, "nonexistent", &base).is_none());
     }
 
     /// Conflict path: two tasks edit the same file. merge_integration must

@@ -7,7 +7,7 @@ mod app;
 mod attachments;
 pub mod modal;
 pub mod theme;
-mod usage_store;
+pub mod usage_store;
 mod widgets;
 
 pub use app::{

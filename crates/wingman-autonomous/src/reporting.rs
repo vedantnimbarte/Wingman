@@ -204,6 +204,31 @@ pub fn tokens_by_phase(events: &[Event]) -> Vec<PhaseTokens> {
     out
 }
 
+/// Aggregate the run's `agent.usd` events into per-model token totals, so a
+/// completed run can be rolled into the global `~/.wingman/usage.json` and
+/// show up in `wingman cost` / the `/usage` modal alongside interactive
+/// sessions. Keyed by the model string as the pilot recorded it (already in
+/// `provider/model` shape). Cache tokens aren't in the event schema, so only
+/// fresh input/output are populated.
+pub fn tokens_by_model(events: &[Event]) -> std::collections::BTreeMap<String, wingman_core::Usage> {
+    let mut map: std::collections::BTreeMap<String, wingman_core::Usage> =
+        std::collections::BTreeMap::new();
+    for ev in events {
+        if let Event::AgentUsd {
+            model,
+            input_tokens,
+            output_tokens,
+            ..
+        } = ev
+        {
+            let u = map.entry(model.clone()).or_default();
+            u.input_tokens = u.input_tokens.saturating_add(*input_tokens as u32);
+            u.output_tokens = u.output_tokens.saturating_add(*output_tokens as u32);
+        }
+    }
+    map
+}
+
 /// Render the per-phase token breakdown as a compact multi-line block for
 /// the end-of-run log. Returns a single line when nothing was recorded.
 pub fn render_token_breakdown(events: &[Event]) -> String {
@@ -256,6 +281,29 @@ mod tests {
         let manager = phases.iter().find(|p| p.phase == "manager").unwrap();
         assert_eq!(manager.input_tokens, 50);
         assert!(phases.iter().any(|p| p.phase == "reviewer"));
+    }
+
+    #[test]
+    fn tokens_by_model_aggregates_across_agents_and_phases() {
+        let usd_model = |model: &str, i: u64, o: u64| Event::AgentUsd {
+            t: "t".into(),
+            agent: "phase:manager".into(),
+            model: model.into(),
+            input_tokens: i,
+            output_tokens: o,
+            usd: 0.0,
+        };
+        let events = vec![
+            usd_model("openrouter/deepseek/deepseek-v4-pro", 100, 10),
+            usd_model("openrouter/deepseek/deepseek-v4-pro", 50, 5),
+            usd_model("deepseek/deepseek-v4-flash", 20, 2),
+        ];
+        let by_model = tokens_by_model(&events);
+        assert_eq!(by_model.len(), 2);
+        let pro = &by_model["openrouter/deepseek/deepseek-v4-pro"];
+        assert_eq!(pro.input_tokens, 150);
+        assert_eq!(pro.output_tokens, 15);
+        assert_eq!(by_model["deepseek/deepseek-v4-flash"].input_tokens, 20);
     }
 
     #[test]

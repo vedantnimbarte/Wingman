@@ -119,6 +119,23 @@ pub fn price_for(key: &str) -> Option<Price> {
             cache_read_per_mtok: 0.31,
         },
 
+        // DeepSeek V4 (hosted via OpenRouter / DeepSeek direct). These
+        // endpoints don't bill a separate prompt-cache fee, so the cache
+        // columns are zero. Without an entry here spend prices as $0, which
+        // silently disables the pilot `max_usd` cap for the model.
+        "deepseek-v4-pro" => Price {
+            input_per_mtok: 0.435,
+            output_per_mtok: 0.87,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.0,
+        },
+        "deepseek-v4-flash" => Price {
+            input_per_mtok: 0.09,
+            output_per_mtok: 0.18,
+            cache_write_per_mtok: 0.0,
+            cache_read_per_mtok: 0.0,
+        },
+
         // Local — no per-token cost.
         "local-model" | "llama3.1:8b" | "qwen2.5:7b" | "deepseek-r1:8b" => Price {
             input_per_mtok: 0.0,
@@ -141,6 +158,15 @@ mod tests {
         for m in ["claude-opus-4-8", "anthropic/claude-sonnet-5", "gpt-5"] {
             assert!(price_for(m).is_some(), "{m} should be priced");
         }
+    }
+
+    #[test]
+    fn deepseek_v4_resolves_through_the_openrouter_prefix() {
+        // The pilot passes `openrouter/deepseek/deepseek-v4-pro`; the bare
+        // model must still price so the max_usd cap actually bounds it.
+        let p = price_for("openrouter/deepseek/deepseek-v4-pro").expect("v4-pro priced");
+        assert!(p.output_per_mtok > p.input_per_mtok);
+        assert!(price_for("deepseek/deepseek-v4-flash").is_some());
     }
 
     #[test]

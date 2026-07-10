@@ -234,7 +234,12 @@ fn compose_worker_system_prompt(role: &Role, task: &Task) -> String {
         "\n## When finished\n\nCommit your changes on this worktree, then call \
          `task_complete` with a one-paragraph summary and the list of files \
          changed. End your turn after that call — the orchestrator will pick \
-         it up from there.\n",
+         it up from there.\n\n\
+         The moment your acceptance checks pass, call `task_complete` \
+         immediately. Do not keep exploring — no further `glob`, `grep`, \
+         `list_dir`, or `read_file` once acceptance is green. Calling \
+         `task_complete` is mandatory: work you finish but never report this \
+         way is thrown away, even if it is correct and committed.\n",
     );
     s
 }

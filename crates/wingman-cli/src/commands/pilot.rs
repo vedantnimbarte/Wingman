@@ -506,7 +506,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     // progress line. The pipeline future and the tail loop share one task
     // (via select!), so there are no Send bounds to satisfy and the tail
     // stops the instant the pipeline returns.
-    let outcome = if opts.watch {
+    let result = if opts.watch {
         run_with_watch(
             wingman_autonomous::pipeline::run_to_completion(store, inputs),
             &run_path,
@@ -514,8 +514,28 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         .await
     } else {
         wingman_autonomous::pipeline::run_to_completion(store, inputs).await
+    };
+
+    // Account for the run's tokens BEFORE propagating any error: the events
+    // are persisted regardless of outcome, and a run that deadlocks still
+    // bills. Roll the spend into ~/.wingman/usage.json so `wingman cost` and
+    // the /usage modal see pilot runs, and print the per-phase breakdown. All
+    // best-effort — instrumentation never changes the run's exit status.
+    if let Ok(final_store) = RunStore::load(&run_path).await {
+        if let Ok(events) = final_store.read_events().await {
+            eprintln!(
+                "[pilot] {}",
+                wingman_autonomous::reporting::render_token_breakdown(&events)
+                    .replace('\n', "\n[pilot] ")
+            );
+            let by_model = wingman_autonomous::reporting::tokens_by_model(&events);
+            if !by_model.is_empty() {
+                wingman_tui::usage_store::LifetimeUsage::load().save_merged(&by_model);
+            }
+        }
     }
-    .context("pipeline run_to_completion")?;
+
+    let outcome = result.context("pipeline run_to_completion")?;
     // J5 — push a proactive status report (routed by R5). Best-effort: a
     // notification failure must not change the run's exit status.
     if let Ok(final_store) = RunStore::load(&run_path).await {
@@ -525,14 +545,6 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             &pilot.notifications,
             !outcome.failed_tasks.is_empty(),
         );
-        // Per-phase token breakdown — the "where did the tokens go?" baseline.
-        if let Ok(events) = final_store.read_events().await {
-            eprintln!(
-                "[pilot] {}",
-                wingman_autonomous::reporting::render_token_breakdown(&events)
-                    .replace('\n', "\n[pilot] ")
-            );
-        }
     }
     if !outcome.failed_tasks.is_empty() {
         eprintln!(
