@@ -992,12 +992,7 @@ On the user's machine:
 
 ## License
 
-Dual-licensed under either:
-
-- MIT License
-- Apache License, Version 2.0
-
-at your option.
+Licensed under the Apache License, Version 2.0.
 
 ---
 
