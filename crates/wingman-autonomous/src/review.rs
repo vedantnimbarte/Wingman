@@ -65,22 +65,25 @@ impl ReviewReport {
 
     /// Decide the task's next status from this report.
     ///
-    /// - `Approve` with no finding at/above `block_gate` → [`TaskStatus::Done`]
-    ///   (the orchestrator then merges the task branch).
-    /// - Otherwise → [`TaskStatus::Todo`] (rework: the task re-enters the
-    ///   queue with the reviewer's notes appended to its context).
+    /// Rework iff there is a concrete finding at/above `block_gate`; otherwise
+    /// the task is Done. Structured findings win over the top-line verdict in
+    /// *both* directions:
     ///
-    /// A reviewer that says `Approve` but left a blocking finding is
-    /// overridden to rework — the structured findings win over the
-    /// top-line verdict, because that's the safer disagreement to resolve
-    /// automatically.
+    /// - `Approve` with a blocking finding → rework (don't merge a flagged bug).
+    /// - `Rework` with no blocking finding → Done. A meticulous model often
+    ///   returns `rework` for a change that already passed its acceptance
+    ///   checks without citing anything concrete; honoring that bare verdict
+    ///   loops correct work until the retry ladder blocks the whole run. The
+    ///   reviewer must name a real defect (a finding at/above the gate) to
+    ///   send work back.
     pub fn next_status(&self, block_gate: Severity) -> TaskStatus {
         let has_blocker = self
             .max_severity()
             .is_some_and(|s| s.meets_or_exceeds(block_gate));
-        match self.verdict {
-            Verdict::Approve if !has_blocker => TaskStatus::Done,
-            _ => TaskStatus::Todo,
+        if has_blocker {
+            TaskStatus::Todo
+        } else {
+            TaskStatus::Done
         }
     }
 
@@ -157,13 +160,31 @@ mod tests {
     }
 
     #[test]
-    fn explicit_rework_goes_to_todo() {
+    fn rework_verdict_without_a_blocking_finding_approves() {
+        // A bare `rework` with no concrete finding must not loop work that
+        // already passed acceptance — findings drive the decision, not the
+        // verdict word.
         let r = ReviewReport {
             verdict: Verdict::Rework,
             findings: vec![],
             summary: "needs tests".into(),
         };
-        assert_eq!(r.next_status(Severity::High), TaskStatus::Todo);
+        assert_eq!(r.next_status(Severity::Medium), TaskStatus::Done);
+    }
+
+    #[test]
+    fn rework_verdict_with_a_blocking_finding_reworks() {
+        let r = ReviewReport {
+            verdict: Verdict::Rework,
+            findings: vec![ReviewFinding {
+                severity: "high".into(),
+                message: "panics on empty input".into(),
+                file: None,
+                line: None,
+            }],
+            summary: String::new(),
+        };
+        assert_eq!(r.next_status(Severity::Medium), TaskStatus::Todo);
     }
 
     #[test]

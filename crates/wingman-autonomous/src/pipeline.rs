@@ -122,6 +122,12 @@ pub struct PipelineOutcome {
     pub escalation_triggers: Vec<crate::escalation::EscalationTrigger>,
 }
 
+/// Severity at/above which the E7 inline reviewer sends a task back for
+/// rework. Its own knob, decoupled from `auto_merge_max_severity`: `Medium`
+/// loops the run on genuine defects while letting low nitpicks — the noise a
+/// meticulous model emits on correct work — through to Done.
+const REVIEWER_REWORK_GATE: crate::severity::Severity = crate::severity::Severity::Medium;
+
 /// Drive the run from its current state to completion.
 ///
 /// Works for both fresh runs (RunStore freshly created, plan persisted)
@@ -153,11 +159,11 @@ pub async fn run_to_completion(
     let reviewer: Option<orchestrator::Reviewer> = if inputs.run_reviewer {
         let provider = aux_provider.clone();
         let model = inputs.reviewer_model.clone();
-        let gate = inputs
-            .pr_config
-            .auto_merge_max_severity
-            .parse::<crate::severity::Severity>()
-            .unwrap_or(crate::severity::Severity::Medium);
+        // The reviewer's rework bar is deliberately its own knob, not
+        // `auto_merge_max_severity` (which governs the merge decision): the
+        // reviewer should loop only on real blockers, not the low nitpicks a
+        // meticulous model tends to emit, or it deadlocks correct runs.
+        let gate = REVIEWER_REWORK_GATE;
         let repo = project_root.clone();
         let run_id_for_review = run_id.clone();
         let base_for_review = state_at_start.base_commit.clone();
@@ -886,12 +892,15 @@ async fn review_task_inline(
     diff: &str,
     block_gate: crate::severity::Severity,
 ) -> Option<String> {
-    const SYSTEM: &str = "You are a meticulous code reviewer. Review the task's actual diff \
+    const SYSTEM: &str = "You are a pragmatic code reviewer. Review the task's actual diff \
         (below) against its stated goal and reply with ONLY a JSON object: \
         {\"verdict\":\"approve\"|\"rework\", \
         \"summary\":\"...\", \"findings\":[{\"severity\":\"low|medium|high|critical\", \
         \"message\":\"...\"}]}. Judge only the diff shown; do not demand changes \
-        for code you cannot see. Approve when the diff satisfies the goal.";
+        for code you cannot see. Approve when the diff satisfies the goal. Only \
+        request rework for a concrete defect — a bug, a broken build, or the goal \
+        left unmet — and record it as a medium-or-higher finding. Do not rework \
+        over style nits or preferences; file those as low-severity and approve.";
     let summary = task
         .outcome
         .as_ref()
