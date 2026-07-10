@@ -346,6 +346,37 @@ pub fn fetch_coverage_gap_candidates(
     Ok(candidates)
 }
 
+/// J3 file-drop intake: each `*.md` in `dir` is a person's request (a
+/// Slack/email gateway writes them there). Read via [`crate::intake::scan_inbox`]
+/// and map to candidates carrying the message's trust — a trusted author's
+/// drop can auto-run, an unknown one surfaces as a proposal. Missing dir →
+/// empty (not an error).
+pub fn fetch_intake_candidates(dir: &Path, trusted_authors: &[String]) -> Vec<Candidate> {
+    crate::intake::scan_inbox(dir, trusted_authors)
+        .into_iter()
+        .take(MAX_GH_CANDIDATES)
+        .map(|g| {
+            let title: String = g
+                .text
+                .lines()
+                .next()
+                .unwrap_or(&g.text)
+                .chars()
+                .take(120)
+                .collect();
+            Candidate {
+                source: format!("intake:{}", g.source.as_str()),
+                title,
+                // A human explicitly asked for this: high value.
+                value: 0.8,
+                confidence: 0.5,
+                risk: 0.4,
+                trust: g.trust_level,
+            }
+        })
+        .collect()
+}
+
 /// J2 discovery cycle: one full pass of the daemon — fetch candidates
 /// from the configured sources, rank them, and decide an action for each.
 /// The infinite scheduling (sleep `poll_interval_secs`, repeat) is trivial
@@ -389,6 +420,10 @@ pub fn run_cycle(
         if let Ok(found) = fetch_coverage_gap_candidates(repo_root, 0.5) {
             candidates.extend(found);
         }
+    }
+    if cfg.sources.iter().any(|s| s == "intake") {
+        let dir = repo_root.join(&cfg.intake_dir);
+        candidates.extend(fetch_intake_candidates(&dir, &cfg.trusted_authors));
     }
     rank(candidates)
         .into_iter()
@@ -679,6 +714,25 @@ mod tests {
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].source, "dependabot#12");
         assert!(c[0].title.contains("bump serde"));
+    }
+
+    #[test]
+    fn fetch_intake_maps_file_drops_to_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A trusted author's drop → Trusted; an unknown one → Known.
+        std::fs::write(
+            tmp.path().join("a.md"),
+            "author: vedant\nAdd a --version flag to the CLI.\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("b.md"), "Fix the flaky test.\n").unwrap();
+        let cands = fetch_intake_candidates(tmp.path(), &["vedant".to_string()]);
+        assert_eq!(cands.len(), 2);
+        assert!(cands.iter().all(|c| c.source.starts_with("intake:")));
+        let trusted = cands.iter().find(|c| c.title.contains("--version")).unwrap();
+        assert_eq!(trusted.trust, TrustLevel::Trusted);
+        // Missing dir → empty, not an error.
+        assert!(fetch_intake_candidates(StdPath::new("/no/such/dir"), &[]).is_empty());
     }
 
     #[test]

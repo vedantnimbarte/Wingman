@@ -1578,6 +1578,18 @@ pub struct PilotDaemonConfig {
     /// tuned.
     #[serde(default)]
     pub auto_dispatch: bool,
+    /// J3 file-drop intake directory (relative to the repo root). When the
+    /// `intake` source is enabled, each `*.md` here is normalized into a goal
+    /// candidate and flows through the same score/dispatch path as discovered
+    /// work. A Slack/email gateway that writes messages into this directory is
+    /// the "transport"; wingman consumes it, so no in-process listener is
+    /// needed. An optional first line `author: <name>` sets trust.
+    #[serde(default = "default_intake_dir")]
+    pub intake_dir: String,
+}
+
+fn default_intake_dir() -> String {
+    ".wingman/intake".into()
 }
 
 impl Default for PilotDaemonConfig {
@@ -1590,12 +1602,12 @@ impl Default for PilotDaemonConfig {
             trusted_authors: Vec::new(),
             trusted_labels: vec!["wingman:auto".into()],
             auto_dispatch: false,
-            // `github_issues` and `todos` have live discovery paths. The
-            // rest (ci_failures, dependabot, coverage_gaps) are planned but
-            // unimplemented, so the default doesn't advertise them — the
-            // daemon warns if you configure one that doesn't exist.
+            // Live sources: github_issues, todos, ci_failures, dependabot,
+            // coverage_gaps, intake. The default advertises only
+            // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             webhook_secret: None,
+            intake_dir: default_intake_dir(),
         }
     }
 }

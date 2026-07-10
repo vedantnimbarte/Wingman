@@ -310,6 +310,11 @@ pub enum PilotAction {
         /// Run this many discovery cycles then exit; 0 = run forever.
         #[arg(long, default_value_t = 0)]
         cycles: usize,
+        /// Log what auto-dispatch WOULD run without opening any PRs — use to
+        /// validate `[pilot.daemon].auto_dispatch` trust config safely before
+        /// letting the daemon act on its own.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// J12 — install the skill packs listed in `[pilot.skills].packs` into
     /// `~/.wingman/packs/` and link their roles into `~/.wingman/agents/`.
@@ -612,9 +617,9 @@ pub async fn run() -> Result<ExitCode> {
                 let cfg = load_config()?;
                 commands::pilot::skills_install(cfg).await
             }
-            PilotAction::Daemon { cycles } => {
+            PilotAction::Daemon { cycles, dry_run } => {
                 let cfg = load_config()?;
-                commands::pilot::daemon(cfg, cycles).await
+                commands::pilot::daemon(cfg, cycles, dry_run).await
             }
             PilotAction::Abort { run_id, task } => {
                 commands::pilot::control_abort(run_id, task).await

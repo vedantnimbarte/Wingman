@@ -1506,7 +1506,7 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64, ascii: bool) -> Res
 /// to `<project>/.wingman/daemon-queue.jsonl` for follow-up. `cycles == 0`
 /// runs forever (Ctrl-C to stop); a positive value runs that many cycles
 /// then exits (used for one-shot triage / CI).
-pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
+pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCode> {
     use std::time::Duration;
 
     let pilot = &cfg.pilot;
@@ -1527,6 +1527,7 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
         "ci_failures",
         "dependabot",
         "coverage_gaps",
+        "intake",
     ];
     for s in &pilot.daemon.sources {
         if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
@@ -1604,6 +1605,17 @@ pub async fn daemon(cfg: Config, cycles: usize) -> Result<ExitCode> {
             if pilot.daemon.auto_dispatch
                 && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun)
             {
+                if dry_run {
+                    // Validation path (#34): show the decision, open nothing.
+                    eprintln!(
+                        "[pilot] daemon: [dry-run] would auto-dispatch a run for {:?} \
+                         (source {}, score {:.2})",
+                        cand.title,
+                        cand.source,
+                        cand.score()
+                    );
+                    continue;
+                }
                 eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
                 let opts = PilotOptions {
                     goal: cand.title.clone(),

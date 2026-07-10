@@ -198,21 +198,23 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > functional correctness before it reaches review, so an over-eager reviewer
 > model can't loop a correct change. The PR base branch is configurable via
 > `[pilot.pr].base_branch` (default `main`).
-> `autopilot` is experimental and ships with known gaps. The discovery
-> daemon now polls `github_issues`, `todos`, `ci_failures`, `dependabot`,
-> and `coverage_gaps` (the last reads an existing `lcov.info` report).
-> **Notification** delivery is wired: any routed channel with an entry under
-> `[pilot.notifications.webhooks]` (e.g. a Slack incoming-webhook URL) is
-> POSTed; channels without an endpoint fall back to the terminal. Mid-run
-> steering works too — `pivot` / `clarify` IPC messages are injected into
-> the worker's next turn. Still open: **inbound intake** (a running
-> Slack/email receiver — the parsing/trust layer exists, the live listener
-> does not); **voice intake** (needs audio hardware); the **`vm` sandbox
-> tier** (fail-closed — pilot refuses vm-tier tasks rather than run them
-> unsandboxed); and live validation of **auto-dispatch**
-> (`[pilot.daemon].auto_dispatch` opens real PRs autonomously; off by
-> default — tune your trust config and dry-run with `daemon --cycles 1`
-> before enabling it).
+> `autopilot` is experimental but most of its edges are now wired. The
+> discovery daemon polls `github_issues`, `todos`, `ci_failures`,
+> `dependabot`, `coverage_gaps` (reads an existing `lcov.info`), and
+> `intake`. **Intake** is transport-agnostic: a Slack/email (or voice→STT)
+> gateway writes `*.md` requests into `[pilot.daemon].intake_dir` and the
+> daemon ingests them with per-author trust — no in-process listener needed.
+> **Notification** delivery is wired via `[pilot.notifications.webhooks]`
+> (channel → URL; Slack incoming-webhook shape; terminal fallback). **Mid-run
+> steering** works — `pivot`/`clarify` IPC inject into the worker's next
+> turn. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
+> opens real PRs autonomously; validate its trust config safely with
+> `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
+> before enabling it. Genuinely still open: a **live mic-capture** voice
+> front-end (needs audio hardware + a speech-to-text model; transcript
+> file-drop already works via intake), and the **`vm` sandbox tier** (real
+> VM/Firecracker isolation — fail-closed today: pilot refuses vm-tier tasks
+> rather than run them unsandboxed).
 
 Pick a tier in `~/.wingman/config.toml`:
 
