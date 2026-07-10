@@ -448,7 +448,8 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         }
     }
 
-    let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH").unwrap_or_else(|_| "main".into());
+    let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH")
+        .unwrap_or_else(|_| pilot.pr.base_branch.clone());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
         max_concurrent_agents: pilot.max_concurrent_agents,
         task_timeout: std::time::Duration::from_secs(pilot.task_timeout_secs),
@@ -1196,7 +1197,8 @@ pub async fn resume(
         .with_context(|| format!("building provider {}", selection.provider_id))?;
 
     let state = store.state().clone();
-    let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH").unwrap_or_else(|_| "main".into());
+    let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH")
+        .unwrap_or_else(|_| cfg.pilot.pr.base_branch.clone());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
         max_concurrent_agents: cfg.pilot.max_concurrent_agents,
         task_timeout: std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),

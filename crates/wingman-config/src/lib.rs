@@ -1488,6 +1488,10 @@ pub struct PilotPrConfig {
     /// turns up any finding at or above this severity.
     pub auto_merge_max_severity: String,
     pub require_ci_green: bool,
+    /// Branch the pilot opens its PR against. Defaults to `main`; set this to
+    /// your repo's default branch (e.g. `master`). The
+    /// `WINGMAN_PILOT_BASE_BRANCH` env var overrides it for one-off runs.
+    pub base_branch: String,
 }
 
 impl Default for PilotPrConfig {
@@ -1496,6 +1500,7 @@ impl Default for PilotPrConfig {
             auto_merge: true,
             auto_merge_max_severity: "low".into(),
             require_ci_green: true,
+            base_branch: "main".into(),
         }
     }
 }

@@ -1792,6 +1792,7 @@ mod tests {
                 auto_merge: true,
                 require_ci_green: false,
                 auto_merge_max_severity: "low".into(),
+                base_branch: "main".into(),
             },
             true, // auto-approved
             wingman_config::PilotTier::Copilot,
@@ -1898,6 +1899,7 @@ mod tests {
                 auto_merge: true,
                 require_ci_green: true,
                 auto_merge_max_severity: "low".into(),
+                base_branch: "main".into(),
             },
             true,
             wingman_config::PilotTier::Copilot,
@@ -1932,6 +1934,7 @@ mod tests {
                 auto_merge: true,
                 require_ci_green: true,
                 auto_merge_max_severity: "low".into(),
+                base_branch: "main".into(),
             },
             true,
             wingman_config::PilotTier::Copilot,
