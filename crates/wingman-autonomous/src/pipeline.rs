@@ -2391,6 +2391,18 @@ mod tests {
             eprintln!("skipping: git not available");
             return;
         }
+        // Persist identity + line-ending settings in the repo config: CI
+        // runners have no global git identity, and `merge_integration`'s
+        // internal rebase/merge shell out without the per-command env vars,
+        // so they'd otherwise fail with "Committer identity unknown".
+        for cfg in [
+            ["config", "user.email", "t@t.t"],
+            ["config", "user.name", "t"],
+            ["config", "core.autocrlf", "false"],
+            ["config", "core.eol", "lf"],
+        ] {
+            gitc(&repo, &cfg).unwrap();
+        }
         std::fs::write(repo.join("shared.txt"), "base\n").unwrap();
         gitc(&repo, &["add", "-A"]).unwrap();
         gitc(&repo, &["commit", "-qm", "seed"]).unwrap();
