@@ -160,6 +160,17 @@ impl ToolCtx {
     pub fn allows_shell(&self) -> bool {
         matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
     }
+
+    /// Permission for outbound network access (web_fetch / web_search).
+    ///
+    /// Network egress is a data-exfiltration channel: content the agent reads
+    /// (or prompt-injected instructions inside it) could smuggle secrets out
+    /// via a URL or query string. So the read-only research modes can't reach
+    /// the network — only `auto-edit`/`yolo`, where the user has already
+    /// granted the agent latitude to act.
+    pub fn allows_network(&self) -> bool {
+        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+    }
 }
 
 /// Resolve `path` to an absolute form suitable for a project-containment
@@ -498,5 +509,18 @@ mod tests {
     fn denylist_empty_denies_nothing() {
         let ctx = ctx_with_denylist(&[]);
         assert!(!ctx.is_shell_denied("rm -rf /"));
+    }
+
+    #[test]
+    fn network_gated_to_edit_modes() {
+        let root = std::env::temp_dir();
+        let ctx = ToolCtx::new(PermissionMode::ReadOnly, root.clone(), root.clone());
+        assert!(!ctx.allows_network(), "read-only must not reach the network");
+        ctx.set_mode(PermissionMode::Plan);
+        assert!(!ctx.allows_network(), "plan must not reach the network");
+        ctx.set_mode(PermissionMode::AutoEdit);
+        assert!(ctx.allows_network(), "auto-edit may reach the network");
+        ctx.set_mode(PermissionMode::Yolo);
+        assert!(ctx.allows_network(), "yolo may reach the network");
     }
 }

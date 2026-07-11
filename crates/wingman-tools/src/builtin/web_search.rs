@@ -44,7 +44,12 @@ impl Tool for WebSearch {
         }
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        if !ctx.allows_network() {
+            return ToolOutcome::err(
+                "network access denied: web_search requires auto-edit or yolo mode".to_string(),
+            );
+        }
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
@@ -77,6 +82,25 @@ impl Tool for WebSearch {
 
         let results = parse_ddg(&html, args.limit as usize);
         if results.is_empty() {
+            // Distinguish a genuine zero-result query from a scrape failure
+            // (markup drift or a bot-check/CAPTCHA page). DDG's real results
+            // and its "no results" page both carry the `result` container
+            // markup; a blocked/redirected page does not. If the anchor class
+            // we parse is present but yielded nothing, the layout changed.
+            if html.contains("result__a") {
+                return ToolOutcome::err(
+                    "web_search parse failed: DuckDuckGo result markup changed (the \
+                     `result__a` selector matched no anchors)"
+                        .to_string(),
+                );
+            }
+            if !html.contains("no-results") && !html.contains("No&nbsp;results") {
+                return ToolOutcome::err(
+                    "web_search failed: DuckDuckGo returned no result markup (likely a \
+                     bot-check/CAPTCHA page or a transport error)"
+                        .to_string(),
+                );
+            }
             return ToolOutcome::ok(format!("(no results for {q})"));
         }
         let mut out = String::new();
@@ -171,5 +195,25 @@ mod tests {
     fn clean_url_unwraps_redirector() {
         let raw = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fp&rut=abc";
         assert_eq!(clean_url(raw), "https://example.com/p");
+    }
+
+    #[test]
+    fn parse_ddg_reads_a_result() {
+        let html = r#"<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com">Example</a>
+            <a class="result__snippet">an example page</a>"#;
+        let hits = parse_ddg(html, 8);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://example.com");
+        assert_eq!(hits[0].title, "Example");
+        assert_eq!(hits[0].snippet, "an example page");
+    }
+
+    #[test]
+    fn empty_parse_on_markup_with_anchor_class_is_a_failure_not_empty() {
+        // Regression: a page that still carries the `result__a` class but whose
+        // anchor shape changed must read as a parse failure, not "0 results".
+        let drifted = r#"<div class="result__a-wrapper">changed</div>"#;
+        assert!(parse_ddg(drifted, 8).is_empty());
+        assert!(drifted.contains("result__a"));
     }
 }

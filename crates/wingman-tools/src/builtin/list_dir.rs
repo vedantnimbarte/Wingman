@@ -39,6 +39,13 @@ impl Tool for ListDir {
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
         let path = ctx.resolve(&args.path);
+        // Confine enumeration to the readable tree, matching `read_file`.
+        if !ctx.allows_read(&path) {
+            return ToolOutcome::err(format!(
+                "read denied: {} is outside the project tree",
+                path.display()
+            ));
+        }
         let mut rd = match tokio::fs::read_dir(&path).await {
             Ok(rd) => rd,
             Err(e) => return ToolOutcome::err(format!("readdir {}: {e}", path.display())),

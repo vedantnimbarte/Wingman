@@ -50,6 +50,13 @@ impl Tool for Glob {
             .as_deref()
             .map(|p| ctx.resolve(p))
             .unwrap_or_else(|| ctx.project_root.clone());
+        // Confine enumeration to the readable tree, matching `read_file`.
+        if !ctx.allows_read(&base) {
+            return ToolOutcome::err(format!(
+                "read denied: {} is outside the project tree",
+                base.display()
+            ));
+        }
 
         let pat = match GlobPat::new(&args.pattern) {
             Ok(g) => g,

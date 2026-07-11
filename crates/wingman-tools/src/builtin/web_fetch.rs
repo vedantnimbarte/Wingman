@@ -51,7 +51,12 @@ impl Tool for WebFetch {
         }
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        if !ctx.allows_network() {
+            return ToolOutcome::err(
+                "network access denied: web_fetch requires auto-edit or yolo mode".to_string(),
+            );
+        }
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
@@ -336,8 +341,9 @@ mod tests {
 
     #[tokio::test]
     async fn refuses_non_http_scheme() {
+        // Yolo so the network gate passes and we reach the scheme check.
         let ctx = ToolCtx::new(
-            wingman_config::PermissionMode::ReadOnly,
+            wingman_config::PermissionMode::Yolo,
             std::env::temp_dir(),
             std::env::temp_dir(),
         );
@@ -346,6 +352,20 @@ mod tests {
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("http"));
+    }
+
+    #[tokio::test]
+    async fn refuses_network_in_read_only() {
+        let ctx = ToolCtx::new(
+            wingman_config::PermissionMode::ReadOnly,
+            std::env::temp_dir(),
+            std::env::temp_dir(),
+        );
+        let out = WebFetch
+            .run(json!({"url": "https://example.com/"}), &ctx)
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("network access denied"));
     }
 
     fn url(s: &str) -> reqwest::Url {
@@ -373,8 +393,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_refuses_metadata_endpoint() {
+        // Yolo so the network gate passes and we reach the SSRF host check.
         let ctx = ToolCtx::new(
-            wingman_config::PermissionMode::ReadOnly,
+            wingman_config::PermissionMode::Yolo,
             std::env::temp_dir(),
             std::env::temp_dir(),
         );

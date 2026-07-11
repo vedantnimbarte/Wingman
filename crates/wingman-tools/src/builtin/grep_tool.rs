@@ -65,6 +65,15 @@ impl Tool for Grep {
             .as_deref()
             .map(|p| ctx.resolve(p))
             .unwrap_or_else(|| ctx.project_root.clone());
+        // Confine to the readable tree just like `read_file` — grep emits
+        // matching file *content*, so an unchecked `path` outside the project
+        // (e.g. `~/.aws`) would leak secrets in read-only/plan mode.
+        if !ctx.allows_read(&base) {
+            return ToolOutcome::err(format!(
+                "read denied: {} is outside the project tree",
+                base.display()
+            ));
+        }
         let include = match args.include.as_deref() {
             None => None,
             Some(s) => match GlobPat::new(s) {
