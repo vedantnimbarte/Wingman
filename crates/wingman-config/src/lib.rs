@@ -118,6 +118,12 @@ pub struct ToolsConfig {
     /// Comma-separated list of tools to disable for this project.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Allow `web_fetch`/`web_search` in read-only/plan mode too. Off by
+    /// default: network egress is otherwise gated to auto-edit/yolo so it
+    /// can't be used as a data-exfiltration channel. Set true if you want
+    /// look-ups while researching before you enter an edit mode.
+    #[serde(default)]
+    pub allow_network: bool,
 }
 
 /// Top-level merged configuration. Constructed via [`Config::load`].

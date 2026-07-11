@@ -16,6 +16,10 @@ pub struct ToolCtx {
     /// Each entry is a substring pattern: if the command contains it, the call
     /// is rejected before execution.
     pub extra_denylist: Vec<String>,
+    /// Opt-in from `[tools].allow_network`: permit web_fetch/web_search in any
+    /// mode (including read-only/plan), not just the edit-capable ones. Off by
+    /// default so network egress stays gated unless the user asks for it.
+    pub allow_network: bool,
 }
 
 /// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
@@ -46,21 +50,25 @@ impl ToolCtx {
             cwd,
             project_root,
             extra_denylist: Vec::new(),
+            allow_network: false,
         }
     }
 
-    /// Like [`new`] but also accepts a project-level denylist of shell patterns.
+    /// Like [`new`] but also accepts a project-level denylist of shell patterns
+    /// and the `allow_network` opt-in.
     pub fn new_with_config(
         mode: PermissionMode,
         cwd: PathBuf,
         project_root: PathBuf,
         extra_denylist: Vec<String>,
+        allow_network: bool,
     ) -> Self {
         Self {
             mode: Arc::new(AtomicU8::new(mode_to_u8(mode))),
             cwd,
             project_root,
             extra_denylist,
+            allow_network,
         }
     }
 
@@ -167,9 +175,11 @@ impl ToolCtx {
     /// (or prompt-injected instructions inside it) could smuggle secrets out
     /// via a URL or query string. So the read-only research modes can't reach
     /// the network — only `auto-edit`/`yolo`, where the user has already
-    /// granted the agent latitude to act.
+    /// granted the agent latitude to act. The `[tools].allow_network` opt-in
+    /// lifts this for users who want look-ups in read-only/plan too.
     pub fn allows_network(&self) -> bool {
-        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+        self.allow_network
+            || matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
     }
 }
 
@@ -438,6 +448,7 @@ mod tests {
             PathBuf::from("/tmp"),
             PathBuf::from("/tmp"),
             patterns.iter().map(|s| s.to_string()).collect(),
+            false,
         )
     }
 
@@ -522,5 +533,21 @@ mod tests {
         assert!(ctx.allows_network(), "auto-edit may reach the network");
         ctx.set_mode(PermissionMode::Yolo);
         assert!(ctx.allows_network(), "yolo may reach the network");
+    }
+
+    #[test]
+    fn allow_network_opt_in_lifts_read_only_gate() {
+        let root = std::env::temp_dir();
+        let ctx = ToolCtx::new_with_config(
+            PermissionMode::ReadOnly,
+            root.clone(),
+            root.clone(),
+            Vec::new(),
+            true,
+        );
+        assert!(
+            ctx.allows_network(),
+            "allow_network opt-in permits network even in read-only"
+        );
     }
 }

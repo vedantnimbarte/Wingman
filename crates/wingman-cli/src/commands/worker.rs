@@ -78,6 +78,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         cwd,
         paths.root.clone(),
         cfg.tools.shell_denylist.clone(),
+        cfg.tools.allow_network,
     );
     let registry = ToolRegistry::new(ctx)
         .with_builtins()

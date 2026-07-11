@@ -448,6 +448,7 @@ pub async fn build_registry_with_learn(
         cwd,
         paths.root.clone(),
         cfg.tools.shell_denylist.clone(),
+        cfg.tools.allow_network,
     );
     let mut reg = ToolRegistry::new(ctx)
         .with_builtins()
@@ -821,6 +822,7 @@ pub async fn build_agent_registry_learn(
                         cwd,
                         paths.root.clone(),
                         cfg.tools.shell_denylist.clone(),
+                        cfg.tools.allow_network,
                     );
                     let mut inner_reg = ToolRegistry::new(ctx)
                         .with_builtins()

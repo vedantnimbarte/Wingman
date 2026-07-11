@@ -719,6 +719,11 @@ fast_model = "anthropic/claude-haiku-4-5-20251001"
 theme = "default"
 show_token_usage = true
 
+[tools]
+# web_fetch/web_search are gated to auto-edit/yolo by default (network egress
+# is an exfiltration channel). Set true to also allow them in read-only/plan.
+allow_network = false
+
 [providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
 model = "claude-opus-4-7"

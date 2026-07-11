@@ -54,6 +54,7 @@ pub fn build_manager_registry(
         cwd,
         project_root,
         Vec::new(),
+        false,
     );
     let mut reg = ToolRegistry::new(ctx);
     // Read-only inspection.
