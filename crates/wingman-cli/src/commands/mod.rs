@@ -13,6 +13,7 @@ pub mod memory;
 pub mod pilot;
 pub mod pilot_watch_tui;
 pub mod review;
+pub mod router;
 pub mod review_multi;
 pub mod schedule;
 pub mod session;

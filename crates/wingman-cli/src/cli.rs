@@ -132,6 +132,11 @@ pub enum Command {
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Model routing utilities.
+    Router {
+        #[command(subcommand)]
+        action: RouterAction,
+    },
     /// Run any [[schedule]] entries whose cadence is due.
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
@@ -426,6 +431,16 @@ pub enum SessionAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum RouterAction {
+    /// Show recorded per-class model win rates (gate pass-rate) for this repo.
+    Stats {
+        /// Aggregate across all repos instead of just the current one.
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ConfigAction {
     /// Write a starter `~/.wingman/config.toml`.
     Init {
@@ -538,6 +553,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Router { action }) => commands::router::run(action).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
