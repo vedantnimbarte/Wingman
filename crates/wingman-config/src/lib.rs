@@ -404,8 +404,26 @@ pub struct McpServerConfig {
     /// Command to spawn for stdio transport.
     pub command: Option<String>,
     pub args: Vec<String>,
+    /// Environment variables for the stdio child process. Most MCP servers
+    /// take their API key / config via env, so this is required to reach them.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Working directory for the stdio child process.
+    #[serde(default)]
+    pub cwd: Option<String>,
     /// URL for http transport.
     pub url: Option<String>,
+    /// Extra HTTP headers for http transport (e.g. `Authorization`). Needed to
+    /// reach authenticated remote MCP servers.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Whether this server's tools are trusted to run in read-only/plan mode.
+    /// MCP tools are opaque — we can't tell a safe search tool from one that
+    /// writes files or runs commands — so by default they are gated to
+    /// edit-capable modes (auto-edit/yolo) just like the shell tool. Set this
+    /// true only for servers you know are side-effect-free.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 impl Default for McpServerConfig {
@@ -414,7 +432,11 @@ impl Default for McpServerConfig {
             transport: "stdio".into(),
             command: None,
             args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            cwd: None,
             url: None,
+            headers: std::collections::BTreeMap::new(),
+            trusted: false,
         }
     }
 }
@@ -1732,6 +1754,33 @@ mod tests {
             PermissionMode::Yolo
         );
         assert!("nope".parse::<PermissionMode>().is_err());
+    }
+
+    #[test]
+    fn mcp_server_parses_env_headers_cwd_trusted() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [mcp.fs]
+            transport = "stdio"
+            command = "mcp-fs"
+            cwd = "/srv/proj"
+            trusted = true
+            env = { API_KEY = "secret", DEBUG = "1" }
+
+            [mcp.remote]
+            transport = "http"
+            url = "https://mcp.example.com/mcp"
+            headers = { Authorization = "Bearer abc" }
+            "#,
+        )
+        .unwrap();
+        let fs = &cfg.mcp["fs"];
+        assert_eq!(fs.cwd.as_deref(), Some("/srv/proj"));
+        assert!(fs.trusted);
+        assert_eq!(fs.env["API_KEY"], "secret");
+        let remote = &cfg.mcp["remote"];
+        assert!(!remote.trusted, "trusted defaults to false");
+        assert_eq!(remote.headers["Authorization"], "Bearer abc");
     }
 
     #[test]

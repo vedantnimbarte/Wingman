@@ -5,18 +5,24 @@
 //! [`McpTool`]. Tools are namespaced as `mcp__<server>__<tool>` so they
 //! never collide with built-ins or with another server.
 //!
-//! M3 ships stdio transport (most servers ship as a process). HTTP transport
-//! uses JSON-RPC 2.0 style requests over `reqwest`.
+//! Both transports run over rmcp's `RunningService`, so both perform the MCP
+//! `initialize` handshake. stdio spawns a child process; http uses rmcp's
+//! spec-compliant Streamable-HTTP client (SSE, `Mcp-Session-Id`, auth headers).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use wingman_config::McpServerConfig;
 use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, Tool as RmcpTool},
     service::{RoleClient, RunningService},
-    transport::TokioChildProcess,
+    transport::{
+        streamable_http_client::StreamableHttpClientTransportConfig, StreamableHttpClientTransport,
+        TokioChildProcess,
+    },
     ServiceExt,
 };
 use thiserror::Error;
@@ -31,8 +37,6 @@ pub enum McpError {
     Rpc(String),
     #[error("bad config: {0}")]
     Config(String),
-    #[error("http: {0}")]
-    Http(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -50,16 +54,16 @@ pub trait McpClient: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Stdio McpClient — wraps rmcp RunningService
+// ServiceMcpClient — wraps an rmcp RunningService (stdio or streamable-http)
 // ---------------------------------------------------------------------------
 
-struct StdioMcpClient {
+struct ServiceMcpClient {
     inner: Arc<RunningService<RoleClient, ()>>,
     tool_name: String,
 }
 
 #[async_trait]
-impl McpClient for StdioMcpClient {
+impl McpClient for ServiceMcpClient {
     async fn call_tool(
         &self,
         name: &str,
@@ -92,90 +96,6 @@ impl McpClient for StdioMcpClient {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP McpClient — JSON-RPC 2.0 over HTTP via reqwest
-// ---------------------------------------------------------------------------
-
-struct HttpMcpClient {
-    base_url: String,
-    http: reqwest::Client,
-}
-
-impl HttpMcpClient {
-    fn new(base_url: String) -> Self {
-        Self {
-            base_url,
-            http: reqwest::Client::new(),
-        }
-    }
-}
-
-#[async_trait]
-impl McpClient for HttpMcpClient {
-    async fn call_tool(
-        &self,
-        name: &str,
-        args: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<String, McpError> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": args.unwrap_or_default()
-            },
-            "id": 1
-        });
-
-        let resp = self
-            .http
-            .post(&self.base_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| McpError::Http(e.to_string()))?;
-
-        let status = resp.status();
-        let text = resp
-            .text()
-            .await
-            .map_err(|e| McpError::Http(e.to_string()))?;
-
-        if !status.is_success() {
-            return Err(McpError::Http(format!("HTTP {status}: {text}")));
-        }
-
-        // Parse JSON-RPC 2.0 response.
-        let val: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| McpError::Http(e.to_string()))?;
-
-        if let Some(err) = val.get("error") {
-            return Err(McpError::Rpc(err.to_string()));
-        }
-
-        let result = val.get("result").unwrap_or(&serde_json::Value::Null);
-
-        // Try to extract text from content array (standard MCP shape).
-        if let Some(content) = result.get("content").and_then(|c| c.as_array()) {
-            let mut out = String::new();
-            for item in content {
-                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                        if !out.is_empty() {
-                            out.push('\n');
-                        }
-                        out.push_str(t);
-                    }
-                }
-            }
-            return Ok(out);
-        }
-
-        // Fallback: stringify whatever the result is.
-        Ok(result.to_string())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // McpServer — holds the connected server + its tool list
 // ---------------------------------------------------------------------------
 
@@ -185,6 +105,9 @@ pub struct McpServer {
     /// Underlying client (stdio or http).
     pub client: Arc<dyn McpClient>,
     pub tools: Vec<RmcpTool>,
+    /// Whether this server's tools may run in read-only/plan mode. See
+    /// [`McpServerConfig::trusted`].
+    pub trusted: bool,
 }
 
 /// Connect to a single server based on user config.
@@ -205,88 +128,69 @@ async fn connect_stdio(name: &str, cfg: &McpServerConfig) -> Result<McpServer, M
     for a in &cfg.args {
         cmd.arg(a);
     }
+    // Most MCP servers read their API key / config from the environment, and
+    // some must run from a specific directory — pass both through.
+    for (k, v) in &cfg.env {
+        cmd.env(k, v);
+    }
+    if let Some(dir) = &cfg.cwd {
+        cmd.current_dir(dir);
+    }
     let process = TokioChildProcess::new(cmd).map_err(|e| McpError::Transport(e.to_string()))?;
     let service = ().serve(process).await.map_err(|e| McpError::Transport(e.to_string()))?;
-    let service = Arc::new(service);
-
-    let tools = service
-        .list_all_tools()
-        .await
-        .map_err(|e| McpError::Rpc(e.to_string()))?;
-
-    // Build per-server stdio client (shared Arc for all tools).
-    let client: Arc<dyn McpClient> = Arc::new(StdioMcpClient {
-        inner: service,
-        tool_name: name.to_string(),
-    });
-
-    Ok(McpServer {
-        name: name.to_string(),
-        client,
-        tools,
-    })
+    serve_into_server(name, cfg.trusted, service).await
 }
 
 async fn connect_http(name: &str, cfg: &McpServerConfig) -> Result<McpServer, McpError> {
-    let base_url = cfg
+    let url = cfg
         .url
         .clone()
         .ok_or_else(|| McpError::Config("http transport requires `url`".into()))?;
 
-    let http_client = reqwest::Client::new();
+    // rmcp's Streamable-HTTP client does the full MCP handshake: `initialize`
+    // + `notifications/initialized`, SSE responses, `Mcp-Session-Id` tracking,
+    // and re-init on session expiry. We only supply the URL + auth/custom
+    // headers from config.
+    let mut headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+    for (k, v) in &cfg.headers {
+        match (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+            (Ok(hn), Ok(hv)) => {
+                headers.insert(hn, hv);
+            }
+            _ => warn!("mcp {name}: skipping invalid header {k:?}"),
+        }
+    }
+    let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
+    let transport = StreamableHttpClientTransport::from_config(config);
+    let service = ()
+        .serve(transport)
+        .await
+        .map_err(|e| McpError::Transport(e.to_string()))?;
+    serve_into_server(name, cfg.trusted, service).await
+}
 
-    // Fetch the tool list via JSON-RPC 2.0 `tools/list`.
-    let list_body = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/list",
-        "params": {},
-        "id": 1
+/// Shared tail: list the server's tools and wrap the running service as an
+/// [`McpServer`]. Works for both transports since both yield a
+/// `RunningService<RoleClient, ()>`.
+async fn serve_into_server(
+    name: &str,
+    trusted: bool,
+    service: RunningService<RoleClient, ()>,
+) -> Result<McpServer, McpError> {
+    let service = Arc::new(service);
+    let tools = service
+        .list_all_tools()
+        .await
+        .map_err(|e| McpError::Rpc(e.to_string()))?;
+    let client: Arc<dyn McpClient> = Arc::new(ServiceMcpClient {
+        inner: service,
+        tool_name: name.to_string(),
     });
-
-    let resp = http_client
-        .post(&base_url)
-        .json(&list_body)
-        .send()
-        .await
-        .map_err(|e| McpError::Http(e.to_string()))?;
-
-    let status = resp.status();
-    let text = resp
-        .text()
-        .await
-        .map_err(|e| McpError::Http(e.to_string()))?;
-
-    if !status.is_success() {
-        return Err(McpError::Http(format!(
-            "HTTP {status} listing tools for {name}: {text}"
-        )));
-    }
-
-    let val: serde_json::Value =
-        serde_json::from_str(&text).map_err(|e| McpError::Http(e.to_string()))?;
-
-    if let Some(err) = val.get("error") {
-        return Err(McpError::Rpc(format!("tools/list error for {name}: {err}")));
-    }
-
-    let result = val.get("result").unwrap_or(&serde_json::Value::Null);
-    let tools_json = result
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    let tools: Vec<RmcpTool> = tools_json
-        .into_iter()
-        .filter_map(|t| serde_json::from_value(t).ok())
-        .collect();
-
-    let client: Arc<dyn McpClient> = Arc::new(HttpMcpClient::new(base_url));
-
     Ok(McpServer {
         name: name.to_string(),
         client,
         tools,
+        trusted,
     })
 }
 
@@ -405,6 +309,7 @@ mod tests {
             name: server.into(),
             client: Arc::new(FakeClient { reply }),
             tools: vec![],
+            trusted: false,
         };
         McpTool::build(&server, &RmcpTool::new(name.to_string(), "desc", schema))
     }

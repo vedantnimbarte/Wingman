@@ -757,10 +757,16 @@ model = "anthropic/claude-opus-4-7"
 transport = "stdio"                 # "stdio" (default) or "http"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
+env = { API_KEY = "${SOME_KEY}" }   # env vars for the child process
+# cwd = "/path/to/run/in"           # working directory for the child
+# trusted = false                   # MCP tools are gated to auto-edit/yolo
+                                    # unless a server is marked trusted (it
+                                    # may run in read-only/plan mode then)
 
 [mcp.remote]
-transport = "http"
-url = "http://localhost:9000/mcp"
+transport = "http"                  # spec-compliant Streamable-HTTP client
+url = "https://mcp.example.com/mcp" # (initialize handshake, SSE, session id)
+headers = { Authorization = "Bearer ${MCP_TOKEN}" }  # auth / custom headers
 
 [logging]
 filter = "info,wingman=info"
