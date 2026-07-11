@@ -132,6 +132,13 @@ pub enum Command {
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Distill durable facts from a past session into a pending-review file
+    /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
+    Distill {
+        /// Session JSONL to distill. Defaults to the most recent session.
+        #[arg(long)]
+        session: Option<std::path::PathBuf>,
+    },
     /// Run any [[schedule]] entries whose cadence is due.
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
@@ -538,6 +545,9 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Distill { session }) => {
+            commands::distill::run(load_config()?, session).await
+        }
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,

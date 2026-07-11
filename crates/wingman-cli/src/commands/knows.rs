@@ -21,6 +21,15 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     print_memory_section("global memories", global_mem.as_deref());
     print_memory_section("project memories", Some(&paths.dir.join("memory")));
 
+    // Distilled facts awaiting review.
+    let pending = wingman_learn::distill::PendingStore::new(&paths.root).load();
+    if !pending.is_empty() {
+        println!(
+            "pending distilled facts: {} (review with `wingman distill`, promote via `save_memory`)",
+            pending.len()
+        );
+    }
+
     // Skills (global + project, project wins on name clash).
     let skills = wingman_skills::load_all(&paths.root);
     println!("skills: {}", skills.len());

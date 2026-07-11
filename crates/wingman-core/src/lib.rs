@@ -23,7 +23,9 @@ pub use agent::{
 pub use error::{WingmanError, Result};
 pub use message::{ContentBlock, Message, Role};
 pub use pricing::{price_for, Price};
-pub use provider::{CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities};
+pub use provider::{
+    complete_text, CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities,
+};
 pub use stream::{ProviderEventStream, StopReason, StreamEvent};
 pub use tokens::{
     estimate_history_tokens, estimate_tokens, CompactPlan, Compactor, ToolOutputBudget,

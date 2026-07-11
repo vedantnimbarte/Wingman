@@ -27,3 +27,4 @@ treesitter = ["dep:wingman-ts", "wingman-ts/treesitter"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"

@@ -15,6 +15,7 @@
 //! - [`hooks`] — the [`LearningHook`] impl that wires all of the above
 //!   into the agent loop's before/after-turn hook points.
 
+pub mod distill;
 pub mod extract;
 pub mod hooks;
 pub mod memory;

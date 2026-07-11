@@ -87,3 +87,21 @@ pub trait Provider: Send + Sync {
         ))
     }
 }
+
+/// One-shot, tool-free text completion: issue `req` and concatenate every
+/// `TextDelta` until the stream stops. For simple side calls (session
+/// distillation, title/commit-message generation) that don't need the agent
+/// loop. Ignores tool-use events (send a request with no tools).
+pub async fn complete_text(provider: &dyn Provider, req: CompletionRequest) -> Result<String> {
+    use futures::StreamExt;
+    let mut stream = provider.complete(req).await?;
+    let mut out = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev? {
+            crate::StreamEvent::TextDelta { text } => out.push_str(&text),
+            crate::StreamEvent::Stop { .. } => break,
+            _ => {}
+        }
+    }
+    Ok(out)
+}

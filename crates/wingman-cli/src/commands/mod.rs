@@ -5,6 +5,7 @@ pub mod cost;
 pub mod diff;
 pub mod diff_annotate;
 pub mod discover;
+pub mod distill;
 pub mod headless;
 pub mod init;
 pub mod knows;
