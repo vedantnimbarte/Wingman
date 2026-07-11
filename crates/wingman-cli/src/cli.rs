@@ -862,10 +862,84 @@ pub async fn run() -> Result<ExitCode> {
                 .as_ref()
                 .map(|s| (s.provider_id.clone(), s.model.clone()))
                 .unwrap_or_default();
+            // Session index handle, shared by `/recall` and the session-end
+            // indexer below. Lazily opens the global store on first use (via a
+            // OnceCell) so the embedder model isn't loaded unless one of them
+            // actually runs.
+            type SessIndex = Option<(
+                std::sync::Arc<dyn wingman_rag::Embedder>,
+                std::sync::Arc<wingman_rag::IndexStore>,
+            )>;
+            let sess_cell: std::sync::Arc<tokio::sync::OnceCell<SessIndex>> =
+                std::sync::Arc::new(tokio::sync::OnceCell::new());
+            async fn open_sess_index(cell: &tokio::sync::OnceCell<SessIndex>) -> &SessIndex {
+                cell.get_or_init(|| async {
+                    let embedder = crate::runtime::pick_embedder_pub();
+                    match wingman_learn::session_index::open_global_store(&*embedder) {
+                        Ok(store) => Some((embedder, store)),
+                        Err(e) => {
+                            tracing::warn!("session index unavailable: {e}");
+                            None
+                        }
+                    }
+                })
+                .await
+            }
+
+            // `/recall <query>` runner.
+            let recall_runner: Option<wingman_tui::RecallRunner> = {
+                let cell = sess_cell.clone();
+                Some(std::sync::Arc::new(move |query: String| {
+                    let cell = cell.clone();
+                    Box::pin(async move {
+                        let (embedder, store) = open_sess_index(&cell)
+                            .await
+                            .as_ref()
+                            .ok_or_else(|| "session index unavailable".to_string())?;
+                        let hits = wingman_learn::session_index::search_sessions(
+                            store.as_ref(),
+                            &**embedder,
+                            &query,
+                            8,
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                        Ok(hits
+                            .into_iter()
+                            .map(|h| (h.session_id, h.score, h.snippet))
+                            .collect())
+                    }) as futures::future::BoxFuture<'static, _>
+                }))
+            };
+
+            // Session-end indexer: index the just-finished interactive session
+            // so it's recallable immediately, instead of waiting for the next
+            // launch's startup backfill.
+            let session_indexer: Option<wingman_tui::SessionIndexer> = {
+                let cell = sess_cell.clone();
+                Some(std::sync::Arc::new(move |path: std::path::PathBuf| {
+                    let cell = cell.clone();
+                    Box::pin(async move {
+                        if let Some((embedder, store)) = open_sess_index(&cell).await {
+                            if let Err(e) = wingman_learn::session_index::index_session_into(
+                                store.as_ref(),
+                                &**embedder,
+                                &path,
+                            )
+                            .await
+                            {
+                                tracing::warn!("session-end index failed: {e}");
+                            }
+                        }
+                    }) as futures::future::BoxFuture<'static, ()>
+                }))
+            };
+
             let ctx = wingman_tui::AppCtx {
                 provider_id,
                 model,
                 mode: mode.to_string(),
+                show_token_usage: cfg.tui.show_token_usage,
                 project_root: project.root.clone(),
                 builder,
                 agent_builder,
@@ -875,6 +949,8 @@ pub async fn run() -> Result<ExitCode> {
                 mcp_list_runner,
                 models_runner,
                 mode_setter,
+                recall_runner,
+                session_indexer,
             };
             wingman_tui::init_theme(&cfg.tui);
             wingman_tui::run(agent, ctx).await?;

@@ -882,7 +882,7 @@ pub async fn build_agent_registry_learn(
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
         system: Some(system),
-        tool_output_budget: ToolOutputBudget::new(cfg.tokens.tool_output_max_lines),
+        tool_output_budget: ToolOutputBudget::new(cfg.effective_tool_output_max_lines()),
         compactor: Compactor {
             trigger_tokens: cfg.tokens.compact_at_tokens,
             ..Default::default()

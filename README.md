@@ -11,8 +11,9 @@ written in Rust. It runs as a TUI for interactive sessions and as a headless
 one-shot (`--print "prompt"`) for scripting, talks to 73+ LLM providers behind
 a single streaming interface, ships a built-in tool layer for reading,
 searching, and editing the project tree, and learns from every conversation:
-it builds a persistent model of you and your projects, creates and refines
-skills from observed work, and recalls past sessions across projects.
+it builds a persistent model of you and your projects, proposes reusable
+skills mined from your session history (which you review and promote), scores
+how well its skills perform, and recalls past sessions across projects.
 
 It is positioned as an open, provider-agnostic alternative to Claude Code,
 Cursor, and Aider — with native support for Anthropic, OpenAI, ChatGPT

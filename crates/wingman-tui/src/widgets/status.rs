@@ -11,7 +11,7 @@ use ratatui::{
 
 /// Tracks per-`provider/model` usage. The status line renders the rolled-up
 /// total; the `/usage` modal renders a breakdown.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct StatusLine {
     pub model: String,
     pub provider: String,
@@ -25,6 +25,24 @@ pub struct StatusLine {
     pub git_branch: Option<String>,
     /// Number of changed (tracked + untracked) files per `git status`.
     pub git_dirty: usize,
+    /// Whether to show the `tok in:… out:… cache:…% $cost` segment. Wired from
+    /// `[tui].show_token_usage`; the `/usage` modal is unaffected.
+    pub show_token_usage: bool,
+}
+
+impl Default for StatusLine {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            provider: String::new(),
+            mode: String::new(),
+            usage: BTreeMap::new(),
+            connected: false,
+            git_branch: None,
+            git_dirty: 0,
+            show_token_usage: true,
+        }
+    }
 }
 
 impl StatusLine {
@@ -121,7 +139,7 @@ impl<'a> Widget for StatusView<'a> {
                 ));
             }
         }
-        if !s.usage.is_empty() {
+        if s.show_token_usage && !s.usage.is_empty() {
             spans.push(Span::raw("  "));
             spans.push(Span::styled(
                 format!(
@@ -172,6 +190,32 @@ mod tests {
             .map(|o| o.status.success())
             .unwrap_or(false);
         assert!(ok, "git {args:?} failed");
+    }
+
+    fn rendered_text(s: &StatusLine) -> String {
+        let area = Rect::new(0, 0, 120, 1);
+        let mut buf = Buffer::empty(area);
+        StatusView { status: s }.render(area, &mut buf);
+        (0..area.width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn show_token_usage_gates_the_token_segment() {
+        let mut s = StatusLine {
+            provider: "anthropic".into(),
+            model: "claude".into(),
+            ..Default::default()
+        };
+        s.merge_usage(&Usage {
+            input_tokens: 10,
+            output_tokens: 5,
+            ..Default::default()
+        });
+        assert!(rendered_text(&s).contains("tok"), "shown by default");
+        s.show_token_usage = false;
+        assert!(!rendered_text(&s).contains("tok"), "hidden when disabled");
     }
 
     #[test]

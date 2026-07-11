@@ -713,12 +713,64 @@ fn run_security_pass(
     project_root: &std::path::Path,
     base_commit: &str,
     integration_branch: &str,
-    _cfg: &wingman_config::PilotSecurityConfig,
+    cfg: &wingman_config::PilotSecurityConfig,
 ) -> crate::security::SecurityReport {
     let mut report = crate::security::SecurityReport::default();
     let diff = collect_diff_lines(runner, project_root, base_commit, integration_branch);
     report.extend(crate::security::scan_secrets(&diff.added));
+    // License gate: only when the change touched a dependency manifest (so we
+    // don't re-scan the whole tree every run) and a policy is configured. Flags
+    // dependencies whose license isn't in `allowed_licenses`.
+    if !cfg.allowed_licenses.is_empty() && diff_touches_manifest(&diff) {
+        let deps = collect_dependency_licenses(runner, project_root);
+        report.extend(crate::security::scan_licenses(&deps, &cfg.allowed_licenses));
+    }
     report
+}
+
+/// True if the diff changed a dependency manifest, the only case where a
+/// license re-scan is worth the `cargo metadata` cost.
+fn diff_touches_manifest(diff: &DiffLines) -> bool {
+    diff.changed.iter().any(|(f, _)| {
+        let base = f.rsplit('/').next().unwrap_or(f);
+        matches!(
+            base,
+            "Cargo.toml" | "Cargo.lock" | "package.json" | "package-lock.json"
+        )
+    })
+}
+
+/// Collect `(crate_name, spdx_license)` for every resolved dependency via
+/// `cargo metadata`. Returns empty for non-Rust projects or on any failure —
+/// the license gate then simply finds nothing.
+fn collect_dependency_licenses(
+    runner: &dyn CommandRunner,
+    project_root: &std::path::Path,
+) -> Vec<(String, String)> {
+    let out = match runner.run("cargo", &["metadata", "--format-version", "1"], project_root) {
+        Ok(o) if o.success() => o.stdout,
+        _ => return Vec::new(),
+    };
+    let json: serde_json::Value = match serde_json::from_str(&out) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    json.get("packages")
+        .and_then(|p| p.as_array())
+        .map(|pkgs| {
+            pkgs.iter()
+                .filter_map(|p| {
+                    let name = p.get("name")?.as_str()?.to_string();
+                    let license = p
+                        .get("license")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    Some((name, license))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parsed lines from `git diff <base>..<branch>`, used by both the R6
@@ -1303,6 +1355,46 @@ mod tests {
     use crate::model::{Event, Role, RunStatus, Task, TaskStatus};
     use crate::orchestrator::{fake_happy_spawner, OrchestratorConfig};
     use crate::pr::{CommandOut, CommandRunner};
+
+    #[test]
+    fn diff_touches_manifest_detects_dep_files() {
+        let mut d = DiffLines::default();
+        d.changed.push(("src/main.rs".into(), "x".into()));
+        assert!(!diff_touches_manifest(&d));
+        d.changed.push(("crates/foo/Cargo.toml".into(), "y".into()));
+        assert!(diff_touches_manifest(&d));
+    }
+
+    #[test]
+    fn collect_dependency_licenses_parses_cargo_metadata() {
+        struct MetaRunner;
+        impl CommandRunner for MetaRunner {
+            fn run(
+                &self,
+                program: &str,
+                _args: &[&str],
+                _cwd: &std::path::Path,
+            ) -> std::io::Result<CommandOut> {
+                assert_eq!(program, "cargo");
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout: r#"{"packages":[
+                        {"name":"foo","license":"MIT"},
+                        {"name":"bar","license":null}
+                    ]}"#
+                    .into(),
+                    stderr: String::new(),
+                })
+            }
+        }
+        let deps = collect_dependency_licenses(&MetaRunner, std::path::Path::new("."));
+        assert_eq!(deps.len(), 2);
+        assert_eq!(deps[0], ("foo".into(), "MIT".into()));
+        assert_eq!(deps[1], ("bar".into(), String::new()));
+        // And the existing scan flags the empty license as a finding.
+        let findings = crate::security::scan_licenses(&deps, &["MIT".into()]);
+        assert_eq!(findings.len(), 1);
+    }
     use wingman_core::{
         AgentEvent, AgentStop, CompletionRequest, ContentBlock, Message, Provider,
         ProviderCapabilities, ProviderEventStream, Role as ApiRole, StopReason, StreamEvent, Usage,

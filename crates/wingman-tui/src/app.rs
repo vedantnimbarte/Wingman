@@ -89,10 +89,29 @@ pub type ModelsRunner = Arc<
     dyn Fn(String) -> BoxFuture<'static, std::result::Result<Vec<String>, String>> + Send + Sync,
 >;
 
+/// One past-session recall hit: `(session_id, score, snippet)`.
+pub type RecallHit = (String, f32, String);
+
+/// Runs a cross-session semantic recall for a query and returns ranked hits.
+/// `Err` means recall is unavailable (no session index / embedder). Wired
+/// from the runtime's session index so `/recall` searches for real instead of
+/// telling the user to ask the agent.
+pub type RecallRunner = Arc<
+    dyn Fn(String) -> BoxFuture<'static, std::result::Result<Vec<RecallHit>, String>> + Send + Sync,
+>;
+
+/// Indexes the given session file into the recall index. Called once at
+/// shutdown so the just-finished interactive session is recallable without
+/// waiting for the next launch's startup backfill. Best-effort (returns `()`).
+pub type SessionIndexer = Arc<dyn Fn(PathBuf) -> BoxFuture<'static, ()> + Send + Sync>;
+
 pub struct AppCtx {
     pub provider_id: String,
     pub model: String,
     pub mode: String,
+    /// `[tui].show_token_usage` — whether the status line shows the token/cost
+    /// segment.
+    pub show_token_usage: bool,
     pub project_root: PathBuf,
     pub builder: ProviderBuilder,
     pub agent_builder: AgentBuilder,
@@ -102,6 +121,12 @@ pub struct AppCtx {
     pub mcp_list_runner: McpListRunner,
     pub models_runner: ModelsRunner,
     pub mode_setter: ModeSetter,
+    /// Runs `/recall <query>` against the session index. `None` when the
+    /// learning loop / session index is unavailable.
+    pub recall_runner: Option<RecallRunner>,
+    /// Indexes the session at shutdown so it's immediately recallable. `None`
+    /// when the session index is unavailable.
+    pub session_indexer: Option<SessionIndexer>,
 }
 
 pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
@@ -114,8 +139,15 @@ pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
     // the /resume picker reads (`<project>/.wingman/sessions`).
     let sessions_dir = ctx.project_root.join(".wingman").join("sessions");
     let mut session = wingman_session::SessionLog::create(&sessions_dir).await.ok();
+    // Clone the shutdown indexer out before `ctx` moves into the loop.
+    let session_indexer = ctx.session_indexer.clone();
     let res = run_inner(&mut terminal, &mut agent, ctx, session.as_mut()).await;
     restore_terminal(&mut terminal)?;
+    // Index this session now so it's recallable next time without waiting for a
+    // startup backfill. Best-effort; only runs if the session index is live.
+    if let (Some(index), Some(log)) = (session_indexer, session.as_ref()) {
+        index(log.path().to_path_buf()).await;
+    }
     res
 }
 
@@ -382,6 +414,7 @@ async fn run_inner(
             provider: ctx.provider_id.clone(),
             mode: ctx.mode.clone(),
             connected: agent.is_some(),
+            show_token_usage: ctx.show_token_usage,
             ..Default::default()
         },
         modal: ActiveModal::None,
@@ -1031,13 +1064,37 @@ async fn idle_step(
                                     ui.transcript.push(TranscriptItem::Error(
                                         "/recall: usage is `/recall <query>`".into(),
                                     ));
+                                } else if let Some(runner) = &ctx.recall_runner {
+                                    match runner(query.clone()).await {
+                                        Ok(hits) if hits.is_empty() => {
+                                            ui.transcript.push(TranscriptItem::System(format!(
+                                                "/recall: no past sessions matched '{query}'"
+                                            )));
+                                        }
+                                        Ok(hits) => {
+                                            let mut out = format!("recall '{query}':\n");
+                                            for (id, score, snippet) in hits.iter().take(8) {
+                                                let one_line: String = snippet
+                                                    .replace('\n', " ")
+                                                    .chars()
+                                                    .take(160)
+                                                    .collect();
+                                                out.push_str(&format!(
+                                                    "  [{score:.2}] {id}: {one_line}\n"
+                                                ));
+                                            }
+                                            ui.transcript.push(TranscriptItem::System(out));
+                                        }
+                                        Err(e) => ui.transcript.push(TranscriptItem::Error(
+                                            format!("/recall failed: {e}"),
+                                        )),
+                                    }
                                 } else {
-                                    ui.transcript.push(TranscriptItem::System(format!(
-                                        "ask the agent: \"recall_session for '{query}'\" — the \
-                                         agent will call the recall_session tool and summarise. \
-                                         (Tip: you can also just ask naturally, e.g. 'have we \
-                                         discussed {query} before?')"
-                                    )));
+                                    ui.transcript.push(TranscriptItem::Error(
+                                        "/recall unavailable: the session index is disabled \
+                                         (needs the learning loop)"
+                                            .into(),
+                                    ));
                                 }
                             }
                             Cmd::SkillStats(name) => {

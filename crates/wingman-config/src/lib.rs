@@ -112,7 +112,9 @@ pub struct ToolsConfig {
     /// e.g. ["rm -rf /", "sudo"]
     #[serde(default)]
     pub shell_denylist: Vec<String>,
-    /// Override the tool output budget (max lines per tool call). 0 = use global default.
+    /// Override the tool output budget (max lines per tool call) for this
+    /// project. `None` or `0` falls back to `[tokens].tool_output_max_lines`.
+    /// Resolve via [`Config::effective_tool_output_max_lines`].
     #[serde(default)]
     pub tool_output_max_lines: Option<u32>,
     /// Comma-separated list of tools to disable for this project.
@@ -420,6 +422,15 @@ impl Default for McpServerConfig {
 }
 
 impl Config {
+    /// Effective per-tool output line budget: the `[tools]` project override
+    /// when set to a non-zero value, else the global `[tokens]` default.
+    pub fn effective_tool_output_max_lines(&self) -> u32 {
+        match self.tools.tool_output_max_lines {
+            Some(n) if n > 0 => n,
+            _ => self.tokens.tool_output_max_lines,
+        }
+    }
+
     /// Load configuration with the documented merge order. Either path may
     /// be `None` to skip that layer (used by tests and `config init`).
     ///
