@@ -65,16 +65,16 @@ impl Provider for ChatGptProvider {
         let body = build_request_body(&req);
         tracing::debug!(target: "wingman::chatgpt", "request: {body}");
 
-        let response = self
-            .http
-            .post(CODEX_URL)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("authorization", format!("Bearer {}", self.access_token))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| WingmanError::Provider(format!("request: {e}")))?;
+        let response = crate::retry::send_with_retry("chatgpt", || {
+            self.http
+                .post(CODEX_URL)
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("authorization", format!("Bearer {}", self.access_token))
+                .json(&body)
+                .send()
+        })
+        .await?;
 
         let status = response.status();
         if !status.is_success() {
