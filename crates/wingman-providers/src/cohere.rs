@@ -328,6 +328,7 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
     };
 
     let mut text = String::new();
+    let mut images: Vec<Value> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     for b in &m.content {
         match b {
@@ -343,13 +344,26 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
                 }));
             }
             ContentBlock::ToolResult { .. } => {}
-            // Images: Command-A accepts OpenAI-shape image_url parts.
-            ContentBlock::Image { .. } => {}
+            // Command-A / Command-R-Plus accept OpenAI-shape image_url parts.
+            ContentBlock::Image { data, media_type } => {
+                images.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": format!("data:{media_type};base64,{data}") },
+                }));
+            }
         }
     }
 
     let mut msg = json!({ "role": role });
-    if !text.is_empty() {
+    if !images.is_empty() {
+        // Multi-part content: an optional text part followed by image parts.
+        let mut parts: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            parts.push(json!({ "type": "text", "text": text }));
+        }
+        parts.extend(images);
+        msg["content"] = Value::Array(parts);
+    } else if !text.is_empty() {
         msg["content"] = json!(text);
     } else if tool_calls.is_empty() {
         msg["content"] = json!("");
@@ -405,5 +419,29 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0]["role"], "tool");
         assert_eq!(out[0]["tool_call_id"], "call_x");
+    }
+
+    #[test]
+    fn image_becomes_multipart_content_with_image_url() {
+        let mut out = Vec::new();
+        encode_message(
+            &Message {
+                role: Role::User,
+                content: vec![
+                    ContentBlock::Text { text: "what is this".into() },
+                    ContentBlock::Image {
+                        data: "AAAA".into(),
+                        media_type: "image/png".into(),
+                    },
+                ],
+            },
+            &mut out,
+        );
+        assert_eq!(out.len(), 1);
+        let parts = out[0]["content"].as_array().expect("array content");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "what is this");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,AAAA");
     }
 }

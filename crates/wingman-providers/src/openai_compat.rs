@@ -542,6 +542,10 @@ impl Provider for OpenAiCompatProvider {
             std::collections::HashMap::new();
         let mut emitted_tool_indices: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
+        // Track whether we already emitted a Stop (on `finish_reason`) so the
+        // `[DONE]` sentinel doesn't yield a second one — consumers otherwise
+        // see two Stop events per turn.
+        let mut stop_emitted = false;
 
         let stream = async_stream::try_stream! {
             while let Some(item) = events.next().await {
@@ -559,7 +563,9 @@ impl Provider for OpenAiCompatProvider {
                             block: ContentBlock::ToolUse { id: acc.id, name: acc.name, input },
                         };
                     }
-                    yield StreamEvent::Stop { reason: StopReason::EndTurn };
+                    if !stop_emitted {
+                        yield StreamEvent::Stop { reason: StopReason::EndTurn };
+                    }
                     break;
                 }
                 let chunk: Value = match serde_json::from_str(&evt.data) {
@@ -627,6 +633,7 @@ impl Provider for OpenAiCompatProvider {
                         _ => StopReason::Other,
                     };
                     yield StreamEvent::Stop { reason };
+                    stop_emitted = true;
                     // Keep reading for trailing usage + [DONE].
                 }
             }
@@ -665,18 +672,39 @@ fn build_request_body(req: &CompletionRequest) -> Value {
 
     let mut body = json!({
         "model": req.model,
-        "max_tokens": req.max_tokens,
         "stream": true,
         "messages": messages,
         "stream_options": { "include_usage": true },
     });
-    if let Some(t) = req.temperature {
-        body["temperature"] = json!(t);
+    // OpenAI reasoning models (o-series, gpt-5 family) reject `max_tokens`
+    // (they require `max_completion_tokens`) and reject any non-default
+    // `temperature`. Emitting the legacy fields makes every such model 400.
+    if is_reasoning_model(&req.model) {
+        body["max_completion_tokens"] = json!(req.max_tokens);
+    } else {
+        body["max_tokens"] = json!(req.max_tokens);
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
     }
     if !req.tools.is_empty() {
         body["tools"] = encode_tools(&req.tools);
     }
     body
+}
+
+/// True for OpenAI reasoning-style model ids that need `max_completion_tokens`
+/// instead of `max_tokens` and reject a custom `temperature`.
+///
+/// ponytail: name-based heuristic (o1/o3/o4/gpt-5). A local server hosting a
+/// model literally named `o1` would be misrouted; upgrade to a per-variant
+/// capability flag if that ever bites.
+fn is_reasoning_model(model: &str) -> bool {
+    let m = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.starts_with("gpt-5")
 }
 
 fn encode_tools(tools: &[ToolSpec]) -> Value {
@@ -1021,5 +1049,35 @@ mod tests {
         assert_eq!(u.input_tokens, 200);
         assert_eq!(u.cache_read_input_tokens, 800);
         assert_eq!(u.output_tokens, 50);
+    }
+
+    #[test]
+    fn reasoning_model_detection() {
+        for m in ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "openai/o3-mini"] {
+            assert!(is_reasoning_model(m), "{m} should be reasoning");
+        }
+        for m in ["gpt-4o", "gpt-4.1", "claude-opus-4-8", "llama-3", "o-something"] {
+            assert!(!is_reasoning_model(m), "{m} should not be reasoning");
+        }
+    }
+
+    #[test]
+    fn reasoning_model_uses_max_completion_tokens_and_drops_temperature() {
+        let mut req = CompletionRequest::new("o3-mini");
+        req.temperature = Some(0.2);
+        let body = build_request_body(&req);
+        assert!(body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], json!(req.max_tokens));
+        assert!(body.get("temperature").is_none(), "temperature must be omitted");
+    }
+
+    #[test]
+    fn non_reasoning_model_keeps_max_tokens_and_temperature() {
+        let mut req = CompletionRequest::new("gpt-4o");
+        req.temperature = Some(0.2);
+        let body = build_request_body(&req);
+        assert_eq!(body["max_tokens"], json!(req.max_tokens));
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["temperature"], json!(0.2_f32));
     }
 }

@@ -202,6 +202,9 @@ impl Provider for WatsonxProvider {
             std::collections::HashMap::new();
         let mut emitted_tool_indices: std::collections::HashSet<u32> =
             std::collections::HashSet::new();
+        // Suppress a second Stop on `[DONE]` when `finish_reason` already
+        // emitted one — otherwise consumers see two Stop events per turn.
+        let mut stop_emitted = false;
 
         let stream = async_stream::try_stream! {
             while let Some(item) = events.next().await {
@@ -218,7 +221,9 @@ impl Provider for WatsonxProvider {
                             block: ContentBlock::ToolUse { id: acc.id, name: acc.name, input },
                         };
                     }
-                    yield StreamEvent::Stop { reason: StopReason::EndTurn };
+                    if !stop_emitted {
+                        yield StreamEvent::Stop { reason: StopReason::EndTurn };
+                    }
                     break;
                 }
                 let chunk: Value = match serde_json::from_str(&evt.data) {
@@ -279,6 +284,7 @@ impl Provider for WatsonxProvider {
                         _ => StopReason::Other,
                     };
                     yield StreamEvent::Stop { reason };
+                    stop_emitted = true;
                 }
             }
         };

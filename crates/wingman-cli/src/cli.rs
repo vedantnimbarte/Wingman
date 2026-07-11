@@ -790,6 +790,7 @@ pub async fn run() -> Result<ExitCode> {
                                 command: Some(p.command),
                                 args: p.args,
                                 url: None,
+                                ..Default::default()
                             };
                             mcp.add(p.name, cfg).await
                         }
