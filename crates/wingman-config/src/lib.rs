@@ -375,6 +375,10 @@ pub struct VerifyConfig {
     /// How many gate failures are fed back to the model for self-correction
     /// before the stop is accepted anyway (with a failing receipt).
     pub max_retries: u32,
+    /// After edits, also run the tests of the *changed* crates/packages
+    /// (not the full suite) as part of the gate. Cargo projects only for
+    /// now; a no-op elsewhere. Composes onto `turn_gate` (needs it not "off").
+    pub affected_tests: bool,
 }
 
 impl Default for VerifyConfig {
@@ -382,6 +386,7 @@ impl Default for VerifyConfig {
         Self {
             turn_gate: "auto".into(),
             max_retries: 2,
+            affected_tests: true,
         }
     }
 }
