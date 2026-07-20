@@ -1,6 +1,5 @@
 use std::collections::BTreeMap;
 
-use wingman_core::Usage;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -8,6 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget},
 };
+use wingman_core::Usage;
 
 /// Tracks per-`provider/model` usage. The status line renders the rolled-up
 /// total; the `/usage` modal renders a breakdown.
@@ -226,7 +226,17 @@ mod tests {
         git(&dir, &["init", "-q"]);
         git(
             &dir,
-            &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "init"],
+            &[
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ],
         );
 
         let mut s = StatusLine::default();

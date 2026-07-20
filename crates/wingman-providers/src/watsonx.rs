@@ -26,15 +26,14 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use wingman_core::{
-    WingmanError, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
-    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
-};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
+use wingman_core::{
+    CacheKind, CompletionRequest, ContentBlock, Message, Provider, ProviderCapabilities,
+    ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec, Usage, WingmanError,
+};
 
 const DEFAULT_BASE_URL: &str = "https://us-south.ml.cloud.ibm.com";
 const DEFAULT_IAM_URL: &str = "https://iam.cloud.ibm.com/identity/token";
@@ -94,7 +93,12 @@ impl WatsonxProvider {
         match &self.credential {
             WatsonxCredential::AccessToken(t) => Ok(t.clone()),
             WatsonxCredential::ApiKey(key) => {
-                if let Some((tok, exp)) = self.cached_token.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+                if let Some((tok, exp)) = self
+                    .cached_token
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()
+                {
                     if exp > Instant::now() {
                         return Ok(tok);
                     }
@@ -136,7 +140,8 @@ impl WatsonxProvider {
                     .unwrap_or(3600);
                 // Refresh 60s before the IAM token expires.
                 let exp = Instant::now() + Duration::from_secs(lifetime_secs.saturating_sub(60));
-                *self.cached_token.lock().unwrap_or_else(|e| e.into_inner()) = Some((token.clone(), exp));
+                *self.cached_token.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some((token.clone(), exp));
                 Ok(token)
             }
         }

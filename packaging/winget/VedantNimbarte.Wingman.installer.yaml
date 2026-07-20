@@ -1,0 +1,19 @@
+# winget installer manifest (template).
+# Placeholders __VERSION__ and __SHA256__ are filled by
+# scripts/stamp-winget.ps1 from a release tag. The Windows release asset is a
+# zip containing wingman.exe at its root (produced by .github/workflows/
+# release.yml), so we use the zip installer type with a portable nested binary
+# — no MSI required.
+PackageIdentifier: VedantNimbarte.Wingman
+PackageVersion: __VERSION__
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: wingman.exe
+    PortableCommandAlias: wingman
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/vedantnimbarte/Wingman/releases/download/v__VERSION__/wingman-x86_64-pc-windows-msvc.zip
+    InstallerSha256: __SHA256__
+ManifestType: installer
+ManifestVersion: 1.6.0

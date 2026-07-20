@@ -10,11 +10,11 @@
 
 use std::path::{Path, PathBuf};
 
-use wingman_core::{AgentEvent, ContentBlock, Message, Role, Usage};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+use wingman_core::{AgentEvent, ContentBlock, Message, Role, Usage};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -314,12 +314,17 @@ mod tests {
         })
         .await
         .unwrap();
-        log.record_message(&Message::user_text("hello")).await.unwrap();
+        log.record_message(&Message::user_text("hello"))
+            .await
+            .unwrap();
         drop(log); // flush by closing the handle
 
         let records = load_session(&path).unwrap();
         assert_eq!(records.len(), 2);
-        assert_eq!(session_meta(&records), Some(("anthropic".into(), "claude".into())));
+        assert_eq!(
+            session_meta(&records),
+            Some(("anthropic".into(), "claude".into()))
+        );
         assert!(matches!(&records[1], SessionRecord::User { text, .. } if text == "hello"));
     }
 
@@ -342,16 +347,34 @@ mod tests {
     #[test]
     fn tool_results_accumulate_then_flush_before_next_prompt() {
         let records = vec![
-            SessionRecord::User { ts: "t".into(), text: "q1".into() },
-            SessionRecord::ToolResult { ts: "t".into(), id: "a".into(), output: "ra".into(), is_error: false },
-            SessionRecord::ToolResult { ts: "t".into(), id: "b".into(), output: "rb".into(), is_error: true },
-            SessionRecord::User { ts: "t".into(), text: "q2".into() },
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "q1".into(),
+            },
+            SessionRecord::ToolResult {
+                ts: "t".into(),
+                id: "a".into(),
+                output: "ra".into(),
+                is_error: false,
+            },
+            SessionRecord::ToolResult {
+                ts: "t".into(),
+                id: "b".into(),
+                output: "rb".into(),
+                is_error: true,
+            },
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "q2".into(),
+            },
         ];
         let msgs = records_to_messages(&records);
         // q1, [tool_results a+b], q2
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1].content.len(), 2); // both tool results in one message
-        assert!(matches!(&msgs[1].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "a"));
+        assert!(
+            matches!(&msgs[1].content[0], ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "a")
+        );
         assert!(matches!(&msgs[2].content[0], ContentBlock::Text { text } if text == "q2"));
     }
 
@@ -376,7 +399,12 @@ mod tests {
         std::fs::write(dir.path().join("notes.txt"), "").unwrap();
         let got = list_sessions(dir.path());
         assert_eq!(got.len(), 2);
-        assert!(got[0].file_name().unwrap().to_str().unwrap().starts_with("20240202"));
+        assert!(got[0]
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .starts_with("20240202"));
     }
 
     /// fork_session with a `take` limit copies only the first N records.

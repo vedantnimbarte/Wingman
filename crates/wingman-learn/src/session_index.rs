@@ -271,8 +271,8 @@ pub async fn backfill_project_sessions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wingman_rag::HashEmbedder;
     use std::io::Write;
+    use wingman_rag::HashEmbedder;
 
     fn write_session(path: &std::path::Path) {
         let mut f = std::fs::File::create(path).unwrap();

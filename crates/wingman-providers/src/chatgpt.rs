@@ -14,15 +14,14 @@
 
 use std::time::Duration;
 
-use wingman_core::{
-    WingmanError, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
-    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
-};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use serde_json::{json, Value};
+use wingman_core::{
+    CacheKind, CompletionRequest, ContentBlock, Message, Provider, ProviderCapabilities,
+    ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec, Usage, WingmanError,
+};
 
 const CODEX_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 

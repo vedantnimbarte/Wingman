@@ -7,12 +7,12 @@
 //! with a "(n reviewers)" badge.
 
 use anyhow::{Context, Result};
-use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
-use wingman_core::AgentEvent;
 use futures::StreamExt;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
+use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
+use wingman_core::AgentEvent;
 
 use crate::runtime::{self, Selection};
 
@@ -68,7 +68,10 @@ pub async fn run(
     // agent loop and collects the assistant text.
     let mut handles = Vec::new();
     for raw in &models {
-        let (p, m) = raw.split_once('/').unwrap();
+        let Some((p, m)) = raw.split_once('/') else {
+            eprintln!("wingman: skipping malformed model '{raw}' (expected `provider/model`)");
+            continue;
+        };
         let sel = Selection {
             provider_id: p.to_string(),
             model: m.to_string(),

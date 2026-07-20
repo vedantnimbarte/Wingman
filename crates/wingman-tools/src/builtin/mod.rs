@@ -11,6 +11,7 @@ mod glob_tool;
 mod grep_tool;
 mod invoke_skill;
 mod list_dir;
+mod lsp_tools;
 mod present_plan;
 mod update_tasks;
 
@@ -33,6 +34,8 @@ mod edit_symbol;
 mod find_symbol;
 #[cfg(feature = "treesitter")]
 mod outline;
+#[cfg(feature = "treesitter")]
+mod who_calls;
 
 pub use apply_patch::ApplyPatch;
 pub use edit_file::EditFile;
@@ -41,8 +44,8 @@ pub use glob_tool::Glob;
 pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
 pub use list_dir::ListDir;
+pub use lsp_tools::{LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename};
 pub use present_plan::PresentPlan;
-pub use update_tasks::UpdateTasks;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;
 pub use recall_memory::RecallMemory;
@@ -52,6 +55,7 @@ pub use save_memory::SaveMemory;
 pub use semantic_search::SemanticSearch;
 pub use spawn_subagent::{SpawnSubagent, SubagentRunner, SubagentSpec};
 pub use task_complete::TaskComplete;
+pub use update_tasks::UpdateTasks;
 pub use web_fetch::WebFetch;
 pub use web_search::WebSearch;
 pub use write_file::WriteFile;
@@ -62,3 +66,5 @@ pub use edit_symbol::EditSymbol;
 pub use find_symbol::FindSymbol;
 #[cfg(feature = "treesitter")]
 pub use outline::Outline;
+#[cfg(feature = "treesitter")]
+pub use who_calls::WhoCalls;

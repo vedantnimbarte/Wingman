@@ -6,10 +6,10 @@
 //! NOT spawn a daemon.
 
 use anyhow::Result;
-use wingman_config::{global_config_path, global_dir, Config, ProjectPaths, ScheduledTask};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use wingman_config::{global_config_path, global_dir, Config, ProjectPaths, ScheduledTask};
 
 const STATE_FILE: &str = "schedule.json";
 

@@ -115,16 +115,7 @@ fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> Acceptance
     // -sS quiet-but-show-errors, -L follow redirects, -m 30 hard timeout,
     // -w appends the numeric status on its own trailing line.
     let output = Command::new("curl")
-        .args([
-            "-sSL",
-            "-m",
-            "30",
-            "-o",
-            "-",
-            "-w",
-            "\n%{http_code}",
-            url,
-        ])
+        .args(["-sSL", "-m", "30", "-o", "-", "-w", "\n%{http_code}", url])
         .current_dir(cwd)
         .output();
     let output = match output {

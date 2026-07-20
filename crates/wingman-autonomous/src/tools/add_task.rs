@@ -1,10 +1,10 @@
 //! `add_task` — append a new task to the running DAG.
 
-use wingman_core::{ToolOutcome, ToolSpec};
-use wingman_tools::{Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
+use wingman_tools::{Tool, ToolCtx};
 
 use crate::model::{Acceptance, Reversibility, Role};
 use crate::orchestrator::{NewTaskSpec, OrchestratorHandle};

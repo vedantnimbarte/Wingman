@@ -5,9 +5,9 @@
 //! `tui.colors`. Initialized once at startup via [`init`] and read via
 //! [`current`].
 
-use wingman_config::{ThemeColors, TuiConfig};
 use ratatui::style::Color;
 use std::sync::OnceLock;
+use wingman_config::{ThemeColors, TuiConfig};
 
 #[derive(Debug, Clone)]
 pub struct Theme {

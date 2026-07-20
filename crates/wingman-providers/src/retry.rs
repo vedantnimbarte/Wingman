@@ -71,7 +71,8 @@ where
             Err(e) => {
                 // Retry only transient network failures; a malformed request or
                 // TLS/DNS error won't fix itself.
-                if attempt >= MAX_ATTEMPTS || !(e.is_timeout() || e.is_connect() || e.is_request()) {
+                if attempt >= MAX_ATTEMPTS || !(e.is_timeout() || e.is_connect() || e.is_request())
+                {
                     return Err(WingmanError::Provider(format!("{label} request: {e}")));
                 }
                 let delay = backoff_secs(attempt);

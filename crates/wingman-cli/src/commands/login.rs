@@ -8,11 +8,11 @@
 //! the two surfaces stay in lockstep.
 
 use anyhow::{anyhow, Context, Result};
+use std::io::{IsTerminal, Write};
+use std::process::ExitCode;
 use wingman_config::{ensure_global_dir, global_config_path, secrets, Config};
 use wingman_tui::modal::login::PROVIDERS;
 use wingman_tui::modal::{LoginPayload, LoginTask};
-use std::io::{IsTerminal, Write};
-use std::process::ExitCode;
 
 /// Parsed `wingman login` arguments.
 pub struct LoginOptions {

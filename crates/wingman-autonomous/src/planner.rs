@@ -15,10 +15,12 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use wingman_core::{CacheBreakpoint, CompletionRequest, Message, Provider, StopReason, StreamEvent};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use wingman_core::{
+    CacheBreakpoint, CompletionRequest, Message, Provider, StopReason, StreamEvent,
+};
 
 use crate::model::{Acceptance, Event, Reversibility, Role, Task, TaskStatus};
 use crate::role::load_planner_prompt;

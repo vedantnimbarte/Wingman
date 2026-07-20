@@ -87,7 +87,17 @@ impl StatsStore {
              CREATE TABLE IF NOT EXISTS counters (
                 key   TEXT PRIMARY KEY,
                 value INTEGER NOT NULL
-             );",
+             );
+
+             CREATE TABLE IF NOT EXISTS routing_outcome (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_class  TEXT NOT NULL,
+                model       TEXT NOT NULL,
+                repo        TEXT NOT NULL,
+                ts          TEXT NOT NULL,
+                passed      INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS idx_routing_repo ON routing_outcome(repo);",
         )?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -193,6 +203,58 @@ impl StatsStore {
         Ok(out)
     }
 
+    /// Record the outcome of a routed model call: which `model` served
+    /// `task_class` in `repo`, and whether the turn's verification gate passed.
+    /// This is the raw signal behind `wingman router stats` (which model wins
+    /// per class in this repo).
+    pub fn record_routing(
+        &self,
+        task_class: &str,
+        model: &str,
+        repo: &str,
+        passed: bool,
+    ) -> Result<()> {
+        let ts = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO routing_outcome(task_class, model, repo, ts, passed) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![task_class, model, repo, ts, passed as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Aggregate routing outcomes by (task_class, model), optionally scoped to
+    /// one repo. Ordered by class then by pass-rate descending so the winner
+    /// per class is first.
+    pub fn routing_summary(&self, repo: Option<&str>) -> Result<Vec<RoutingStat>> {
+        let conn = self.conn.lock().unwrap();
+        // `?1 IS NULL` short-circuits the repo filter when no repo is given.
+        let mut stmt = conn.prepare(
+            "SELECT task_class, model, \
+                    SUM(passed) AS passes, COUNT(*) AS total \
+             FROM routing_outcome \
+             WHERE (?1 IS NULL OR repo = ?1) \
+             GROUP BY task_class, model \
+             ORDER BY task_class ASC, (CAST(SUM(passed) AS REAL) / COUNT(*)) DESC",
+        )?;
+        let rows = stmt.query_map(params![repo], |r| {
+            let passes: i64 = r.get(2)?;
+            let total: i64 = r.get(3)?;
+            Ok(RoutingStat {
+                task_class: r.get(0)?,
+                model: r.get(1)?,
+                passed: passes as u32,
+                total: total as u32,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Count rows newer than `cutoff_iso` for a skill.
     pub fn count_since(&self, skill_name: &str, cutoff_iso: &str) -> Result<u32> {
         let conn = self.conn.lock().unwrap();
@@ -243,6 +305,27 @@ pub struct SkillSummary {
     pub corrected: u32,
     pub unclear: u32,
     pub total: u32,
+}
+
+/// Aggregated routing outcomes for one (task_class, model) pair.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoutingStat {
+    pub task_class: String,
+    pub model: String,
+    /// Turns whose verification gate passed.
+    pub passed: u32,
+    pub total: u32,
+}
+
+impl RoutingStat {
+    /// Fraction of turns that passed the gate (0.0 when no data).
+    pub fn pass_rate(&self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.passed as f32 / self.total as f32
+        }
+    }
 }
 
 impl SkillSummary {
@@ -362,6 +445,45 @@ mod tests {
         assert_eq!(store.counter_incr("sessions_without_save").unwrap(), 2);
         store.counter_set("sessions_without_save", 0).unwrap();
         assert_eq!(store.counter_get("sessions_without_save").unwrap(), 0);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn routing_summary_ranks_winner_first() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        // opus: 2/2 pass; haiku: 1/3 pass — both on "default" in repo "r".
+        store.record_routing("default", "opus", "r", true).unwrap();
+        store.record_routing("default", "opus", "r", true).unwrap();
+        store.record_routing("default", "haiku", "r", true).unwrap();
+        store
+            .record_routing("default", "haiku", "r", false)
+            .unwrap();
+        store
+            .record_routing("default", "haiku", "r", false)
+            .unwrap();
+        // Different repo — excluded when scoped to "r".
+        store
+            .record_routing("default", "haiku", "other", true)
+            .unwrap();
+
+        let stats = store.routing_summary(Some("r")).unwrap();
+        assert_eq!(stats.len(), 2);
+        // Winner (higher pass-rate) first within the class.
+        assert_eq!(stats[0].model, "opus");
+        assert_eq!(stats[0].total, 2);
+        assert!((stats[0].pass_rate() - 1.0).abs() < 1e-6);
+        assert_eq!(stats[1].model, "haiku");
+        assert_eq!(stats[1].total, 3); // "other" repo excluded
+
+        // Unscoped includes the other repo.
+        let all = store.routing_summary(None).unwrap();
+        let haiku_total: u32 = all
+            .iter()
+            .filter(|s| s.model == "haiku")
+            .map(|s| s.total)
+            .sum();
+        assert_eq!(haiku_total, 4);
         let _ = std::fs::remove_file(&p);
     }
 }

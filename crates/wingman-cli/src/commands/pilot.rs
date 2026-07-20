@@ -448,8 +448,8 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         }
     }
 
-    let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH")
-        .unwrap_or_else(|_| pilot.pr.base_branch.clone());
+    let base_branch =
+        std::env::var("WINGMAN_PILOT_BASE_BRANCH").unwrap_or_else(|_| pilot.pr.base_branch.clone());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
         max_concurrent_agents: pilot.max_concurrent_agents,
         task_timeout: std::time::Duration::from_secs(pilot.task_timeout_secs),
@@ -495,7 +495,11 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         // `provider/model` config value (e.g. `openrouter/deepseek/…`) becomes
         // the bare model id the provider's API expects — the prefixed string
         // 400s ("not a valid model ID") and the agent silently fails.
-        reviewer_model: match pilot.reviewer_model.clone().or_else(|| pilot.default_model.clone()) {
+        reviewer_model: match pilot
+            .reviewer_model
+            .clone()
+            .or_else(|| pilot.default_model.clone())
+        {
             Some(s) => runtime::resolve_selection(&cfg, Some(&s))
                 .map(|sel| sel.model)
                 .unwrap_or_else(|_| selection.model.clone()),
@@ -1155,7 +1159,9 @@ async fn wait_for_approval(run_dir: &std::path::Path, timeout_secs: u64) -> bool
             }
         }
         if start.elapsed() >= window {
-            eprintln!("[pilot] approval window elapsed with no decision; rejecting (deny-by-default).");
+            eprintln!(
+                "[pilot] approval window elapsed with no decision; rejecting (deny-by-default)."
+            );
             return false;
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -1725,9 +1731,8 @@ async fn feedback_pending_runs(
                 .read_events()
                 .await
                 .map(|evs| {
-                    evs.iter().any(|e| {
-                        matches!(e, wingman_autonomous::model::Event::PrOutcome { .. })
-                    })
+                    evs.iter()
+                        .any(|e| matches!(e, wingman_autonomous::model::Event::PrOutcome { .. }))
                 })
                 .unwrap_or(false),
             Err(_) => false,
@@ -1768,7 +1773,11 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     for r in &refs {
         let url = format!("https://github.com/{}/{}", r.owner, r.name);
         match skillpack::fetch_pack(&runner, r, &url, &home) {
-            Ok(dest) => eprintln!("[pilot] skills: installed {} → {}", r.slug(), dest.display()),
+            Ok(dest) => eprintln!(
+                "[pilot] skills: installed {} → {}",
+                r.slug(),
+                dest.display()
+            ),
             Err(e) => {
                 eprintln!("[pilot] skills: {} failed — {e}", r.slug());
                 failures += 1;
@@ -1934,7 +1943,12 @@ async fn run_eval_goals(
             .into_iter()
             .find(|r| !before.contains(&r.run_id))
             .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok())
-            .map(|s| (s.status == wingman_autonomous::RunStatus::Done, s.totals.usd))
+            .map(|s| {
+                (
+                    s.status == wingman_autonomous::RunStatus::Done,
+                    s.totals.usd,
+                )
+            })
             .unwrap_or((false, 0.0));
 
         out.push(EvalResult {
@@ -1952,9 +1966,7 @@ async fn run_eval_goals(
     out
 }
 
-fn read_eval_results(
-    path: &std::path::Path,
-) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
+fn read_eval_results(path: &std::path::Path) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2033,8 +2045,8 @@ fn append_daemon_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wingman_autonomous::control::{append, ControlCommand};
     use std::time::Duration;
+    use wingman_autonomous::control::{append, ControlCommand};
 
     #[test]
     fn r4_eval_gate_flags_regression_and_passes_on_parity() {

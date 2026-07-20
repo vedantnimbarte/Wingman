@@ -8,9 +8,9 @@
 
 use std::time::Duration;
 
-use wingman_core::{CompletionRequest, Message, Provider};
 use futures::StreamExt;
 use tokio::time::timeout;
+use wingman_core::{CompletionRequest, Message, Provider};
 
 /// Send a tiny request to `provider` using `model`. Returns `Ok(())` if the
 /// provider produces at least one stream event without erroring; otherwise

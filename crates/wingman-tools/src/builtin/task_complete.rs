@@ -9,11 +9,11 @@
 //! sessions) — the manager has its own `finalize_task` tool.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Write;
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct TaskComplete;
 

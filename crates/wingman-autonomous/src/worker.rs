@@ -302,31 +302,34 @@ pub async fn run_worker(
     // they're all green, synthesize the outcome the worker never sent. This
     // doubles as a trust check — the parent now verifies acceptance itself
     // rather than taking the worker's self-report on faith.
-    let (outcome, acceptance) =
-        if should_reverify(outcome.is_some(), status.success(), &spec.task.acceptance) {
-            let verified =
-                crate::acceptance::run_acceptance_checks(&spec.task.acceptance, &spec.worktree);
-            if crate::acceptance::all_green(&verified) {
-                tracing::info!(
-                    target: "pilot::worker",
-                    task = %spec.task.id,
-                    "worker stopped without task_complete but acceptance is green; salvaging to Review"
-                );
-                (
-                    Some(TaskOutcome {
-                        summary: "completed without explicit task_complete; \
+    let (outcome, acceptance) = if should_reverify(
+        outcome.is_some(),
+        status.success(),
+        &spec.task.acceptance,
+    ) {
+        let verified =
+            crate::acceptance::run_acceptance_checks(&spec.task.acceptance, &spec.worktree);
+        if crate::acceptance::all_green(&verified) {
+            tracing::info!(
+                target: "pilot::worker",
+                task = %spec.task.id,
+                "worker stopped without task_complete but acceptance is green; salvaging to Review"
+            );
+            (
+                Some(TaskOutcome {
+                    summary: "completed without explicit task_complete; \
                                   acceptance re-verified green by the supervisor"
-                            .into(),
-                        files_changed: spec.task.writes.clone(),
-                    }),
-                    verified,
-                )
-            } else {
-                (outcome, acceptance)
-            }
+                        .into(),
+                    files_changed: spec.task.writes.clone(),
+                }),
+                verified,
+            )
         } else {
             (outcome, acceptance)
-        };
+        }
+    } else {
+        (outcome, acceptance)
+    };
 
     // E3 gate: if the task declared acceptance checks, the worker MUST
     // have returned green results in order to move to Review. Otherwise

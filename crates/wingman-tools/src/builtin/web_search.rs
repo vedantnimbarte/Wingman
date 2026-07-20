@@ -4,11 +4,11 @@
 //! to be paired with `web_fetch` on a chosen URL.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct WebSearch;
 

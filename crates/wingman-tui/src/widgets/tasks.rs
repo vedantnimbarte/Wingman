@@ -63,7 +63,11 @@ pub fn parse(input: &Value) -> Vec<TaskItem> {
             arr.iter()
                 .filter_map(|t| {
                     let text = t.get("text")?.as_str()?.to_string();
-                    let status = TaskStatus::from_str(t.get("status").and_then(|s| s.as_str()).unwrap_or("pending"));
+                    let status = TaskStatus::from_str(
+                        t.get("status")
+                            .and_then(|s| s.as_str())
+                            .unwrap_or("pending"),
+                    );
                     Some(TaskItem { text, status })
                 })
                 .collect()
@@ -77,13 +81,19 @@ pub struct TasksView<'a> {
 
 impl<'a> Widget for TasksView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let done = self.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+        let done = self
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::Done)
+            .count();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(Span::styled(
                 format!(" Tasks {done}/{} ", self.tasks.len()),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ));
         let inner = block.inner(area);
         block.render(area, buf);
@@ -99,7 +109,10 @@ impl<'a> Widget for TasksView<'a> {
                     style = style.add_modifier(Modifier::BOLD);
                 }
                 Line::from(vec![
-                    Span::styled(format!("{} ", t.status.glyph()), Style::default().fg(t.status.color())),
+                    Span::styled(
+                        format!("{} ", t.status.glyph()),
+                        Style::default().fg(t.status.color()),
+                    ),
                     Span::styled(t.text.clone(), style),
                 ])
             })

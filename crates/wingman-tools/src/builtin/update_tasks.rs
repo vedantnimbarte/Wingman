@@ -66,11 +66,7 @@ impl Tool for UpdateTasks {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
-        let done = parsed
-            .tasks
-            .iter()
-            .filter(|t| t.status == "done")
-            .count();
+        let done = parsed.tasks.iter().filter(|t| t.status == "done").count();
         ToolOutcome::ok(format!(
             "task list updated ({done}/{} done)",
             parsed.tasks.len()

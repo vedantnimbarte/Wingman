@@ -11,8 +11,8 @@
 
 use std::fmt;
 
-use wingman_config::{PilotApprovalConfig, PilotTier};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use wingman_config::{PilotApprovalConfig, PilotTier};
 
 use crate::planner::PlannedTask;
 

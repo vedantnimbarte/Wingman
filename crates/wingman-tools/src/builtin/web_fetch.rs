@@ -5,12 +5,12 @@
 //! tool-output budget.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
+use wingman_core::{ToolOutcome, ToolSpec};
 
 const MAX_BYTES: usize = 1_000_000;
 const MAX_REDIRECTS: usize = 5;

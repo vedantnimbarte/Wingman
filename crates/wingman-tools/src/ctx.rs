@@ -1,7 +1,7 @@
-use wingman_config::PermissionMode;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
+use wingman_config::PermissionMode;
 
 #[derive(Debug, Clone)]
 pub struct ToolCtx {
@@ -178,8 +178,7 @@ impl ToolCtx {
     /// granted the agent latitude to act. The `[tools].allow_network` opt-in
     /// lifts this for users who want look-ups in read-only/plan too.
     pub fn allows_network(&self) -> bool {
-        self.allow_network
-            || matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+        self.allow_network || matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
     }
 }
 
@@ -526,7 +525,10 @@ mod tests {
     fn network_gated_to_edit_modes() {
         let root = std::env::temp_dir();
         let ctx = ToolCtx::new(PermissionMode::ReadOnly, root.clone(), root.clone());
-        assert!(!ctx.allows_network(), "read-only must not reach the network");
+        assert!(
+            !ctx.allows_network(),
+            "read-only must not reach the network"
+        );
         ctx.set_mode(PermissionMode::Plan);
         assert!(!ctx.allows_network(), "plan must not reach the network");
         ctx.set_mode(PermissionMode::AutoEdit);

@@ -1,8 +1,8 @@
 use crate::{commands, logging};
 use anyhow::Result;
-use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
+use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
 
 /// wingman — multi-provider terminal coding agent.
 #[derive(Parser, Debug)]
@@ -94,11 +94,21 @@ pub enum Command {
     },
     /// Restore the most recent wingman checkpoint via `git stash pop`.
     Undo,
+    /// Scrub back through per-edit checkpoints. No args prints the timeline;
+    /// `wingman rewind <n>` reverts the last n mutating edits (newest first).
+    Rewind {
+        /// Number of edits to revert. Omit to just print the timeline.
+        steps: Option<usize>,
+    },
     /// Show estimated token spend by model from ~/.wingman/usage.json.
     Cost {
         /// Output as JSON instead of a table.
         #[arg(long)]
         json: bool,
+        /// Also reprice your actual token volume against other models
+        /// (provider-cost arbitrage) — what the same work would cost elsewhere.
+        #[arg(long)]
+        compare: bool,
     },
     /// Session utilities.
     Session {
@@ -132,6 +142,25 @@ pub enum Command {
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Model routing utilities.
+    Router {
+        #[command(subcommand)]
+        action: RouterAction,
+    },
+    /// Distill durable facts from a past session into a pending-review file
+    /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
+    Distill {
+        /// Session JSONL to distill. Defaults to the most recent session.
+        #[arg(long)]
+        session: Option<std::path::PathBuf>,
+    },
+    /// Keep this project's semantic index warm: initial reindex, then watch
+    /// the tree and refresh on change until interrupted.
+    Indexd {
+        /// Report whether a daemon is running and index freshness, then exit.
+        #[arg(long)]
+        status: bool,
+    },
     /// Run any [[schedule]] entries whose cadence is due.
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
@@ -380,6 +409,26 @@ pub enum SkillAction {
         #[arg(long)]
         force: bool,
     },
+    /// Import portable SKILL.md skills (a SKILL.md, its directory, or a
+    /// directory of skill sub-directories) from other agents into wingman.
+    Import {
+        /// Path to a SKILL.md, a skill directory, or a directory of them.
+        path: String,
+        /// Import into the project's .wingman/skills instead of global.
+        #[arg(long)]
+        project: bool,
+        /// Overwrite existing skills with the same name.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Export a wingman skill as a portable <out-dir>/<name>/SKILL.md bundle
+    /// usable by Claude Code, Codex, Cursor, and other SKILL.md agents.
+    Export {
+        /// Skill name (as shown by `/skills`).
+        name: String,
+        /// Output directory to write the skill bundle under.
+        out_dir: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -405,6 +454,14 @@ pub enum MemoryAction {
     },
     /// Show a unified diff of two memory packs (or the live dir vs. a pack).
     Diff { a: String, b: String },
+    /// Reconcile team-shared project memory: optionally fold in memory files
+    /// from a git ref (without clobbering local ones), then rebuild MEMORY.md
+    /// from the files on disk — resolving index merge conflicts.
+    Sync {
+        /// Git ref to pull teammate memory files from (e.g. `origin/main`).
+        /// Omit to just rebuild the index from local files.
+        git_ref: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -422,6 +479,16 @@ pub enum SessionAction {
         /// Truncate the new file to the first N records.
         #[arg(long)]
         at: Option<usize>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum RouterAction {
+    /// Show recorded per-class model win rates (gate pass-rate) for this repo.
+    Stats {
+        /// Aggregate across all repos instead of just the current one.
+        #[arg(long)]
+        all: bool,
     },
 }
 
@@ -496,7 +563,8 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Init { force }) => commands::init::run(force).await,
         Some(Command::Checkpoint { label }) => commands::checkpoint::create(label).await,
         Some(Command::Undo) => commands::checkpoint::undo().await,
-        Some(Command::Cost { json }) => commands::cost::run(json).await,
+        Some(Command::Rewind { steps }) => commands::rewind::run(steps).await,
+        Some(Command::Cost { json, compare }) => commands::cost::run_with(json, compare).await,
         Some(Command::Session { action }) => commands::session::run(action).await,
         Some(Command::Worktree { action }) => match action {
             WorktreeAction::Create { branch } => commands::worktree::create(branch).await,
@@ -507,6 +575,7 @@ pub async fn run() -> Result<ExitCode> {
             MemoryAction::Export { out } => commands::memory::export(out).await,
             MemoryAction::Import { path, force } => commands::memory::import(path, force).await,
             MemoryAction::Diff { a, b } => commands::memory::diff(a, b).await,
+            MemoryAction::Sync { git_ref } => commands::memory::sync(git_ref).await,
         },
         Some(Command::Review {
             pr,
@@ -538,9 +607,18 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Router { action }) => commands::router::run(action).await,
+        Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
+        Some(Command::Indexd { status }) => commands::indexd::run(status).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
+            SkillAction::Import {
+                path,
+                project,
+                force,
+            } => commands::skill::import(path, project, force).await,
+            SkillAction::Export { name, out_dir } => commands::skill::export(name, out_dir).await,
         },
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await

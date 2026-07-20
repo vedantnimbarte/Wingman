@@ -4,10 +4,10 @@
 //! Results are printed as JSONL or plain text.
 
 use anyhow::Result;
-use wingman_config::Config;
-use wingman_core::{AgentEvent, AgentStop};
 use futures::StreamExt;
 use std::process::ExitCode;
+use wingman_config::Config;
+use wingman_core::{AgentEvent, AgentStop};
 
 use crate::runtime::resolve_selection;
 

@@ -1,10 +1,10 @@
 //! `finalize_task` — move a `review` task to `done` after merge.
 
-use wingman_core::{ToolOutcome, ToolSpec};
-use wingman_tools::{Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
+use wingman_tools::{Tool, ToolCtx};
 
 use crate::orchestrator::OrchestratorHandle;
 

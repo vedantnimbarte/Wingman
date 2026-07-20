@@ -659,10 +659,7 @@ mod tests {
     fn connected_picker_queues_a_fetch_once() {
         let mut p = ModelPicker::new(&["openrouter".to_string()]);
         assert!(p.has_pending_task());
-        assert_eq!(
-            p.take_pending_task(),
-            Some(vec!["openrouter".to_string()])
-        );
+        assert_eq!(p.take_pending_task(), Some(vec!["openrouter".to_string()]));
         // Drains exactly once.
         assert!(!p.has_pending_task());
         assert_eq!(p.take_pending_task(), None);

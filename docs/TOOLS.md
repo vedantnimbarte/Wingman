@@ -398,6 +398,36 @@ Search the project RAG index for relevant code chunks.
 - Results include filename, line range, and code snippet.
 - `top_k` defaults to 5; max 20.
 
+## Symbol Graph
+
+Tree-sitter-backed navigation (feature `treesitter`, on by default). Answers
+"where is this defined / who uses it" in one tool call instead of several
+grep→read round-trips. Supported languages: rust, python, javascript,
+typescript, tsx, go.
+
+### `find_symbol`
+
+Locate where a symbol is *defined* (not merely mentioned). Args: `name`
+(required), `glob`, `limit`, `case_insensitive`. Returns
+`path:line  kind  name  signature` rows.
+
+### `who_calls`
+
+Find *references* to a symbol (call sites, mentions), each annotated with the
+enclosing function/method — the part `grep` can't tell you. Skips the
+definition line itself. Args: `name` (required), `glob`, `limit`.
+
+**Returns:**
+```
+crates/wingman-ts/src/parse.rs:257  [in fn semantic_chunks]  let symbols = extract_symbols(lang, src);
+crates/wingman-ts/src/parse.rs:370  [in fn outline]          let symbols = extract_symbols(lang, src);
+```
+
+**Notes:**
+- Whole-word, case-sensitive name match — a name-based heuristic, not resolved
+  references, so it can over-report same-named symbols and miss dynamic calls.
+- Pair with `find_symbol` (definition) for the full picture of a symbol.
+
 ## Planning & Structured Output
 
 ### `present_plan`
@@ -650,6 +680,8 @@ faster model while the parent session keeps the strongest one. An explicit
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
 | `web_search`        | Y    | —     | —     | always     | DuckDuckGo search (no key)     |
 | `semantic_search`   | Y    | —     | —     | always     | RAG index search               |
+| `find_symbol`       | Y    | —     | —     | always     | Where a symbol is defined      |
+| `who_calls`         | Y    | —     | —     | always     | References + enclosing symbol  |
 | `present_plan`      | —    | —     | —     | always     | Structured plan (gates in plan mode) |
 | `save_memory`       | —    | Y     | —     | always     | Persist across sessions        |
 | `recall_memory`     | Y    | —     | —     | always     | Fetch memory body              |

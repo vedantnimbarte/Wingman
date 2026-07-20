@@ -15,16 +15,18 @@
 //! - [`hooks`] — the [`LearningHook`] impl that wires all of the above
 //!   into the agent loop's before/after-turn hook points.
 
+pub mod distill;
 pub mod extract;
 pub mod hooks;
 pub mod memory;
 pub mod proposal;
 pub mod session_index;
+pub mod staleness;
 pub mod stats;
 
 pub use hooks::LearnHook;
 pub use memory::{Memory, MemoryDraft, MemoryScope, MemoryStore, MemoryType};
-pub use stats::{Outcome, StatsStore};
+pub use stats::{Outcome, RoutingStat, StatsStore};
 
 use thiserror::Error;
 

@@ -6,11 +6,11 @@
 //! preserved. Returns a unified diff so the model can verify the edit.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct EditSymbol;
 

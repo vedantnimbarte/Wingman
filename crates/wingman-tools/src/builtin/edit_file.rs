@@ -6,11 +6,11 @@
 //! of what changed so the model can verify its own edit.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use similar::{ChangeTag, TextDiff};
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct EditFile;
 
@@ -126,8 +126,8 @@ fn unified_diff(old: &str, new: &str, label: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wingman_config::PermissionMode;
     use std::path::PathBuf;
+    use wingman_config::PermissionMode;
 
     fn tmp_dir() -> PathBuf {
         // pid + nanos can collide between parallel tokio tests on macOS

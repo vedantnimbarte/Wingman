@@ -7,12 +7,12 @@
 //! should refuse to register another `spawn_subagent`, so depth caps at 2).
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use wingman_core::{ToolOutcome, ToolSpec};
 
 /// `prompt`, `description` → final assistant text or an error message.
 pub type SubagentRunner =

@@ -5,7 +5,6 @@
 //! via [`SkillsView::take_selected`] and prepends its body to the next
 //! prompt.
 
-use wingman_skills::Skill;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
@@ -14,6 +13,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Widget},
 };
+use wingman_skills::Skill;
 
 use super::{centered_rect, ModalOutcome};
 

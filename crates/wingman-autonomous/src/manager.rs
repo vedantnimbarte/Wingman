@@ -19,10 +19,10 @@
 
 use std::sync::Arc;
 
-use wingman_core::{AgentConfig, AgentEvent, AgentLoop, AgentStop, Provider, Usage};
-use wingman_tools::{builtin, ToolCtx, ToolRegistry};
 use futures::StreamExt;
 use thiserror::Error;
+use wingman_core::{AgentConfig, AgentEvent, AgentLoop, AgentStop, Provider, Usage};
+use wingman_tools::{builtin, ToolCtx, ToolRegistry};
 
 use crate::model::{RunState, TaskStatus};
 use crate::orchestrator::{OrchestratorError, OrchestratorHandle};
@@ -252,12 +252,7 @@ fn state_fingerprint(state: &RunState) -> String {
 /// here when another task is stuck waiting on it.
 fn dag_stall_reason(state: &RunState) -> Option<String> {
     use TaskStatus::*;
-    let is_done = |id: &str| {
-        state
-            .task(id)
-            .map(|t| t.status == Done)
-            .unwrap_or(false)
-    };
+    let is_done = |id: &str| state.task(id).map(|t| t.status == Done).unwrap_or(false);
     let unfinished: Vec<&crate::model::Task> =
         state.tasks.iter().filter(|t| t.status != Done).collect();
     if unfinished.is_empty() {
@@ -360,7 +355,10 @@ mod tests {
             task("t2", TaskStatus::Pending, &["t1"]),
         ]);
         let reason = dag_stall_reason(&s).expect("a cycle must be flagged as a stall");
-        assert!(reason.contains("t1") && reason.contains("t2"), "got: {reason}");
+        assert!(
+            reason.contains("t1") && reason.contains("t2"),
+            "got: {reason}"
+        );
     }
 
     #[test]

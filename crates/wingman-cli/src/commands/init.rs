@@ -10,9 +10,9 @@
 //! `--force` is passed.
 
 use anyhow::{Context, Result};
-use wingman_config::ProjectPaths;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use wingman_config::ProjectPaths;
 
 pub async fn run(force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;

@@ -47,18 +47,104 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # Formatting is fast, platform-independent, and always fixable, so it gates
+  # `main` via the aggregate `test` job below.
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt (check)
+        run: cargo fmt --all --check
+
+  # MSRV check: the workspace declares rust-version = "1.80". Informational
+  # (not in the required aggregate): the *dependency tree* may already require a
+  # newer rustc (a transitive crate on edition 2024 needs >= 1.85), which is
+  # outside our control. When this is red, determine the true floor and update
+  # the declared `rust-version` deliberately rather than letting it block PRs.
+  msrv:
+    name: msrv (1.80)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust 1.80
+        uses: dtolnay/rust-toolchain@1.80
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: cargo check on MSRV
+        run: cargo check --workspace
+
+  # Advisory scan. Informational (not in the required aggregate): some
+  # advisories come from transitive deps (ort/fastembed) we can't immediately
+  # bump, and we don't want an upstream RUSTSEC entry to block unrelated PRs.
+  # Triage failures here and add ignores to deny.toml deliberately.
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit
+
+  # License + duplicate-dependency + advisory policy via cargo-deny.
+  # Also informational until the policy in deny.toml is stabilized.
+  deny:
+    name: deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  # Line coverage via cargo-llvm-cov. Informational: emits an lcov artifact and
+  # a summary, does not fail the build on a coverage threshold.
+  coverage:
+    name: coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate coverage (lcov)
+        run: cargo llvm-cov --workspace --lcov --output-path lcov.info
+      - name: Coverage summary
+        run: cargo llvm-cov --workspace --summary-only
+      - name: Upload lcov artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
   # Aggregate gate: this is the single required status check on `main`. It
-  # passes only when every matrix leg passed, so the branch protection rule
-  # ("test") keeps working regardless of which platforms the matrix runs.
+  # passes only when every matrix leg AND formatting AND the MSRV check passed,
+  # so the branch protection rule ("test") keeps working regardless of which
+  # platforms the matrix runs.
   test:
     name: test
-    needs: matrix-test
+    needs: [matrix-test, fmt]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Verify all matrix legs passed
+      - name: Verify required jobs passed
         run: |
           if [ "${{ needs.matrix-test.result }}" != "success" ]; then
             echo "matrix tests did not all succeed: ${{ needs.matrix-test.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.fmt.result }}" != "success" ]; then
+            echo "rustfmt check failed: ${{ needs.fmt.result }}"
             exit 1
           fi

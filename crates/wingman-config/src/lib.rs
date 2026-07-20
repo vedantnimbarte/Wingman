@@ -375,6 +375,17 @@ pub struct VerifyConfig {
     /// How many gate failures are fed back to the model for self-correction
     /// before the stop is accepted anyway (with a failing receipt).
     pub max_retries: u32,
+    /// After edits, also run the tests of the *changed* crates/packages
+    /// (not the full suite) as part of the gate. Cargo projects only for
+    /// now; a no-op elsewhere. Composes onto `turn_gate` (needs it not "off").
+    pub affected_tests: bool,
+    /// After edits, also fold the language server's diagnostics for the
+    /// *changed* files into the gate: a turn that introduced a type error the
+    /// compiler-check command didn't surface (or in a language with no cheap
+    /// compile step) fails verification. Backed by whatever LSP server is on
+    /// PATH; a graceful no-op (passes with a note) when none is installed.
+    /// Composes onto `turn_gate` (needs it not "off").
+    pub lsp_diagnostics: bool,
 }
 
 impl Default for VerifyConfig {
@@ -382,6 +393,8 @@ impl Default for VerifyConfig {
         Self {
             turn_gate: "auto".into(),
             max_retries: 2,
+            affected_tests: true,
+            lsp_diagnostics: true,
         }
     }
 }
@@ -657,7 +670,15 @@ impl Config {
         base_url: Option<&str>,
         with_keyring: bool,
     ) -> Result<(), ConfigError> {
-        Self::write_provider_layer(path, provider_id, model, base_url, None, with_keyring, false)
+        Self::write_provider_layer(
+            path,
+            provider_id,
+            model,
+            base_url,
+            None,
+            with_keyring,
+            false,
+        )
     }
 
     /// Shared implementation for the two `*_provider_and_save` entry points.

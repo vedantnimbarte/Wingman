@@ -392,12 +392,18 @@ mod tests {
             Url("https://raw.githubusercontent.com/acme/skills/HEAD/pack/review.md".into())
         );
         // bare name → registry lookup
-        assert_eq!(classify_source("code-review"), RegistryName("code-review".into()));
+        assert_eq!(
+            classify_source("code-review"),
+            RegistryName("code-review".into())
+        );
     }
 
     #[test]
     fn sanitize_blocks_path_traversal() {
-        assert_eq!(sanitize_name("../../etc/passwd").as_deref(), Some("etc-passwd"));
+        assert_eq!(
+            sanitize_name("../../etc/passwd").as_deref(),
+            Some("etc-passwd")
+        );
         assert_eq!(sanitize_name("Good Skill!").as_deref(), Some("good-skill"));
         assert_eq!(sanitize_name("///"), None);
     }

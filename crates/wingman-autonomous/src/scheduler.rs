@@ -308,12 +308,7 @@ mod tests {
     fn edges(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         pairs
             .iter()
-            .map(|(id, deps)| {
-                (
-                    id.to_string(),
-                    deps.iter().map(|s| s.to_string()).collect(),
-                )
-            })
+            .map(|(id, deps)| (id.to_string(), deps.iter().map(|s| s.to_string()).collect()))
             .collect()
     }
 

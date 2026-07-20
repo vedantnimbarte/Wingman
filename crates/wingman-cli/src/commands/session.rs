@@ -2,9 +2,9 @@
 
 use crate::cli::SessionAction;
 use anyhow::{Context, Result};
-use wingman_config::ProjectPaths;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use wingman_config::ProjectPaths;
 
 pub async fn run(action: SessionAction) -> Result<ExitCode> {
     match action {

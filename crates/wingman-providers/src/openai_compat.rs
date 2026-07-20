@@ -21,15 +21,14 @@
 
 use std::time::Duration;
 
-use wingman_core::{
-    WingmanError, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
-    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
-};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
+use wingman_core::{
+    CacheKind, CompletionRequest, ContentBlock, Message, Provider, ProviderCapabilities,
+    ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec, Usage, WingmanError,
+};
 
 /// Which downstream we're talking to. Picks a default base URL and the
 /// stable `provider_id` we expose to the agent.
@@ -700,11 +699,12 @@ fn build_request_body(req: &CompletionRequest) -> Value {
 /// model literally named `o1` would be misrouted; upgrade to a per-variant
 /// capability flag if that ever bites.
 fn is_reasoning_model(model: &str) -> bool {
-    let m = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
-    m.starts_with("o1")
-        || m.starts_with("o3")
-        || m.starts_with("o4")
-        || m.starts_with("gpt-5")
+    let m = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")
 }
 
 fn encode_tools(tools: &[ToolSpec]) -> Value {
@@ -1053,10 +1053,24 @@ mod tests {
 
     #[test]
     fn reasoning_model_detection() {
-        for m in ["o1", "o1-mini", "o3", "o3-mini", "o4-mini", "gpt-5", "openai/o3-mini"] {
+        for m in [
+            "o1",
+            "o1-mini",
+            "o3",
+            "o3-mini",
+            "o4-mini",
+            "gpt-5",
+            "openai/o3-mini",
+        ] {
             assert!(is_reasoning_model(m), "{m} should be reasoning");
         }
-        for m in ["gpt-4o", "gpt-4.1", "claude-opus-4-8", "llama-3", "o-something"] {
+        for m in [
+            "gpt-4o",
+            "gpt-4.1",
+            "claude-opus-4-8",
+            "llama-3",
+            "o-something",
+        ] {
             assert!(!is_reasoning_model(m), "{m} should not be reasoning");
         }
     }
@@ -1068,7 +1082,10 @@ mod tests {
         let body = build_request_body(&req);
         assert!(body.get("max_tokens").is_none());
         assert_eq!(body["max_completion_tokens"], json!(req.max_tokens));
-        assert!(body.get("temperature").is_none(), "temperature must be omitted");
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted"
+        );
     }
 
     #[test]

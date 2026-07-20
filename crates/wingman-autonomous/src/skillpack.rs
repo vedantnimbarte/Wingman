@@ -150,7 +150,8 @@ pub fn scan_manifest(pack_dir: &Path) -> std::io::Result<PackManifest> {
         } else if name == "tools" && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             if let Ok(tools) = std::fs::read_dir(e.path()) {
                 for t in tools.flatten() {
-                    m.tools.push(format!("tools/{}", t.file_name().to_string_lossy()));
+                    m.tools
+                        .push(format!("tools/{}", t.file_name().to_string_lossy()));
                 }
             }
         }

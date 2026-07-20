@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::{Tool, ToolCtx};
-use wingman_config::HooksConfig;
-use wingman_core::{ToolDispatcher, ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
+use wingman_config::HooksConfig;
+use wingman_core::{ToolDispatcher, ToolOutcome, ToolSpec};
 
 pub struct ToolRegistry {
     /// Interior-mutable so MCP servers can be added/removed at runtime
@@ -103,7 +103,16 @@ impl ToolRegistry {
             self.register(crate::builtin::FindSymbol);
             self.register(crate::builtin::Outline);
             self.register(crate::builtin::EditSymbol);
+            self.register(crate::builtin::WhoCalls);
         }
+        // LSP-backed intelligence. Registered unconditionally — each tool
+        // degrades gracefully (returns a "fall back to the tree-sitter tools"
+        // note) when the user has no language server installed for the file.
+        self.register(crate::builtin::LspDefinition);
+        self.register(crate::builtin::LspReferences);
+        self.register(crate::builtin::LspHover);
+        self.register(crate::builtin::LspDiagnostics);
+        self.register(crate::builtin::LspRename);
         self
     }
 

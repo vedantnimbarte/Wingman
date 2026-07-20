@@ -210,7 +210,9 @@ pub fn tokens_by_phase(events: &[Event]) -> Vec<PhaseTokens> {
 /// sessions. Keyed by the model string as the pilot recorded it (already in
 /// `provider/model` shape). Cache tokens aren't in the event schema, so only
 /// fresh input/output are populated.
-pub fn tokens_by_model(events: &[Event]) -> std::collections::BTreeMap<String, wingman_core::Usage> {
+pub fn tokens_by_model(
+    events: &[Event],
+) -> std::collections::BTreeMap<String, wingman_core::Usage> {
     let mut map: std::collections::BTreeMap<String, wingman_core::Usage> =
         std::collections::BTreeMap::new();
     for ev in events {
@@ -236,9 +238,9 @@ pub fn render_token_breakdown(events: &[Event]) -> String {
     if phases.is_empty() {
         return "token usage by phase: none recorded".to_string();
     }
-    let (ti, to): (u64, u64) = phases
-        .iter()
-        .fold((0, 0), |(i, o), p| (i + p.input_tokens, o + p.output_tokens));
+    let (ti, to): (u64, u64) = phases.iter().fold((0, 0), |(i, o), p| {
+        (i + p.input_tokens, o + p.output_tokens)
+    });
     let mut out = format!("token usage by phase (total in={ti} out={to}):");
     for p in &phases {
         out.push_str(&format!(

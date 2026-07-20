@@ -115,9 +115,7 @@ pub fn tool_calls_for_task(events: &[Event], task_id: &str) -> Vec<ToolCall> {
     events
         .iter()
         .filter_map(|e| match e {
-            Event::TaskTool {
-                id, tool, file, ..
-            } if id == task_id => Some(ToolCall {
+            Event::TaskTool { id, tool, file, .. } if id == task_id => Some(ToolCall {
                 tool: tool.clone(),
                 // Now populated from the tool's `path` input, so multi-*file*
                 // work is distinguished from a single file edited by several

@@ -138,6 +138,31 @@ worker agents in isolated worktrees, and converges into a PR.
   (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
   index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
   so the workspace builds without the C toolchain if you don't need parsing.
+- **LSP-backed code intelligence.** Real, *resolved* go-to-definition,
+  find-references, hover, diagnostics, and project-wide rename via whatever
+  language server you have on `PATH` (rust-analyzer, pyright/pylsp,
+  typescript-language-server, gopls) — the semantic upgrade over the
+  tree-sitter heuristics. Tools `lsp_definition`, `lsp_references`, `lsp_hover`,
+  `lsp_diagnostics`, `lsp_rename` degrade gracefully to the heuristic tools when
+  no server is installed. See [docs/LSP.md](docs/LSP.md).
+- **LSP-backed verification receipts.** The post-edit turn gate can fold the
+  language server's diagnostics for the *changed* files into the verdict
+  (`[verify].lsp_diagnostics`), so a change that introduces a type error the
+  compile step missed fails verification: `✓ builds  ✓ affected tests  ✓ 0 new
+  LSP diagnostics`.
+- **Git-backed team memory.** `wingman memory sync [<git-ref>]` reconciles the
+  team-shared `<project>/.wingman/memory/` — rebuilds the `MEMORY.md` index from
+  the files on disk (resolving the "two teammates both added a memory" merge
+  conflict) and optionally folds in memory files from a git ref without
+  clobbering local ones.
+- **Provider-cost arbitrage.** `wingman cost --compare` reprices your actual
+  token volume against a spread of models (Opus / Sonnet / Haiku / GPT-5 /
+  Gemini / DeepSeek) — what the same work would have cost elsewhere. Only a
+  provider-agnostic agent can show this.
+- **Portable skill interop.** `wingman skill import <path>` /
+  `wingman skill export <name> <dir>` bridge wingman skills and the
+  ecosystem-standard `SKILL.md` format (Claude Code, Codex, Cursor, Gemini CLI,
+  Copilot, Cline, Goose).
 - **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by

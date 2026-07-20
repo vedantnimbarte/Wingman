@@ -35,11 +35,14 @@ pub trait ToolDispatcher: Send + Sync {
 ///
 /// The default impl is a no-op so existing callers that don't supply a hook
 /// pay nothing.
+#[async_trait]
 pub trait LearningHook: Send + Sync {
     /// Called once before the per-turn provider request. May return extra
     /// system text to splice onto `AgentConfig::system` for this turn only
-    /// (memory recall, nudges, ephemeral skill injection).
-    fn before_turn(&self, _history: &[Message]) -> Option<String> {
+    /// (memory recall, nudges, ephemeral skill injection, index retrieval).
+    /// Async so implementations can hit I/O (e.g. a RAG search) without
+    /// blocking the loop's runtime.
+    async fn before_turn(&self, _history: &[Message]) -> Option<String> {
         None
     }
     /// Called after each assistant turn completes (tool round trip done).
@@ -51,6 +54,7 @@ pub trait LearningHook: Send + Sync {
 
 /// No-op default — used when the caller doesn't supply a hook.
 pub struct NoopLearningHook;
+#[async_trait]
 impl LearningHook for NoopLearningHook {}
 
 /// Result of one post-edit verification run.
@@ -270,7 +274,8 @@ impl AgentLoop {
     pub fn compact_now(&mut self) -> Option<usize> {
         let plan = self.config.compactor.plan_forced(&self.history)?;
         let replaced = plan.replaced;
-        self.history.splice(0..replaced, std::iter::once(plan.recap));
+        self.history
+            .splice(0..replaced, std::iter::once(plan.recap));
         Some(replaced)
     }
 
@@ -342,7 +347,7 @@ impl AgentLoop {
                 // Allow the learning hook to splice extra system text on a
                 // per-turn basis (memory index, nudges, ephemeral skill body).
                 let system_for_turn = match (config.system.as_deref(), &config.learning) {
-                    (base, Some(hook)) => match hook.before_turn(history) {
+                    (base, Some(hook)) => match hook.before_turn(history).await {
                         Some(extra) if !extra.trim().is_empty() => {
                             let mut s = String::new();
                             if let Some(b) = base {
@@ -621,7 +626,10 @@ mod tests {
             }
         }
         async fn complete(&self, req: CompletionRequest) -> crate::Result<ProviderEventStream> {
-            self.captured.lock().unwrap().push(req.cache_breakpoints.clone());
+            self.captured
+                .lock()
+                .unwrap()
+                .push(req.cache_breakpoints.clone());
             let events = self
                 .responses
                 .lock()

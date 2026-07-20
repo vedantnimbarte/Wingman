@@ -5,10 +5,10 @@ use std::io::Write;
 use std::process::ExitCode;
 
 use anyhow::Result;
+use futures::StreamExt;
 use wingman_config::{Config, PermissionMode, ProjectPaths};
 use wingman_core::AgentEvent;
 use wingman_session::{SessionLog, SessionRecord};
-use futures::StreamExt;
 
 use crate::runtime;
 
@@ -62,6 +62,11 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         );
     }
 
+    // Record per-turn routing outcomes (which model, did the gate pass) so
+    // `wingman router stats` can show which model wins per class in this repo.
+    let routing_stats = wingman_learn::StatsStore::open_default().ok();
+    let repo = paths.root.to_string_lossy().to_string();
+
     let mut events = agent.run(opts.prompt);
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -81,6 +86,11 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         // mode too (previously it only did in the human-readable branch).
         match &event {
             AgentEvent::TextDelta { text } => assistant_text.push_str(text),
+            AgentEvent::Verification { passed, .. } => {
+                if let Some(st) = &routing_stats {
+                    let _ = st.record_routing("default", &selection.model, &repo, *passed);
+                }
+            }
             AgentEvent::Error { .. } => exit = ExitCode::from(1),
             AgentEvent::Stop {
                 reason: wingman_core::AgentStop::Error,

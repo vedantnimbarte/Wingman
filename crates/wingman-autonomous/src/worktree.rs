@@ -784,10 +784,14 @@ mod tests {
         git(&repo, &["switch", "integration"]);
 
         rebase_branch_onto(&repo, "feat-clean", "integration").expect("clean rebase");
-        let head = String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
-            .trim()
-            .to_string();
-        assert_eq!(head, "integration", "HEAD must be restored after clean rebase");
+        let head =
+            String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+        assert_eq!(
+            head, "integration",
+            "HEAD must be restored after clean rebase"
+        );
 
         // A conflicting branch also edits a.txt.
         git(&repo, &["switch", "-c", "feat-conflict", "main"]);
@@ -797,10 +801,14 @@ mod tests {
         git(&repo, &["switch", "integration"]);
 
         assert!(rebase_branch_onto(&repo, "feat-conflict", "integration").is_err());
-        let head = String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
-            .trim()
-            .to_string();
-        assert_eq!(head, "integration", "HEAD must be restored after aborted rebase");
+        let head =
+            String::from_utf8_lossy(&git(&repo, &["symbolic-ref", "--short", "HEAD"]).stdout)
+                .trim()
+                .to_string();
+        assert_eq!(
+            head, "integration",
+            "HEAD must be restored after aborted rebase"
+        );
         // No rebase in progress left dangling.
         assert!(!repo.join(".git").join("rebase-merge").exists());
     }
@@ -826,7 +834,8 @@ mod tests {
         // Simulate an interrupted run: the dir and branch are still present.
         // A naive `git worktree add -b` would now fail; create_worktree must
         // prune the stale state and recreate cleanly.
-        let branch2 = create_worktree(&repo, &base, run_id, "t1", &wt).expect("recreate over stale");
+        let branch2 =
+            create_worktree(&repo, &base, run_id, "t1", &wt).expect("recreate over stale");
         assert_eq!(branch, branch2);
         assert!(wt.exists());
     }
@@ -960,8 +969,8 @@ mod tests {
         git(&wt_path, &["add", "-A"]);
         git(&wt_path, &["commit", "-m", "add file-t1.txt"]);
 
-        let outcome = merge_integration(&repo, &base, branch, &state)
-            .expect("integration merge succeeded");
+        let outcome =
+            merge_integration(&repo, &base, branch, &state).expect("integration merge succeeded");
         assert_eq!(outcome.commits.len(), 1, "the Done task should be merged");
         assert!(
             repo.join("file-t1.txt").exists(),
@@ -1104,8 +1113,11 @@ mod tests {
     #[test]
     fn has_conflict_markers_detects_and_clears() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("c.txt"), "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n")
-            .unwrap();
+        std::fs::write(
+            tmp.path().join("c.txt"),
+            "a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> b\n",
+        )
+        .unwrap();
         std::fs::write(tmp.path().join("clean.txt"), "a\nb\n").unwrap();
         assert!(has_conflict_markers(tmp.path(), &["c.txt".into()]));
         assert!(!has_conflict_markers(tmp.path(), &["clean.txt".into()]));

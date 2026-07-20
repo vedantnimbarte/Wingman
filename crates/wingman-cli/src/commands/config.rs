@@ -1,10 +1,10 @@
 use crate::cli::ConfigAction;
 use anyhow::{Context, Result};
+use std::process::ExitCode;
 use wingman_config::{
     ensure_global_dir, global_config_path, global_credentials_path, global_dir, global_logs_dir,
     Config, ProjectPaths,
 };
-use std::process::ExitCode;
 
 pub async fn run(action: ConfigAction) -> Result<ExitCode> {
     match action {

@@ -4,9 +4,9 @@
 //! learning loop's value is obvious (and auditable) to the user.
 
 use anyhow::Result;
-use wingman_config::{Config, ProjectPaths};
 use std::path::Path;
 use std::process::ExitCode;
+use wingman_config::{Config, ProjectPaths};
 
 pub async fn run(cfg: Config) -> Result<ExitCode> {
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -20,6 +20,30 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
         .map(|d| d.join("memory"));
     print_memory_section("global memories", global_mem.as_deref());
     print_memory_section("project memories", Some(&paths.dir.join("memory")));
+
+    // Staleness: memories naming project files that no longer exist.
+    let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
+    let all = store.load_all();
+    let stale = wingman_learn::staleness::stale_memories(&all, &paths.root);
+    if !stale.is_empty() {
+        println!(
+            "stale memories: {} (reference files that no longer exist)",
+            stale.len()
+        );
+        for (m, missing) in stale.iter().take(10) {
+            println!("  - {} → missing {}", m.name, missing.join(", "));
+        }
+        println!();
+    }
+
+    // Distilled facts awaiting review.
+    let pending = wingman_learn::distill::PendingStore::new(&paths.root).load();
+    if !pending.is_empty() {
+        println!(
+            "pending distilled facts: {} (review with `wingman distill`, promote via `save_memory`)",
+            pending.len()
+        );
+    }
 
     // Skills (global + project, project wins on name clash).
     let skills = wingman_skills::load_all(&paths.root);

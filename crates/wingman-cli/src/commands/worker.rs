@@ -22,12 +22,12 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use futures::StreamExt;
 use wingman_autonomous::model::{Acceptance, Role, Task};
 use wingman_autonomous::role::load_role_prompt_with_lessons;
 use wingman_config::{Config, PermissionMode, ProjectPaths};
 use wingman_core::{AgentConfig, AgentEvent, AgentLoop, Compactor, ToolOutputBudget};
 use wingman_tools::{ToolCtx, ToolRegistry};
-use futures::StreamExt;
 
 use crate::runtime;
 
@@ -144,8 +144,8 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         let cancel = cancel.clone();
         let injections = ipc_injections.clone();
         std::thread::spawn(move || {
-            use wingman_autonomous::ipc::ManagerCommand;
             use std::io::BufRead;
+            use wingman_autonomous::ipc::ManagerCommand;
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
                 let Ok(line) = line else { break };
@@ -234,8 +234,9 @@ struct IpcInjector {
     pending: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+#[async_trait::async_trait]
 impl wingman_core::LearningHook for IpcInjector {
-    fn before_turn(&self, _history: &[wingman_core::Message]) -> Option<String> {
+    async fn before_turn(&self, _history: &[wingman_core::Message]) -> Option<String> {
         let mut q = self.pending.lock().unwrap();
         if q.is_empty() {
             return None;
@@ -334,20 +335,21 @@ mod tests {
     use super::*;
     use wingman_core::LearningHook;
 
-    #[test]
-    fn ipc_injector_drains_pending_once() {
+    #[tokio::test]
+    async fn ipc_injector_drains_pending_once() {
         let pending = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let hook = IpcInjector {
             pending: pending.clone(),
         };
-        // Empty queue → nothing to inject.
-        assert!(hook.before_turn(&[]).is_none());
+        // Empty queue → nothing to inject. (`before_turn` is async since the
+        // search-escalation hook does I/O; await it here.)
+        assert!(hook.before_turn(&[]).await.is_none());
         // Two queued messages are joined and injected once...
         pending.lock().unwrap().push("clarify: use tabs".into());
         pending.lock().unwrap().push("pivot: target v2".into());
-        let injected = hook.before_turn(&[]).expect("injects pending");
+        let injected = hook.before_turn(&[]).await.expect("injects pending");
         assert!(injected.contains("use tabs") && injected.contains("target v2"));
         // ...then drained, so the next turn injects nothing.
-        assert!(hook.before_turn(&[]).is_none());
+        assert!(hook.before_turn(&[]).await.is_none());
     }
 }

@@ -12,8 +12,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use wingman_config::McpServerConfig;
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
@@ -28,6 +26,8 @@ use rmcp::{
 use thiserror::Error;
 use tokio::process::Command;
 use tracing::warn;
+use wingman_config::McpServerConfig;
+use wingman_core::{ToolOutcome, ToolSpec};
 
 #[derive(Debug, Error)]
 pub enum McpError {
@@ -153,7 +153,10 @@ async fn connect_http(name: &str, cfg: &McpServerConfig) -> Result<McpServer, Mc
     // headers from config.
     let mut headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
     for (k, v) in &cfg.headers {
-        match (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+        match (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
             (Ok(hn), Ok(hv)) => {
                 headers.insert(hn, hv);
             }
@@ -162,10 +165,7 @@ async fn connect_http(name: &str, cfg: &McpServerConfig) -> Result<McpServer, Mc
     }
     let config = StreamableHttpClientTransportConfig::with_uri(url).custom_headers(headers);
     let transport = StreamableHttpClientTransport::from_config(config);
-    let service = ()
-        .serve(transport)
-        .await
-        .map_err(|e| McpError::Transport(e.to_string()))?;
+    let service = ().serve(transport).await.map_err(|e| McpError::Transport(e.to_string()))?;
     serve_into_server(name, cfg.trusted, service).await
 }
 

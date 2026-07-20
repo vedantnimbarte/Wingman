@@ -4,6 +4,7 @@
 //! (headless --print, --json, future TUI) can just ask `Runtime::build(...)`.
 
 use anyhow::{anyhow, Context, Result};
+use std::sync::Arc;
 use wingman_config::{secrets, Config, PermissionMode, ProjectPaths};
 use wingman_core::{
     AgentConfig, AgentLoop, Compactor, GateReport, Provider, ToolOutputBudget, TurnGate,
@@ -19,7 +20,6 @@ use wingman_providers::{
 use wingman_rag::{Embedder, HashEmbedder, IndexStore, Indexer};
 use wingman_skills::Skill;
 use wingman_tools::{ToolCtx, ToolRegistry};
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -584,6 +584,57 @@ impl ShellTurnGate {
     }
 }
 
+/// Run `cmd` in `cwd` and render a compact [`GateReport`]. Shared by every
+/// shell-backed gate (compile check, affected tests).
+async fn run_check_cmd(cmd: &str, cwd: &std::path::Path) -> GateReport {
+    let output = if cfg!(windows) {
+        tokio::process::Command::new("cmd")
+            .args(["/C", cmd])
+            .current_dir(cwd)
+            .output()
+            .await
+    } else {
+        tokio::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(cwd)
+            .output()
+            .await
+    };
+    match output {
+        Ok(o) => {
+            let passed = o.status.success();
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let body = if stderr.trim().is_empty() {
+                stdout
+            } else {
+                stderr
+            };
+            // Keep the receipt small: last 40 lines is enough for the
+            // model (and the user) to see what broke.
+            let lines: Vec<&str> = body.lines().collect();
+            let tail = if lines.len() > 40 {
+                format!(
+                    "… ({} lines omitted)\n{}",
+                    lines.len() - 40,
+                    lines[lines.len() - 40..].join("\n")
+                )
+            } else {
+                lines.join("\n")
+            };
+            let mark = if passed { "✓ passed" } else { "✗ failed" };
+            GateReport {
+                passed,
+                summary: format!("$ {cmd}\n{mark}\n{tail}").trim_end().to_string(),
+            }
+        }
+        Err(e) => GateReport {
+            passed: true,
+            summary: format!("$ {cmd}\n⚠ gate skipped (could not run: {e})"),
+        },
+    }
+}
+
 #[async_trait::async_trait]
 impl TurnGate for ShellTurnGate {
     fn label(&self) -> String {
@@ -591,55 +642,266 @@ impl TurnGate for ShellTurnGate {
     }
 
     async fn check(&self) -> GateReport {
-        let output = if cfg!(windows) {
-            tokio::process::Command::new("cmd")
-                .args(["/C", &self.cmd])
-                .current_dir(&self.cwd)
-                .output()
-                .await
-        } else {
-            tokio::process::Command::new("sh")
-                .args(["-c", &self.cmd])
-                .current_dir(&self.cwd)
-                .output()
-                .await
-        };
-        match output {
-            Ok(o) => {
-                let passed = o.status.success();
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                let body = if stderr.trim().is_empty() {
-                    stdout
-                } else {
-                    stderr
-                };
-                // Keep the receipt small: last 40 lines is enough for the
-                // model (and the user) to see what broke.
-                let lines: Vec<&str> = body.lines().collect();
-                let tail = if lines.len() > 40 {
-                    format!(
-                        "… ({} lines omitted)\n{}",
-                        lines.len() - 40,
-                        lines[lines.len() - 40..].join("\n")
-                    )
-                } else {
-                    lines.join("\n")
-                };
-                let mark = if passed { "✓ passed" } else { "✗ failed" };
-                GateReport {
-                    passed,
-                    summary: format!("$ {}\n{mark}\n{tail}", self.cmd)
-                        .trim_end()
-                        .to_string(),
-                }
-            }
-            Err(e) => GateReport {
+        run_check_cmd(&self.cmd, &self.cwd).await
+    }
+}
+
+/// Runs the tests of the crates changed this turn (via `git`), not the whole
+/// suite. Discovers changed crates at check-time so it tracks whatever the
+/// agent edited. A no-op (passes) when nothing relevant changed.
+///
+/// ponytail: crate-level granularity, not symbol→test mapping. Upgrade path is
+/// mapping edited symbols to the specific tests that reference them.
+pub struct AffectedTestsGate {
+    root: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for AffectedTestsGate {
+    fn label(&self) -> String {
+        "affected tests".into()
+    }
+
+    async fn check(&self) -> GateReport {
+        let crates = changed_rust_crates(&self.root);
+        if crates.is_empty() {
+            return GateReport {
                 passed: true,
-                summary: format!("$ {}\n⚠ gate skipped (could not run: {e})", self.cmd),
-            },
+                summary: "affected tests: none (no changed Rust crates)".into(),
+            };
+        }
+        let mut cmd = String::from("cargo test --quiet");
+        for c in &crates {
+            cmd.push_str(" -p ");
+            cmd.push_str(c);
+        }
+        run_check_cmd(&cmd, &self.root).await
+    }
+}
+
+/// Runs several gates in sequence, short-circuiting on the first failure so a
+/// broken compile doesn't waste time running tests. Passes only if all pass.
+pub struct CompositeGate {
+    gates: Vec<Arc<dyn TurnGate>>,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for CompositeGate {
+    fn label(&self) -> String {
+        self.gates
+            .iter()
+            .map(|g| g.label())
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+
+    async fn check(&self) -> GateReport {
+        let mut summaries = Vec::new();
+        for g in &self.gates {
+            let r = g.check().await;
+            summaries.push(r.summary);
+            if !r.passed {
+                return GateReport {
+                    passed: false,
+                    summary: summaries.join("\n\n"),
+                };
+            }
+        }
+        GateReport {
+            passed: true,
+            summary: summaries.join("\n\n"),
         }
     }
+}
+
+/// Changed Rust crates (by package name) in the working tree, via
+/// `git status --porcelain`. Maps each changed `.rs` file up to its nearest
+/// `Cargo.toml` and reads the package name. Empty on non-git repos or when
+/// nothing Rust changed.
+fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut crates: Vec<String> = Vec::new();
+    // `-z` gives NUL-separated `XY <path>` entries where `XY` is exactly two
+    // status columns followed by a space — so the path starts at byte 3. Do
+    // NOT trim: a leading space in `XY` (e.g. " M") is significant alignment.
+    // Renames emit a second NUL field (the old path) with no status prefix;
+    // it won't map to a real file so it's harmlessly ignored.
+    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
+        if entry.len() < 4 {
+            continue;
+        }
+        let path = &entry[3..]; // strip "XY " status prefix
+        if !path.ends_with(".rs") {
+            continue;
+        }
+        if let Some(name) = crate_name_for(root, std::path::Path::new(path)) {
+            if !crates.contains(&name) {
+                crates.push(name);
+            }
+        }
+    }
+    crates.sort();
+    crates
+}
+
+/// Changed files in the working tree (absolute paths) whose extension maps to
+/// a language server we can drive. Shares the `git status --porcelain -z`
+/// parsing of [`changed_rust_crates`]. Empty on non-git repos.
+fn changed_lsp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
+        if entry.len() < 4 {
+            continue;
+        }
+        let path = &entry[3..]; // strip "XY " status prefix
+        let abs = root.join(path);
+        // Deletions won't exist on disk; skip so we don't ask the server about
+        // a vanished file.
+        if wingman_lsp::Lang::from_path(&abs).is_some() && abs.exists() {
+            files.push(abs);
+        }
+    }
+    files
+}
+
+/// Post-edit gate that folds the language server's diagnostics for the files
+/// changed this turn into verification. Fail-open: no server installed, no
+/// changed files, or a server error all pass (with a note) rather than trapping
+/// the agent. Only genuine *errors* (severity 1) fail the gate; warnings are
+/// reported but don't block.
+pub struct LspDiagnosticsGate {
+    root: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for LspDiagnosticsGate {
+    fn label(&self) -> String {
+        "lsp diagnostics".into()
+    }
+
+    async fn check(&self) -> GateReport {
+        let files = changed_lsp_files(&self.root);
+        if files.is_empty() {
+            return GateReport {
+                passed: true,
+                summary: "lsp diagnostics: none (no changed files a server handles)".into(),
+            };
+        }
+        let manager = wingman_lsp::manager_for(&self.root).await;
+        let mut error_lines: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let mut no_server = 0usize;
+        for file in &files {
+            let client = match manager.client_for_path(file).await {
+                Ok(c) => c,
+                Err(_) => {
+                    no_server += 1;
+                    continue;
+                }
+            };
+            let diags = client
+                .diagnostics(file, std::time::Duration::from_secs(15))
+                .await
+                .unwrap_or_default();
+            checked += 1;
+            let rel = file
+                .strip_prefix(&self.root)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for d in diags.iter().filter(|d| d.is_error()) {
+                error_lines.push(format!(
+                    "{rel}:{}:{} error: {}",
+                    d.line + 1,
+                    d.character + 1,
+                    d.message.replace('\n', " ")
+                ));
+            }
+        }
+
+        if checked == 0 {
+            return GateReport {
+                passed: true,
+                summary: format!(
+                    "lsp diagnostics: ⚠ skipped (no language server on PATH for {no_server} changed file(s))"
+                ),
+            };
+        }
+        if error_lines.is_empty() {
+            GateReport {
+                passed: true,
+                summary: format!("lsp diagnostics: ✓ no errors in {checked} changed file(s)"),
+            }
+        } else {
+            GateReport {
+                passed: false,
+                summary: format!(
+                    "lsp diagnostics: ✗ {} error(s) in changed files\n{}",
+                    error_lines.len(),
+                    error_lines.join("\n")
+                ),
+            }
+        }
+    }
+}
+
+/// Walk up from a repo-relative file path to the nearest `Cargo.toml` and read
+/// its `[package] name`. Returns None if no manifest or no name found.
+fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
+    let mut dir = root.join(rel_file);
+    dir.pop(); // drop filename
+    loop {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() {
+            if let Some(name) = package_name(&manifest) {
+                return Some(name);
+            }
+        }
+        if !dir.starts_with(root) || !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// Minimal `[package] name = "…"` extractor. ponytail: line scan, not a full
+/// TOML parse — good enough for standard manifests; workspace-only manifests
+/// (no `[package]`) correctly yield None.
+fn package_name(manifest: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(manifest).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if in_package {
+            if let Some(rest) = line.strip_prefix("name") {
+                let rest = rest.trim_start().strip_prefix('=')?.trim();
+                return Some(rest.trim_matches(['"', '\'']).to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Pick a check command from the project type. Conservative: only commands
@@ -666,10 +928,30 @@ pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn T
         "auto" => detect_turn_gate_cmd(root)?,
         explicit => explicit.to_string(),
     };
-    Some(Arc::new(ShellTurnGate {
+    let compile: Arc<dyn TurnGate> = Arc::new(ShellTurnGate {
         cmd,
         cwd: root.to_path_buf(),
-    }))
+    });
+
+    // Compose optional gates after the compile check, short-circuiting on the
+    // first failure (compile → affected tests → lsp diagnostics).
+    let mut gates: Vec<Arc<dyn TurnGate>> = vec![compile];
+    if cfg.verify.affected_tests && root.join("Cargo.toml").exists() {
+        gates.push(Arc::new(AffectedTestsGate {
+            root: root.to_path_buf(),
+        }));
+    }
+    if cfg.verify.lsp_diagnostics {
+        gates.push(Arc::new(LspDiagnosticsGate {
+            root: root.to_path_buf(),
+        }));
+    }
+
+    if gates.len() == 1 {
+        Some(gates.into_iter().next().unwrap())
+    } else {
+        Some(Arc::new(CompositeGate { gates }))
+    }
 }
 
 /// On failure, walks `cfg.router.fallback_models`
@@ -680,8 +962,7 @@ pub async fn build_agent_with_fallback(
     selection: &Selection,
     mode: PermissionMode,
 ) -> Result<AgentLoop> {
-    let (agent, _registry) =
-        build_agent_registry_with_fallback(cfg, selection, mode).await?;
+    let (agent, _registry) = build_agent_registry_with_fallback(cfg, selection, mode).await?;
     Ok(agent)
 }
 
@@ -768,7 +1049,10 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
-    let learn = match LearnHandles::build(learn_cfg) {
+    // Give the learn hook the project index so it can inject relevant code
+    // locations per turn (search escalation). Cheap: opens the store, no reindex.
+    let learn_indexer = build_indexer(&paths).ok().flatten();
+    let learn = match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
         Ok(h) => Some(Arc::new(h)),
         Err(e) => {
             tracing::warn!("disabling learning loop: {e}");
@@ -999,4 +1283,117 @@ fn base_prompt(mode: PermissionMode, cwd: &str) -> String {
          - Working directory: {cwd}\n\
          - Permission mode: {mode}\n"
     )
+}
+
+#[cfg(test)]
+mod affected_tests_tests {
+    use super::*;
+    use wingman_core::{GateReport, TurnGate};
+
+    #[test]
+    fn package_name_reads_package_section_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("Cargo.toml");
+        std::fs::write(
+            &m,
+            "[workspace]\nmembers = [\"a\"]\n\n[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(package_name(&m).as_deref(), Some("my-crate"));
+
+        // Workspace-only manifest (no [package]) → None.
+        let m2 = dir.path().join("Cargo2.toml");
+        std::fs::write(&m2, "[workspace]\nmembers = [\"a\"]\n").unwrap();
+        assert_eq!(package_name(&m2), None);
+    }
+
+    #[test]
+    fn crate_name_walks_up_to_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        std::fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        std::fs::write(
+            root.join("crates/foo/Cargo.toml"),
+            "[package]\nname = \"foo\"\n",
+        )
+        .unwrap();
+        let name = crate_name_for(root, std::path::Path::new("crates/foo/src/lib.rs"));
+        assert_eq!(name.as_deref(), Some("foo"));
+    }
+
+    struct FixedGate(bool, &'static str);
+    #[async_trait::async_trait]
+    impl TurnGate for FixedGate {
+        fn label(&self) -> String {
+            self.1.into()
+        }
+        async fn check(&self) -> GateReport {
+            GateReport {
+                passed: self.0,
+                summary: self.1.into(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn composite_short_circuits_on_first_failure() {
+        // Second gate must not appear in the summary when the first fails.
+        let g = CompositeGate {
+            gates: vec![
+                Arc::new(FixedGate(false, "compile-failed")),
+                Arc::new(FixedGate(true, "tests-ran")),
+            ],
+        };
+        let r = g.check().await;
+        assert!(!r.passed);
+        assert!(r.summary.contains("compile-failed"));
+        assert!(
+            !r.summary.contains("tests-ran"),
+            "should have short-circuited"
+        );
+    }
+
+    #[tokio::test]
+    async fn composite_passes_when_all_pass() {
+        let g = CompositeGate {
+            gates: vec![
+                Arc::new(FixedGate(true, "a")),
+                Arc::new(FixedGate(true, "b")),
+            ],
+        };
+        let r = g.check().await;
+        assert!(r.passed);
+        assert!(r.summary.contains("a") && r.summary.contains("b"));
+    }
+
+    #[test]
+    fn changed_rust_crates_parses_porcelain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::create_dir_all(root.join("crates/foo/src")).unwrap();
+        std::fs::write(
+            root.join("crates/foo/Cargo.toml"),
+            "[package]\nname=\"foo\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/foo/src/lib.rs"), "// v1\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "init"]);
+        // Modify the file — it must show up as a changed crate.
+        std::fs::write(root.join("crates/foo/src/lib.rs"), "// v2 changed\n").unwrap();
+        assert_eq!(changed_rust_crates(root), vec!["foo".to_string()]);
+        // A changed non-rs file contributes no crate.
+        std::fs::write(root.join("README.md"), "x").unwrap();
+        assert_eq!(changed_rust_crates(root), vec!["foo".to_string()]);
+    }
 }

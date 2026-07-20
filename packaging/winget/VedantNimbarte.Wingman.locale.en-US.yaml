@@ -1,0 +1,29 @@
+# winget default-locale manifest (template).
+PackageIdentifier: VedantNimbarte.Wingman
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: Wingman contributors
+PublisherUrl: https://github.com/vedantnimbarte/Wingman
+PublisherSupportUrl: https://github.com/vedantnimbarte/Wingman/issues
+PackageName: Wingman
+PackageUrl: https://github.com/vedantnimbarte/Wingman
+License: Apache-2.0
+LicenseUrl: https://github.com/vedantnimbarte/Wingman/blob/main/LICENSE-APACHE
+ShortDescription: Multi-provider, terminal-first, self-improving coding agent in Rust.
+Description: |-
+  Wingman is a terminal-first coding agent that talks to 70+ LLM providers behind
+  one streaming interface, ships a built-in tool layer for reading/searching/
+  editing your project, offers LSP-backed code intelligence, a verification turn
+  gate, git-backed team memory, and a multi-agent pilot mode that plans a goal and
+  converges into a PR. Developed and tested on Windows from day one.
+Moniker: wingman
+Tags:
+  - ai
+  - agent
+  - cli
+  - coding-assistant
+  - llm
+  - rust
+  - terminal
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

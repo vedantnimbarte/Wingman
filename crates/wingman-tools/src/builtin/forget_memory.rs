@@ -3,11 +3,11 @@
 use std::sync::Arc;
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
-use wingman_learn::memory::MemoryStore;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
+use wingman_learn::memory::MemoryStore;
 
 pub struct ForgetMemory {
     store: Arc<MemoryStore>,

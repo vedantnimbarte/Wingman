@@ -16,6 +16,7 @@ wingman-config = { workspace = true }
 wingman-core = { workspace = true }
 wingman-providers = { workspace = true }
 wingman-tools = { workspace = true }
+wingman-lsp = { workspace = true }
 wingman-session = { workspace = true }
 wingman-tui = { workspace = true }
 wingman-rag = { workspace = true, default-features = false }

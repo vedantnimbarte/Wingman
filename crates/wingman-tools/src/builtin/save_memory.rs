@@ -4,12 +4,12 @@
 use std::sync::{Arc, Mutex};
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
-use wingman_learn::hooks::LearnSignals;
-use wingman_learn::memory::{MemoryDraft, MemoryScope, MemoryStore, MemoryType};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
+use wingman_learn::hooks::LearnSignals;
+use wingman_learn::memory::{MemoryDraft, MemoryScope, MemoryStore, MemoryType};
 
 pub struct SaveMemory {
     store: Arc<MemoryStore>,

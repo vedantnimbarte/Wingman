@@ -18,8 +18,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use wingman_core::Provider;
 use thiserror::Error;
+use wingman_core::Provider;
 
 use crate::manager::{build_manager, build_manager_registry, drive_to_completion, run_succeeded};
 use crate::model::TaskStatus;
@@ -747,7 +747,11 @@ fn collect_dependency_licenses(
     runner: &dyn CommandRunner,
     project_root: &std::path::Path,
 ) -> Vec<(String, String)> {
-    let out = match runner.run("cargo", &["metadata", "--format-version", "1"], project_root) {
+    let out = match runner.run(
+        "cargo",
+        &["metadata", "--format-version", "1"],
+        project_root,
+    ) {
         Ok(o) if o.success() => o.stdout,
         _ => return Vec::new(),
     };
@@ -910,11 +914,11 @@ async fn complete_text(
     system: &str,
     user: &str,
 ) -> Result<(String, wingman_core::Usage), PipelineError> {
+    use futures::StreamExt;
     use wingman_core::{
         CacheBreakpoint, CompletionRequest, ContentBlock, Message, Role as ApiRole, StreamEvent,
         Usage,
     };
-    use futures::StreamExt;
     let req = CompletionRequest {
         model: model.to_string(),
         system: Some(system.to_string()),
@@ -1274,7 +1278,12 @@ fn discover_crate_modules(crates_dir: &std::path::Path) -> Vec<(String, Vec<Stri
             .filter_map(|l| {
                 let l = l.trim();
                 l.strip_prefix("pub mod ")
-                    .map(|rest| rest.trim_end_matches(';').split_whitespace().next().unwrap_or(""))
+                    .map(|rest| {
+                        rest.trim_end_matches(';')
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                    })
                     .filter(|m| !m.is_empty())
                     .map(|m| m.to_string())
             })
@@ -1395,14 +1404,14 @@ mod tests {
         let findings = crate::security::scan_licenses(&deps, &["MIT".into()]);
         assert_eq!(findings.len(), 1);
     }
-    use wingman_core::{
-        AgentEvent, AgentStop, CompletionRequest, ContentBlock, Message, Provider,
-        ProviderCapabilities, ProviderEventStream, Role as ApiRole, StopReason, StreamEvent, Usage,
-    };
     use async_trait::async_trait;
     use std::path::Path;
     use std::sync::Mutex;
     use tempfile::tempdir;
+    use wingman_core::{
+        AgentEvent, AgentStop, CompletionRequest, ContentBlock, Message, Provider,
+        ProviderCapabilities, ProviderEventStream, Role as ApiRole, StopReason, StreamEvent, Usage,
+    };
 
     /// Scripted provider: each `complete()` call peeks at the LAST user
     /// message in the request to figure out where the run is and returns
@@ -2526,9 +2535,8 @@ mod tests {
         let repo_c = repo.clone();
         let resolver = move |files: &[String]| -> bool {
             tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(resolve_conflicts_inline(
-                    &provider, "m", &repo_c, files,
-                ))
+                tokio::runtime::Handle::current()
+                    .block_on(resolve_conflicts_inline(&provider, "m", &repo_c, files))
             })
         };
 
@@ -2602,7 +2610,9 @@ mod tests {
         };
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks = vec![done_task("t1")];
-        assert!(!run_critic_pass(&provider, "m", &state, &mut wingman_core::Usage::default()).await);
+        assert!(
+            !run_critic_pass(&provider, "m", &state, &mut wingman_core::Usage::default()).await
+        );
     }
 
     #[tokio::test]
@@ -2706,7 +2716,10 @@ mod tests {
             .task("merge-fixer-t2")
             .expect("merge-fixer task recorded");
         assert_eq!(t.role, crate::model::Role::MergeFixer);
-        assert_eq!(t.writes, vec!["src/a.rs".to_string(), "src/b.rs".to_string()]);
+        assert_eq!(
+            t.writes,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
         assert!(t.goal.contains("t2") && t.goal.contains("src/a.rs"));
     }
 

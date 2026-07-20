@@ -107,7 +107,9 @@ pub fn parse_github_event(
             .unwrap_or("");
         if author.contains("dependabot") {
             return Some(WatchEvent::DependabotPrGreen {
-                within_allowlist: has_trusted_label(pr.get("labels").unwrap_or(&serde_json::Value::Null)),
+                within_allowlist: has_trusted_label(
+                    pr.get("labels").unwrap_or(&serde_json::Value::Null),
+                ),
             });
         }
         return None;
@@ -262,13 +264,17 @@ mod tests {
             "labels": [{"name": "wingman:auto"}]}});
         assert_eq!(
             parse_github_event(&pr, &authors, &labels),
-            Some(WatchEvent::DependabotPrGreen { within_allowlist: true })
+            Some(WatchEvent::DependabotPrGreen {
+                within_allowlist: true
+            })
         );
         // dependabot PR without the label → not allowlisted
         let pr2 = json!({"pull_request": {"user": {"login": "dependabot[bot]"}, "labels": []}});
         assert_eq!(
             parse_github_event(&pr2, &authors, &labels),
-            Some(WatchEvent::DependabotPrGreen { within_allowlist: false })
+            Some(WatchEvent::DependabotPrGreen {
+                within_allowlist: false
+            })
         );
         // labeled issue from a trusted author → trusted
         let issue = json!({"issue": {"user": {"login": "vedantnimbarte"},
@@ -288,7 +294,10 @@ mod tests {
             scan_file_for_ask("let x = 1;\n  // ASK: is this right?\nfn f(){}"),
             Some("is this right?".to_string())
         );
-        assert_eq!(scan_file_for_ask("# ASK: py style?"), Some("py style?".to_string()));
+        assert_eq!(
+            scan_file_for_ask("# ASK: py style?"),
+            Some("py style?".to_string())
+        );
         assert_eq!(scan_file_for_ask("// just a comment"), None);
         assert_eq!(scan_file_for_ask("// ASK:   "), None);
     }

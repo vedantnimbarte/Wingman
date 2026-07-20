@@ -17,15 +17,14 @@
 
 use std::time::Duration;
 
-use wingman_core::{
-    WingmanError, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
-    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
-};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
+use wingman_core::{
+    CacheKind, CompletionRequest, ContentBlock, Message, Provider, ProviderCapabilities,
+    ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec, Usage, WingmanError,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.cohere.com";
 
@@ -428,7 +427,9 @@ mod tests {
             &Message {
                 role: Role::User,
                 content: vec![
-                    ContentBlock::Text { text: "what is this".into() },
+                    ContentBlock::Text {
+                        text: "what is this".into(),
+                    },
                     ContentBlock::Image {
                         data: "AAAA".into(),
                         media_type: "image/png".into(),

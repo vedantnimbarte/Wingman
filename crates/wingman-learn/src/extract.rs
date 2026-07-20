@@ -14,9 +14,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use wingman_core::{ContentBlock, Role};
 use wingman_session::{list_sessions, load_session, SessionRecord};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedPattern {

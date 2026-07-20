@@ -17,9 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use wingman_core::{
-    WingmanError, CacheBreakpoint, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
+    CacheBreakpoint, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
     ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
+    Usage, WingmanError,
 };
 
 /// Gemini rejects `cachedContents` below a per-model minimum (~1024 tokens).
@@ -252,7 +252,9 @@ impl Provider for GeminiProvider {
                         m.get("supportedGenerationMethods")
                             .and_then(|v| v.as_array())
                             .map(|methods| {
-                                methods.iter().any(|x| x.as_str() == Some("generateContent"))
+                                methods
+                                    .iter()
+                                    .any(|x| x.as_str() == Some("generateContent"))
                             })
                             .unwrap_or(false)
                     })
@@ -643,7 +645,15 @@ mod tests {
             input_schema: json!({"type":"object"}),
         }];
         let a = prefix_hash("m", "sys", &tools);
-        assert_eq!(a, prefix_hash("m", "sys", &tools), "same inputs → same hash");
-        assert_ne!(a, prefix_hash("m", "other", &tools), "system change → new hash");
+        assert_eq!(
+            a,
+            prefix_hash("m", "sys", &tools),
+            "same inputs → same hash"
+        );
+        assert_ne!(
+            a,
+            prefix_hash("m", "other", &tools),
+            "system change → new hash"
+        );
     }
 }

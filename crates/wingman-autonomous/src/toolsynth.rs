@@ -164,7 +164,11 @@ mod tests {
         let out = dir.path().join("tools");
         // query_db is new; "read_file" collides with an existing tool and
         // is dropped; a second query_db in-batch is de-duped.
-        let props = vec![proposal("query_db"), proposal("read_file"), proposal("query_db")];
+        let props = vec![
+            proposal("query_db"),
+            proposal("read_file"),
+            proposal("query_db"),
+        ];
         let names = persist_accepted(&props, &["read_file".to_string()], &out).unwrap();
         assert_eq!(names, vec!["query_db".to_string()]);
         assert!(out.join("query_db.json").exists());

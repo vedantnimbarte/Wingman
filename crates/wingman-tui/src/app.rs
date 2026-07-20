@@ -10,7 +10,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use wingman_core::{AgentEvent, AgentLoop, AgentStop, Provider};
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, Event as CtEvent, EventStream, KeyCode,
@@ -26,6 +25,7 @@ use ratatui::{
     widgets::Widget,
     Terminal,
 };
+use wingman_core::{AgentEvent, AgentLoop, AgentStop, Provider};
 
 use crate::modal::{
     ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
@@ -138,7 +138,9 @@ pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
     // failure to open the log must not stop the TUI. Written to the same dir
     // the /resume picker reads (`<project>/.wingman/sessions`).
     let sessions_dir = ctx.project_root.join(".wingman").join("sessions");
-    let mut session = wingman_session::SessionLog::create(&sessions_dir).await.ok();
+    let mut session = wingman_session::SessionLog::create(&sessions_dir)
+        .await
+        .ok();
     // Clone the shutdown indexer out before `ctx` moves into the loop.
     let session_indexer = ctx.session_indexer.clone();
     let res = run_inner(&mut terminal, &mut agent, ctx, session.as_mut()).await;
@@ -343,12 +345,12 @@ fn apply_mode(ui: &mut UiState, raw: &str, mode_setter: &ModeSetter) {
             ui.status.mode = normalized.clone();
             // Re-gate the running agent's tools, not just the status line.
             mode_setter(mode);
-            ui.transcript.push(TranscriptItem::System(format!(
-                "mode set to {normalized}"
-            )));
+            ui.transcript
+                .push(TranscriptItem::System(format!("mode set to {normalized}")));
         }
         Err(e) => {
-            ui.transcript.push(TranscriptItem::Error(format!("/mode: {e}")));
+            ui.transcript
+                .push(TranscriptItem::Error(format!("/mode: {e}")));
         }
     }
 }
@@ -800,9 +802,8 @@ async fn idle_step(
                                     }
                                 }
                                 if done == 0 {
-                                    ui.transcript.push(TranscriptItem::System(
-                                        "nothing to undo".into(),
-                                    ));
+                                    ui.transcript
+                                        .push(TranscriptItem::System("nothing to undo".into()));
                                 }
                             }
                             Cmd::Compact => match agent.as_mut() {
@@ -833,8 +834,7 @@ async fn idle_step(
                             }
                             Cmd::Model(None) => {
                                 let connected = connected_provider_ids(&ui.status.provider);
-                                ui.modal =
-                                    ActiveModal::ModelPicker(ModelPicker::new(&connected));
+                                ui.modal = ActiveModal::ModelPicker(ModelPicker::new(&connected));
                                 // Kick off the live-catalog fetch: draw the
                                 // picker (with its "fetching…" hint) and hand
                                 // control to the outer task pump.
@@ -900,17 +900,16 @@ async fn idle_step(
                                 } else {
                                     match git_commit(project_root, msg) {
                                         Ok(out) => ui.transcript.push(TranscriptItem::System(out)),
-                                        Err(e) => ui.transcript.push(TranscriptItem::Error(
-                                            format!("/commit: {e}"),
-                                        )),
+                                        Err(e) => ui
+                                            .transcript
+                                            .push(TranscriptItem::Error(format!("/commit: {e}"))),
                                     }
                                     ui.status.refresh_git(project_root);
                                 }
                             }
                             Cmd::Pr(title) => {
-                                ui.transcript.push(TranscriptItem::System(
-                                    "opening pull request…".into(),
-                                ));
+                                ui.transcript
+                                    .push(TranscriptItem::System("opening pull request…".into()));
                                 draw(terminal, ui)?;
                                 match git_open_pr(project_root, title.trim()) {
                                     Ok(out) => ui.transcript.push(TranscriptItem::System(out)),
@@ -1554,7 +1553,8 @@ async fn install_skill(
         }
     };
     let content = fetch_text(&url).await?;
-    wingman_skills::install_markdown(&content, &hint, project_root, scope).map_err(|e| format!("{e}"))
+    wingman_skills::install_markdown(&content, &hint, project_root, scope)
+        .map_err(|e| format!("{e}"))
 }
 
 /// Last path segment of a URL, minus a `.md` suffix — a fallback skill name.
@@ -1583,7 +1583,10 @@ async fn fetch_text(url: &str) -> std::result::Result<String, String> {
     if !resp.status().is_success() {
         return Err(format!("HTTP {} from {url}", resp.status()));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("read failed: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read failed: {e}"))?;
     if bytes.len() > MAX_BYTES {
         return Err(format!(
             "skill too large ({} bytes, max {MAX_BYTES})",
@@ -1627,7 +1630,12 @@ fn git_open_pr(root: &std::path::Path, title: &str) -> std::result::Result<Strin
     if title.is_empty() {
         args.push("--fill".into()); // title + body from commits
     } else {
-        args.extend(["--title".into(), title.into(), "--body".into(), title.into()]);
+        args.extend([
+            "--title".into(),
+            title.into(),
+            "--body".into(),
+            title.into(),
+        ]);
     }
     let out = std::process::Command::new("gh")
         .args(&args)

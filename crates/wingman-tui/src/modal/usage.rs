@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 
-use wingman_core::{price_for, Usage};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     buffer::Buffer,
@@ -17,6 +16,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Row, Table, Widget},
 };
+use wingman_core::{price_for, Usage};
 
 use super::{centered_rect, ModalOutcome};
 
@@ -150,8 +150,19 @@ impl UsageView {
         let mut rows: Vec<Row> = Vec::new();
         for (prov, models) in &groups {
             rows.push(
-                Row::new(vec![prov.to_string(), String::new(), String::new(), String::new(), String::new(), String::new()])
-                    .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Row::new(vec![
+                    prov.to_string(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ])
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
             );
             let mut sub = Usage::default();
             let mut sub_cost = 0.0;
@@ -182,7 +193,11 @@ impl UsageView {
                     fmt(sub.output_tokens),
                     fmt(sub.cache_read_input_tokens),
                     fmt(sub.cache_creation_input_tokens),
-                    if sub_priced { format!("${sub_cost:.4}") } else { "—".into() },
+                    if sub_priced {
+                        format!("${sub_cost:.4}")
+                    } else {
+                        "—".into()
+                    },
                 ])
                 .style(Style::default().fg(Color::DarkGray)),
             );

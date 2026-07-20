@@ -5,6 +5,7 @@
 //! temporary provider for the probe, writing the keyring entry, and
 //! persisting the new default provider+model to the global config file.
 
+use std::sync::Arc;
 use wingman_config::{global_config_path, secrets, Config};
 use wingman_core::Provider;
 use wingman_providers::{
@@ -12,7 +13,6 @@ use wingman_providers::{
     OpenAiCompatProvider, OpenAiVariant, WatsonxCredential, WatsonxProvider,
 };
 use wingman_tui::modal::{LoginPayload, LoginTask};
-use std::sync::Arc;
 
 /// Entry point invoked by the TUI's login runner closure.
 pub async fn run_login_task(task: LoginTask) -> Result<(), String> {

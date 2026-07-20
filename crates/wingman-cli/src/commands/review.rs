@@ -6,9 +6,9 @@
 //! short — the user can supply their own via `--template <path>`.
 
 use anyhow::{Context, Result};
-use wingman_config::{global_config_path, Config, ProjectPaths};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
+use wingman_config::{global_config_path, Config, ProjectPaths};
 
 const DEFAULT_TEMPLATE: &str = "Review the following diff. For each finding, output:\n\
      - severity: blocker | major | minor | nit\n\

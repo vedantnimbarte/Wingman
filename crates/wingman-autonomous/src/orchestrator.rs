@@ -132,9 +132,8 @@ pub type TaskSplitter = Arc<
 /// lives inside the closure (built in the pipeline from `pr` config), so the
 /// orchestrator stays config-agnostic. Runs at the finalize choke point so it
 /// can't race the manager. `None` reviewer disables inline review.
-pub type Reviewer = Arc<
-    dyn Fn(Task) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync,
->;
+pub type Reviewer =
+    Arc<dyn Fn(Task) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
 
 /// Per-spawn context handed to a [`WorkerSpawner`].
 #[derive(Clone)]
@@ -849,15 +848,16 @@ async fn handle_assign(
         // no-op); budget burn is real (`totals.usd` vs `max_usd`).
         // ponytail: no 429 counter or host-load sampler wired from workers
         // yet — add them to tighten the cap under provider backoff.
-        let cap = crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
-            max_agents: cfg.max_concurrent_agents,
-            min_agents: 1,
-            recent_rate_limit_hits: 0,
-            active_retry_after_secs: 0,
-            cpu_load: 0.0,
-            usd_spent: store_g.state().totals.usd,
-            max_usd: cfg.max_usd,
-        });
+        let cap =
+            crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
+                max_agents: cfg.max_concurrent_agents,
+                min_agents: 1,
+                recent_rate_limit_hits: 0,
+                active_retry_after_secs: 0,
+                cpu_load: 0.0,
+                usd_spent: store_g.state().totals.usd,
+                max_usd: cfg.max_usd,
+            });
         if live >= cap {
             return Err(OrchestratorError::ConcurrencyCap(cap));
         }
@@ -974,7 +974,10 @@ async fn handle_assign(
     let handle = tokio::spawn(async move {
         use futures::FutureExt;
         let task_id = task_id_for_log;
-        match std::panic::AssertUnwindSafe(spawner(ctx)).catch_unwind().await {
+        match std::panic::AssertUnwindSafe(spawner(ctx))
+            .catch_unwind()
+            .await
+        {
             Ok(Ok(_result)) => {
                 tracing::debug!(target: "pilot::orch", task = %task_id, "worker finished");
             }
@@ -1010,7 +1013,10 @@ async fn mark_worker_failed(store: &Arc<Mutex<RunStore>>, task_id: &str, agent_i
     // Skip if the worker already recorded a terminal status (it may have
     // written Failed/Review before a late panic in teardown).
     if let Some(t) = g.state().task(task_id) {
-        if matches!(t.status, TaskStatus::Failed | TaskStatus::Review | TaskStatus::Done) {
+        if matches!(
+            t.status,
+            TaskStatus::Failed | TaskStatus::Review | TaskStatus::Done
+        ) {
             return;
         }
     }
@@ -1771,7 +1777,10 @@ mod tests {
             .add_task(dev_task("t1", vec!["t99"]))
             .await
             .unwrap_err();
-        assert!(matches!(err, OrchestratorError::InvalidDag(_)), "got {err:?}");
+        assert!(
+            matches!(err, OrchestratorError::InvalidDag(_)),
+            "got {err:?}"
+        );
 
         // Build a valid chain t1 → t2, then re-create t1 depending on t2 —
         // that closes a t1→t2→t1 cycle and must be refused.
@@ -1781,7 +1790,10 @@ mod tests {
             .add_task(dev_task("t1", vec!["t2"]))
             .await
             .unwrap_err();
-        assert!(matches!(err, OrchestratorError::InvalidDag(_)), "got {err:?}");
+        assert!(
+            matches!(err, OrchestratorError::InvalidDag(_)),
+            "got {err:?}"
+        );
 
         // The rejected re-create left t1's deps untouched (still empty), so
         // the graph is still schedulable.
@@ -2753,15 +2765,22 @@ mod tests {
         }
 
         // Reviewer that always requests rework.
-        let rework: Reviewer = std::sync::Arc::new(|_task| {
-            Box::pin(async { Some("add tests".to_string()) })
-        });
+        let rework: Reviewer =
+            std::sync::Arc::new(|_task| Box::pin(async { Some("add tests".to_string()) }));
         let dir = tempdir().unwrap();
         let store = seed_review(dir.path()).await;
-        let (handle, join) =
-            spawn_full(store, cfg(dir.path().to_path_buf()), fake_happy_spawner(), None, Some(rework));
+        let (handle, join) = spawn_full(
+            store,
+            cfg(dir.path().to_path_buf()),
+            fake_happy_spawner(),
+            None,
+            Some(rework),
+        );
         let err = handle.finalize_task("t1", None).await.unwrap_err();
-        assert!(matches!(err, OrchestratorError::ReviewRework(ref id) if id == "t1"), "got {err:?}");
+        assert!(
+            matches!(err, OrchestratorError::ReviewRework(ref id) if id == "t1"),
+            "got {err:?}"
+        );
         // The rework bounced it to Failed with the reviewer notes as summary.
         let t = handle.snapshot().await.unwrap().task("t1").unwrap().clone();
         assert_eq!(t.status, TaskStatus::Failed);
@@ -2773,8 +2792,13 @@ mod tests {
         let approve: Reviewer = std::sync::Arc::new(|_task| Box::pin(async { None }));
         let dir = tempdir().unwrap();
         let store = seed_review(dir.path()).await;
-        let (handle, join) =
-            spawn_full(store, cfg(dir.path().to_path_buf()), fake_happy_spawner(), None, Some(approve));
+        let (handle, join) = spawn_full(
+            store,
+            cfg(dir.path().to_path_buf()),
+            fake_happy_spawner(),
+            None,
+            Some(approve),
+        );
         handle.finalize_task("t1", None).await.unwrap();
         assert_eq!(
             handle.snapshot().await.unwrap().task("t1").unwrap().status,

@@ -4473,6 +4473,7 @@ dependencies = [
  "wingman-config",
  "wingman-core",
  "wingman-learn",
+ "wingman-lsp",
  "wingman-mcp",
  "wingman-providers",
  "wingman-rag",
@@ -4515,10 +4516,12 @@ dependencies = [
 name = "wingman-learn"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4528,6 +4531,17 @@ dependencies = [
  "wingman-session",
  "wingman-skills",
  "wingman-ts",
+]
+
+[[package]]
+name = "wingman-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4626,6 +4640,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
@@ -4633,6 +4648,7 @@ dependencies = [
  "wingman-config",
  "wingman-core",
  "wingman-learn",
+ "wingman-lsp",
  "wingman-rag",
  "wingman-session",
  "wingman-skills",

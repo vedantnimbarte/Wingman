@@ -22,6 +22,10 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Best for: Understanding semantic chunking, symbol extraction, code understanding.
   - Read this if: You're working with the RAG index, diff tools, or adding new languages.
 
+- **[LSP.md](LSP.md)** — Language Server Protocol client: resolved go-to-definition, references, hover, diagnostics, rename, and LSP-backed verification receipts.
+  - Best for: Understanding the `lsp_*` tools, server detection, and how diagnostics feed the turn gate.
+  - Read this if: You want resolved (not name-matched) code intelligence, or you're wiring the verification gate.
+
 - **[LEARNING-LOOP.md](LEARNING-LOOP.md)** — Self-improving mechanism (memories, skill stats, session recall, nudges).
   - Best for: Understanding how Wingman learns from sessions, persists across projects, and builds institutional knowledge.
   - Read this if: You're using memory features, skill extraction, or cross-project recall.

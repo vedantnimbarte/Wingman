@@ -12,10 +12,10 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio::sync::Mutex;
 use wingman_config::{global_config_path, Config, McpServerConfig};
 use wingman_mcp::{McpServer, McpTool, McpToolHandle};
 use wingman_tools::ToolRegistry;
-use tokio::sync::Mutex;
 
 use crate::mcp_adapter::McpToolAdapter;
 

@@ -1,12 +1,12 @@
 //! `glob`: list files matching a glob pattern, respecting `.gitignore`.
 
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use globset::{Glob as GlobPat, GlobSetBuilder};
 use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct Glob;
 

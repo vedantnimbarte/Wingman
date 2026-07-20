@@ -10,16 +10,16 @@
 
 use std::time::Duration;
 
-use wingman_core::{
-    WingmanError, CacheBreakpoint, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
-    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
-    Usage,
-};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use wingman_core::{
+    CacheBreakpoint, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
+    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
+    Usage, WingmanError,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -68,7 +68,10 @@ impl Provider for AnthropicProvider {
 
     async fn list_models(&self) -> Result<Vec<String>> {
         // GET /v1/models -> { "data": [ { "id": "claude-…" }, … ] }.
-        let url = format!("{}/v1/models?limit=1000", self.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/v1/models?limit=1000",
+            self.base_url.trim_end_matches('/')
+        );
         let response = self
             .http
             .get(&url)

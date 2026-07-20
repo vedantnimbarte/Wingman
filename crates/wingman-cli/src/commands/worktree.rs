@@ -6,8 +6,8 @@
 //! gitignore-friendly.
 
 use anyhow::{Context, Result};
-use wingman_config::ProjectPaths;
 use std::process::{Command, ExitCode, Stdio};
+use wingman_config::ProjectPaths;
 
 pub async fn create(branch: String) -> Result<ExitCode> {
     if branch.is_empty() {

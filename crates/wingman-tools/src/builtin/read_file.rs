@@ -1,8 +1,8 @@
 use crate::{Tool, ToolCtx};
-use wingman_core::{ToolOutcome, ToolSpec};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use wingman_core::{ToolOutcome, ToolSpec};
 
 pub struct ReadFile;
 
@@ -62,6 +62,10 @@ impl Tool for ReadFile {
             Ok(b) => b,
             Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
         };
+        // Speculatively warm the page cache for likely-next reads (siblings)
+        // and pre-warm `git status`. Fire-and-forget; never blocks this read.
+        crate::prefetch::warm_siblings(path.clone());
+        crate::prefetch::warm_git_status_once(ctx.project_root.clone());
         if looks_binary(&bytes) {
             return ToolOutcome::err(format!("refusing to read binary file {}", path.display()));
         }
@@ -206,8 +210,8 @@ fn render_notebook(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wingman_config::PermissionMode;
     use serde_json::json;
+    use wingman_config::PermissionMode;
 
     #[test]
     fn renders_notebook_cells() {

@@ -147,11 +147,7 @@ pub fn fetch_todo_candidates(
     repo_root: &Path,
 ) -> Result<Vec<Candidate>, String> {
     let out = runner
-        .run(
-            "git",
-            &["grep", "-n", "-I", "-E", "TODO|FIXME"],
-            repo_root,
-        )
+        .run("git", &["grep", "-n", "-I", "-E", "TODO|FIXME"], repo_root)
         .map_err(|e| format!("git grep failed: {e}"))?;
     // git grep exits 1 with no matches — that's not an error, just no work.
     if !out.success() {
@@ -161,8 +157,7 @@ pub fn fetch_todo_candidates(
     for line in out.stdout.lines() {
         // Format: `path:linenum:content`.
         let mut parts = line.splitn(3, ':');
-        let (Some(path), Some(_lineno), Some(content)) =
-            (parts.next(), parts.next(), parts.next())
+        let (Some(path), Some(_lineno), Some(content)) = (parts.next(), parts.next(), parts.next())
         else {
             continue;
         };
@@ -212,7 +207,10 @@ pub fn fetch_ci_failure_candidates(
         )
         .map_err(|e| format!("gh run list failed: {e}"))?;
     if !out.success() {
-        return Err(format!("gh run list exited non-zero: {}", out.stderr.trim()));
+        return Err(format!(
+            "gh run list exited non-zero: {}",
+            out.stderr.trim()
+        ));
     }
     let items: serde_json::Value =
         serde_json::from_str(&out.stdout).map_err(|e| format!("bad gh json: {e}"))?;
@@ -323,7 +321,11 @@ pub fn fetch_coverage_gap_candidates(
             hit = lh.trim().parse().unwrap_or(0);
         } else if line.starts_with("end_of_record") {
             if let Some(f) = file.take() {
-                let ratio = if found == 0 { 1.0 } else { hit as f64 / found as f64 };
+                let ratio = if found == 0 {
+                    1.0
+                } else {
+                    hit as f64 / found as f64
+                };
                 if found > 0 && ratio < min_ratio {
                     let pct = (ratio * 100.0).round() as u64;
                     candidates.push(Candidate {
@@ -572,7 +574,9 @@ mod tests {
         assert_eq!(cands[0].title, "TODO: handle empty input");
         // Local markers never carry enough trust to auto-run.
         assert!(cands.iter().all(|c| c.trust == TrustLevel::Known));
-        assert!(cands.iter().all(|c| decide(c, 0.75, 0.3) != DaemonAction::AutoRun));
+        assert!(cands
+            .iter()
+            .all(|c| decide(c, 0.75, 0.3) != DaemonAction::AutoRun));
     }
 
     struct NoMatchGrep;
@@ -729,7 +733,10 @@ mod tests {
         let cands = fetch_intake_candidates(tmp.path(), &["vedant".to_string()]);
         assert_eq!(cands.len(), 2);
         assert!(cands.iter().all(|c| c.source.starts_with("intake:")));
-        let trusted = cands.iter().find(|c| c.title.contains("--version")).unwrap();
+        let trusted = cands
+            .iter()
+            .find(|c| c.title.contains("--version"))
+            .unwrap();
         assert_eq!(trusted.trust, TrustLevel::Trusted);
         // Missing dir → empty, not an error.
         assert!(fetch_intake_candidates(StdPath::new("/no/such/dir"), &[]).is_empty());
