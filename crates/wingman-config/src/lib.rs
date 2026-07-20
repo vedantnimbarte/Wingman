@@ -105,7 +105,7 @@ impl std::fmt::Display for PermissionMode {
 }
 
 /// Per-project tool settings.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     /// Additional shell patterns to always deny even in yolo mode.
@@ -126,6 +126,29 @@ pub struct ToolsConfig {
     /// look-ups while researching before you enter an edit mode.
     #[serde(default)]
     pub allow_network: bool,
+    /// Redact high-confidence secret tokens (OpenAI `sk-…`, GitHub `ghp_…`,
+    /// AWS `AKIA…`, Slack `xox…`, JWTs, `-----BEGIN … PRIVATE KEY-----`) in tool
+    /// *output* before it reaches the model — so the agent can't surface or
+    /// exfiltrate a credential it happened to read. On by default; only matches
+    /// unambiguous token shapes to avoid mangling legitimate content.
+    #[serde(default = "default_true")]
+    pub redact_output_secrets: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for ToolsConfig {
+    fn default() -> Self {
+        Self {
+            shell_denylist: Vec::new(),
+            tool_output_max_lines: None,
+            disabled_tools: Vec::new(),
+            allow_network: false,
+            redact_output_secrets: true,
+        }
+    }
 }
 
 /// Top-level merged configuration. Constructed via [`Config::load`].
@@ -364,6 +387,11 @@ pub struct TokenConfig {
     pub tool_output_max_lines: u32,
     /// Enable provider prompt caching where supported.
     pub prompt_cache: bool,
+    /// Optional soft budget: warn once when a session's estimated USD spend
+    /// crosses this. `None` disables the warning. (Pilot mode has a hard
+    /// `max_usd`; this is the interactive/headless soft guardrail.)
+    #[serde(default)]
+    pub max_usd_per_session: Option<f64>,
 }
 
 impl Default for TokenConfig {
@@ -372,6 +400,7 @@ impl Default for TokenConfig {
             compact_at_tokens: 120_000,
             tool_output_max_lines: 400,
             prompt_cache: true,
+            max_usd_per_session: None,
         }
     }
 }

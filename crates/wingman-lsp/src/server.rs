@@ -17,6 +17,12 @@ pub enum Lang {
     JavaScript,
     TypeScript,
     Go,
+    Java,
+    C,
+    Cpp,
+    Ruby,
+    CSharp,
+    Php,
 }
 
 impl Lang {
@@ -30,6 +36,12 @@ impl Lang {
             "js" | "jsx" | "mjs" | "cjs" => Lang::JavaScript,
             "ts" | "tsx" | "mts" | "cts" => Lang::TypeScript,
             "go" => Lang::Go,
+            "java" => Lang::Java,
+            "c" | "h" => Lang::C,
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => Lang::Cpp,
+            "rb" => Lang::Ruby,
+            "cs" => Lang::CSharp,
+            "php" => Lang::Php,
             _ => return None,
         })
     }
@@ -42,6 +54,12 @@ impl Lang {
             Lang::JavaScript => "javascript",
             Lang::TypeScript => "typescript",
             Lang::Go => "go",
+            Lang::Java => "java",
+            Lang::C => "c",
+            Lang::Cpp => "cpp",
+            Lang::Ruby => "ruby",
+            Lang::CSharp => "csharp",
+            Lang::Php => "php",
         }
     }
 
@@ -74,6 +92,15 @@ impl ServerSpec {
                 vec![("typescript-language-server", vec!["--stdio"])]
             }
             Lang::Go => vec![("gopls", vec![])],
+            Lang::Java => vec![("jdtls", vec![])],
+            // clangd drives both C and C++.
+            Lang::C | Lang::Cpp => vec![("clangd", vec![])],
+            Lang::Ruby => vec![("ruby-lsp", vec![]), ("solargraph", vec!["stdio"])],
+            Lang::CSharp => vec![("csharp-ls", vec![]), ("omnisharp", vec!["-lsp"])],
+            Lang::Php => vec![
+                ("intelephense", vec!["--stdio"]),
+                ("phpactor", vec!["language-server"]),
+            ],
         };
         ServerSpec { lang, candidates }
     }
@@ -145,16 +172,35 @@ mod tests {
         assert_eq!(Lang::from_path(Path::new("x.tsx")), Some(Lang::TypeScript));
         assert_eq!(Lang::from_path(Path::new("x.mjs")), Some(Lang::JavaScript));
         assert_eq!(Lang::from_path(Path::new("x.go")), Some(Lang::Go));
+        assert_eq!(Lang::from_path(Path::new("A.java")), Some(Lang::Java));
+        assert_eq!(Lang::from_path(Path::new("x.c")), Some(Lang::C));
+        assert_eq!(Lang::from_path(Path::new("x.cpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::from_path(Path::new("x.hpp")), Some(Lang::Cpp));
+        assert_eq!(Lang::from_path(Path::new("x.rb")), Some(Lang::Ruby));
+        assert_eq!(Lang::from_path(Path::new("x.cs")), Some(Lang::CSharp));
+        assert_eq!(Lang::from_path(Path::new("x.php")), Some(Lang::Php));
         assert_eq!(Lang::from_path(Path::new("x.md")), None);
         assert_eq!(Lang::from_path(Path::new("noext")), None);
     }
 
     #[test]
     fn specs_have_candidates_and_names() {
-        for lang in [Lang::Rust, Lang::Python, Lang::TypeScript, Lang::Go] {
+        for lang in [
+            Lang::Rust,
+            Lang::Python,
+            Lang::TypeScript,
+            Lang::Go,
+            Lang::Java,
+            Lang::C,
+            Lang::Cpp,
+            Lang::Ruby,
+            Lang::CSharp,
+            Lang::Php,
+        ] {
             let spec = ServerSpec::for_lang(lang);
             assert!(!spec.candidates.is_empty());
             assert!(!spec.candidate_names().is_empty());
+            assert!(!lang.language_id().is_empty());
         }
     }
 

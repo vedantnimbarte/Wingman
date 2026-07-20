@@ -90,8 +90,10 @@ async fn agent_loop_executes_a_real_read_file_tool() {
         ),
     });
 
-    let mut config = AgentConfig::default();
-    config.model = "scripted/test".into();
+    let config = AgentConfig {
+        model: "scripted/test".into(),
+        ..AgentConfig::default()
+    };
     let mut agent = AgentLoop::new(provider, registry, config);
 
     let mut events = Vec::new();
@@ -158,8 +160,10 @@ async fn read_outside_project_is_blocked_by_permission_gate() {
         ),
     });
 
-    let mut config = AgentConfig::default();
-    config.model = "scripted/test".into();
+    let config = AgentConfig {
+        model: "scripted/test".into(),
+        ..AgentConfig::default()
+    };
     let mut agent = AgentLoop::new(provider, registry, config);
     let mut stream = agent.run("read a secret".into());
     let mut denied = false;

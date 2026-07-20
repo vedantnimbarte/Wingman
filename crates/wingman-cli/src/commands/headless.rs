@@ -76,6 +76,7 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let mut stderr = stderr.lock();
     let mut exit = ExitCode::SUCCESS;
     let mut assistant_text = String::new();
+    let mut budget_warned = false;
 
     while let Some(event) = events.next().await {
         // Log to session.
@@ -97,6 +98,25 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
             AgentEvent::Stop {
                 reason: wingman_core::AgentStop::Error,
             } => exit = ExitCode::from(1),
+            AgentEvent::Usage { usage } => {
+                // Soft cost guardrail: warn once when the estimated spend
+                // crosses `[tokens].max_usd_per_session`. Usage is cumulative
+                // for the turn, so its cost is the running session cost here.
+                if let Some(budget) = cfg.tokens.max_usd_per_session {
+                    if !budget_warned {
+                        if let Some(price) = wingman_core::pricing::price_for(&selection.model) {
+                            let usd = price.cost(usage);
+                            if usd > budget {
+                                budget_warned = true;
+                                eprintln!(
+                                    "wingman: ⚠ estimated session cost ~${usd:.4} exceeded budget \
+                                     ${budget:.2} ([tokens].max_usd_per_session)"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
 

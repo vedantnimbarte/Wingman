@@ -118,8 +118,20 @@ impl Indexer {
         Ok(out)
     }
 
-    /// Embed a query and run cosine search.
+    /// Embed a query and run **hybrid** search — dense vector similarity fused
+    /// with BM25 keyword scoring (RRF). Better recall on code than vector-only
+    /// (it also catches exact identifier / error-string matches). Falls back to
+    /// pure vector search via [`Self::search_vector`] if you need it.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>> {
+        let embs = self.embedder.embed(&[query.to_string()]).await?;
+        if embs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.store.search_hybrid(query, &embs[0], limit)
+    }
+
+    /// Pure dense vector search (no keyword fusion).
+    pub async fn search_vector(&self, query: &str, limit: usize) -> Result<Vec<ScoredChunk>> {
         let embs = self.embedder.embed(&[query.to_string()]).await?;
         if embs.is_empty() {
             return Ok(Vec::new());

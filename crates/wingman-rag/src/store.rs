@@ -269,6 +269,166 @@ impl IndexStore {
         scored.truncate(limit);
         Ok(scored)
     }
+
+    /// Hybrid search: fuse dense vector similarity (`query_emb`) with sparse
+    /// BM25 keyword scoring (`query_text`) via Reciprocal Rank Fusion. This
+    /// catches both semantically-similar chunks the embedder likes AND exact
+    /// term matches (identifiers, error strings) the embedder can miss —
+    /// materially better recall on code than vector-only. RRF needs no score
+    /// normalization: it fuses the two *rankings*, so a chunk that ranks high in
+    /// either list surfaces. Returns the top `limit`, `score` = the RRF score.
+    pub fn search_hybrid(
+        &self,
+        query_text: &str,
+        query_emb: &[f32],
+        limit: usize,
+    ) -> Result<Vec<ScoredChunk>> {
+        if query_emb.len() != self.dim {
+            return Err(RagError::DimMismatch {
+                expected: self.dim,
+                actual: query_emb.len(),
+            });
+        }
+        let q_norm = norm(query_emb);
+        let conn = self.db.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, start_line, end_line, content, embedding, symbol FROM chunks")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)? as u32,
+                r.get::<_, i64>(2)? as u32,
+                r.get::<_, String>(3)?,
+                r.get::<_, Vec<u8>>(4)?,
+                r.get::<_, Option<String>>(5)?,
+            ))
+        })?;
+
+        struct Doc {
+            chunk: ScoredChunk,
+            vec_score: f32,
+            tokens: Vec<String>,
+        }
+        let mut docs: Vec<Doc> = Vec::new();
+        for row in rows {
+            let (path, start_line, end_line, content, emb_bytes, symbol) = row?;
+            let emb = bytes_to_f32_vec(&emb_bytes);
+            if emb.len() != self.dim {
+                continue;
+            }
+            let e_norm = norm(&emb);
+            let vec_score = if q_norm == 0.0 || e_norm == 0.0 {
+                0.0
+            } else {
+                let dot: f32 = query_emb.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
+                dot / (q_norm * e_norm)
+            };
+            let tokens = tokenize(&content);
+            docs.push(Doc {
+                chunk: ScoredChunk {
+                    path,
+                    start_line,
+                    end_line,
+                    content,
+                    score: 0.0,
+                    symbol,
+                },
+                vec_score,
+                tokens,
+            });
+        }
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // BM25 scoring for the query terms.
+        let query_terms: Vec<String> = {
+            let mut t = tokenize(query_text);
+            t.sort();
+            t.dedup();
+            t
+        };
+        let n = docs.len() as f32;
+        let avgdl = docs.iter().map(|d| d.tokens.len()).sum::<usize>() as f32 / n;
+        // Document frequency per query term.
+        let mut df: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for term in &query_terms {
+            let count = docs
+                .iter()
+                .filter(|d| d.tokens.iter().any(|w| w == term))
+                .count() as u32;
+            df.insert(term.as_str(), count);
+        }
+        const K1: f32 = 1.2;
+        const B: f32 = 0.75;
+        let bm25: Vec<f32> = docs
+            .iter()
+            .map(|d| {
+                let dl = d.tokens.len() as f32;
+                let mut score = 0.0f32;
+                for term in &query_terms {
+                    let dfi = *df.get(term.as_str()).unwrap_or(&0) as f32;
+                    if dfi == 0.0 {
+                        continue;
+                    }
+                    let tf = d.tokens.iter().filter(|w| *w == term).count() as f32;
+                    if tf == 0.0 {
+                        continue;
+                    }
+                    let idf = ((n - dfi + 0.5) / (dfi + 0.5) + 1.0).ln();
+                    let denom = tf + K1 * (1.0 - B + B * dl / avgdl.max(1.0));
+                    score += idf * (tf * (K1 + 1.0)) / denom;
+                }
+                score
+            })
+            .collect();
+
+        // Rank by each signal, then Reciprocal Rank Fusion.
+        let rank_desc = |scores: &[f32]| -> Vec<usize> {
+            let mut idx: Vec<usize> = (0..scores.len()).collect();
+            idx.sort_by(|&a, &b| {
+                scores[b]
+                    .partial_cmp(&scores[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            // position of each doc in the ranking
+            let mut pos = vec![0usize; scores.len()];
+            for (rank, &d) in idx.iter().enumerate() {
+                pos[d] = rank;
+            }
+            pos
+        };
+        let vec_scores: Vec<f32> = docs.iter().map(|d| d.vec_score).collect();
+        let vrank = rank_desc(&vec_scores);
+        let krank = rank_desc(&bm25);
+        const RRF_K: f32 = 60.0;
+
+        let mut out: Vec<ScoredChunk> = docs
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut d)| {
+                let rrf = 1.0 / (RRF_K + vrank[i] as f32) + 1.0 / (RRF_K + krank[i] as f32);
+                d.chunk.score = rrf;
+                d.chunk
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(limit);
+        Ok(out)
+    }
+}
+
+/// Lowercase alphanumeric tokenization (matches the hash embedder's splitting)
+/// used for BM25 keyword scoring.
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_ascii_lowercase())
+        .collect()
 }
 
 fn norm(v: &[f32]) -> f32 {
@@ -338,6 +498,50 @@ mod tests {
         let results = store.search(&[0.9, 0.1, 0.0, 0.0], 5).unwrap();
         assert_eq!(results[0].path, "a.rs");
         assert!(results[0].score > results[1].score);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn hybrid_search_surfaces_keyword_match_the_vector_buries() {
+        let path = tmp_db();
+        let store = IndexStore::open(&path, "test", 4).unwrap();
+        // Three chunks. The query vector favors A then C; B is orthogonal
+        // (vector-buried). But the query KEYWORD ("deserialize") only appears in
+        // B. Pure-vector top-2 = [A, C] excludes B; hybrid RRF should pull B
+        // into the top-2 (recall the vector alone misses).
+        let mk = |p: &str, c: &str| Chunk {
+            path: p.into(),
+            start_line: 1,
+            end_line: 5,
+            content: c.into(),
+            symbol: None,
+        };
+        let a = mk("a.rs", "alpha helper utility function here");
+        let c = mk("c.rs", "some medium relevance helper text");
+        let b = mk("b.rs", "fn deserialize_config parses the toml file");
+        store
+            .replace_file("a.rs", "h", &[a], &[vec![1.0, 0.0, 0.0, 0.0]])
+            .unwrap();
+        store
+            .replace_file("c.rs", "h", &[c], &[vec![0.0, 1.0, 0.0, 0.0]])
+            .unwrap();
+        store
+            .replace_file("b.rs", "h", &[b], &[vec![0.0, 0.0, 1.0, 0.0]])
+            .unwrap();
+
+        let query_emb = [0.9, 0.4, 0.0, 0.0];
+        let vec_only = store.search(&query_emb, 2).unwrap();
+        assert!(
+            !vec_only.iter().any(|r| r.path == "b.rs"),
+            "pure vector should bury the keyword-only chunk"
+        );
+
+        let hybrid = store.search_hybrid("deserialize", &query_emb, 2).unwrap();
+        assert!(
+            hybrid.iter().any(|r| r.path == "b.rs"),
+            "hybrid should surface the keyword match into the top-2: {:?}",
+            hybrid.iter().map(|r| &r.path).collect::<Vec<_>>()
+        );
         let _ = std::fs::remove_file(&path);
     }
 

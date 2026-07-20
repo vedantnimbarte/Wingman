@@ -16,6 +16,9 @@ pub struct ToolRegistry {
     /// Optional append-only audit log path. When set, each dispatch appends a
     /// JSONL record — an enterprise/compliance trail of what the agent did.
     audit: Option<std::path::PathBuf>,
+    /// Redact high-confidence secret tokens in tool output before it reaches
+    /// the model (data-exfiltration guard). Default on.
+    redact_output: bool,
 }
 
 impl ToolRegistry {
@@ -25,6 +28,7 @@ impl ToolRegistry {
             ctx,
             hooks: HooksConfig::default(),
             audit: None,
+            redact_output: true,
         }
     }
 
@@ -37,6 +41,12 @@ impl ToolRegistry {
     /// Enable the append-only audit log at `path`. Builder-style.
     pub fn with_audit(mut self, path: Option<std::path::PathBuf>) -> Self {
         self.audit = path;
+        self
+    }
+
+    /// Toggle high-confidence secret redaction of tool output. Builder-style.
+    pub fn with_output_redaction(mut self, on: bool) -> Self {
+        self.redact_output = on;
         self
     }
 
@@ -227,10 +237,20 @@ impl ToolDispatcher for ToolRegistry {
             .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned();
-        let outcome = match tool {
+        let mut outcome = match tool {
             Some(tool) => tool.run(args.clone(), &self.ctx).await,
             None => ToolOutcome::err(format!("unknown tool: {name}")),
         };
+
+        // Data-exfiltration guard: strip high-confidence secret tokens from the
+        // output before it reaches the model, so a credential the agent read
+        // (e.g. from a .env) can't be echoed back or smuggled out.
+        if self.redact_output {
+            let (redacted, n) = redact_output_secrets(&outcome.content);
+            if n > 0 {
+                outcome.content = redacted;
+            }
+        }
 
         if !outcome.is_error && !pres.is_empty() {
             wingman_core::checkpoint::commit(&self.ctx.project_root, pres);
@@ -306,6 +326,39 @@ fn redact_secrets(v: &Value) -> Value {
         Value::Array(arr) => Value::Array(arr.iter().map(redact_secrets).collect()),
         other => other.clone(),
     }
+}
+
+/// Redact high-confidence secret tokens in `text`, returning `(redacted, n)`.
+/// Only matches unambiguous credential shapes so it doesn't mangle normal
+/// output. Used to stop the agent surfacing/exfiltrating a secret it read.
+pub fn redact_output_secrets(text: &str) -> (String, usize) {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    let patterns = PATTERNS.get_or_init(|| {
+        [
+            r"sk-[A-Za-z0-9_-]{20,}",        // OpenAI / Anthropic-style
+            r"gh[pousr]_[A-Za-z0-9]{30,}",   // GitHub tokens
+            r"AKIA[0-9A-Z]{16}",             // AWS access key id
+            r"xox[baprs]-[A-Za-z0-9-]{10,}", // Slack tokens
+            r"AIza[0-9A-Za-z_-]{35}",        // Google API key
+            r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}", // JWT
+            r"(?s)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", // PEM keys
+        ]
+        .iter()
+        .filter_map(|p| Regex::new(p).ok())
+        .collect()
+    });
+    let mut out = text.to_string();
+    let mut n = 0usize;
+    for re in patterns {
+        let count = re.find_iter(&out).count();
+        if count > 0 {
+            n += count;
+            out = re.replace_all(&out, "[redacted-secret]").into_owned();
+        }
+    }
+    (out, n)
 }
 
 fn tool_matches(name: &str, pattern: &str) -> bool {
@@ -422,6 +475,26 @@ mod tests {
         );
         assert!(body.contains("\"is_error\":false"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn redacts_high_confidence_output_tokens() {
+        let (out, n) = super::redact_output_secrets(
+            "key=sk-abcdefghij0123456789ABCDEF and AKIAIOSFODNN7EXAMPLE plus normal text",
+        );
+        assert_eq!(n, 2);
+        assert!(!out.contains("sk-abcdefghij"));
+        assert!(!out.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(out.contains("normal text"));
+        assert!(out.contains("[redacted-secret]"));
+    }
+
+    #[test]
+    fn leaves_ordinary_output_untouched() {
+        let text = "fn main() { let key = compute(); println!(\"{key}\"); }";
+        let (out, n) = super::redact_output_secrets(text);
+        assert_eq!(n, 0);
+        assert_eq!(out, text);
     }
 
     #[test]

@@ -465,7 +465,8 @@ pub async fn build_registry_with_learn(
     let mut reg = ToolRegistry::new(ctx)
         .with_builtins()
         .with_hooks(cfg.hooks.clone())
-        .with_audit(audit_path);
+        .with_audit(audit_path)
+        .with_output_redaction(cfg.tools.redact_output_secrets);
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {
         reg = reg.with_semantic_search(idx);
