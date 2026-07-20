@@ -61,18 +61,17 @@ jobs:
       - name: rustfmt (check)
         run: cargo fmt --all --check
 
-  # MSRV check: the workspace declares rust-version = "1.80". Informational
-  # (not in the required aggregate): the *dependency tree* may already require a
-  # newer rustc (a transitive crate on edition 2024 needs >= 1.85), which is
-  # outside our control. When this is red, determine the true floor and update
-  # the declared `rust-version` deliberately rather than letting it block PRs.
+  # MSRV check: verify the workspace still compiles on its declared floor
+  # (rust-version = "1.88"). 1.88 is the real floor today — the dependency tree
+  # (darling 0.23 → 1.88, icu 2.2 → 1.86, built → 1.87) pulls it up. Required
+  # again (see the aggregate below) so the declared MSRV can't silently drift.
   msrv:
-    name: msrv (1.80)
+    name: msrv (1.88)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Install Rust 1.80
-        uses: dtolnay/rust-toolchain@1.80
+      - name: Install Rust 1.88
+        uses: dtolnay/rust-toolchain@1.88
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
       - name: cargo check on MSRV
@@ -134,7 +133,7 @@ jobs:
   # platforms the matrix runs.
   test:
     name: test
-    needs: [matrix-test, fmt]
+    needs: [matrix-test, fmt, msrv]
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -146,5 +145,9 @@ jobs:
           fi
           if [ "${{ needs.fmt.result }}" != "success" ]; then
             echo "rustfmt check failed: ${{ needs.fmt.result }}"
+            exit 1
+          fi
+          if [ "${{ needs.msrv.result }}" != "success" ]; then
+            echo "MSRV (1.88) check failed: ${{ needs.msrv.result }}"
             exit 1
           fi
