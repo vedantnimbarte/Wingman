@@ -108,7 +108,9 @@ pub fn commit_all(root: &Path, message: &str) -> Result<Option<String>, String> 
         .current_dir(root)
         .output()
         .map_err(|e| format!("git log: {e}"))?;
-    Ok(Some(String::from_utf8_lossy(&show.stdout).trim().to_string()))
+    Ok(Some(
+        String::from_utf8_lossy(&show.stdout).trim().to_string(),
+    ))
 }
 
 /// Convenience: if `[git].auto_commit` is on, commit the work-tree changes with
@@ -170,7 +172,11 @@ mod tests {
     #[test]
     fn message_prefers_prompt_intent() {
         let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-        let m = generate_message("wingman: ", &changed, Some("Add retry to the client\n\nmore"));
+        let m = generate_message(
+            "wingman: ",
+            &changed,
+            Some("Add retry to the client\n\nmore"),
+        );
         assert!(m.starts_with("wingman: Add retry to the client"));
         assert!(m.contains("src/a.rs"));
         assert!(m.contains("src/b.rs"));
@@ -178,7 +184,12 @@ mod tests {
 
     #[test]
     fn message_falls_back_to_file_summary() {
-        let changed = vec!["a".to_string(), "b".to_string(), "c".to_string(), "d".to_string()];
+        let changed = vec![
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
         let m = generate_message("wingman: ", &changed, None);
         assert!(m.contains("update 4 file(s)"));
         assert!(m.contains("(+1 more)"));

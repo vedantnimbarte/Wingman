@@ -155,11 +155,9 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
 
     // Git-native auto-commit: turn this run's edits into a reviewable commit
     // (only if `[git].auto_commit` and the work tree actually changed).
-    if let Some(line) = crate::git_auto::auto_commit_if_enabled(
-        &cfg,
-        &paths.root,
-        Some(&prompt_for_commit),
-    ) {
+    if let Some(line) =
+        crate::git_auto::auto_commit_if_enabled(&cfg, &paths.root, Some(&prompt_for_commit))
+    {
         if !opts.json {
             eprintln!("wingman: committed {line}");
         }

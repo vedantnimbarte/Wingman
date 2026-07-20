@@ -1,4 +1,5 @@
 pub mod batch;
+pub mod bench;
 pub mod checkpoint;
 pub mod config;
 pub mod cost;

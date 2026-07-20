@@ -491,7 +491,10 @@ impl Tool for LspCodeAction {
             };
             (pos, pos)
         } else {
-            let zero = Position { line: 0, character: 0 };
+            let zero = Position {
+                line: 0,
+                character: 0,
+            };
             (zero, zero)
         };
 
@@ -524,9 +527,20 @@ impl Tool for LspCodeAction {
                 .iter()
                 .enumerate()
                 .map(|(i, act)| {
-                    let title = act.get("title").and_then(Value::as_str).unwrap_or("(untitled)");
+                    let title = act
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(untitled)");
                     let kind = act.get("kind").and_then(Value::as_str).unwrap_or("");
-                    format!("{}. {title}{}", i + 1, if kind.is_empty() { String::new() } else { format!("  [{kind}]") })
+                    format!(
+                        "{}. {title}{}",
+                        i + 1,
+                        if kind.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{kind}]")
+                        }
+                    )
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
@@ -572,8 +586,13 @@ async fn apply_code_action(
             (cmd.as_str().unwrap_or("").to_string(), Value::Array(vec![]))
         } else {
             (
-                cmd.get("command").and_then(Value::as_str).unwrap_or("").to_string(),
-                cmd.get("arguments").cloned().unwrap_or(Value::Array(vec![])),
+                cmd.get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                cmd.get("arguments")
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![])),
             )
         };
         if !name.is_empty() {
@@ -584,7 +603,9 @@ async fn apply_code_action(
     }
 
     if changed.is_empty() {
-        ToolOutcome::ok(format!("applied `{title}` (server applied any edits directly)"))
+        ToolOutcome::ok(format!(
+            "applied `{title}` (server applied any edits directly)"
+        ))
     } else {
         let list = changed
             .iter()

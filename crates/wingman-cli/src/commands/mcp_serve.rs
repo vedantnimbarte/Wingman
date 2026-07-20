@@ -62,12 +62,16 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
         let response = match handle(method, &params, &registry, &paths).await {
-            HandleResult::Reply(result) => id.map(|id| json!({
-                "jsonrpc": "2.0", "id": id, "result": result
-            })),
-            HandleResult::Error(code, message) => id.map(|id| json!({
-                "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message }
-            })),
+            HandleResult::Reply(result) => id.map(|id| {
+                json!({
+                    "jsonrpc": "2.0", "id": id, "result": result
+                })
+            }),
+            HandleResult::Error(code, message) => id.map(|id| {
+                json!({
+                    "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message }
+                })
+            }),
             HandleResult::NoReply => None,
         };
 
@@ -116,11 +120,13 @@ async fn handle(
             let tools: Vec<Value> = registry
                 .specs()
                 .into_iter()
-                .map(|s| json!({
-                    "name": s.name,
-                    "description": s.description,
-                    "inputSchema": s.input_schema,
-                }))
+                .map(|s| {
+                    json!({
+                        "name": s.name,
+                        "description": s.description,
+                        "inputSchema": s.input_schema,
+                    })
+                })
                 .collect();
             HandleResult::Reply(json!({ "tools": tools }))
         }
@@ -161,12 +167,14 @@ fn memory_resources(paths: &ProjectPaths) -> Vec<Value> {
     store
         .load_all()
         .into_iter()
-        .map(|m| json!({
-            "uri": format!("wingman-memory:///{}", m.name),
-            "name": m.name,
-            "description": m.description,
-            "mimeType": "text/markdown",
-        }))
+        .map(|m| {
+            json!({
+                "uri": format!("wingman-memory:///{}", m.name),
+                "name": m.name,
+                "description": m.description,
+                "mimeType": "text/markdown",
+            })
+        })
         .collect()
 }
 

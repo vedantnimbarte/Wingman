@@ -142,6 +142,16 @@ pub enum Command {
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Benchmark harness: run a suite of prompts and record time-to-first-token,
+    /// tokens/task, wall time, and verified-done rate. Needs a live provider.
+    Bench {
+        /// JSONL suite file ({"id","prompt"} per line). Omit for a built-in suite.
+        #[arg(long, value_name = "FILE")]
+        suite: Option<String>,
+        /// Output JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Model routing utilities.
     Router {
         #[command(subcommand)]
@@ -634,6 +644,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Bench { suite, json }) => commands::bench::run(suite, json).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
         Some(Command::McpServe) => {
             // Read-only by default: exposing write/shell tools to an external

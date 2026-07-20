@@ -32,10 +32,19 @@ async fn preset(name: &str, model: Option<String>) -> Result<ExitCode> {
             println!("local_model = \"{m}\"");
             println!();
             println!("[router.classes]");
-            for class in ["summarize", "search_summarize", "compaction", "commit_message", "title"] {
+            for class in [
+                "summarize",
+                "search_summarize",
+                "compaction",
+                "commit_message",
+                "title",
+            ] {
                 println!("{class:<16} = \"local\"");
             }
-            println!("{:<16} = \"default\"   # keep real thinking on the session model", "reason");
+            println!(
+                "{:<16} = \"default\"   # keep real thinking on the session model",
+                "reason"
+            );
             println!("{:<16} = \"default\"", "codegen");
             println!();
             println!("# Requires a local server running (e.g. `ollama serve`) with the");

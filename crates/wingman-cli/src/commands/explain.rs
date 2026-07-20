@@ -68,9 +68,6 @@ fn collect_diff(base: Option<&str>, staged: bool) -> Result<String> {
 fn load_config() -> Result<Config> {
     let global = global_config_path()?;
     let project = ProjectPaths::discover(&std::env::current_dir()?);
-    let project_file = project
-        .config_file
-        .exists()
-        .then_some(project.config_file);
+    let project_file = project.config_file.exists().then_some(project.config_file);
     Ok(Config::load(Some(&global), project_file.as_deref())?)
 }
