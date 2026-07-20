@@ -20,6 +20,7 @@ pub mod hooks;
 pub mod memory;
 pub mod proposal;
 pub mod session_index;
+pub mod staleness;
 pub mod stats;
 
 pub use hooks::LearnHook;

@@ -21,6 +21,18 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     print_memory_section("global memories", global_mem.as_deref());
     print_memory_section("project memories", Some(&paths.dir.join("memory")));
 
+    // Staleness: memories naming project files that no longer exist.
+    let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
+    let all = store.load_all();
+    let stale = wingman_learn::staleness::stale_memories(&all, &paths.root);
+    if !stale.is_empty() {
+        println!("stale memories: {} (reference files that no longer exist)", stale.len());
+        for (m, missing) in stale.iter().take(10) {
+            println!("  - {} → missing {}", m.name, missing.join(", "));
+        }
+        println!();
+    }
+
     // Skills (global + project, project wins on name clash).
     let skills = wingman_skills::load_all(&paths.root);
     println!("skills: {}", skills.len());
