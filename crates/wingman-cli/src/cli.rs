@@ -409,6 +409,26 @@ pub enum SkillAction {
         #[arg(long)]
         force: bool,
     },
+    /// Import portable SKILL.md skills (a SKILL.md, its directory, or a
+    /// directory of skill sub-directories) from other agents into wingman.
+    Import {
+        /// Path to a SKILL.md, a skill directory, or a directory of them.
+        path: String,
+        /// Import into the project's .wingman/skills instead of global.
+        #[arg(long)]
+        project: bool,
+        /// Overwrite existing skills with the same name.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Export a wingman skill as a portable <out-dir>/<name>/SKILL.md bundle
+    /// usable by Claude Code, Codex, Cursor, and other SKILL.md agents.
+    Export {
+        /// Skill name (as shown by `/skills`).
+        name: String,
+        /// Output directory to write the skill bundle under.
+        out_dir: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -595,6 +615,14 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
+            SkillAction::Import {
+                path,
+                project,
+                force,
+            } => commands::skill::import(path, project, force).await,
+            SkillAction::Export { name, out_dir } => {
+                commands::skill::export(name, out_dir).await
+            }
         },
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
