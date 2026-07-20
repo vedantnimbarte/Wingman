@@ -1,0 +1,41 @@
+{
+  "name": "wingman-vscode",
+  "displayName": "Wingman",
+  "description": "Wingman's warm repo index, team memory, and code intelligence inside VS Code — over MCP.",
+  "version": "0.1.0",
+  "publisher": "vedantnimbarte",
+  "license": "Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/vedantnimbarte/Wingman" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Other", "Machine Learning"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "wingman.semanticSearch", "title": "Wingman: Semantic Search" },
+      { "command": "wingman.recallMemory", "title": "Wingman: Recall Memory" },
+      { "command": "wingman.restart", "title": "Wingman: Restart Server" }
+    ],
+    "configuration": {
+      "title": "Wingman",
+      "properties": {
+        "wingman.binaryPath": {
+          "type": "string",
+          "default": "wingman",
+          "description": "Path to the wingman binary (must be on PATH or absolute)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=dist/extension.js",
+    "watch": "npm run build -- --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.4.0"
+  }
+}

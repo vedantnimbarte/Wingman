@@ -72,6 +72,7 @@ pub async fn chatgpt_oauth_login() -> Result<(String, String)> {
     }
 
     // 6. Exchange authorization code for tokens.
+    wingman_core::ensure_tls_provider();
     let http = reqwest::Client::new();
     let token_resp = http
         .post(TOKEN_URL)
@@ -110,6 +111,7 @@ pub async fn chatgpt_oauth_login() -> Result<(String, String)> {
 /// Use a stored refresh token to obtain a new access token without re-opening
 /// the browser.  Returns `(new_access_token, new_refresh_token)`.
 pub async fn refresh_chatgpt_token(refresh_token: &str) -> Result<(String, String)> {
+    wingman_core::ensure_tls_provider();
     let http = reqwest::Client::new();
     let resp = http
         .post(TOKEN_URL)

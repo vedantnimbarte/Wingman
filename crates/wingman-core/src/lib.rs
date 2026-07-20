@@ -31,4 +31,21 @@ pub use tokens::{
     estimate_history_tokens, estimate_tokens, CompactPlan, Compactor, ToolOutputBudget,
 };
 pub use tool::ToolSpec;
+
+/// Install the process-wide rustls crypto provider (ring) exactly once.
+///
+/// Our reqwest deps use the `rustls-no-provider` feature (so we stay on ring —
+/// no aws-lc-rs/OpenSSL, preserving the static-binary distribution while
+/// unifying every crate on reqwest 0.13). reqwest then reads the *process
+/// default* `CryptoProvider`; without one installed, building an HTTPS client
+/// fails. Every reqwest client builder in the workspace calls this first. It is
+/// idempotent — the first install wins and later calls are ignored.
+pub fn ensure_tls_provider() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        // Ignore the Err: it only means a provider was already installed.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
 pub use usage::Usage;

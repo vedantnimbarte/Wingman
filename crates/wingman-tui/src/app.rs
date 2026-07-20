@@ -1573,6 +1573,7 @@ fn url_basename(url: &str) -> String {
 /// wrong URL can't hang the TUI or blow up memory.
 async fn fetch_text(url: &str) -> std::result::Result<String, String> {
     const MAX_BYTES: usize = 512 * 1024;
+    wingman_core::ensure_tls_provider();
     let resp = reqwest::Client::new()
         .get(url)
         .header(reqwest::header::USER_AGENT, "wingman")

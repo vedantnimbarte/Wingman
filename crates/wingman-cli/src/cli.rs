@@ -422,6 +422,35 @@ pub enum PilotAction {
         /// Run id; defaults to the most recently updated.
         run_id: Option<String>,
     },
+    /// External intake transports: turn Slack / email / voice into pilot
+    /// requests (written to the daemon's intake dir).
+    Intake {
+        #[command(subcommand)]
+        channel: IntakeChannel,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IntakeChannel {
+    /// Run a minimal HTTP server for the Slack Events API.
+    Slack {
+        /// Address to bind (e.g. 127.0.0.1:8899). Put TLS/ingress in front.
+        #[arg(long, default_value = "127.0.0.1:8899")]
+        addr: String,
+    },
+    /// Ingest `.eml` files delivered into a directory by your mail system.
+    Email {
+        /// Directory your mail delivery drops `.eml` files into.
+        maildir: String,
+    },
+    /// Ingest a speech-to-text transcript file as a request.
+    Voice {
+        /// Path to the transcript text file (from any STT tool).
+        transcript: String,
+        /// Optional author name for trust classification.
+        #[arg(long)]
+        author: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -489,6 +518,10 @@ pub enum MemoryAction {
         /// Omit to just rebuild the index from local files.
         git_ref: Option<String>,
     },
+    /// Push this project's memories to the team server (`[team].endpoint`).
+    Push,
+    /// Pull team memories from the server and merge them (non-clobbering).
+    Pull,
 }
 
 #[derive(Subcommand, Debug)]
@@ -613,6 +646,8 @@ pub async fn run() -> Result<ExitCode> {
             MemoryAction::Import { path, force } => commands::memory::import(path, force).await,
             MemoryAction::Diff { a, b } => commands::memory::diff(a, b).await,
             MemoryAction::Sync { git_ref } => commands::memory::sync(git_ref).await,
+            MemoryAction::Push => commands::memory::push().await,
+            MemoryAction::Pull => commands::memory::pull().await,
         },
         Some(Command::Review {
             pr,
@@ -752,6 +787,13 @@ pub async fn run() -> Result<ExitCode> {
             }
             PilotAction::Approve { run_id } => commands::pilot::control_approve(run_id).await,
             PilotAction::Veto { run_id } => commands::pilot::control_veto(run_id).await,
+            PilotAction::Intake { channel } => match channel {
+                IntakeChannel::Slack { addr } => commands::pilot_intake::slack(addr).await,
+                IntakeChannel::Email { maildir } => commands::pilot_intake::email(maildir).await,
+                IntakeChannel::Voice { transcript, author } => {
+                    commands::pilot_intake::voice(transcript, author).await
+                }
+            },
         },
         Some(Command::Autonomous {
             goal,

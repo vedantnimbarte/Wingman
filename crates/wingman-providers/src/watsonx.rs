@@ -61,6 +61,7 @@ pub struct WatsonxProvider {
 
 impl WatsonxProvider {
     pub fn new(credential: WatsonxCredential, project_id: impl Into<String>) -> Result<Self> {
+        wingman_core::ensure_tls_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))

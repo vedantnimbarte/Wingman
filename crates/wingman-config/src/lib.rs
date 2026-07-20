@@ -178,6 +178,22 @@ pub struct Config {
     /// Audit logging (compliance trail of tool calls).
     #[serde(default)]
     pub audit: AuditConfig,
+
+    /// Team memory server (optional, beyond the git-backed `memory sync`).
+    #[serde(default)]
+    pub team: TeamConfig,
+}
+
+/// Optional HTTP endpoint for server-backed team memory
+/// (`wingman memory push` / `pull`). The git-backed `wingman memory sync`
+/// needs no server; this is for teams that prefer a central store.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TeamConfig {
+    /// Base URL of the team memory service. Empty disables push/pull.
+    pub endpoint: Option<String>,
+    /// Bearer token. Supports `${ENV_VAR}` and `keyring:...` like other secrets.
+    pub token: Option<String>,
 }
 
 /// Append-only audit trail of tool calls — an enterprise/compliance aid.
@@ -434,6 +450,39 @@ pub struct VerifyConfig {
     /// PATH; a graceful no-op (passes with a note) when none is installed.
     /// Composes onto `turn_gate` (needs it not "off").
     pub lsp_diagnostics: bool,
+    /// Optional headless-browser visual verification. When `url` is set and a
+    /// baseline screenshot exists, a turn that edited files loads the URL,
+    /// screenshots it, and fails if it differs from the baseline by more than
+    /// `threshold`. Needs a Chrome/Chromium binary (build with the `browser`
+    /// feature); fail-open otherwise.
+    #[serde(default)]
+    pub browser: BrowserVerifyConfig,
+}
+
+/// Headless-browser visual verification settings (see [`VerifyConfig::browser`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BrowserVerifyConfig {
+    /// URL to load and screenshot (e.g. a local dev server). Empty disables it.
+    pub url: String,
+    /// Baseline screenshot path (PNG). Relative to the project root. The first
+    /// run with no baseline writes one and passes.
+    pub baseline: Option<String>,
+    /// Max fraction of differing pixels (0.0..=1.0) before the gate fails.
+    pub threshold: f64,
+    /// Per-channel tolerance (0..=255) that absorbs anti-aliasing jitter.
+    pub tolerance: u8,
+}
+
+impl Default for BrowserVerifyConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            baseline: None,
+            threshold: 0.02,
+            tolerance: 3,
+        }
+    }
 }
 
 impl Default for VerifyConfig {
@@ -443,6 +492,7 @@ impl Default for VerifyConfig {
             max_retries: 2,
             affected_tests: true,
             lsp_diagnostics: true,
+            browser: BrowserVerifyConfig::default(),
         }
     }
 }

@@ -16,6 +16,7 @@ pub mod login;
 pub mod mcp_serve;
 pub mod memory;
 pub mod pilot;
+pub mod pilot_intake;
 pub mod pilot_watch_tui;
 pub mod review;
 pub mod review_multi;

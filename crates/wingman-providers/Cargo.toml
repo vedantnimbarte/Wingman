@@ -15,7 +15,7 @@ tokio = { workspace = true }
 async-trait = { workspace = true }
 async-stream = "0.3"
 futures = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "form", "rustls-no-provider"] }
 eventsource-stream = "0.2"
 bytes = "1"
 serde = { workspace = true }

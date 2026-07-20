@@ -63,6 +63,8 @@ impl Tool for WebSearch {
             urlencoding::encode(q)
         );
 
+        wingman_core::ensure_tls_provider();
+
         let client = match reqwest::Client::builder()
             .user_agent("Mozilla/5.0 (wingman)")
             .timeout(std::time::Duration::from_secs(20))

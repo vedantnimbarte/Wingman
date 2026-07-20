@@ -33,6 +33,7 @@ pub struct ChatGptProvider {
 
 impl ChatGptProvider {
     pub fn new(access_token: impl Into<String>) -> Result<Self> {
+        wingman_core::ensure_tls_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))

@@ -136,6 +136,112 @@ fn memory_dir() -> Result<PathBuf> {
     Ok(wingman_config::ensure_global_dir()?.join("memory"))
 }
 
+/// `wingman memory push` — upload this project's memory pack to the team server
+/// (`[team].endpoint`). Server-backed complement to the git-based `sync`.
+pub async fn push() -> Result<ExitCode> {
+    let (endpoint, token) = match team_endpoint()? {
+        Some(t) => t,
+        None => {
+            eprintln!("wingman: set [team].endpoint (and token) to use memory push/pull");
+            return Ok(ExitCode::from(1));
+        }
+    };
+    let paths = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
+    let pack = collect_pack(&store.project_dir()).unwrap_or_default();
+    if pack.is_empty() {
+        println!("(no project memories to push)");
+        return Ok(ExitCode::SUCCESS);
+    }
+    wingman_core::ensure_tls_provider();
+    let client = reqwest::Client::new();
+    let mut req = client.post(format!("{endpoint}/memory")).json(&pack);
+    if let Some(tok) = &token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.context("POST /memory")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("push failed: HTTP {}", resp.status());
+    }
+    println!("pushed {} memory file(s) to {endpoint}", pack.len());
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `wingman memory pull` — download the team memory pack and merge it into the
+/// project's memories without clobbering local files, then rebuild the index.
+pub async fn pull() -> Result<ExitCode> {
+    let (endpoint, token) = match team_endpoint()? {
+        Some(t) => t,
+        None => {
+            eprintln!("wingman: set [team].endpoint (and token) to use memory push/pull");
+            return Ok(ExitCode::from(1));
+        }
+    };
+    wingman_core::ensure_tls_provider();
+    let client = reqwest::Client::new();
+    let mut req = client.get(format!("{endpoint}/memory"));
+    if let Some(tok) = &token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.context("GET /memory")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("pull failed: HTTP {}", resp.status());
+    }
+    let pack: BTreeMap<String, String> = resp.json().await.context("parse memory pack")?;
+
+    let paths = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
+    let dir = store.project_dir();
+    std::fs::create_dir_all(&dir).ok();
+    let mut added = 0usize;
+    for (name, content) in pack {
+        // Only the leaf filename; never clobber a local memory.
+        let fname = Path::new(&name)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or(name);
+        if fname == "MEMORY.md" {
+            continue;
+        }
+        let dst = dir.join(&fname);
+        if dst.exists() {
+            continue;
+        }
+        std::fs::write(&dst, content).with_context(|| format!("write {}", dst.display()))?;
+        added += 1;
+    }
+    let slugs = store
+        .rebuild_project_index()
+        .map_err(|e| anyhow::anyhow!("rebuild index: {e}"))?;
+    println!(
+        "pulled from {endpoint}: {added} new memory file(s); index now has {}",
+        slugs.len()
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Resolve `[team].endpoint` + token, expanding `${ENV_VAR}` in the token.
+fn team_endpoint() -> Result<Option<(String, Option<String>)>> {
+    let global = wingman_config::global_config_path()?;
+    let project = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let project_file = project.config_file.exists().then_some(project.config_file);
+    let cfg = wingman_config::Config::load(Some(&global), project_file.as_deref())?;
+    let Some(endpoint) = cfg.team.endpoint.filter(|e| !e.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let token = cfg.team.token.map(|t| expand_env(&t));
+    Ok(Some((endpoint.trim_end_matches('/').to_string(), token)))
+}
+
+/// Expand a single `${ENV_VAR}` reference (or return the literal).
+fn expand_env(s: &str) -> String {
+    if let Some(inner) = s.strip_prefix("${").and_then(|r| r.strip_suffix('}')) {
+        std::env::var(inner).unwrap_or_default()
+    } else {
+        s.to_string()
+    }
+}
+
 /// `wingman memory sync [<git-ref>]` — reconcile the team-shared project
 /// memory.
 ///

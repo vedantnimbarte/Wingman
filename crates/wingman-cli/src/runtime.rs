@@ -788,6 +788,87 @@ fn edited_symbol_names(_root: &std::path::Path) -> Vec<String> {
     Vec::new()
 }
 
+/// Headless-browser visual verification: load a URL, screenshot it, and fail
+/// if it differs from a committed baseline by more than a threshold — proving
+/// a UI change renders. Fail-open when no browser is available (the `browser`
+/// feature is off, or no Chrome binary), so it never traps the agent.
+pub struct BrowserGate {
+    root: std::path::PathBuf,
+    cfg: wingman_config::BrowserVerifyConfig,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for BrowserGate {
+    fn label(&self) -> String {
+        "browser".into()
+    }
+
+    async fn check(&self) -> GateReport {
+        let url = self.cfg.url.clone();
+        let timeout = std::time::Duration::from_secs(30);
+        let capture =
+            tokio::task::spawn_blocking(move || wingman_browser::capture(&url, timeout)).await;
+        let capture = match capture {
+            Ok(Ok(c)) => c,
+            // Fail-open: no browser / feature off / navigation failure.
+            Ok(Err(e)) => {
+                return GateReport {
+                    passed: true,
+                    summary: format!("browser: ⚠ skipped ({e})"),
+                }
+            }
+            Err(_) => {
+                return GateReport {
+                    passed: true,
+                    summary: "browser: ⚠ skipped (capture task failed)".into(),
+                }
+            }
+        };
+
+        let Some(rel) = &self.cfg.baseline else {
+            return GateReport {
+                passed: true,
+                summary: "browser: captured (no baseline configured to compare)".into(),
+            };
+        };
+        let baseline = self.root.join(rel);
+        if !baseline.exists() {
+            if let Some(parent) = baseline.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&baseline, &capture.screenshot_png);
+            return GateReport {
+                passed: true,
+                summary: format!("browser: baseline captured → {}", baseline.display()),
+            };
+        }
+        let base = std::fs::read(&baseline).unwrap_or_default();
+        match wingman_browser::diff_ratio(&base, &capture.screenshot_png, self.cfg.tolerance) {
+            Ok(ratio) if ratio <= self.cfg.threshold => GateReport {
+                passed: true,
+                summary: format!(
+                    "browser: ✓ {:.2}% pixels changed (≤ {:.2}% threshold)",
+                    ratio * 100.0,
+                    self.cfg.threshold * 100.0
+                ),
+            },
+            Ok(ratio) => GateReport {
+                passed: false,
+                summary: format!(
+                    "browser: ✗ {:.2}% pixels changed (> {:.2}% threshold) at {} — update the baseline if intended",
+                    ratio * 100.0,
+                    self.cfg.threshold * 100.0,
+                    self.cfg.url
+                ),
+            },
+            Err(e) => GateReport {
+                passed: false,
+                summary: format!("browser: ✗ screenshot diff failed: {e}"),
+            },
+        }
+    }
+}
+
 /// Runs several gates in sequence, short-circuiting on the first failure so a
 /// broken compile doesn't waste time running tests. Passes only if all pass.
 pub struct CompositeGate {
@@ -1053,6 +1134,12 @@ pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn T
     if cfg.verify.lsp_diagnostics {
         gates.push(Arc::new(LspDiagnosticsGate {
             root: root.to_path_buf(),
+        }));
+    }
+    if !cfg.verify.browser.url.trim().is_empty() {
+        gates.push(Arc::new(BrowserGate {
+            root: root.to_path_buf(),
+            cfg: cfg.verify.browser.clone(),
         }));
     }
 

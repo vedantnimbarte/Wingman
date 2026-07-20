@@ -15,6 +15,7 @@ members = [
     "crates/wingman-ts",
     "crates/wingman-autonomous",
     "crates/wingman-lsp",
+    "crates/wingman-browser",
 ]
 
 [workspace.package]
@@ -40,6 +41,7 @@ wingman-learn = { path = "crates/wingman-learn", version = "0.1.0" }
 wingman-ts = { path = "crates/wingman-ts", version = "0.1.0", default-features = false }
 wingman-autonomous = { path = "crates/wingman-autonomous", version = "0.1.0" }
 wingman-lsp = { path = "crates/wingman-lsp", version = "0.1.0" }
+wingman-browser = { path = "crates/wingman-browser", version = "0.1.0", default-features = false }
 
 tokio = { version = "1.40", features = ["rt-multi-thread", "macros", "fs", "io-util", "process", "signal", "sync", "time"] }
 async-trait = "0.1"

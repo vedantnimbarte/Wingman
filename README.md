@@ -187,6 +187,17 @@ worker agents in isolated worktrees, and converges into a PR.
   time-to-first-token, tokens/task, and verified-done rate.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [docs/SDK.md](docs/SDK.md).
+- **Visual verification.** Build with `--features browser` and set
+  `[verify.browser].url` to make the turn gate load a URL, screenshot it, and
+  fail if it drifts from a baseline — proof a UI change renders.
+- **Server-backed team memory.** Beyond the git-backed `memory sync`,
+  `wingman memory push` / `pull` sync memories through a team HTTP endpoint
+  (`[team]`), merging non-destructively.
+- **Multi-channel pilot intake.** `wingman pilot intake slack | email | voice`
+  turns Slack events, delivered `.eml` files, or an STT transcript into pilot
+  requests.
+- **VS Code extension.** `editors/vscode` brings `semantic_search` and
+  `recall_memory` into the editor over `wingman mcp-serve`.
 - **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by
