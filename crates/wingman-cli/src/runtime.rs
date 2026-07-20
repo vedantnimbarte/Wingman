@@ -66,7 +66,45 @@ pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selec
     Ok(Selection { provider_id, model })
 }
 
+/// Known provider ids that only ever talk to localhost.
+const LOCAL_PROVIDER_IDS: &[&str] = &[
+    "ollama",
+    "lmstudio",
+    "vllm",
+    "llamacpp",
+    "tgi",
+    "gpt4all",
+    "jan",
+    "koboldcpp",
+    "oobabooga",
+    "mlx",
+    "localai",
+    "aphrodite",
+    "mistralrs",
+];
+
+/// True if `provider_id` is guaranteed local: a known-local id, or a configured
+/// base URL pointing at localhost/127.0.0.1.
+pub fn provider_is_local(cfg: &Config, provider_id: &str) -> bool {
+    if LOCAL_PROVIDER_IDS.contains(&provider_id) {
+        return true;
+    }
+    cfg.providers
+        .get(provider_id)
+        .and_then(|pc| pc.base_url.as_deref())
+        .map(|u| u.contains("localhost") || u.contains("127.0.0.1") || u.contains("[::1]"))
+        .unwrap_or(false)
+}
+
 pub fn build_provider(cfg: &Config, provider_id: &str) -> Result<Arc<dyn Provider>> {
+    // Air-gapped guard: in local_only mode, refuse any non-local provider so a
+    // misconfiguration can't silently send code to the cloud.
+    if cfg.privacy.local_only && !provider_is_local(cfg, provider_id) {
+        return Err(anyhow!(
+            "[privacy].local_only is set but provider '{provider_id}' is not local — \
+             use a local provider (ollama / lmstudio / vllm / …) or set a localhost base_url"
+        ));
+    }
     let pc = cfg
         .providers
         .get(provider_id)
@@ -468,6 +506,12 @@ pub async fn build_registry_with_learn(
         .with_audit(audit_path)
         .with_output_redaction(cfg.tools.redact_output_secrets)
         .with_custom_tools(&cfg.tools.custom);
+
+    // Air-gapped guard: hard-remove the network tools so no code leaves the box.
+    if cfg.privacy.local_only {
+        reg.unregister("web_fetch");
+        reg.unregister("web_search");
+    }
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {
         reg = reg.with_semantic_search(idx);

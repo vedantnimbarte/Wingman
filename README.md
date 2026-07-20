@@ -218,6 +218,24 @@ worker agents in isolated worktrees, and converges into a PR.
 - **11 LSP languages.** Rust, Python, JS/TS, Go, Java, C/C++, Ruby, C#, PHP.
 - **Session cost budget.** `[tokens].max_usd_per_session` warns when a session's
   estimated spend crosses your limit.
+- **Characterization / golden testing.** `wingman golden capture/check` snapshots
+  a command's output and the verification gate (`[verify].golden`) fails on any
+  drift — a regression net for undertested/legacy code ("verified correct, not
+  just verified builds").
+- **Ask, don't guess.** The `ask_user` tool lets the agent pause and ask at a
+  genuine fork or before an irreversible action instead of guessing.
+- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider and
+  disables network tools; `wingman attest` reports what leaves the machine.
+- **Cited memory.** `recall_memory` returns provenance (source + date) and the
+  agent cites the memory it acts on.
+- **Test-first.** `wingman spec "<intent>"` writes failing tests, then implements
+  until the gate is green.
+- **PR-native.** `wingman pr address <pr#>` addresses a PR's review comments and
+  failing CI on the current branch.
+- **Repo onboarding.** `wingman tour` orients you on an unfamiliar codebase.
+- **Preview & replay.** `wingman --print --dry-run` shows what it *would* do
+  without changing anything; `wingman session replay <file>` re-runs a past
+  session's prompts to reproduce it.
 - **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by

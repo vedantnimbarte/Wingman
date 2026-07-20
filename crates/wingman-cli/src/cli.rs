@@ -33,6 +33,11 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Preview only: with `--print`, force read-only and describe the changes
+    /// that would be made without applying them.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Run as a pilot-mode worker subprocess: load the role's system prompt,
     /// read the task spec from `--task-file`, run the agent loop with the
     /// task as the user prompt, emit a final `task_complete` event. Hidden
@@ -142,6 +147,9 @@ pub enum Command {
     /// Health check: config, provider credentials, local servers, the semantic
     /// index, language servers on PATH, and git/gh tooling.
     Doctor,
+    /// Report the air-gapped / local-only posture (`[privacy].local_only`):
+    /// what leaves the machine, verified against config, for compliance.
+    Attest,
     /// Characterization / golden-master testing: snapshot a command's output,
     /// then fail if a later change alters it (regression net for legacy code).
     Golden {
@@ -208,6 +216,24 @@ pub enum Command {
         /// Comma-separated list of provider/model pairs to consult.
         #[arg(long, value_name = "LIST")]
         models: String,
+    },
+    /// Onboard onto this codebase: architecture, entry points, key modules,
+    /// conventions, and where to start reading.
+    Tour {
+        /// Optional focus area (e.g. "the agent loop", "auth").
+        focus: Option<String>,
+    },
+    /// Implement an intent test-first: write failing tests, then implement
+    /// until the verification gate is green. Runs in auto-edit.
+    Spec {
+        /// The intent to implement, in natural language.
+        intent: String,
+    },
+    /// PR-native: address a PR's review comments and failing CI checks on the
+    /// current branch (needs `gh`).
+    Pr {
+        #[command(subcommand)]
+        action: PrAction,
     },
     /// Explain-and-teach the current changes: a per-file "what changed and
     /// why it matters" walkthrough of the working diff, aimed at a reviewer or
@@ -561,6 +587,21 @@ pub enum SessionAction {
         #[arg(long)]
         at: Option<usize>,
     },
+    /// Re-run a past session's user prompts against the current code (read-only)
+    /// to reproduce what happened — for debugging / regression.
+    Replay {
+        /// Path to the session JSONL to replay.
+        src: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PrAction {
+    /// Address the PR's review comments and failing CI checks.
+    Address {
+        /// PR number.
+        pr: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -658,7 +699,20 @@ pub async fn run() -> Result<ExitCode> {
 
     if let Some(prompt) = cli.print {
         let cfg = load_config()?;
-        let mode_override = parse_mode(cli.mode.as_deref())?;
+        // Dry run: force read-only (so nothing is mutated) and frame the task as
+        // "show me what you WOULD do" — a safe preview of the plan and edits.
+        let (prompt, mode_override) = if cli.dry_run {
+            (
+                format!(
+                    "DRY RUN — do NOT make any changes. Investigate and then describe precisely the \
+                     changes you would make (which files, what edits, what commands) and why, as a \
+                     plan I can review. Task:\n\n{prompt}"
+                ),
+                Some(PermissionMode::ReadOnly),
+            )
+        } else {
+            (prompt, parse_mode(cli.mode.as_deref())?)
+        };
         let opts = commands::headless::HeadlessOptions {
             prompt,
             json: cli.json,
@@ -724,6 +778,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
+        Some(Command::Attest) => commands::attest::run(load_config()?).await,
         Some(Command::Golden { action }) => match action {
             GoldenAction::Capture { name, command } => {
                 commands::golden::capture(name, command).await
@@ -755,6 +810,11 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
         }
+        Some(Command::Tour { focus }) => commands::tour::run(focus).await,
+        Some(Command::Spec { intent }) => commands::spec::run(intent).await,
+        Some(Command::Pr { action }) => match action {
+            PrAction::Address { pr } => commands::pr::address(pr).await,
+        },
         Some(Command::Explain { local, staged }) => commands::explain::run(local, staged).await,
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
         Some(Command::Pilot { action }) => match action {

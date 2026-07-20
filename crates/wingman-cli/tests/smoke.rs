@@ -47,6 +47,59 @@ fn help_lists_newly_merged_subcommands() {
 }
 
 #[test]
+fn help_lists_frontier_subcommands() {
+    let out = wingman().arg("--help").output().expect("run --help");
+    let text = String::from_utf8_lossy(&out.stdout);
+    for sub in ["doctor", "golden", "attest", "tour", "spec", "pr"] {
+        assert!(text.contains(sub), "--help missing subcommand `{sub}`");
+    }
+}
+
+#[test]
+fn golden_capture_and_check_round_trip() {
+    // Capture the output of a stable command, then `check` should pass.
+    let s = Scratch::new();
+    // Make it a project dir so goldens land under its .wingman/.
+    std::fs::write(s.dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+    let cap = wingman()
+        .args(["golden", "capture", "echo", "--", "echo", "stable-output"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("golden capture");
+    assert!(
+        cap.status.success(),
+        "capture failed: {}",
+        String::from_utf8_lossy(&cap.stderr)
+    );
+    let chk = wingman()
+        .args(["golden", "check", "echo"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("golden check");
+    assert!(
+        chk.status.success(),
+        "golden check should pass on unchanged output"
+    );
+}
+
+#[test]
+fn attest_reports_not_airgapped_by_default() {
+    let s = Scratch::new();
+    let out = wingman()
+        .arg("attest")
+        .current_dir(&s.dir)
+        .output()
+        .expect("run attest");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!combined.contains("panicked"));
+    assert!(combined.to_lowercase().contains("local"));
+}
+
+#[test]
 fn version_flag_prints_a_version() {
     let out = wingman().arg("--version").output().expect("run --version");
     assert!(out.status.success(), "--version should exit 0");

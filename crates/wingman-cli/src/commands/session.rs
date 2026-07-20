@@ -10,7 +10,56 @@ pub async fn run(action: SessionAction) -> Result<ExitCode> {
     match action {
         SessionAction::List { limit } => list(limit).await,
         SessionAction::Fork { src, at } => fork(src, at).await,
+        SessionAction::Replay { src } => replay(src).await,
     }
+}
+
+/// Re-run a past session's user prompts against the current code — reproduce
+/// what happened, for debugging / regression. (Deterministic replay of the
+/// provider's *outputs* is separate; this replays the inputs.)
+async fn replay(src: String) -> Result<ExitCode> {
+    let src_path = PathBuf::from(&src);
+    let text = std::fs::read_to_string(&src_path)
+        .with_context(|| format!("read session {}", src_path.display()))?;
+    // Extract user prompts in order from the JSONL.
+    let prompts: Vec<String> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("user"))
+        .filter_map(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .collect();
+    if prompts.is_empty() {
+        eprintln!("wingman: no user prompts found in {}", src_path.display());
+        return Ok(ExitCode::from(1));
+    }
+    let total = prompts.len();
+    eprintln!(
+        "replaying {total} prompt(s) from {} (read-only)",
+        src_path.display()
+    );
+    let cfg = load_config()?;
+    for (i, prompt) in prompts.into_iter().enumerate() {
+        eprintln!("\n=== replay {}/{total} ===", i + 1);
+        let opts = crate::commands::headless::HeadlessOptions {
+            prompt,
+            json: false,
+            mode_override: Some(wingman_config::PermissionMode::ReadOnly),
+            model_override: None,
+        };
+        // Best-effort reproduction; keep going across prompts.
+        let _ = crate::commands::headless::run(cfg.clone(), opts).await?;
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn load_config() -> Result<wingman_config::Config> {
+    let global = wingman_config::global_config_path()?;
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let project_file = project.config_file.exists().then_some(project.config_file);
+    Ok(wingman_config::Config::load(
+        Some(&global),
+        project_file.as_deref(),
+    )?)
 }
 
 async fn list(limit: usize) -> Result<ExitCode> {

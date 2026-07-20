@@ -228,6 +228,21 @@ pub struct Config {
     /// Team memory server (optional, beyond the git-backed `memory sync`).
     #[serde(default)]
     pub team: TeamConfig,
+
+    /// Privacy / air-gapped mode.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
+}
+
+/// Fully-local, air-gapped operation. When `local_only` is on, Wingman refuses
+/// any non-local provider (base URL must be localhost/127.0.0.1), disables the
+/// network tools (`web_fetch`/`web_search`) regardless of permission mode, and
+/// `wingman attest` reports the guarantees — for regulated / air-gapped teams
+/// that cloud agents structurally can't serve.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrivacyConfig {
+    pub local_only: bool,
 }
 
 /// Optional HTTP endpoint for server-backed team memory
