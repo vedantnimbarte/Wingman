@@ -379,6 +379,13 @@ pub struct VerifyConfig {
     /// (not the full suite) as part of the gate. Cargo projects only for
     /// now; a no-op elsewhere. Composes onto `turn_gate` (needs it not "off").
     pub affected_tests: bool,
+    /// After edits, also fold the language server's diagnostics for the
+    /// *changed* files into the gate: a turn that introduced a type error the
+    /// compiler-check command didn't surface (or in a language with no cheap
+    /// compile step) fails verification. Backed by whatever LSP server is on
+    /// PATH; a graceful no-op (passes with a note) when none is installed.
+    /// Composes onto `turn_gate` (needs it not "off").
+    pub lsp_diagnostics: bool,
 }
 
 impl Default for VerifyConfig {
@@ -387,6 +394,7 @@ impl Default for VerifyConfig {
             turn_gate: "auto".into(),
             max_retries: 2,
             affected_tests: true,
+            lsp_diagnostics: true,
         }
     }
 }

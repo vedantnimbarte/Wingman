@@ -4473,6 +4473,7 @@ dependencies = [
  "wingman-config",
  "wingman-core",
  "wingman-learn",
+ "wingman-lsp",
  "wingman-mcp",
  "wingman-providers",
  "wingman-rag",

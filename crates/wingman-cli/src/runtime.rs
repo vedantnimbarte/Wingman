@@ -753,6 +753,117 @@ fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
     crates
 }
 
+/// Changed files in the working tree (absolute paths) whose extension maps to
+/// a language server we can drive. Shares the `git status --porcelain -z`
+/// parsing of [`changed_rust_crates`]. Empty on non-git repos.
+fn changed_lsp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["status", "--porcelain", "-z"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let mut files = Vec::new();
+    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
+        if entry.len() < 4 {
+            continue;
+        }
+        let path = &entry[3..]; // strip "XY " status prefix
+        let abs = root.join(path);
+        // Deletions won't exist on disk; skip so we don't ask the server about
+        // a vanished file.
+        if wingman_lsp::Lang::from_path(&abs).is_some() && abs.exists() {
+            files.push(abs);
+        }
+    }
+    files
+}
+
+/// Post-edit gate that folds the language server's diagnostics for the files
+/// changed this turn into verification. Fail-open: no server installed, no
+/// changed files, or a server error all pass (with a note) rather than trapping
+/// the agent. Only genuine *errors* (severity 1) fail the gate; warnings are
+/// reported but don't block.
+pub struct LspDiagnosticsGate {
+    root: std::path::PathBuf,
+}
+
+#[async_trait::async_trait]
+impl TurnGate for LspDiagnosticsGate {
+    fn label(&self) -> String {
+        "lsp diagnostics".into()
+    }
+
+    async fn check(&self) -> GateReport {
+        let files = changed_lsp_files(&self.root);
+        if files.is_empty() {
+            return GateReport {
+                passed: true,
+                summary: "lsp diagnostics: none (no changed files a server handles)".into(),
+            };
+        }
+        let manager = wingman_lsp::manager_for(&self.root).await;
+        let mut error_lines: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let mut no_server = 0usize;
+        for file in &files {
+            let client = match manager.client_for_path(file).await {
+                Ok(c) => c,
+                Err(_) => {
+                    no_server += 1;
+                    continue;
+                }
+            };
+            let diags = client
+                .diagnostics(file, std::time::Duration::from_secs(15))
+                .await
+                .unwrap_or_default();
+            checked += 1;
+            let rel = file
+                .strip_prefix(&self.root)
+                .unwrap_or(file)
+                .to_string_lossy()
+                .replace('\\', "/");
+            for d in diags.iter().filter(|d| d.is_error()) {
+                error_lines.push(format!(
+                    "{rel}:{}:{} error: {}",
+                    d.line + 1,
+                    d.character + 1,
+                    d.message.replace('\n', " ")
+                ));
+            }
+        }
+
+        if checked == 0 {
+            return GateReport {
+                passed: true,
+                summary: format!(
+                    "lsp diagnostics: ⚠ skipped (no language server on PATH for {no_server} changed file(s))"
+                ),
+            };
+        }
+        if error_lines.is_empty() {
+            GateReport {
+                passed: true,
+                summary: format!("lsp diagnostics: ✓ no errors in {checked} changed file(s)"),
+            }
+        } else {
+            GateReport {
+                passed: false,
+                summary: format!(
+                    "lsp diagnostics: ✗ {} error(s) in changed files\n{}",
+                    error_lines.len(),
+                    error_lines.join("\n")
+                ),
+            }
+        }
+    }
+}
+
 /// Walk up from a repo-relative file path to the nearest `Cargo.toml` and read
 /// its `[package] name`. Returns None if no manifest or no name found.
 fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
@@ -821,18 +932,26 @@ pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn T
         cmd,
         cwd: root.to_path_buf(),
     });
-    // Compose affected-tests after the compile check for Cargo projects.
+
+    // Compose optional gates after the compile check, short-circuiting on the
+    // first failure (compile → affected tests → lsp diagnostics).
+    let mut gates: Vec<Arc<dyn TurnGate>> = vec![compile];
     if cfg.verify.affected_tests && root.join("Cargo.toml").exists() {
-        return Some(Arc::new(CompositeGate {
-            gates: vec![
-                compile,
-                Arc::new(AffectedTestsGate {
-                    root: root.to_path_buf(),
-                }),
-            ],
+        gates.push(Arc::new(AffectedTestsGate {
+            root: root.to_path_buf(),
         }));
     }
-    Some(compile)
+    if cfg.verify.lsp_diagnostics {
+        gates.push(Arc::new(LspDiagnosticsGate {
+            root: root.to_path_buf(),
+        }));
+    }
+
+    if gates.len() == 1 {
+        Some(gates.into_iter().next().unwrap())
+    } else {
+        Some(Arc::new(CompositeGate { gates }))
+    }
 }
 
 /// On failure, walks `cfg.router.fallback_models`
