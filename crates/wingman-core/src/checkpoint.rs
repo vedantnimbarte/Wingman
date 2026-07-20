@@ -35,6 +35,29 @@ struct Entry {
     /// Snapshot filename holding prior bytes, or `None` if the file was new.
     snap: Option<String>,
     existed: bool,
+    /// Unix seconds when the checkpoint was committed. `None` on entries
+    /// written before timestamps were added.
+    #[serde(default)]
+    ts: Option<u64>,
+}
+
+/// One entry in the rewind timeline, newest-first when returned by [`list`].
+#[derive(Debug, Clone)]
+pub struct Step {
+    pub seq: u64,
+    pub path: String,
+    /// True if the file was modified; false if the edit created it (undo
+    /// deletes it).
+    pub existed: bool,
+    /// Unix seconds when committed, if known.
+    pub ts: Option<u64>,
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Which file path(s) a tool call will mutate. Empty for non-mutating tools.
@@ -100,6 +123,7 @@ pub fn commit(root: &Path, pres: Vec<Pre>) {
         return;
     }
     let mut seq = next_seq(root);
+    let ts = Some(now_secs());
     let mut out = String::new();
     for pre in pres {
         let (snap, existed) = match &pre.prior {
@@ -117,6 +141,7 @@ pub fn commit(root: &Path, pres: Vec<Pre>) {
             path: pre.path.to_string_lossy().into_owned(),
             snap,
             existed,
+            ts,
         };
         if let Ok(line) = serde_json::to_string(&entry) {
             out.push_str(&line);
@@ -183,6 +208,35 @@ pub fn undo_last(root: &Path) -> Option<String> {
     Some(summary)
 }
 
+/// The rewind timeline, newest edit first. Each entry is one undo step.
+pub fn list(root: &Path) -> Vec<Step> {
+    let mut steps: Vec<Step> = read_entries(root)
+        .into_iter()
+        .map(|e| Step {
+            seq: e.seq,
+            path: e.path,
+            existed: e.existed,
+            ts: e.ts,
+        })
+        .collect();
+    steps.reverse();
+    steps
+}
+
+/// Rewind the last `n` checkpoints (each a single mutating edit), newest
+/// first. Returns one summary line per reverted step. Stops early if the
+/// timeline runs out.
+pub fn undo_n(root: &Path, n: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        match undo_last(root) {
+            Some(s) => out.push(s),
+            None => break,
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,6 +266,38 @@ mod tests {
 
         // Nothing left to undo.
         assert!(undo_last(&root).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn list_and_undo_n_walk_the_timeline() {
+        let root = std::env::temp_dir().join(format!("wingman-tl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        for (i, content) in ["v1", "v2", "v3"].iter().enumerate() {
+            let pre = capture(&root, "a.txt");
+            std::fs::write(root.join("a.txt"), content).unwrap();
+            commit(&root, vec![pre]);
+            let _ = i;
+        }
+        // Timeline is newest-first and carries timestamps.
+        let steps = list(&root);
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].seq > steps[2].seq);
+        assert!(steps[0].ts.is_some());
+
+        // Rewind two steps: v3→v2 undone leaves the file as it was before v2's
+        // edit, i.e. "v1".
+        let summaries = undo_n(&root, 2);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1");
+        assert_eq!(depth(&root), 1);
+
+        // Asking for more than remain stops cleanly.
+        assert_eq!(undo_n(&root, 5).len(), 1);
+        assert_eq!(depth(&root), 0);
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -94,6 +94,12 @@ pub enum Command {
     },
     /// Restore the most recent wingman checkpoint via `git stash pop`.
     Undo,
+    /// Scrub back through per-edit checkpoints. No args prints the timeline;
+    /// `wingman rewind <n>` reverts the last n mutating edits (newest first).
+    Rewind {
+        /// Number of edits to revert. Omit to just print the timeline.
+        steps: Option<usize>,
+    },
     /// Show estimated token spend by model from ~/.wingman/usage.json.
     Cost {
         /// Output as JSON instead of a table.
@@ -525,6 +531,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Init { force }) => commands::init::run(force).await,
         Some(Command::Checkpoint { label }) => commands::checkpoint::create(label).await,
         Some(Command::Undo) => commands::checkpoint::undo().await,
+        Some(Command::Rewind { steps }) => commands::rewind::run(steps).await,
         Some(Command::Cost { json }) => commands::cost::run(json).await,
         Some(Command::Session { action }) => commands::session::run(action).await,
         Some(Command::Worktree { action }) => match action {
