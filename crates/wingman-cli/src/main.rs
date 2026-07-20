@@ -6,6 +6,7 @@
 
 mod cli;
 mod commands;
+mod git_auto;
 mod logging;
 mod login;
 mod mcp_adapter;

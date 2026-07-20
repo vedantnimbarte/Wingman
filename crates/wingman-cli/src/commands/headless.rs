@@ -67,6 +67,8 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let routing_stats = wingman_learn::StatsStore::open_default().ok();
     let repo = paths.root.to_string_lossy().to_string();
 
+    // Keep the prompt for an auto-commit message after the turn.
+    let prompt_for_commit = opts.prompt.clone();
     let mut events = agent.run(opts.prompt);
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
@@ -148,6 +150,16 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
 
         if matches!(event, AgentEvent::Stop { .. }) {
             break;
+        }
+    }
+
+    // Git-native auto-commit: turn this run's edits into a reviewable commit
+    // (only if `[git].auto_commit` and the work tree actually changed).
+    if let Some(line) =
+        crate::git_auto::auto_commit_if_enabled(&cfg, &paths.root, Some(&prompt_for_commit))
+    {
+        if !opts.json {
+            eprintln!("wingman: committed {line}");
         }
     }
 

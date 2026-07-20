@@ -402,6 +402,220 @@ impl Tool for LspRename {
     }
 }
 
+// ---- lsp_code_action ------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CodeActionArgs {
+    path: String,
+    /// 1-based line to request actions at. Optional for whole-file source
+    /// actions like organize-imports.
+    #[serde(default)]
+    line: Option<u32>,
+    #[serde(default)]
+    character: Option<u32>,
+    #[serde(default)]
+    symbol: Option<String>,
+    /// Filter by code-action kind (e.g. "quickfix", "source.organizeImports").
+    #[serde(default)]
+    kind: Option<String>,
+    /// Shortcut: request + apply `source.organizeImports` for the whole file.
+    #[serde(default)]
+    organize_imports: bool,
+    /// Apply the Nth listed action (1-based) instead of just listing.
+    #[serde(default)]
+    apply: Option<usize>,
+}
+
+pub struct LspCodeAction;
+
+#[async_trait]
+impl Tool for LspCodeAction {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "lsp_code_action".into(),
+            description: "List or apply the language server's own code actions — quick-fixes (add missing \
+                          import, implement trait, fix lint), refactors, and source actions like \
+                          organize-imports. Unlike editing by hand, these are the server's canonical fixes. \
+                          Give `path` (+ `line` and `symbol`/`character` for a position). List to see \
+                          options, then set `apply: N` (1-based) to apply one, or `organize_imports: true` \
+                          for that one-shot. Applying edits files (needs write permission)."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path (relative or absolute)." },
+                    "line": { "type": "integer", "minimum": 1, "description": "1-based line (omit for whole-file source actions)." },
+                    "character": { "type": "integer", "minimum": 1, "description": "1-based column (optional if `symbol`)." },
+                    "symbol": { "type": "string", "description": "Symbol on `line` to locate the column." },
+                    "kind": { "type": "string", "description": "Filter by kind, e.g. \"quickfix\" or \"source.organizeImports\"." },
+                    "organize_imports": { "type": "boolean", "description": "Request+apply source.organizeImports for the whole file." },
+                    "apply": { "type": "integer", "minimum": 1, "description": "Apply the Nth listed action (1-based)." }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        let a: CodeActionArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
+        };
+        let abs = ctx.resolve(&a.path);
+        let mutating = a.apply.is_some() || a.organize_imports;
+        if mutating && !ctx.allows_write(&abs) {
+            return ToolOutcome::err(
+                "applying a code action edits files; not permitted in the current mode (needs auto-edit/yolo)",
+            );
+        }
+        let (abs, client) = match client_for(ctx, &a.path).await {
+            Ok(v) => v,
+            Err(out) => return out,
+        };
+
+        // Resolve the range. A point at the located position, or (0,0) for
+        // whole-file source actions.
+        let (start, end) = if let Some(line) = a.line {
+            let pos = match resolve_position(
+                &abs,
+                &PosArgs {
+                    path: a.path.clone(),
+                    line,
+                    character: a.character,
+                    symbol: a.symbol.clone(),
+                },
+            ) {
+                Ok(p) => p,
+                Err(e) => return ToolOutcome::err(e),
+            };
+            (pos, pos)
+        } else {
+            let zero = Position {
+                line: 0,
+                character: 0,
+            };
+            (zero, zero)
+        };
+
+        let kinds: Vec<String> = if a.organize_imports {
+            vec!["source.organizeImports".to_string()]
+        } else if let Some(k) = &a.kind {
+            vec![k.clone()]
+        } else {
+            Vec::new()
+        };
+
+        let actions = match client.code_actions(&abs, start, end, &kinds).await {
+            Ok(a) => a,
+            Err(e) => return ToolOutcome::err(format!("lsp code actions failed: {e}")),
+        };
+        if actions.is_empty() {
+            return ToolOutcome::ok("(no code actions available at that position)");
+        }
+
+        // Decide which action to apply, if any.
+        let apply_idx = if a.organize_imports {
+            Some(0)
+        } else {
+            a.apply.map(|n| n.saturating_sub(1))
+        };
+
+        let Some(idx) = apply_idx else {
+            // List mode.
+            let listing = actions
+                .iter()
+                .enumerate()
+                .map(|(i, act)| {
+                    let title = act
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or("(untitled)");
+                    let kind = act.get("kind").and_then(Value::as_str).unwrap_or("");
+                    format!(
+                        "{}. {title}{}",
+                        i + 1,
+                        if kind.is_empty() {
+                            String::new()
+                        } else {
+                            format!("  [{kind}]")
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            return ToolOutcome::ok(format!("{listing}\n(apply one with `apply: N`)"));
+        };
+
+        let Some(action) = actions.get(idx) else {
+            return ToolOutcome::err(format!(
+                "action index {} out of range (1..={})",
+                idx + 1,
+                actions.len()
+            ));
+        };
+
+        apply_code_action(&client, action, &ctx.project_root).await
+    }
+}
+
+/// Apply a code action: its inline `edit` (if any), then its `command` (if
+/// any). A command typically pushes a `workspace/applyEdit` the client handles.
+async fn apply_code_action(
+    client: &wingman_lsp::LspClient,
+    action: &Value,
+    root: &Path,
+) -> ToolOutcome {
+    let title = action
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("code action")
+        .to_string();
+    let mut changed: Vec<PathBuf> = Vec::new();
+
+    if let Some(edit) = action.get("edit") {
+        match wingman_lsp::edit::apply_workspace_edit(edit).await {
+            Ok(mut c) => changed.append(&mut c),
+            Err(e) => return ToolOutcome::err(format!("applying `{title}` edit failed: {e}")),
+        }
+    }
+
+    // A `command` may be a string or a `{ command, arguments }` object.
+    if let Some(cmd) = action.get("command") {
+        let (name, arguments) = if cmd.is_string() {
+            (cmd.as_str().unwrap_or("").to_string(), Value::Array(vec![]))
+        } else {
+            (
+                cmd.get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                cmd.get("arguments")
+                    .cloned()
+                    .unwrap_or(Value::Array(vec![])),
+            )
+        };
+        if !name.is_empty() {
+            if let Err(e) = client.execute_command(&name, arguments).await {
+                return ToolOutcome::err(format!("executing `{title}` command failed: {e}"));
+            }
+        }
+    }
+
+    if changed.is_empty() {
+        ToolOutcome::ok(format!(
+            "applied `{title}` (server applied any edits directly)"
+        ))
+    } else {
+        let list = changed
+            .iter()
+            .map(|p| rel(root, p))
+            .collect::<Vec<_>>()
+            .join("\n");
+        ToolOutcome::ok(format!("applied `{title}` — changed:\n{list}"))
+    }
+}
+
 /// The shared JSON schema for position-taking tools.
 fn pos_schema() -> Value {
     json!({

@@ -170,6 +170,47 @@ pub struct Config {
     /// Post-edit verification (turn gate + receipts).
     #[serde(default)]
     pub verify: VerifyConfig,
+
+    /// Git-native workflow (Aider-style auto-commit).
+    #[serde(default)]
+    pub git: GitConfig,
+
+    /// Audit logging (compliance trail of tool calls).
+    #[serde(default)]
+    pub audit: AuditConfig,
+}
+
+/// Append-only audit trail of tool calls — an enterprise/compliance aid.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AuditConfig {
+    /// When true, every tool dispatch appends a JSONL record (timestamp, tool,
+    /// a redacted input summary, error flag) to the audit log.
+    pub enabled: bool,
+    /// Log file path. Defaults to `<project>/.wingman/audit.log` when unset.
+    pub log_path: Option<String>,
+}
+
+/// Git-native workflow options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    /// When true, after a turn in which the agent edited files (and the
+    /// verification gate, if any, passed), auto-commit the working-tree changes
+    /// with a generated message — so every AI change is a reviewable, revertable
+    /// commit. Off by default. Only commits inside a git repo.
+    pub auto_commit: bool,
+    /// Prefix for generated commit subjects.
+    pub auto_commit_prefix: String,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            auto_commit: false,
+            auto_commit_prefix: "wingman: ".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -325,6 +366,12 @@ pub struct RouterConfig {
     /// "Fast" model used for classification, summarization, and recap.
     /// Form: `provider/model_id`, e.g. `anthropic/claude-haiku-4-5-20251001`.
     pub fast_model: Option<String>,
+    /// Local model for the privacy preset — the target of the "local" class
+    /// keyword. Form: `provider/model_id`, e.g. `ollama/llama3.1`. When classes
+    /// like `summarize`/`compaction` map to "local", those steps never leave
+    /// the machine. `wingman router preset local` prints a recommended block.
+    #[serde(default)]
+    pub local_model: Option<String>,
     /// Ordered fallback chain. If the primary model errors (network /
     /// rate-limit / provider 5xx), the runtime walks this list in order.
     /// Each entry is `provider/model_id`.
@@ -356,6 +403,7 @@ impl RouterConfig {
         }
         match self.classes.get(class).map(String::as_str) {
             Some("fast") => self.fast_model.clone(),
+            Some("local") => self.local_model.clone(),
             Some("default") | None => None,
             Some(explicit) => Some(explicit.to_string()),
         }

@@ -450,9 +450,22 @@ pub async fn build_registry_with_learn(
         cfg.tools.shell_denylist.clone(),
         cfg.tools.allow_network,
     );
+    // Audit log path: explicit config, else the project's .wingman/audit.log.
+    let audit_path = if cfg.audit.enabled {
+        Some(
+            cfg.audit
+                .log_path
+                .clone()
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| paths.dir.join("audit.log")),
+        )
+    } else {
+        None
+    };
     let mut reg = ToolRegistry::new(ctx)
         .with_builtins()
-        .with_hooks(cfg.hooks.clone());
+        .with_hooks(cfg.hooks.clone())
+        .with_audit(audit_path);
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {
         reg = reg.with_semantic_search(idx);
@@ -675,8 +688,104 @@ impl TurnGate for AffectedTestsGate {
             cmd.push_str(" -p ");
             cmd.push_str(c);
         }
-        run_check_cmd(&cmd, &self.root).await
+        let mut report = run_check_cmd(&cmd, &self.root).await;
+
+        // Surface the symbols actually edited this turn (tree-sitter-mapped from
+        // the diff hunks) in the receipt. We deliberately do NOT narrow the
+        // `cargo test` invocation to these symbol names: a name filter that
+        // matches no test would run zero tests and pass — a false green that's
+        // worse than running the whole changed crate. Safe symbol-level
+        // narrowing needs resolved references from `test fn -> edited symbol`
+        // (LSP), which is the follow-on; until then crate-level is the floor.
+        let symbols = edited_symbol_names(&self.root);
+        if !symbols.is_empty() {
+            let shown: Vec<&str> = symbols.iter().take(12).map(String::as_str).collect();
+            let more = symbols.len().saturating_sub(shown.len());
+            report.summary = format!(
+                "edited symbols: {}{}\n{}",
+                shown.join(", "),
+                if more > 0 {
+                    format!(" (+{more})")
+                } else {
+                    String::new()
+                },
+                report.summary
+            );
+        }
+        report
     }
+}
+
+/// Repo-relative changed file -> 1-based line numbers touched, from
+/// `git diff --unified=0` hunk headers. Empty on non-git repos.
+fn changed_lines_by_file(
+    root: &std::path::Path,
+) -> std::collections::HashMap<String, std::collections::BTreeSet<u32>> {
+    let mut map: std::collections::HashMap<String, std::collections::BTreeSet<u32>> =
+        std::collections::HashMap::new();
+    let out = std::process::Command::new("git")
+        .args(["diff", "--unified=0"])
+        .current_dir(root)
+        .output();
+    let Ok(out) = out else {
+        return map;
+    };
+    if !out.status.success() {
+        return map;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            current = Some(rest.trim().to_string());
+        } else if line.starts_with("@@") {
+            // `@@ -a,b +c,d @@` — take the `+c,d` (new-side) span.
+            if let Some(plus) = line.split('+').nth(1) {
+                let spec = plus.split([' ', '@']).next().unwrap_or("");
+                let mut it = spec.split(',');
+                let start: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let count: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+                if start > 0 {
+                    if let Some(f) = &current {
+                        let set = map.entry(f.clone()).or_default();
+                        for l in start..start + count.max(1) {
+                            set.insert(l);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Names of symbols whose definition span overlaps a changed line this turn,
+/// via tree-sitter over the changed files. Used to make the affected-tests
+/// receipt informative (which symbols changed). Empty without tree-sitter.
+#[cfg(feature = "treesitter")]
+fn edited_symbol_names(root: &std::path::Path) -> Vec<String> {
+    let changed = changed_lines_by_file(root);
+    let mut names = std::collections::BTreeSet::new();
+    for (path, lines) in changed {
+        let abs = root.join(&path);
+        let Some(lang) = wingman_ts::Language::from_path(&abs) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(&abs) else {
+            continue;
+        };
+        for sym in wingman_ts::extract_symbols(lang, &text) {
+            if lines.range(sym.start_line..=sym.end_line).next().is_some() {
+                names.insert(sym.name);
+            }
+        }
+    }
+    names.into_iter().collect()
+}
+
+#[cfg(not(feature = "treesitter"))]
+fn edited_symbol_names(_root: &std::path::Path) -> Vec<String> {
+    Vec::new()
 }
 
 /// Runs several gates in sequence, short-circuiting on the first failure so a

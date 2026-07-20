@@ -174,9 +174,26 @@ impl LspClient {
                     "references": { "dynamicRegistration": false },
                     "hover": { "contentFormat": ["plaintext", "markdown"] },
                     "rename": { "dynamicRegistration": false, "prepareSupport": false },
+                    "codeAction": {
+                        "dynamicRegistration": false,
+                        "codeActionLiteralSupport": {
+                            "codeActionKind": {
+                                "valueSet": [
+                                    "quickfix", "refactor", "refactor.extract",
+                                    "refactor.inline", "refactor.rewrite", "source",
+                                    "source.organizeImports", "source.fixAll"
+                                ]
+                            }
+                        }
+                    },
                     "publishDiagnostics": { "relatedInformation": true }
                 },
-                "workspace": { "workspaceFolders": true, "configuration": true }
+                "workspace": {
+                    "workspaceFolders": true,
+                    "configuration": true,
+                    "applyEdit": true,
+                    "executeCommand": { "dynamicRegistration": false }
+                }
             }
         });
         // A generous timeout: rust-analyzer can be slow to answer initialize on
@@ -342,6 +359,78 @@ impl LspClient {
         }
     }
 
+    /// `textDocument/codeAction` — available quick-fixes / refactors / source
+    /// actions for `[start, end]`. Returns the raw action objects (each has a
+    /// `title`, optional `kind`, optional inline `edit` (WorkspaceEdit), and/or
+    /// a `command`). `only_kinds` filters by kind (e.g.
+    /// `["source.organizeImports"]`, `["quickfix"]`); empty means all.
+    pub async fn code_actions(
+        &self,
+        path: &Path,
+        start: Position,
+        end: Position,
+        only_kinds: &[String],
+    ) -> Result<Vec<Value>> {
+        let uri = self.open(path).await?;
+        // Reconstruct a diagnostics context from what we've accumulated so the
+        // server can attach diagnostic-linked quick-fixes.
+        let diags_ctx: Vec<Value> = self
+            .diagnostics
+            .lock()
+            .await
+            .get(&uri)
+            .map(|ds| {
+                ds.iter()
+                    .map(|d| {
+                        json!({
+                            "range": {
+                                "start": { "line": d.line, "character": d.character },
+                                "end": { "line": d.line, "character": d.character }
+                            },
+                            "severity": d.severity,
+                            "message": d.message,
+                            "source": d.source,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut context = json!({ "diagnostics": diags_ctx });
+        if !only_kinds.is_empty() {
+            context["only"] = json!(only_kinds);
+        }
+        let result = self
+            .request(
+                "textDocument/codeAction",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "range": {
+                        "start": { "line": start.line, "character": start.character },
+                        "end": { "line": end.line, "character": end.character }
+                    },
+                    "context": context
+                }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        Ok(match result {
+            Value::Array(a) => a,
+            _ => Vec::new(),
+        })
+    }
+
+    /// `workspace/executeCommand` — run a server command (a code action's
+    /// `command`). The server typically responds by pushing a
+    /// `workspace/applyEdit` request, which the reader loop applies to disk.
+    pub async fn execute_command(&self, command: &str, arguments: Value) -> Result<Value> {
+        self.request(
+            "workspace/executeCommand",
+            json!({ "command": command, "arguments": arguments }),
+            Duration::from_secs(20),
+        )
+        .await
+    }
+
     /// Open `path` and wait up to `timeout` for the server to publish
     /// diagnostics for it. Diagnostics arrive asynchronously after `didOpen`,
     /// so we poll our accumulated map until an entry appears or time runs out.
@@ -416,6 +505,19 @@ async fn reader_loop(
                         .map(|a| a.len())
                         .unwrap_or(0);
                     Value::Array(vec![Value::Null; n])
+                }
+                // A code action's command asks us to apply an edit — do it and
+                // report the result, so command-based fixes actually land.
+                "workspace/applyEdit" => {
+                    let edit = msg
+                        .get("params")
+                        .and_then(|p| p.get("edit"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    match crate::edit::apply_workspace_edit(&edit).await {
+                        Ok(_) => json!({ "applied": true }),
+                        Err(e) => json!({ "applied": false, "failureReason": e.to_string() }),
+                    }
                 }
                 // Everything else we don't implement → null result is safe.
                 _ => Value::Null,

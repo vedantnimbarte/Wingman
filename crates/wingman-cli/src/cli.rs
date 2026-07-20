@@ -142,11 +142,27 @@ pub enum Command {
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
     Knows,
+    /// Benchmark harness: run a suite of prompts and record time-to-first-token,
+    /// tokens/task, wall time, and verified-done rate. Needs a live provider.
+    Bench {
+        /// JSONL suite file ({"id","prompt"} per line). Omit for a built-in suite.
+        #[arg(long, value_name = "FILE")]
+        suite: Option<String>,
+        /// Output JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Model routing utilities.
     Router {
         #[command(subcommand)]
         action: RouterAction,
     },
+    /// Expose Wingman itself as an MCP server over stdio: any MCP client
+    /// (Claude Code, Cursor, another Wingman) can consume Wingman's tools —
+    /// notably `semantic_search` (warm repo index) and `recall_memory` (team
+    /// memory). Read-only by default; raise with `--mode`.
+    #[command(name = "mcp-serve")]
+    McpServe,
     /// Distill durable facts from a past session into a pending-review file
     /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
     Distill {
@@ -183,6 +199,17 @@ pub enum Command {
         /// Comma-separated list of provider/model pairs to consult.
         #[arg(long, value_name = "LIST")]
         models: String,
+    },
+    /// Explain-and-teach the current changes: a per-file "what changed and
+    /// why it matters" walkthrough of the working diff, aimed at a reviewer or
+    /// junior. Routes to the fast model when configured.
+    Explain {
+        /// Explain the diff against this base ref instead of the working tree.
+        #[arg(long, value_name = "BASE")]
+        local: Option<String>,
+        /// Explain only staged changes.
+        #[arg(long)]
+        staged: bool,
     },
     /// Interactive diff viewer: walk a unified diff hunk by hunk and
     /// accept or reject each one before writing the result.
@@ -490,6 +517,16 @@ pub enum RouterAction {
         #[arg(long)]
         all: bool,
     },
+    /// Print a recommended [router] preset to paste into config. `local` keeps
+    /// cheap steps (summarize/compaction/commit-message/title) on a local model.
+    Preset {
+        /// Preset name (currently: `local`).
+        #[arg(default_value = "local")]
+        name: String,
+        /// Local model to use for the `local` preset (default ollama/llama3.1).
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -607,7 +644,14 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
+        Some(Command::Bench { suite, json }) => commands::bench::run(suite, json).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
+        Some(Command::McpServe) => {
+            // Read-only by default: exposing write/shell tools to an external
+            // client is risky, so require an explicit --mode to raise it.
+            let mode = parse_mode(cli.mode.as_deref())?.unwrap_or(PermissionMode::ReadOnly);
+            commands::mcp_serve::run(load_config()?, mode).await
+        }
         Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
         Some(Command::Indexd { status }) => commands::indexd::run(status).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
@@ -623,6 +667,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
         }
+        Some(Command::Explain { local, staged }) => commands::explain::run(local, staged).await,
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
         Some(Command::Pilot { action }) => match action {
             PilotAction::Run {

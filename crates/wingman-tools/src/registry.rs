@@ -13,6 +13,9 @@ pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
     ctx: ToolCtx,
     hooks: HooksConfig,
+    /// Optional append-only audit log path. When set, each dispatch appends a
+    /// JSONL record — an enterprise/compliance trail of what the agent did.
+    audit: Option<std::path::PathBuf>,
 }
 
 impl ToolRegistry {
@@ -21,6 +24,7 @@ impl ToolRegistry {
             tools: RwLock::new(HashMap::new()),
             ctx,
             hooks: HooksConfig::default(),
+            audit: None,
         }
     }
 
@@ -28,6 +32,47 @@ impl ToolRegistry {
     pub fn with_hooks(mut self, hooks: HooksConfig) -> Self {
         self.hooks = hooks;
         self
+    }
+
+    /// Enable the append-only audit log at `path`. Builder-style.
+    pub fn with_audit(mut self, path: Option<std::path::PathBuf>) -> Self {
+        self.audit = path;
+        self
+    }
+
+    /// Append one audit record for a dispatched tool call. Best-effort: a
+    /// logging failure never blocks the tool. The input is truncated so the
+    /// trail stays compact and doesn't balloon with large tool arguments.
+    fn write_audit(&self, name: &str, args: &Value, is_error: bool) {
+        let Some(path) = &self.audit else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let mut input = args.to_string();
+        if input.len() > 400 {
+            input.truncate(400);
+            input.push('…');
+        }
+        let record = serde_json::json!({
+            "ts_ms": ts,
+            "tool": name,
+            "input": input,
+            "is_error": is_error,
+        });
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{record}");
+        }
     }
 
     pub fn hooks(&self) -> &HooksConfig {
@@ -113,6 +158,7 @@ impl ToolRegistry {
         self.register(crate::builtin::LspHover);
         self.register(crate::builtin::LspDiagnostics);
         self.register(crate::builtin::LspRename);
+        self.register(crate::builtin::LspCodeAction);
         self
     }
 
@@ -186,6 +232,9 @@ impl ToolDispatcher for ToolRegistry {
         if !outcome.is_error && !pres.is_empty() {
             wingman_core::checkpoint::commit(&self.ctx.project_root, pres);
         }
+
+        // Append to the compliance audit trail, if enabled.
+        self.write_audit(name, &args, outcome.is_error);
 
         // Post-tool-use hooks: fire-and-forget; failures only logged.
         for hook in &self.hooks.post_tool_use {
@@ -287,5 +336,59 @@ pub async fn run_hook(command: &str, timeout_secs: u64, env: &[(&str, String)]) 
         success: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Tool, ToolCtx};
+    use async_trait::async_trait;
+    use wingman_config::PermissionMode;
+
+    struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "echo".into(),
+                description: "echo".into(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+        async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("ok")
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_log_records_each_dispatch() {
+        let dir = std::env::temp_dir().join(format!("wm-audit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("audit.log");
+        let ctx = ToolCtx::new(PermissionMode::ReadOnly, dir.clone(), dir.clone());
+        let mut reg = ToolRegistry::new(ctx).with_audit(Some(log.clone()));
+        reg.register(EchoTool);
+        let _ = reg.dispatch("echo", serde_json::json!({ "x": 1 })).await;
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            body.contains("\"tool\":\"echo\""),
+            "audit missing tool: {body}"
+        );
+        assert!(body.contains("\"is_error\":false"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn no_audit_when_disabled() {
+        let dir = std::env::temp_dir().join(format!("wm-audit-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = ToolCtx::new(PermissionMode::ReadOnly, dir.clone(), dir.clone());
+        let mut reg = ToolRegistry::new(ctx); // no audit
+        reg.register(EchoTool);
+        let _ = reg.dispatch("echo", serde_json::json!({})).await;
+        assert!(!dir.join("audit.log").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -44,7 +44,9 @@ pub use glob_tool::Glob;
 pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
 pub use list_dir::ListDir;
-pub use lsp_tools::{LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename};
+pub use lsp_tools::{
+    LspCodeAction, LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename,
+};
 pub use present_plan::PresentPlan;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;

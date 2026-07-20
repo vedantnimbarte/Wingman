@@ -163,6 +163,30 @@ worker agents in isolated worktrees, and converges into a PR.
   `wingman skill export <name> <dir>` bridge wingman skills and the
   ecosystem-standard `SKILL.md` format (Claude Code, Codex, Cursor, Gemini CLI,
   Copilot, Cline, Goose).
+- **LSP code-actions.** The `lsp_code_action` tool lists and applies the
+  language server's *own* canonical fixes — add missing import, implement trait,
+  fix lint, and `organize_imports` — instead of hand-editing.
+- **Wingman as an MCP server.** `wingman mcp-serve` exposes Wingman's tools over
+  MCP stdio so any MCP client (Claude Code, Cursor, another Wingman) can consume
+  them — most valuably `semantic_search` (the warm repo index) and
+  `recall_memory` (team memory). Read-only by default. Wingman is both an MCP
+  host *and* an MCP server.
+- **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
+  into a reviewable, revertable commit with a generated message (Aider-style),
+  composing with the rewind timeline and verification gate.
+- **Local-first privacy preset.** `wingman router preset local` routes the
+  cheap steps (summarize / compaction / commit-message / title) to a local
+  model — simple steps never leave your machine.
+- **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
+  why it matters" walkthrough of the working diff (fast-model), for reviewers
+  and juniors.
+- **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
+  tool, redacted input, error flag) for every tool call — a compliance trail
+  for teams.
+- **Benchmark harness.** `wingman bench` runs a suite of prompts and records
+  time-to-first-token, tokens/task, and verified-done rate.
+- **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
+  language over MCP (`wingman mcp-serve`). See [docs/SDK.md](docs/SDK.md).
 - **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by
