@@ -485,16 +485,14 @@ async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Opti
 fn one_location(v: &Value) -> Option<Location> {
     // Either a `Location { uri, range }` or a `LocationLink { targetUri,
     // targetSelectionRange }`.
-    let (uri, range) = if let Some(uri) = v.get("uri") {
-        (uri, v.get("range"))
-    } else if let Some(uri) = v.get("targetUri") {
-        (
+    let (uri, range) = match (v.get("uri"), v.get("targetUri")) {
+        (Some(uri), _) => (uri, v.get("range")),
+        (None, Some(uri)) => (
             uri,
             v.get("targetSelectionRange")
                 .or_else(|| v.get("targetRange")),
-        )
-    } else {
-        return None;
+        ),
+        (None, None) => return None,
     };
     let uri = uri.as_str()?;
     let path = uri_to_path(uri)?;
