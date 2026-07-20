@@ -4533,6 +4533,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wingman-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "wingman-mcp"
 version = "0.1.0"
 dependencies = [
@@ -4636,6 +4647,7 @@ dependencies = [
  "wingman-config",
  "wingman-core",
  "wingman-learn",
+ "wingman-lsp",
  "wingman-rag",
  "wingman-session",
  "wingman-skills",

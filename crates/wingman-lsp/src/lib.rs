@@ -151,7 +151,8 @@ mod tests {
         let err = m
             .client_for_path(Path::new("notes.md"))
             .await
-            .unwrap_err();
+            .err()
+            .expect("markdown has no language server");
         assert!(matches!(err, Unavailable::UnsupportedLanguage));
     }
 

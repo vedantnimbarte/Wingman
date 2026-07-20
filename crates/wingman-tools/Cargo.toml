@@ -14,6 +14,7 @@ wingman-rag = { workspace = true, default-features = false }
 wingman-learn = { workspace = true }
 wingman-skills = { workspace = true }
 wingman-session = { workspace = true }
+wingman-lsp = { workspace = true }
 wingman-ts = { workspace = true, optional = true }
 
 tokio = { workspace = true }

@@ -105,6 +105,14 @@ impl ToolRegistry {
             self.register(crate::builtin::EditSymbol);
             self.register(crate::builtin::WhoCalls);
         }
+        // LSP-backed intelligence. Registered unconditionally — each tool
+        // degrades gracefully (returns a "fall back to the tree-sitter tools"
+        // note) when the user has no language server installed for the file.
+        self.register(crate::builtin::LspDefinition);
+        self.register(crate::builtin::LspReferences);
+        self.register(crate::builtin::LspHover);
+        self.register(crate::builtin::LspDiagnostics);
+        self.register(crate::builtin::LspRename);
         self
     }
 

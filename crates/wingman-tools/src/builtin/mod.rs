@@ -11,6 +11,7 @@ mod glob_tool;
 mod grep_tool;
 mod invoke_skill;
 mod list_dir;
+mod lsp_tools;
 mod present_plan;
 mod update_tasks;
 
@@ -43,6 +44,7 @@ pub use glob_tool::Glob;
 pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
 pub use list_dir::ListDir;
+pub use lsp_tools::{LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename};
 pub use present_plan::PresentPlan;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;
