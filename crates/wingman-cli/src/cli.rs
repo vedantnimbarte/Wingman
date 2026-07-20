@@ -147,6 +147,12 @@ pub enum Command {
         #[command(subcommand)]
         action: RouterAction,
     },
+    /// Expose Wingman itself as an MCP server over stdio: any MCP client
+    /// (Claude Code, Cursor, another Wingman) can consume Wingman's tools —
+    /// notably `semantic_search` (warm repo index) and `recall_memory` (team
+    /// memory). Read-only by default; raise with `--mode`.
+    #[command(name = "mcp-serve")]
+    McpServe,
     /// Distill durable facts from a past session into a pending-review file
     /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
     Distill {
@@ -608,6 +614,12 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
+        Some(Command::McpServe) => {
+            // Read-only by default: exposing write/shell tools to an external
+            // client is risky, so require an explicit --mode to raise it.
+            let mode = parse_mode(cli.mode.as_deref())?.unwrap_or(PermissionMode::ReadOnly);
+            commands::mcp_serve::run(load_config()?, mode).await
+        }
         Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
         Some(Command::Indexd { status }) => commands::indexd::run(status).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,

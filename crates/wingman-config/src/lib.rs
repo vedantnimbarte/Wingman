@@ -170,6 +170,32 @@ pub struct Config {
     /// Post-edit verification (turn gate + receipts).
     #[serde(default)]
     pub verify: VerifyConfig,
+
+    /// Git-native workflow (Aider-style auto-commit).
+    #[serde(default)]
+    pub git: GitConfig,
+}
+
+/// Git-native workflow options.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct GitConfig {
+    /// When true, after a turn in which the agent edited files (and the
+    /// verification gate, if any, passed), auto-commit the working-tree changes
+    /// with a generated message — so every AI change is a reviewable, revertable
+    /// commit. Off by default. Only commits inside a git repo.
+    pub auto_commit: bool,
+    /// Prefix for generated commit subjects.
+    pub auto_commit_prefix: String,
+}
+
+impl Default for GitConfig {
+    fn default() -> Self {
+        Self {
+            auto_commit: false,
+            auto_commit_prefix: "wingman: ".into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

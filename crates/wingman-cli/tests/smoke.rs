@@ -162,6 +162,37 @@ fn pilot_status_without_runs_does_not_panic() {
     );
 }
 
+#[test]
+fn mcp_serve_answers_initialize() {
+    // End-to-end MCP server check: spawn `wingman mcp-serve`, send one
+    // `initialize` JSON-RPC line, close stdin (so the server exits cleanly),
+    // and assert it replied identifying itself. No hang: stdin EOF ends the loop.
+    use std::io::Write;
+    use std::process::Stdio;
+    let s = Scratch::new();
+    let mut child = wingman()
+        .arg("mcp-serve")
+        .current_dir(&s.dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn mcp-serve");
+    {
+        let stdin = child.stdin.as_mut().expect("stdin");
+        let req = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#;
+        stdin.write_all(req.as_bytes()).expect("write req");
+        stdin.write_all(b"\n").expect("write nl");
+    }
+    // Dropping stdin closes it → server sees EOF after handling the request.
+    let out = child.wait_with_output().expect("wait mcp-serve");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("serverInfo") && stdout.contains("wingman"),
+        "mcp-serve did not answer initialize: {stdout}"
+    );
+}
+
 /// Minimal, dependency-free scratch-dir helper. Kept in-file so these smoke
 /// tests pull in nothing beyond std. Cleaned up on drop.
 struct Scratch {

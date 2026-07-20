@@ -163,6 +163,17 @@ worker agents in isolated worktrees, and converges into a PR.
   `wingman skill export <name> <dir>` bridge wingman skills and the
   ecosystem-standard `SKILL.md` format (Claude Code, Codex, Cursor, Gemini CLI,
   Copilot, Cline, Goose).
+- **LSP code-actions.** The `lsp_code_action` tool lists and applies the
+  language server's *own* canonical fixes — add missing import, implement trait,
+  fix lint, and `organize_imports` — instead of hand-editing.
+- **Wingman as an MCP server.** `wingman mcp-serve` exposes Wingman's tools over
+  MCP stdio so any MCP client (Claude Code, Cursor, another Wingman) can consume
+  them — most valuably `semantic_search` (the warm repo index) and
+  `recall_memory` (team memory). Read-only by default. Wingman is both an MCP
+  host *and* an MCP server.
+- **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
+  into a reviewable, revertable commit with a generated message (Aider-style),
+  composing with the rewind timeline and verification gate.
 - **Multi-model code review.** `wingman review-multi <pr#> --models
   anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
   review out across reviewers in parallel and merges findings by
