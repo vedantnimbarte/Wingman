@@ -25,7 +25,7 @@ pub mod stats;
 
 pub use hooks::LearnHook;
 pub use memory::{Memory, MemoryDraft, MemoryScope, MemoryStore, MemoryType};
-pub use stats::{Outcome, StatsStore};
+pub use stats::{Outcome, RoutingStat, StatsStore};
 
 use thiserror::Error;
 
