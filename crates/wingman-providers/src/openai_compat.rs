@@ -358,6 +358,7 @@ pub struct OpenAiCompatProvider {
 
 impl OpenAiCompatProvider {
     pub fn new(variant: Variant, api_key: Option<String>) -> Result<Self> {
+        wingman_core::ensure_tls_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))

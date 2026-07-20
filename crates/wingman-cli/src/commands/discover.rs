@@ -23,6 +23,7 @@ const TARGETS: &[(&str, &str)] = &[
 ];
 
 pub async fn run() -> Result<ExitCode> {
+    wingman_core::ensure_tls_provider();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(1500))
         .build()?;

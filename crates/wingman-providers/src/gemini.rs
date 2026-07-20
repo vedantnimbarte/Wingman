@@ -57,6 +57,7 @@ pub struct GeminiProvider {
 
 impl GeminiProvider {
     pub fn new(api_key: impl Into<String>) -> Result<Self> {
+        wingman_core::ensure_tls_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(600))

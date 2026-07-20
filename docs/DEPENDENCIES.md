@@ -6,33 +6,25 @@ these visible; the `audit` job surfaces new advisories. Both are informational
 until the items below clear, then flip `deny.toml`'s `[bans] multiple-versions`
 to `"deny"`.
 
-## Duplicate `reqwest` (0.12 + 0.13)
+## `reqwest` — migrated to 0.13 (first-party unified)
 
-**Status:** tracked, low-priority (build bloat only, not a correctness issue).
-
-Every wingman crate pins `reqwest = "0.12"`. The second major (`0.13`) is pulled
-transitively by `rmcp` (the MCP client), which moved to `reqwest 0.13`:
-
-```
-reqwest v0.13.4
-└── rmcp v1.7.0
-    └── wingman-mcp
-        └── wingman-cli
-```
-
-Unifying is **not** a free bump: `reqwest 0.13` renamed the `rustls-tls` feature
-to `rustls` and carries API changes, so migrating our five direct dependents
+**Status:** done for everything we control. All five first-party crates
 (`wingman-cli`, `wingman-mcp`, `wingman-providers`, `wingman-tools`,
-`wingman-tui`) is a real, wide change driven entirely by a transitive dep.
+`wingman-tui`) are now on **reqwest 0.13**, sharing one copy with `rmcp` (the
+MCP client, which was already on 0.13). The `rustls-tls` feature was renamed to
+`rustls` in 0.13, and that feature now pulls `aws-lc-rs` (needs `cc`/NASM) — so
+we instead use `rustls-no-provider` and install the **ring** crypto provider
+once at startup (`wingman_core::ensure_tls_provider`), preserving the
+static-binary / no-OpenSSL distribution story. `.form()` moved behind reqwest's
+`form` feature (enabled on `wingman-providers` for the watsonx IAM exchange).
 
-**Resolution paths (either clears it):**
-- Bump the whole stack to `reqwest 0.13` once we're ready to migrate features +
-  API and re-verify the MSRV job — do this deliberately, not as a side effect.
-- Or wait for `rmcp` to align, or pin `rmcp` to a `reqwest 0.12` release if one
-  exists and we can accept that version.
-
-Until then: `deny.toml` sets `multiple-versions = "warn"` so it's visible but
-non-blocking.
+**Remaining 0.12 copy — outside our control:** `hf-hub` (pulled by `fastembed`
+behind the optional `embeddings` feature of `wingman-rag`, for downloading
+embedding models) still depends on `reqwest 0.12`. So a second reqwest major
+persists *only* in the embeddings dependency tree. It clears when `hf-hub` bumps
+to 0.13, or entirely if you build `wingman-rag` with `--no-default-features`
+(hash embedder, no fastembed). `deny.toml` keeps `multiple-versions = "warn"`
+until then.
 
 ## `ort` release-candidate (`2.0.0-rc.x`)
 

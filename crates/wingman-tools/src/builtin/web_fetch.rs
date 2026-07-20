@@ -91,6 +91,8 @@ impl Tool for WebFetch {
             }
         });
 
+        wingman_core::ensure_tls_provider();
+
         let client = match reqwest::Client::builder()
             .user_agent("wingman/0.0.1")
             .timeout(std::time::Duration::from_secs(20))
