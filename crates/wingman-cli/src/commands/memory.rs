@@ -136,6 +136,116 @@ fn memory_dir() -> Result<PathBuf> {
     Ok(wingman_config::ensure_global_dir()?.join("memory"))
 }
 
+/// `wingman memory sync [<git-ref>]` — reconcile the team-shared project
+/// memory.
+///
+/// Teams commit `<project>/.wingman/memory/` to git so a new teammate's agent
+/// starts with the team's accumulated knowledge. Two frictions make raw git
+/// awkward: (1) the regenerated `MEMORY.md` index conflicts whenever two people
+/// each add a memory, and (2) a teammate's memories on another branch aren't in
+/// your tree yet. `sync` handles both:
+///   - optional `<git-ref>` (e.g. `origin/main`): copy in any memory files
+///     present at that ref but missing locally — never overwriting a local
+///     file, so your own memories and edits are safe;
+///   - always: rebuild `MEMORY.md` from the memory files on disk, resolving the
+///     index conflict deterministically and folding every memory into the
+///     prompt index.
+pub async fn sync(git_ref: Option<String>) -> Result<ExitCode> {
+    let paths = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
+    let dir = store.project_dir();
+    std::fs::create_dir_all(&dir).ok();
+
+    let before: std::collections::BTreeSet<String> =
+        store.indexed_project_slugs().into_iter().collect();
+
+    // 1. Optionally fold in teammate memory files from a git ref.
+    let mut added_from_ref = 0usize;
+    if let Some(gref) = git_ref.as_deref() {
+        added_from_ref = import_memories_from_ref(&paths.root, &dir, gref)?;
+    }
+
+    // 2. Rebuild the index from whatever is now on disk.
+    let slugs = store
+        .rebuild_project_index()
+        .map_err(|e| anyhow::anyhow!("rebuild index: {e}"))?;
+    let after: std::collections::BTreeSet<String> = slugs.iter().cloned().collect();
+
+    let newly_indexed: Vec<&String> = after.difference(&before).collect();
+    let dropped: Vec<&String> = before.difference(&after).collect();
+
+    if let Some(gref) = git_ref.as_deref() {
+        println!("pulled {added_from_ref} new memory file(s) from {gref}");
+    }
+    println!("indexed {} project memories → {}", slugs.len(), dir.join("MEMORY.md").display());
+    if !newly_indexed.is_empty() {
+        println!("  + folded into the index: {}", join_slugs(&newly_indexed));
+    }
+    if !dropped.is_empty() {
+        println!(
+            "  - removed stale index entries (file no longer present): {}",
+            join_slugs(&dropped)
+        );
+    }
+    if newly_indexed.is_empty() && dropped.is_empty() && added_from_ref == 0 {
+        println!("  (already in sync)");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn join_slugs(slugs: &[&String]) -> String {
+    slugs
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Copy memory `*.md` files present at `git_ref` into `dir`, skipping any that
+/// already exist locally (never clobbering local memories/edits). Returns the
+/// count added. Best-effort: a non-git repo or bad ref yields a clean error.
+fn import_memories_from_ref(root: &Path, dir: &Path, git_ref: &str) -> Result<usize> {
+    // List files under .wingman/memory at the ref.
+    let rel_dir = ".wingman/memory";
+    let listing = std::process::Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", git_ref, "--", rel_dir])
+        .current_dir(root)
+        .output()
+        .context("git ls-tree")?;
+    if !listing.status.success() {
+        anyhow::bail!(
+            "git ls-tree {git_ref} failed: {}",
+            String::from_utf8_lossy(&listing.stderr).trim()
+        );
+    }
+    let mut added = 0usize;
+    for path in String::from_utf8_lossy(&listing.stdout).lines() {
+        let path = path.trim();
+        if !path.ends_with(".md") || path.ends_with("MEMORY.md") {
+            continue;
+        }
+        let file_name = Path::new(path)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let dst = dir.join(&file_name);
+        if dst.exists() {
+            continue; // never clobber a local memory
+        }
+        let show = std::process::Command::new("git")
+            .args(["show", &format!("{git_ref}:{path}")])
+            .current_dir(root)
+            .output()
+            .context("git show")?;
+        if show.status.success() {
+            std::fs::write(&dst, &show.stdout)
+                .with_context(|| format!("write {}", dst.display()))?;
+            added += 1;
+        }
+    }
+    Ok(added)
+}
+
 fn collect_pack(src: &Path) -> Result<BTreeMap<String, String>> {
     let mut pack = BTreeMap::new();
     for entry in walk_md(src) {

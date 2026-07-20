@@ -430,6 +430,14 @@ pub enum MemoryAction {
     },
     /// Show a unified diff of two memory packs (or the live dir vs. a pack).
     Diff { a: String, b: String },
+    /// Reconcile team-shared project memory: optionally fold in memory files
+    /// from a git ref (without clobbering local ones), then rebuild MEMORY.md
+    /// from the files on disk — resolving index merge conflicts.
+    Sync {
+        /// Git ref to pull teammate memory files from (e.g. `origin/main`).
+        /// Omit to just rebuild the index from local files.
+        git_ref: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -543,6 +551,7 @@ pub async fn run() -> Result<ExitCode> {
             MemoryAction::Export { out } => commands::memory::export(out).await,
             MemoryAction::Import { path, force } => commands::memory::import(path, force).await,
             MemoryAction::Diff { a, b } => commands::memory::diff(a, b).await,
+            MemoryAction::Sync { git_ref } => commands::memory::sync(git_ref).await,
         },
         Some(Command::Review {
             pr,

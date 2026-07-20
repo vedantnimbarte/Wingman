@@ -128,6 +128,37 @@ impl MemoryStore {
         Ok(())
     }
 
+    /// Project memories only (no global), sorted by slug. Used by
+    /// `wingman memory sync` to reason about the team-shared, git-committed set.
+    pub fn load_project(&self) -> Vec<Memory> {
+        let mut mems = load_dir(&self.project_dir(), MemoryScope::Project);
+        mems.sort_by(|a, b| a.name.cmp(&b.name));
+        mems
+    }
+
+    /// Regenerate the project `MEMORY.md` index from the memory files actually
+    /// present on disk. This is the core of `wingman memory sync`: teams commit
+    /// `.wingman/memory/`, but the regenerated index file conflicts in git
+    /// whenever two teammates each add a memory. Deriving the index from the
+    /// files themselves resolves that class of conflict deterministically and
+    /// folds every pulled-in teammate memory into the prompt index. Returns the
+    /// slugs indexed.
+    pub fn rebuild_project_index(&self) -> Result<Vec<String>> {
+        let dir = self.project_dir();
+        std::fs::create_dir_all(&dir)?;
+        let mems = self.load_project();
+        write_full_index(&dir.join("MEMORY.md"), &mems)?;
+        Ok(mems.iter().map(|m| m.name.clone()).collect())
+    }
+
+    /// Slugs currently listed in the project `MEMORY.md` index (not the files).
+    /// Lets `sync` report which memories the rebuild newly folded in.
+    pub fn indexed_project_slugs(&self) -> Vec<String> {
+        let path = self.project_dir().join("MEMORY.md");
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        index_slugs(&text)
+    }
+
     /// Load every memory from both scopes. Project memories with a colliding
     /// name override the global one.
     pub fn load_all(&self) -> Vec<Memory> {
@@ -317,6 +348,43 @@ fn ensure_index(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Write a complete `MEMORY.md` from a list of memories (one sorted line each),
+/// replacing any existing index. The line format matches [`update_index`] so a
+/// rebuilt index is byte-compatible with an incrementally-maintained one.
+fn write_full_index(index_path: &Path, mems: &[Memory]) -> Result<()> {
+    if let Some(parent) = index_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut out = String::from("# wingman memory index\n\n");
+    for m in mems {
+        out.push_str(&format!(
+            "- [{}]({}.md) [{}] — {}\n",
+            m.name,
+            m.name,
+            m.mtype.as_str(),
+            truncate(&one_line(&m.description), 140),
+        ));
+    }
+    std::fs::write(index_path, out)?;
+    Ok(())
+}
+
+/// Extract the memory slugs referenced by an index body (lines like
+/// `- [slug](slug.md) …`).
+fn index_slugs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        if let Some(rest) = line.strip_prefix("- [") {
+            if let Some(end) = rest.find(']') {
+                out.push(rest[..end].to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Append a line for `slug` to the index if absent; replace the existing
 /// line if present.
 fn update_index(index_path: &Path, slug: &str, description: &str, mtype: MemoryType) -> Result<()> {
@@ -462,6 +530,42 @@ mod tests {
         assert_eq!(slugify("User prefers terse"), "user-prefers-terse");
         assert_eq!(slugify("---foo!!!bar---"), "foo-bar");
         assert_eq!(slugify("kebab-case-already"), "kebab-case-already");
+    }
+
+    #[test]
+    fn rebuild_project_index_derives_from_files() {
+        let root = tmp_project();
+        let store = MemoryStore::new(root.clone());
+        // Two memories on disk, but a stale index that lists only one plus a
+        // now-deleted slug — the exact "two teammates edited MEMORY.md" mess.
+        for (name, mtype) in [("alpha", MemoryType::Project), ("beta", MemoryType::User)] {
+            store
+                .save(MemoryDraft {
+                    name: name.into(),
+                    description: format!("desc for {name}"),
+                    mtype,
+                    body: "b".into(),
+                    scope: Some(MemoryScope::Project),
+                })
+                .unwrap();
+        }
+        // Corrupt the index to simulate a merge-conflict leftover.
+        let idx = store.project_dir().join("MEMORY.md");
+        std::fs::write(&idx, "# wingman memory index\n\n- [ghost](ghost.md) [user] — gone\n").unwrap();
+
+        let before: std::collections::BTreeSet<_> =
+            store.indexed_project_slugs().into_iter().collect();
+        assert!(before.contains("ghost") && !before.contains("alpha"));
+
+        let slugs = store.rebuild_project_index().unwrap();
+        assert_eq!(slugs, vec!["alpha".to_string(), "beta".to_string()]);
+        let after: std::collections::BTreeSet<_> =
+            store.indexed_project_slugs().into_iter().collect();
+        assert!(after.contains("alpha") && after.contains("beta"));
+        assert!(!after.contains("ghost"), "stale slug dropped");
+        let body = std::fs::read_to_string(&idx).unwrap();
+        assert!(body.contains("desc for alpha"));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
