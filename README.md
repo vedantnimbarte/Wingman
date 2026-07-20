@@ -36,6 +36,11 @@ worker agents in isolated worktrees, and converges into a PR.
   - [docs/TOOLS.md](docs/TOOLS.md) — complete reference for all 20+ built-in tools.
   - [docs/AUTONOMOUS-MODE.md](docs/AUTONOMOUS-MODE.md) — design doc for multi-task orchestration (now shipped as [Pilot mode](#pilot-mode)).
   - [docs/DIFFERENTIATION.md](docs/DIFFERENTIATION.md) — single-agent differentiation roadmap (routing, warm index, verification receipts, team memory).
+  - [docs/LSP.md](docs/LSP.md) — LSP-backed code intelligence (definition/references/hover/diagnostics/rename/code-actions) and LSP-backed verification receipts.
+  - [docs/SDK.md](docs/SDK.md) — embed `wingman-core` as a library, or drive Wingman from any language over MCP.
+  - [docs/PACKAGING.md](docs/PACKAGING.md) — winget / Homebrew / Scoop packaging and release flow.
+  - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — tracked dependency notes (reqwest/ort).
+  - [docs/ROADMAP-STATUS.md](docs/ROADMAP-STATUS.md) — what's shipped and what needs external infra to run.
 - **For Developers:** See [Development](#development) below.
 
 ---
@@ -787,9 +792,11 @@ permission_mode = "read-only"
 compact_at_tokens = 120000
 tool_output_max_lines = 400
 prompt_cache = true
+# max_usd_per_session = 5.0   # soft warning when estimated spend crosses this
 
 [router]
 fast_model = "anthropic/claude-haiku-4-5-20251001"
+# local_model = "ollama/llama3.1"   # target of the `local` class keyword
 
 [tui]
 theme = "default"
@@ -799,6 +806,36 @@ show_token_usage = true
 # web_fetch/web_search are gated to auto-edit/yolo by default (network egress
 # is an exfiltration channel). Set true to also allow them in read-only/plan.
 allow_network = false
+redact_output_secrets = true   # redact secret tokens in tool output (default on)
+
+# Verification gate (runs after edits): compile check + affected tests + LSP
+# diagnostics, and optional headless-browser visual check.
+[verify]
+turn_gate = "auto"        # "auto" | "off" | an explicit command
+affected_tests = true
+lsp_diagnostics = true
+# [verify.browser]
+# url = "http://localhost:5173"
+# baseline = "tests/baseline.png"
+
+# Aider-style: commit each turn's edits automatically.
+[git]
+auto_commit = false
+
+# Append a compliance audit trail of every tool call.
+[audit]
+enabled = false
+
+# Server-backed team memory (beyond the git-backed `memory sync`).
+# [team]
+# endpoint = "https://memory.example.com"
+# token = "${WINGMAN_TEAM_TOKEN}"
+
+# Extend the agent with your own shell-command tools (no recompile).
+# [[tools.custom]]
+# name = "run_migration"
+# description = "Apply the latest DB migration"
+# command = "make migrate"
 
 [providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
@@ -917,10 +954,19 @@ wingman [OPTIONS] [COMMAND]
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
 | `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
+| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, and git/gh tooling. |
+| `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
+| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
+| `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
+| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
+| `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
+| `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
+| `router stats`       | Per-class model win-rates (gate pass-rate) for this repo. `--all` across repos. |
+| `router preset local`| Print a recommended local-first `[router]` preset. `--model <provider/model>`. |
 | `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
 | `undo`               | Restore the most recent `wingman checkpoint` via `git stash pop`. |
-| `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. |
+| `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. `--compare` reprices your volume against other models (provider-cost arbitrage). |
 | `session list`       | List recent session JSONL files for this project.       |
 | `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
 | `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
@@ -929,10 +975,15 @@ wingman [OPTIONS] [COMMAND]
 | `memory export <out>` | Export the global memory dir to a directory or `.json` pack. |
 | `memory import <path>` | Import a memory pack (`--force` to overwrite).        |
 | `memory diff <a> <b>` | Show differences between two packs (or live dir vs. pack). |
+| `memory sync [<ref>]` | Reconcile team-shared project memory: rebuild `MEMORY.md` from files (resolving index merge conflicts), optionally fold in a git ref's memories. |
+| `memory push` / `memory pull` | Sync memories through a team HTTP endpoint (`[team]`), non-clobbering. |
+| `memory review`      | Review distilled pending memories: list, or `--promote N` / `--discard N` / `--promote-all`. |
 | `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
 | `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
 | `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
+| `skill import <path>` | Import portable `SKILL.md` skills (a file, its dir, or a dir of them). `--project`, `--force`. |
+| `skill export <name> <dir>` | Export a wingman skill as a portable `<dir>/<name>/SKILL.md` bundle. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
@@ -942,6 +993,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
+| `pilot intake slack\|email\|voice` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion, STT transcript). |
 
 Running `wingman` with no subcommand launches the TUI against the resolved
 provider and model.
@@ -970,7 +1022,17 @@ decide whether to act, prompt, or refuse based on that context.
 | `run_shell`       | Execute a shell command. Subject to the permission denylist.            |
 | `web_fetch`       | Download an http(s) URL, strip HTML, return text.                       |
 | `web_search`      | DuckDuckGo HTML search (no API key); pairs with `web_fetch`.            |
-| `semantic_search` | Cosine search the project RAG index for relevant code chunks.           |
+| `semantic_search` | Hybrid search (dense vectors + BM25) the project RAG index for relevant code chunks. |
+| `find_symbol`     | Locate a symbol's definition via tree-sitter (feature-gated).           |
+| `edit_symbol`     | Replace a symbol's body via tree-sitter (feature-gated).                |
+| `outline`         | Structural outline of a file's symbols (feature-gated).                 |
+| `who_calls`       | Find references to a symbol, annotated with the enclosing function (feature-gated). |
+| `lsp_definition`  | Resolved go-to-definition via a language server.                        |
+| `lsp_references`  | Resolved find-references via a language server.                         |
+| `lsp_hover`       | Type / signature / doc summary via a language server.                   |
+| `lsp_diagnostics` | Live errors/warnings for a file via a language server.                  |
+| `lsp_rename`      | Project-wide rename via a language server (needs write permission).     |
+| `lsp_code_action` | List/apply the language server's quick-fixes / organize-imports.        |
 | `present_plan`    | Structured plan block; required step before edits in `plan` mode.       |
 | `save_memory`     | Persist a fact / preference / instruction across sessions.              |
 | `recall_memory`   | Read the full body of a memory by slug.                                 |
@@ -980,7 +1042,14 @@ decide whether to act, prompt, or refuse based on that context.
 | `read_session`    | Fetch a full session JSONL by id.                                       |
 
 Tool output is bounded by `tokens.tool_output_max_lines`; anything longer is
-head/tail truncated before being fed back into the model.
+head/tail truncated before being fed back into the model. High-confidence secret
+tokens are redacted from tool output before it reaches the model
+(`[tools].redact_output_secrets`, default on).
+
+You can add your own tools without recompiling: define a shell command under
+`[[tools.custom]]` (`name`, `description`, `command`) and it becomes a tool the
+model can call — the tool input JSON arrives on stdin and in
+`$WINGMAN_TOOL_INPUT`, and stdout is the result (runs under the shell permission).
 
 ---
 
