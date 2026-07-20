@@ -351,6 +351,12 @@ pub struct RouterConfig {
     /// "Fast" model used for classification, summarization, and recap.
     /// Form: `provider/model_id`, e.g. `anthropic/claude-haiku-4-5-20251001`.
     pub fast_model: Option<String>,
+    /// Local model for the privacy preset — the target of the "local" class
+    /// keyword. Form: `provider/model_id`, e.g. `ollama/llama3.1`. When classes
+    /// like `summarize`/`compaction` map to "local", those steps never leave
+    /// the machine. `wingman router preset local` prints a recommended block.
+    #[serde(default)]
+    pub local_model: Option<String>,
     /// Ordered fallback chain. If the primary model errors (network /
     /// rate-limit / provider 5xx), the runtime walks this list in order.
     /// Each entry is `provider/model_id`.
@@ -382,6 +388,7 @@ impl RouterConfig {
         }
         match self.classes.get(class).map(String::as_str) {
             Some("fast") => self.fast_model.clone(),
+            Some("local") => self.local_model.clone(),
             Some("default") | None => None,
             Some(explicit) => Some(explicit.to_string()),
         }

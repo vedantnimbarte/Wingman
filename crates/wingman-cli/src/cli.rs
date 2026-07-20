@@ -496,6 +496,16 @@ pub enum RouterAction {
         #[arg(long)]
         all: bool,
     },
+    /// Print a recommended [router] preset to paste into config. `local` keeps
+    /// cheap steps (summarize/compaction/commit-message/title) on a local model.
+    Preset {
+        /// Preset name (currently: `local`).
+        #[arg(default_value = "local")]
+        name: String,
+        /// Local model to use for the `local` preset (default ollama/llama3.1).
+        #[arg(long)]
+        model: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
