@@ -7,7 +7,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use wingman_core::{ContentBlock, LearningHook, Message, Role};
+use wingman_rag::Indexer;
 
 use crate::{
     memory::{self, MemoryStore},
@@ -58,6 +60,13 @@ pub struct LearnHook {
     /// Cached count of recent user-message indexes we've already consumed
     /// so before_turn doesn't re-process the same turn for outcome scoring.
     last_user_idx: Mutex<usize>,
+    /// Optional project index for proactive retrieval ("search escalation").
+    /// `None` when RAG isn't wired (e.g. no embedder available).
+    indexer: Option<Arc<Indexer>>,
+    /// Cache of the retrieval block keyed by user-message count, so we only
+    /// hit the index once per user turn and keep the injected context stable
+    /// across the turn's tool round-trips.
+    retrieval: Mutex<Option<(usize, Option<String>)>>,
 }
 
 impl LearnHook {
@@ -68,7 +77,16 @@ impl LearnHook {
             stats,
             signals: Arc::new(Mutex::new(LearnSignals::default())),
             last_user_idx: Mutex::new(0),
+            indexer: None,
+            retrieval: Mutex::new(None),
         }
+    }
+
+    /// Attach the project index so `before_turn` can inject relevant code
+    /// locations for each request. Builder-style; a no-op when `idx` is None.
+    pub fn with_indexer(mut self, idx: Option<Arc<Indexer>>) -> Self {
+        self.indexer = idx;
+        self
     }
 
     pub fn signals(&self) -> Arc<Mutex<LearnSignals>> {
@@ -130,8 +148,67 @@ impl LearnHook {
     }
 }
 
+impl LearnHook {
+    /// Latest user message flattened to plain text (concatenated text blocks).
+    fn latest_user_text(history: &[Message]) -> Option<String> {
+        let msg = history.iter().rev().find(|m| m.role == Role::User)?;
+        let text: String = msg
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    /// Search escalation: pull the top index hits for the latest request and
+    /// render their locations, so the agent starts from the right files
+    /// instead of spending tool turns grepping. Returns `None` when there's
+    /// no index, no useful query, or no hits.
+    async fn retrieval_block(&self, history: &[Message]) -> Option<String> {
+        let indexer = self.indexer.as_ref()?;
+        let query = Self::latest_user_text(history)?;
+        // Very short prompts ("yes", "go on") aren't concept queries.
+        if query.trim().len() < 8 {
+            return None;
+        }
+        let hits = match indexer.search(query.trim(), 4).await {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::debug!("search-escalation retrieval failed: {e}");
+                return None;
+            }
+        };
+        if hits.is_empty() {
+            return None;
+        }
+        let mut lines = vec![
+            "Relevant code from the project index (semantic search on the latest request). \
+             Prefer reading these locations over a fresh grep:"
+                .to_string(),
+        ];
+        for h in &hits {
+            let sym = h
+                .symbol
+                .as_deref()
+                .map(|s| format!("  {s}"))
+                .unwrap_or_default();
+            lines.push(format!("- {}:{}-{}{}", h.path, h.start_line, h.end_line, sym));
+        }
+        Some(lines.join("\n"))
+    }
+}
+
+#[async_trait]
 impl LearningHook for LearnHook {
-    fn before_turn(&self, history: &[Message]) -> Option<String> {
+    async fn before_turn(&self, history: &[Message]) -> Option<String> {
         if !self.cfg.enabled {
             return None;
         }
@@ -139,14 +216,40 @@ impl LearningHook for LearnHook {
         // Outcome scoring: every new user turn is a chance to resolve any
         // pending skill invocation.
         let current_user_count = history.iter().filter(|m| m.role == Role::User).count();
-        let mut idx = self.last_user_idx.lock().unwrap();
-        if current_user_count > *idx {
-            *idx = current_user_count;
-            drop(idx);
-            self.score_pending_outcome(history);
+        {
+            let mut idx = self.last_user_idx.lock().unwrap();
+            if current_user_count > *idx {
+                *idx = current_user_count;
+                drop(idx);
+                self.score_pending_outcome(history);
+            }
         }
 
         let mut hints: Vec<String> = Vec::new();
+
+        // Search escalation: inject top index hits for this user turn. Cached
+        // by user-message count so we hit the index once per turn (the guard
+        // is dropped before the await — std Mutex can't cross it).
+        if self.indexer.is_some() {
+            let cached = {
+                let cache = self.retrieval.lock().unwrap();
+                match &*cache {
+                    Some((n, block)) if *n == current_user_count => Some(block.clone()),
+                    _ => None,
+                }
+            };
+            let block = match cached {
+                Some(b) => b,
+                None => {
+                    let b = self.retrieval_block(history).await;
+                    *self.retrieval.lock().unwrap() = Some((current_user_count, b.clone()));
+                    b
+                }
+            };
+            if let Some(b) = block {
+                hints.push(b);
+            }
+        }
 
         // Quiet-session nudge.
         let quiet = self.stats.counter_get("sessions_without_save").unwrap_or(0);
@@ -207,10 +310,19 @@ pub struct LearnHandles {
 
 impl LearnHandles {
     pub fn build(cfg: LearnConfig) -> crate::Result<Self> {
+        Self::build_with_indexer(cfg, None)
+    }
+
+    /// Like [`build`], but attaches a project index so the hook can do
+    /// proactive retrieval ("search escalation") each turn.
+    pub fn build_with_indexer(
+        cfg: LearnConfig,
+        indexer: Option<Arc<Indexer>>,
+    ) -> crate::Result<Self> {
         let memory = Arc::new(MemoryStore::new(cfg.project_root.clone()));
         memory.ensure_indexes()?;
         let stats = Arc::new(StatsStore::open_default()?);
-        let hook = Arc::new(LearnHook::new(cfg, memory.clone(), stats.clone()));
+        let hook = Arc::new(LearnHook::new(cfg, memory.clone(), stats.clone()).with_indexer(indexer));
         let signals = hook.signals();
         Ok(Self {
             hook,
@@ -225,4 +337,59 @@ impl LearnHandles {
 pub fn memory_prompt_block(store: &MemoryStore) -> Option<String> {
     let mems = store.load_all();
     memory::render_prompt_block(&mems)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wingman_rag::{Embedder, HashEmbedder, IndexStore};
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    #[test]
+    fn latest_user_text_flattens_last_user_message() {
+        let history = vec![user("first"), user("where do we parse symbols")];
+        assert_eq!(
+            LearnHook::latest_user_text(&history).as_deref(),
+            Some("where do we parse symbols")
+        );
+        assert_eq!(LearnHook::latest_user_text(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn before_turn_injects_index_hits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        std::fs::write(
+            root.join("parser.rs"),
+            "fn parse_symbols(src: &str) { /* tokenize and parse symbols */ }\n",
+        )
+        .unwrap();
+
+        let embedder = Arc::new(HashEmbedder::new(64));
+        let store = IndexStore::open(&root.join("index.db"), embedder.id(), embedder.dim()).unwrap();
+        let indexer = Arc::new(Indexer::new(root.clone(), embedder, Arc::new(store)));
+        indexer.reindex_repo().await.unwrap();
+
+        let cfg = LearnConfig::new(root.clone(), "test-session".into());
+        let hook = LearnHook::new(
+            cfg,
+            Arc::new(MemoryStore::new(root.clone())),
+            Arc::new(StatsStore::open(&root.join("learn.db")).unwrap()),
+        )
+        .with_indexer(Some(indexer));
+
+        let history = vec![user("where do we parse symbols in this project")];
+        let out = hook.before_turn(&history).await.unwrap_or_default();
+        assert!(
+            out.contains("parser.rs"),
+            "expected retrieval block to cite parser.rs, got: {out}"
+        );
+        assert!(out.contains("project index"), "got: {out}");
+    }
 }

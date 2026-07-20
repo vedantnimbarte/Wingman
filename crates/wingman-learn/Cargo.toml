@@ -14,6 +14,7 @@ wingman-skills = { workspace = true }
 wingman-session = { workspace = true }
 wingman-rag = { workspace = true }
 wingman-ts = { workspace = true, optional = true }
+async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -27,3 +28,4 @@ treesitter = ["dep:wingman-ts", "wingman-ts/treesitter"]
 
 [dev-dependencies]
 tokio = { workspace = true }
+tempfile = "3"

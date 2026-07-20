@@ -30,7 +30,10 @@ impl Tool for Grep {
         ToolSpec {
             name: "grep".into(),
             description: "Search for a regex pattern across files (gitignore-aware). Returns \
-                          `path:line:content` lines. Default limit 200 matches."
+                          `path:line:content` lines. Default limit 200 matches. For concept-level \
+                          questions (\"where do we handle X\", \"what implements Y\") prefer \
+                          `semantic_search` first — it finds relevant code by meaning in one call; \
+                          use grep for exact strings, identifiers, and regexes."
                 .into(),
             input_schema: json!({
                 "type": "object",

@@ -931,7 +931,10 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
-    let learn = match LearnHandles::build(learn_cfg) {
+    // Give the learn hook the project index so it can inject relevant code
+    // locations per turn (search escalation). Cheap: opens the store, no reindex.
+    let learn_indexer = build_indexer(&paths).ok().flatten();
+    let learn = match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
         Ok(h) => Some(Arc::new(h)),
         Err(e) => {
             tracing::warn!("disabling learning loop: {e}");

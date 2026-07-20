@@ -234,8 +234,9 @@ struct IpcInjector {
     pending: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
+#[async_trait::async_trait]
 impl wingman_core::LearningHook for IpcInjector {
-    fn before_turn(&self, _history: &[wingman_core::Message]) -> Option<String> {
+    async fn before_turn(&self, _history: &[wingman_core::Message]) -> Option<String> {
         let mut q = self.pending.lock().unwrap();
         if q.is_empty() {
             return None;
