@@ -11,7 +11,7 @@
 
 use anyhow::Result;
 use std::process::ExitCode;
-use wingman_config::{Config, PermissionMode, ProjectPaths};
+use wingman_config::{Config, ProjectPaths};
 
 pub async fn run(cfg: Config, json: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
@@ -44,7 +44,8 @@ pub async fn run(cfg: Config, json: bool) -> Result<ExitCode> {
             )
         })
         .collect();
-    tools.sort_by(|a, b| b.1.cmp(&a.1));
+    // Largest first — that's the actionable end of the list.
+    tools.sort_by_key(|(_, tokens, _)| std::cmp::Reverse(*tokens));
 
     let tool_tokens: u32 = tools.iter().map(|(_, t, _)| t).sum();
     let total = system_tokens + tool_tokens;
