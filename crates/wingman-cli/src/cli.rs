@@ -185,6 +185,14 @@ pub enum Command {
     /// model routing, the verification gate, and index freshness.
     #[command(display_order = 5)]
     Knows,
+    /// Show what Wingman sends before you type: system-prompt and tool-schema
+    /// token counts, the first-turn total, and what that costs per turn.
+    #[command(display_order = 6)]
+    Context {
+        /// Machine-readable output, including every tool's size.
+        #[arg(long)]
+        json: bool,
+    },
     /// Benchmark harness: run a suite of prompts and record time-to-first-token,
     /// tokens/task, wall time, and verified-done rate. Needs a live provider.
     #[command(display_order = 42)]
@@ -834,6 +842,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
         Some(Command::Attest) => commands::attest::run(load_config()?).await,
+        Some(Command::Context { json }) => commands::context::run(load_config()?, json).await,
         Some(Command::Trust { action }) => commands::trust::run(action).await,
         Some(Command::Golden { action }) => match action {
             GoldenAction::Capture { name, command } => {

@@ -3,6 +3,7 @@ pub mod batch;
 pub mod bench;
 pub mod checkpoint;
 pub mod config;
+pub mod context;
 pub mod cost;
 pub mod diff;
 pub mod diff_annotate;

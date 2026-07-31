@@ -104,13 +104,19 @@ mod fastembed_impl {
             // with no output and no explanation — which reads as a freeze, and
             // is a poor look for a tool that advertises a local-only mode.
             // Announce it, and let fastembed draw the progress bar.
+            // "Cached" = the cache directory exists and has something in it.
+            // Matching an exact model directory name is brittle: fastembed's
+            // layout is its own business and changes between versions, and a
+            // stale guess here means the banner prints on every single run.
             let already_cached = cache_dir
                 .as_ref()
-                .map(|d| d.join("models--Qdrant--bge-small-en-v1.5-onnx-Q").exists())
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .map(|mut entries| entries.next().is_some())
                 .unwrap_or(false);
             if !already_cached {
                 eprintln!(
-                    "wingman: downloading the embedding model (~120 MB, one time) for                      semantic search…"
+                    "wingman: downloading the embedding model (~120 MB, one time) \
+                     for semantic search…"
                 );
             }
             let mut opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
