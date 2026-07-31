@@ -6,21 +6,45 @@
 
 [![ci](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml)
 
-`wingman` is a multi-provider, terminal-first **self-improving** coding agent
-written in Rust. It runs as a TUI for interactive sessions and as a headless
-one-shot (`--print "prompt"`) for scripting, talks to 73+ LLM providers behind
-a single streaming interface, ships a built-in tool layer for reading,
-searching, and editing the project tree, and learns from every conversation:
-it builds a persistent model of you and your projects, proposes reusable
-skills mined from your session history (which you review and promote), scores
-how well its skills perform, and recalls past sessions across projects.
+**A terminal coding agent that asks the compiler instead of guessing.**
 
-It is positioned as an open, provider-agnostic alternative to Claude Code,
-Cursor, and Aider — with native support for Anthropic, OpenAI, ChatGPT
-(OAuth), Google Gemini, OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama,
-a built-in MCP host that adapts external MCP-server tools as first-class
-tools, and a multi-agent **pilot mode** that plans a goal, delegates to
-worker agents in isolated worktrees, and converges into a PR.
+Most agents answer "where is this used, and what breaks if I change it" by
+grepping and reading files until the context window fills. `wingman` asks the
+language server and a local semantic index, so it resolves imports, types, and
+re-exports rather than matching names — and it spends a fraction of the
+context doing it.
+
+That is the part worth choosing it for. Everything else is table stakes, and
+this README tries to be honest about which is which.
+
+```
+$ wingman context
+  system prompt       583 tokens
+  tool schemas       3653 tokens  (24 tools)
+  --------------------------------------------
+  first turn         4236 tokens  before your prompt
+```
+
+Run that in your own repo. Every agent pays a per-turn context tax and almost
+none of them will tell you what it is.
+
+**What else you get:** a `ratatui` TUI and a headless `--print` mode; one
+streaming interface over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
+OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama; an MCP host; a verification
+gate that runs your build and tests before the agent may call a turn done; and
+a multi-agent **pilot mode** that plans a goal, delegates to workers in
+isolated worktrees, and converges into a PR.
+
+**What it deliberately doesn't do.** It doesn't push your code to anyone's
+cloud — BYO key, everything local. It doesn't reuse a subscription token to
+dodge API billing. It doesn't headline agent count: the two firms who have
+published the most on parallel agents both concluded that writes should stay
+single-threaded, and pilot mode serialises tasks whose write-sets overlap
+rather than racing them. And it doesn't claim your shell is sandboxed when it
+isn't — `wingman doctor` tells you exactly which containment is active on your
+machine.
+
+Pre-1.0. See [Maturity](#maturity) for what that means in practice.
 
 ---
 
@@ -1136,6 +1160,32 @@ model can call — the tool input JSON arrives on stdin and in
 
 ---
 
+## Maturity
+
+Pre-1.0, and the honest breakdown matters more than a version number. This
+table is what "shipped" means per area, so you can decide what to lean on.
+
+| Area | State | What that means |
+| --- | --- | --- |
+| Agent loop, tools, providers | **Solid** | The daily path. Streaming, tool dispatch, compaction, session resume, live model swap. |
+| LSP code intelligence | **Solid** | Real definition/references/hover/diagnostics/rename, 11 languages, degrades to tree-sitter when no server is installed. |
+| Semantic index (RAG) | **Solid** | Hybrid dense + BM25. Downloads a ~120 MB embedding model on first use. |
+| Verification gate | **Solid, bounded** | Runs your build/tests before the agent may finish. Gives up after `[verify].max_retries` (default 2) and exits non-zero — bounded retries, not loop-until-green. |
+| Permission model | **Solid** | Central capability gate; protected paths refused in every mode. No interactive approval prompts by design — a disallowed call is refused, not queued. |
+| Shell containment | **Platform-dependent** | Real via `bwrap`/`sandbox-exec`; **nothing on Windows yet**. `wingman doctor` reports which. |
+| Pilot (multi-agent) | **Works, user-validated** | Genuine parallel workers in worktrees converging to a PR. Not CI-validated end-to-end; treat unattended runs with a spend cap and read the PR. |
+| Memory / skills | **Works, modest** | Memories are plain files you can read and delete. Skill "outcome scoring" is a phrase heuristic over your replies, not a learned signal. |
+| Browser verification | **Opt-in, fails open** | Needs `--features browser` and Chrome. Absent a browser the gate passes. |
+| Team memory, Slack intake | **Needs your infrastructure** | Speak simple HTTP contracts; you supply the endpoint/ingress. |
+| Editor integration | **Thin** | A VS Code bridge over `mcp-serve` — a context provider, not an agent UI. ACP is the intended path; see [#109](https://github.com/vedantnimbarte/Wingman/issues/109). |
+
+Known gaps are tracked as issues rather than hidden: see the
+[issue tracker](https://github.com/vedantnimbarte/Wingman/issues), and
+[SECURITY.md](SECURITY.md) for the threat model and what is deliberately out
+of scope.
+
+---
+
 ## Roadmap
 
 The project is being built milestone by milestone:
@@ -1159,9 +1209,11 @@ The project is being built milestone by milestone:
   tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
   end-to-end runs are user-validated)* `wingman autonomous` is a deprecated
   alias.
-- **Next** — Interactive TUI approval modal for skill/memory proposals,
-  session logging from the TUI (currently headless-only), autopilot-tier
-  hardening (critic, knowledge graph, tool synthesis).
+- **Next** — [ACP](https://agentclientprotocol.com/) support (one
+  implementation reaches Zed, JetBrains, Neovim, and Emacs — see
+  [#109](https://github.com/vedantnimbarte/Wingman/issues/109)), Windows shell
+  containment, and an interactive TUI approval modal for skill/memory
+  proposals.
 
 ---
 
