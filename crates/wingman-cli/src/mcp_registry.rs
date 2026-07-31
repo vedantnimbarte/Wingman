@@ -191,8 +191,11 @@ impl McpRegistry {
     fn register_server_tools(&self, server: &McpServer, into: &mut Vec<String>) {
         for tool in &server.tools {
             let handle: Arc<dyn McpToolHandle> = Arc::new(McpTool::build(server, tool));
-            let adapter: Arc<dyn wingman_tools::Tool> =
-                Arc::new(McpToolAdapter::new(handle, server.trusted));
+            let adapter: Arc<dyn wingman_tools::Tool> = Arc::new(McpToolAdapter::with_server(
+                handle,
+                server.trusted,
+                server.name.clone(),
+            ));
             let name = adapter.spec().name;
             self.tools.register_arc(adapter);
             into.push(name);

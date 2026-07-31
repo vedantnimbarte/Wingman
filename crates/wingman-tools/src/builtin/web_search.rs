@@ -118,7 +118,9 @@ impl Tool for WebSearch {
                 r.snippet.chars().take(220).collect::<String>()
             ));
         }
-        ToolOutcome::ok(out)
+        // Result titles and snippets are attacker-controllable by anyone
+        // who can rank for the query.
+        ToolOutcome::ok(crate::wrap_untrusted("web_search results", &out))
     }
 }
 

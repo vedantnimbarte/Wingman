@@ -128,7 +128,12 @@ impl Tool for WebFetch {
             "url: {final_url}\nstatus: {status}{trunc}\n---\n",
             trunc = if truncated { "  [truncated]" } else { "" }
         );
-        ToolOutcome::ok(format!("{header}{body}"))
+        // Web pages are the classic injection vector: an attacker controls
+        // the bytes and wants them read as instructions. Fence them.
+        ToolOutcome::ok(format!(
+            "{header}{}",
+            crate::wrap_untrusted(&format!("web_fetch {final_url}"), &body)
+        ))
     }
 }
 
