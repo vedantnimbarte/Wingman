@@ -31,5 +31,6 @@ pub mod session;
 pub mod skill;
 pub mod spec;
 pub mod tour;
+pub mod trust;
 pub mod worker;
 pub mod worktree;

@@ -150,6 +150,15 @@ pub enum Command {
     /// Report the air-gapped / local-only posture (`[privacy].local_only`):
     /// what leaves the machine, verified against config, for compliance.
     Attest,
+    /// Trust this project's `.wingman/config.toml` so its executable keys
+    /// (`[hooks]`, `[mcp]`, `[verify]`, `[providers]`, `permission_mode`, …)
+    /// are honoured. Untrusted project configs may only pick a model and tune
+    /// presentation — a cloned repo must not be able to run commands. Trust is
+    /// pinned to the file's contents and lapses whenever it changes.
+    Trust {
+        #[command(subcommand)]
+        action: Option<TrustAction>,
+    },
     /// Characterization / golden-master testing: snapshot a command's output,
     /// then fail if a later change alters it (regression net for legacy code).
     Golden {
@@ -604,6 +613,19 @@ pub enum PrAction {
     },
 }
 
+#[derive(Subcommand, Debug, Clone, Copy, Default)]
+pub enum TrustAction {
+    /// Trust this project's config as it currently stands (the default).
+    #[default]
+    Add,
+    /// Revoke trust for this project's config.
+    Remove,
+    /// Report whether this project's config is currently trusted.
+    Show,
+    /// List every trusted project config, flagging any that have changed.
+    List,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum GoldenAction {
     /// Capture a command's output as a golden snapshot: `golden capture <name> -- <cmd…>`.
@@ -779,6 +801,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
         Some(Command::Attest) => commands::attest::run(load_config()?).await,
+        Some(Command::Trust { action }) => commands::trust::run(action).await,
         Some(Command::Golden { action }) => match action {
             GoldenAction::Capture { name, command } => {
                 commands::golden::capture(name, command).await
