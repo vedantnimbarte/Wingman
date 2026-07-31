@@ -146,6 +146,24 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<LspManager>>> {
     REG.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Shut down every language server this process started, across all project
+/// roots.
+///
+/// Language servers are long-lived child processes (rust-analyzer in
+/// particular is expensive). `LspClient` sets `kill_on_drop(true)`, but the
+/// process-wide registry holds an `Arc` for the lifetime of the process, so
+/// nothing was ever dropped and `LspManager::shutdown_all` had no callers —
+/// servers leaked until the process died. Call this on a clean exit.
+pub async fn shutdown_all_managers() {
+    let managers: Vec<Arc<LspManager>> = {
+        let mut reg = registry().lock().await;
+        reg.drain().map(|(_, m)| m).collect()
+    };
+    for m in managers {
+        m.shutdown_all().await;
+    }
+}
+
 /// The shared [`LspManager`] for `root`, created on first use.
 pub async fn manager_for(root: &Path) -> Arc<LspManager> {
     let key = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());

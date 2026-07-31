@@ -454,6 +454,10 @@ async fn run_inner(
             IdleAction::Quit => {
                 // Flush lifetime usage one last time on the way out.
                 ui.lifetime.save_merged(&ui.status.usage);
+                // Reap language servers. They are long-lived children
+                // (rust-analyzer especially) held by a process-wide registry,
+                // so without this they survived until the process died.
+                wingman_lsp::shutdown_all_managers().await;
                 return Ok(());
             }
             // A modal queued a task; loop back so the pump at the top of

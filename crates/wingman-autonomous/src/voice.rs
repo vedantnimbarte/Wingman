@@ -1,5 +1,12 @@
 //! J14 — voice intake (opt-in).
 //!
+//! **STATUS: PARKED — no production callers.** The logic below is implemented
+//! and unit-tested, but nothing in a real run reaches it; its only callers are
+//! its own tests. It is kept because the design is worth preserving, not
+//! because it is live. Do not cite it as a shipped capability, and check
+//! `git grep` before assuming a change here affects behaviour.
+//! Tracked in https://github.com/vedantnimbarte/Wingman/issues/105
+//!
 //! A local STT shim (whisper.cpp or platform-native) bound to a hotkey
 //! captures speech, transcribes it, and dispatches the text to the daemon
 //! intake queue as a [`Channel::Voice`](crate::intake::Channel::Voice)

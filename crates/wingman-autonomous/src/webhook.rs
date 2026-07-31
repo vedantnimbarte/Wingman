@@ -1,4 +1,15 @@
 //! J3 inbound webhook receiver — a minimal, dependency-free HTTP/1.1
+//!
+//! **STATUS: partially live.** `hmac_sha256`, `to_hex`, and
+//! `header_boundary_and_len` now back the authenticated Slack intake listener
+//! (`wingman pilot intake slack`). The HTTP receiver itself (`serve`,
+//! `serve_listener`, `handle_connection`) still has no production caller, and
+//! `[pilot.daemon].webhook_secret` is parsed but unread.
+//!
+//! Known gap if it is ever wired: there is no timestamp/replay window here —
+//! a captured signed request replays forever. The Slack path adds one; this
+//! one would need the same before being exposed.
+//! Tracked in https://github.com/vedantnimbarte/Wingman/issues/105
 //! endpoint that turns `POST /goals` into an intake [`Goal`].
 //!
 //! Built on `std::net::TcpListener` so it pulls in no web framework and is

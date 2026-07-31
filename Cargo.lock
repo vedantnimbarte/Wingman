@@ -4958,6 +4958,7 @@ dependencies = [
  "wingman-config",
  "wingman-core",
  "wingman-learn",
+ "wingman-lsp",
  "wingman-session",
  "wingman-skills",
  "wingman-ts",

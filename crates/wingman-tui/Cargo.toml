@@ -8,6 +8,7 @@ repository.workspace = true
 description = "ratatui-based terminal UI for wingman"
 
 [dependencies]
+wingman-lsp = { workspace = true }
 wingman-core = { workspace = true }
 wingman-config = { workspace = true }
 wingman-skills = { workspace = true }
