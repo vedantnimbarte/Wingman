@@ -1,4 +1,4 @@
-# wingman installer for Windows — downloads a prebuilt `wingman.exe` from the
+# wingman installer for Windows - downloads a prebuilt `wingman.exe` from the
 # latest GitHub Release and installs it onto your PATH.
 #
 #   irm https://raw.githubusercontent.com/vedantnimbarte/Wingman/main/scripts/install.ps1 | iex
@@ -34,6 +34,34 @@ try {
   Write-Host "Downloading $asset ..."
   $zip = Join-Path $tmp $asset
   Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+
+  # Verify the SHA256 the release workflow publishes alongside every archive.
+  # Without this, "the bytes GitHub served me" and "the bytes the release build
+  # produced" are the same claim taken on faith.
+  $sumFile = "$zip.sha256"
+  $haveSum = $true
+  try {
+    Invoke-WebRequest -Uri "$url.sha256" -OutFile $sumFile -UseBasicParsing
+  } catch {
+    $haveSum = $false
+  }
+
+  if ($haveSum) {
+    $expected = ((Get-Content $sumFile -First 1) -split '\s+')[0].Trim().ToLower()
+    $actual   = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+    if ([string]::IsNullOrWhiteSpace($expected)) {
+      throw "checksum file was empty; refusing to install unverified binary."
+    }
+    if ($expected -ne $actual) {
+      throw "CHECKSUM MISMATCH for $asset`n  expected: $expected`n  actual:   $actual`nRefusing to install. The download was corrupted or tampered with."
+    }
+    Write-Host "Checksum OK."
+  } elseif ($env:WINGMAN_SKIP_CHECKSUM -eq "1") {
+    Write-Host "warning: no checksum published for this asset; continuing because WINGMAN_SKIP_CHECKSUM=1."
+  } else {
+    throw "no checksum published for $asset (expected $url.sha256).`nRefusing to install unverified. Set WINGMAN_SKIP_CHECKSUM=1 to override."
+  }
+
   Expand-Archive -Path $zip -DestinationPath $tmp -Force
 
   New-Item -ItemType Directory -Path $installDir -Force | Out-Null
@@ -46,7 +74,7 @@ try {
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
   if ($userPath -notlike "*$installDir*") {
     [Environment]::SetEnvironmentVariable("Path", "$userPath;$installDir", "User")
-    Write-Host "Added $installDir to your user PATH — restart your terminal to pick it up."
+    Write-Host "Added $installDir to your user PATH - restart your terminal to pick it up."
   }
   Write-Host "Run: $Bin --help"
 } finally {

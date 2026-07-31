@@ -72,6 +72,37 @@ trap 'rm -rf "$tmp"' EXIT
 
 say "Downloading $asset ..."
 fetch "$url" "$tmp/$asset" || err "download failed. Has a release been published for $REPO? URL: $url"
+
+# --- verify checksum ------------------------------------------------------
+# The release workflow publishes <asset>.sha256 next to every archive. Verify
+# it before extracting: without this step "the bytes GitHub served me" and
+# "the bytes the release build produced" are the same claim on faith.
+if fetch "$url.sha256" "$tmp/$asset.sha256" 2>/dev/null; then
+  expected="$(awk '{print $1}' "$tmp/$asset.sha256" | head -n1 | tr -d "[:space:]")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp/$asset" | awk '{print $1}')"
+  elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')"
+  else
+    err "need sha256sum or shasum to verify the download. Install one, or set WINGMAN_SKIP_CHECKSUM=1 to bypass (not recommended)."
+  fi
+  if [ -z "$expected" ]; then
+    err "checksum file was empty; refusing to install unverified binary."
+  fi
+  if [ "$expected" != "$actual" ]; then
+    err "CHECKSUM MISMATCH for $asset
+  expected: $expected
+  actual:   $actual
+Refusing to install. This means the download was corrupted or tampered with."
+  fi
+  say "Checksum OK."
+elif [ "${WINGMAN_SKIP_CHECKSUM:-0}" = "1" ]; then
+  say "warning: no checksum published for this asset; continuing because WINGMAN_SKIP_CHECKSUM=1."
+else
+  err "no checksum published for $asset (expected $url.sha256).
+Refusing to install unverified. Set WINGMAN_SKIP_CHECKSUM=1 to override."
+fi
+
 tar -xzf "$tmp/$asset" -C "$tmp" || err "failed to extract $asset."
 
 # The archive contains the bare binary at its root.

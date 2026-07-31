@@ -77,6 +77,45 @@ jobs:
       - name: cargo check on MSRV
         run: cargo check --workspace
 
+  # Syntax-check the install scripts. `install.ps1` shipped broken once: it was
+  # UTF-8 without a BOM, PowerShell 5.1 read it as the ANSI codepage, and an
+  # em-dash decoded to a character PowerShell accepts as a string terminator —
+  # so the whole script failed to parse and the Windows install path was dead.
+  # This must run under `powershell` (5.1), not `pwsh`, or it won't reproduce.
+  scripts:
+    name: install scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse PowerShell scripts (5.1)
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $e = $null; $t = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$t, [ref]$e) | Out-Null
+            if ($e -and $e.Count -gt 0) {
+              $failed = $true
+              $e | ForEach-Object { Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Reject non-ASCII in .ps1 (PS 5.1 misdecodes it)
+        shell: powershell
+        run: |
+          $bad = Get-ChildItem -Recurse -Filter *.ps1 | Where-Object {
+            (Get-Content $_.FullName -Raw).ToCharArray() | Where-Object { [int]$_ -gt 127 }
+          }
+          if ($bad) {
+            $bad | ForEach-Object { Write-Host "::error file=$($_.FullName)::contains non-ASCII; keep .ps1 ASCII-only" }
+            exit 1
+          }
+      - name: Shell-check install.sh
+        shell: bash
+        run: |
+          sh -n scripts/install.sh
+          DRY_RUN=1 sh scripts/install.sh
+
   # Advisory scan. Informational (not in the required aggregate): some
   # advisories come from transitive deps (ort/fastembed) we can't immediately
   # bump, and we don't want an upstream RUSTSEC entry to block unrelated PRs.
