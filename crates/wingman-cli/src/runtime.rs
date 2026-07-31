@@ -488,30 +488,7 @@ pub async fn build_registry_with_learn(
         cfg.tools.shell_denylist.clone(),
         cfg.tools.allow_network,
     );
-    // Audit log path: explicit config, else the project's .wingman/audit.log.
-    let audit_path = if cfg.audit.enabled {
-        Some(
-            cfg.audit
-                .log_path
-                .clone()
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| paths.dir.join("audit.log")),
-        )
-    } else {
-        None
-    };
-    let mut reg = ToolRegistry::new(ctx)
-        .with_builtins()
-        .with_hooks(cfg.hooks.clone())
-        .with_audit(audit_path)
-        .with_output_redaction(cfg.tools.redact_output_secrets)
-        .with_custom_tools(&cfg.tools.custom);
-
-    // Air-gapped guard: hard-remove the network tools so no code leaves the box.
-    if cfg.privacy.local_only {
-        reg.unregister("web_fetch");
-        reg.unregister("web_search");
-    }
+    let mut reg = base_registry(ctx, cfg, audit_path_for(cfg, &paths));
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {
         reg = reg.with_semantic_search(idx);
@@ -568,17 +545,66 @@ pub async fn build_registry_with_learn(
         }
         reg.register(wingman_tools::builtin::ReadSession::new(paths.root.clone()));
     }
-    // Honor [tools].disabled_tools: a tool the user disabled must not be
-    // offered to the model. Applied last so it also removes builtins.
+    apply_tool_removals(&mut reg, cfg);
+    // MCP servers are connected later via [`McpRegistry::seed`] so the
+    // shared `Arc<ToolRegistry>` can be reached from the TUI for runtime
+    // add / remove operations.
+    Ok(reg)
+}
+
+/// Construct a registry with every security-relevant setting applied.
+///
+/// Both the main session and the `spawn_subagent` runner go through this. They
+/// used to build registries independently, and the subagent's copy silently
+/// omitted the audit log, secret redaction, `[tools].disabled_tools`, custom
+/// tools, and the `local_only` network-tool removal — so a subagent could reach
+/// the network under an air-gapped config, and its tool calls never reached the
+/// compliance trail. Keeping one builder is what stops those from drifting
+/// apart again.
+fn base_registry(
+    ctx: ToolCtx,
+    cfg: &Config,
+    audit_path: Option<std::path::PathBuf>,
+) -> ToolRegistry {
+    let reg = ToolRegistry::new(ctx)
+        .with_builtins()
+        .with_hooks(cfg.hooks.clone())
+        .with_audit(audit_path)
+        .with_output_redaction(cfg.tools.redact_output_secrets)
+        .with_custom_tools(&cfg.tools.custom);
+
+    // Air-gapped guard: hard-remove the network tools so no code leaves the
+    // box. `unregister` takes &self (the map is interior-mutable), so no `mut`
+    // binding is needed here.
+    if cfg.privacy.local_only {
+        reg.unregister("web_fetch");
+        reg.unregister("web_search");
+    }
+    reg
+}
+
+/// Honor `[tools].disabled_tools`. Applied after registration so it also
+/// removes builtins.
+fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
     for name in &cfg.tools.disabled_tools {
         if reg.unregister(name).is_some() {
             tracing::info!(target: "wingman::tools", tool = %name, "disabled via config");
         }
     }
-    // MCP servers are connected later via [`McpRegistry::seed`] so the
-    // shared `Arc<ToolRegistry>` can be reached from the TUI for runtime
-    // add / remove operations.
-    Ok(reg)
+}
+
+/// The audit-log path implied by config, if auditing is on.
+fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathBuf> {
+    if !cfg.audit.enabled {
+        return None;
+    }
+    Some(
+        cfg.audit
+            .log_path
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| paths.dir.join("audit.log")),
+    )
 }
 
 /// Build the project's RAG indexer. Uses fastembed (BGE small) by default
@@ -1423,11 +1449,16 @@ pub async fn build_agent_registry_learn(
     // `spawn_subagent` registered on it, so recursion is bounded to depth 1.
     {
         let cfg_for_runner = cfg.clone();
-        let mode_for_runner = mode;
+        // Clone the *parent's* ToolCtx rather than rebuilding one. Its mode
+        // lives behind a shared atomic, so `/mode read-only` mid-session
+        // now downgrades running subagents too; the old code snapshotted
+        // the mode by value into a detached ctx, so a subagent spawned
+        // after a downgrade still ran at the mode the session started in.
+        let parent_ctx = registry.ctx().clone();
         let runner: wingman_tools::builtin::SubagentRunner =
             Arc::new(move |spec: wingman_tools::builtin::SubagentSpec| {
                 let cfg = cfg_for_runner.clone();
-                let mode = mode_for_runner;
+                let parent_ctx = parent_ctx.clone();
                 Box::pin(async move {
                     // Model resolution: explicit override > task-class routing
                     // ([router.classes], e.g. search/summarize → fast_model) >
@@ -1457,19 +1488,16 @@ pub async fn build_agent_registry_learn(
                         build_provider(&cfg, &sel.provider_id).map_err(|e| e.to_string())?;
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let paths = ProjectPaths::discover(&cwd);
-                    let ctx = ToolCtx::new_with_config(
-                        mode,
-                        cwd,
-                        paths.root.clone(),
-                        cfg.tools.shell_denylist.clone(),
-                        cfg.tools.allow_network,
-                    );
-                    let mut inner_reg = ToolRegistry::new(ctx)
-                        .with_builtins()
-                        .with_hooks(cfg.hooks.clone());
+                    // Same builder as the main session, so the subagent
+                    // inherits the audit log, secret redaction, custom tools,
+                    // and the local_only network-tool removal instead of
+                    // quietly getting none of them.
+                    let mut inner_reg =
+                        base_registry(parent_ctx, &cfg, audit_path_for(&cfg, &paths));
                     if let Ok(Some(idx)) = build_indexer(&paths) {
                         inner_reg = inner_reg.with_semantic_search(idx);
                     }
+                    apply_tool_removals(&mut inner_reg, &cfg);
                     let inner_reg = Arc::new(inner_reg);
                     let agent_cfg = AgentConfig {
                         model: sel.model.clone(),
