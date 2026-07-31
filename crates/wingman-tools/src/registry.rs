@@ -670,8 +670,8 @@ mod tests {
 
         let blocking = HooksConfig {
             user_prompt_submit: vec![Hook {
-                // Non-zero exit == refuse.
-                command: if cfg!(windows) { "exit 1" } else { "exit 1" }.into(),
+                // Non-zero exit == refuse. `exit 1` works in both cmd and sh.
+                command: "exit 1".into(),
                 match_tool: String::new(),
                 block: true,
                 timeout_secs: 10,
