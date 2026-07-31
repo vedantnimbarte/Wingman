@@ -1177,7 +1177,7 @@ table is what "shipped" means per area, so you can decide what to lean on.
 | Memory / skills | **Works, modest** | Memories are plain files you can read and delete. Skill "outcome scoring" is a phrase heuristic over your replies, not a learned signal. |
 | Browser verification | **Opt-in, fails open** | Needs `--features browser` and Chrome. Absent a browser the gate passes. |
 | Team memory, Slack intake | **Needs your infrastructure** | Speak simple HTTP contracts; you supply the endpoint/ingress. |
-| Editor integration | **Thin** | A VS Code bridge over `mcp-serve` — a context provider, not an agent UI. ACP is the intended path; see [#109](https://github.com/vedantnimbarte/Wingman/issues/109). |
+| Editor integration | **ACP turn loop** | `wingman acp` speaks the Agent Client Protocol, so ACP-capable editors (Zed, JetBrains, Neovim, Emacs) can drive it. Covers the streaming turn loop; per-tool-call approval from the editor (`session/request_permission`) is not wired yet — Wingman applies its own permission model. A VS Code bridge over `mcp-serve` also exists as a context provider. |
 
 Known gaps are tracked as issues rather than hidden: see the
 [issue tracker](https://github.com/vedantnimbarte/Wingman/issues), and
@@ -1209,11 +1209,13 @@ The project is being built milestone by milestone:
   tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
   end-to-end runs are user-validated)* `wingman autonomous` is a deprecated
   alias.
-- **Next** — [ACP](https://agentclientprotocol.com/) support (one
-  implementation reaches Zed, JetBrains, Neovim, and Emacs — see
-  [#109](https://github.com/vedantnimbarte/Wingman/issues/109)), Windows shell
-  containment, and an interactive TUI approval modal for skill/memory
-  proposals.
+- **ACP** — `wingman acp` speaks the Agent Client Protocol over stdio
+  (initialize / session/new / session/prompt / session/cancel, streaming
+  `session/update`), so one implementation reaches Zed, JetBrains, Neovim, and
+  Emacs. *(shipped; turn loop)*
+- **Next** — editor-driven per-tool approval over ACP
+  (`session/request_permission`), Windows shell containment, and an
+  interactive TUI approval modal for skill/memory proposals.
 
 ---
 

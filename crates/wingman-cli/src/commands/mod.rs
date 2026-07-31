@@ -1,3 +1,4 @@
+pub mod acp_serve;
 pub mod attest;
 pub mod batch;
 pub mod bench;

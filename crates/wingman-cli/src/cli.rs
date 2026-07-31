@@ -217,6 +217,12 @@ pub enum Command {
     #[command(name = "mcp-serve")]
     #[command(display_order = 30)]
     McpServe,
+    /// Speak the Agent Client Protocol over stdio, so ACP-capable editors
+    /// (Zed, JetBrains, Neovim, Emacs) can drive Wingman as their agent —
+    /// one protocol instead of a plugin per editor.
+    #[command(name = "acp")]
+    #[command(display_order = 30)]
+    Acp,
     /// Distill durable facts from a past session into a pending-review file
     /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
     #[command(display_order = 25)]
@@ -843,6 +849,15 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
         Some(Command::Attest) => commands::attest::run(load_config()?).await,
         Some(Command::Context { json }) => commands::context::run(load_config()?, json).await,
+        Some(Command::Acp) => {
+            let cfg = load_config()?;
+            let mode = cli
+                .mode
+                .as_deref()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(cfg.permission_mode);
+            commands::acp_serve::run(cfg, mode).await
+        }
         Some(Command::Trust { action }) => commands::trust::run(action).await,
         Some(Command::Golden { action }) => match action {
             GoldenAction::Capture { name, command } => {
