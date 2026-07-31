@@ -62,6 +62,12 @@ impl McpRegistry {
         self.tools.set_mode(mode);
     }
 
+    /// Record the user's acceptance of a presented plan on the shared
+    /// `ToolCtx`. In `plan` mode this is what unlocks writes and shell.
+    pub fn approve_plan(&self) {
+        self.tools.ctx().approve_plan();
+    }
+
     /// Seed the registry from an already-loaded config + best-effort
     /// connect-all (the runtime does this at startup so the TUI can later
     /// see what's there).

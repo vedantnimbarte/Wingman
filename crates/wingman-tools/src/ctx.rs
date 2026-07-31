@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use wingman_config::PermissionMode;
 
@@ -20,6 +20,11 @@ pub struct ToolCtx {
     /// mode (including read-only/plan), not just the edit-capable ones. Off by
     /// default so network egress stays gated unless the user asks for it.
     pub allow_network: bool,
+    /// Has the user approved a plan this session? Only meaningful in
+    /// [`PermissionMode::Plan`], where writes and shell stay denied until the
+    /// agent has presented a plan *and* the user accepted it. Shared like
+    /// `mode`, so approving once re-gates every clone.
+    plan_approved: Arc<AtomicBool>,
 }
 
 /// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
@@ -51,6 +56,7 @@ impl ToolCtx {
             project_root,
             extra_denylist: Vec::new(),
             allow_network: false,
+            plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -69,6 +75,7 @@ impl ToolCtx {
             project_root,
             extra_denylist,
             allow_network,
+            plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -79,8 +86,30 @@ impl ToolCtx {
 
     /// Switch the permission mode live. Shared across clones of this ctx, so
     /// the running agent's next tool call is gated by the new mode.
+    ///
+    /// Switching *out* of `Plan` clears any plan approval, so returning to
+    /// plan mode later starts from "no plan approved" rather than inheriting
+    /// consent given for different work.
     pub fn set_mode(&self, mode: PermissionMode) {
+        if mode != PermissionMode::Plan {
+            self.plan_approved.store(false, Ordering::SeqCst);
+        }
         self.mode.store(mode_to_u8(mode), Ordering::SeqCst);
+    }
+
+    /// Record that the user accepted the agent's plan.
+    ///
+    /// This is what makes `plan` mode a gate rather than a naming convention:
+    /// until it is called, `plan` denies writes and shell exactly like
+    /// `read-only`; afterwards it behaves like `auto-edit` for the rest of the
+    /// session. Only a human action should call this — never a tool.
+    pub fn approve_plan(&self) {
+        self.plan_approved.store(true, Ordering::SeqCst);
+    }
+
+    /// Has a plan been approved this session?
+    pub fn plan_approved(&self) -> bool {
+        self.plan_approved.load(Ordering::SeqCst)
     }
 
     /// Returns `true` if `command` matches any entry in the project-level
@@ -152,7 +181,11 @@ impl ToolCtx {
         match self.mode() {
             PermissionMode::Yolo => true,
             PermissionMode::AutoEdit => self.is_inside_project(path),
-            PermissionMode::ReadOnly | PermissionMode::Plan => false,
+            // Plan is read-only until the user accepts a plan, then behaves
+            // like auto-edit. Before this, `plan` was byte-identical to
+            // read-only and `present_plan` gated nothing.
+            PermissionMode::Plan => self.plan_approved() && self.is_inside_project(path),
+            PermissionMode::ReadOnly => false,
         }
     }
 
@@ -239,12 +272,20 @@ impl ToolCtx {
     /// [`crate::Capability::WRITE`] before it runs. `allows_write` still
     /// decides *which* paths; this decides whether writing is on the table.
     pub fn allows_any_write(&self) -> bool {
-        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+        match self.mode() {
+            PermissionMode::AutoEdit | PermissionMode::Yolo => true,
+            PermissionMode::Plan => self.plan_approved(),
+            PermissionMode::ReadOnly => false,
+        }
     }
 
     /// Permission for any shell execution.
     pub fn allows_shell(&self) -> bool {
-        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+        match self.mode() {
+            PermissionMode::AutoEdit | PermissionMode::Yolo => true,
+            PermissionMode::Plan => self.plan_approved(),
+            PermissionMode::ReadOnly => false,
+        }
     }
 
     /// Permission for outbound network access (web_fetch / web_search).
@@ -547,6 +588,68 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `plan` used to be byte-identical to `read-only`: `present_plan` gated
+    /// nothing and there was no promotion step, while the README sold it as
+    /// "the agent must call present_plan before any edit".
+    #[test]
+    fn plan_mode_denies_until_the_plan_is_approved() {
+        let root = std::env::temp_dir().join(format!("wm-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("src.rs");
+
+        let ctx = ToolCtx::new(PermissionMode::Plan, root.clone(), root.clone());
+
+        // Before approval: identical to read-only.
+        assert!(!ctx.allows_write(&target));
+        assert!(!ctx.allows_any_write());
+        assert!(!ctx.allows_shell());
+        assert!(!ctx.plan_approved());
+
+        // Reads were always fine, and must stay fine.
+        assert!(ctx.allows_read(&target));
+
+        ctx.approve_plan();
+
+        // After approval: behaves like auto-edit, still project-confined.
+        assert!(ctx.plan_approved());
+        assert!(ctx.allows_write(&target));
+        assert!(ctx.allows_any_write());
+        assert!(ctx.allows_shell());
+        assert!(
+            !ctx.allows_write(std::path::Path::new("/etc/passwd")),
+            "approval must not lift project containment"
+        );
+        assert!(
+            !ctx.allows_write(&root.join(".git").join("hooks").join("pre-commit")),
+            "approval must not lift protected paths"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Approval is consent for *this* plan. Leaving plan mode drops it, so
+    /// coming back later doesn't silently inherit permission for other work.
+    #[test]
+    fn leaving_plan_mode_revokes_approval() {
+        let root = std::env::temp_dir().join(format!("wm-planrevoke-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let ctx = ToolCtx::new(PermissionMode::Plan, root.clone(), root.clone());
+        ctx.approve_plan();
+        assert!(ctx.plan_approved());
+
+        ctx.set_mode(PermissionMode::ReadOnly);
+        ctx.set_mode(PermissionMode::Plan);
+
+        assert!(
+            !ctx.plan_approved(),
+            "returning to plan mode must require a fresh approval"
+        );
+        assert!(!ctx.allows_shell());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// One injected edit must not be able to buy persistence. These paths stay

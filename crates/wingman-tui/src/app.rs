@@ -64,6 +64,9 @@ pub type AgentBuilder = Arc<
 /// tools. Applies the new [`PermissionMode`] to the running agent's shared
 /// tool registry; a no-op host closure means "display only".
 pub type ModeSetter = Arc<dyn Fn(wingman_config::PermissionMode) + Send + Sync>;
+/// Records the user's acceptance of a presented plan. In `plan` mode this
+/// is what unlocks writes and shell — see `ToolCtx::approve_plan`.
+pub type PlanApprover = Arc<dyn Fn() + Send + Sync>;
 
 /// Closure the host registers so the `/login` modal can ask it to perform
 /// async work (probe a freshly-entered key, persist credentials, etc.)
@@ -121,6 +124,7 @@ pub struct AppCtx {
     pub mcp_list_runner: McpListRunner,
     pub models_runner: ModelsRunner,
     pub mode_setter: ModeSetter,
+    pub plan_approver: PlanApprover,
     /// Runs `/recall <query>` against the session index. `None` when the
     /// learning loop / session index is unavailable.
     pub recall_runner: Option<RecallRunner>,
@@ -176,6 +180,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
 
 enum Cmd {
     Quit,
+    ApprovePlan,
     Clear,
     Undo(usize),
     Compact,
@@ -222,6 +227,9 @@ fn parse_slash(line: &str) -> Cmd {
         "/clear" => Cmd::Clear,
         "/undo" => Cmd::Undo(arg.trim().parse().unwrap_or(1)),
         "/compact" => Cmd::Compact,
+        // Accept the agent's plan: in `plan` mode this is what unlocks
+        // writes and shell for the rest of the session.
+        "/approve" | "/approve-plan" => Cmd::ApprovePlan,
         "/help" | "/?" => Cmd::Help,
         "/mode" => Cmd::Mode(if arg.is_empty() {
             None
@@ -804,6 +812,20 @@ async fn idle_step(
                                 if done == 0 {
                                     ui.transcript
                                         .push(TranscriptItem::System("nothing to undo".into()));
+                                }
+                            }
+                            Cmd::ApprovePlan => {
+                                if ui.status.mode == "plan" {
+                                    (ctx.plan_approver)();
+                                    ui.transcript.push(TranscriptItem::System(
+                                        "plan approved — writes inside the project and shell                                          are now permitted for this session (`/mode plan` again                                          to revoke)"
+                                            .to_string(),
+                                    ));
+                                } else {
+                                    ui.transcript.push(TranscriptItem::System(format!(
+                                        "/approve applies in plan mode (currently {});                                          run `/mode plan` first",
+                                        ui.status.mode
+                                    )));
                                 }
                             }
                             Cmd::Compact => match agent.as_mut() {

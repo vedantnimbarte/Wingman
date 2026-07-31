@@ -46,13 +46,24 @@ pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selec
         }
         Some(s) => {
             let provider = cfg.default_provider.clone().ok_or_else(|| {
-                anyhow!("no default_provider configured; pass --model provider/model")
+                anyhow!(
+                    "no provider configured. Run `wingman login <provider>` \
+                     (e.g. `wingman login anthropic`), or pass --model provider/model"
+                )
             })?;
             (provider, s)
         }
         None => {
             let provider = cfg.default_provider.clone().ok_or_else(|| {
-                anyhow!("no default_provider configured; run `wingman config init`")
+                anyhow!(
+                    "no provider configured.\n\
+                     \n\
+                     Quickest path:  wingman login anthropic   \
+                     (probes the key, stores it in your OS keyring, sets the default model)\n\
+                     Local models:   wingman discover          \
+                     (finds a running Ollama / LM Studio / vLLM)\n\
+                     Edit by hand:   wingman config init"
+                )
             })?;
             let model = cfg
                 .providers

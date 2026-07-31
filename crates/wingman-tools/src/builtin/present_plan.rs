@@ -60,7 +60,7 @@ impl Tool for PresentPlan {
         }
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
@@ -79,6 +79,17 @@ impl Tool for PresentPlan {
             for c in &args.caveats {
                 out.push_str(&format!("- {c}\n"));
             }
+        }
+        // In plan mode the plan is a gate, not a formality: writes and shell
+        // stay denied until the user accepts. Say so, so the model waits
+        // instead of immediately retrying an edit and getting refused.
+        if ctx.mode() == wingman_config::PermissionMode::Plan && !ctx.plan_approved() {
+            out.push_str(
+                "
+---
+Awaiting approval. Writes and shell are denied until the user                  runs `/approve`. Do not attempt edits yet — stop here and let them read                  the plan.
+",
+            );
         }
         ToolOutcome::ok(out)
     }

@@ -91,8 +91,8 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Layered configuration.** Defaults → global `~/.wingman/config.toml` →
   project `.wingman/config.toml` → `WINGMAN_*` env vars → CLI flags. TOML
   sub-tables merge instead of clobbering.
-- **Permission modes.** `read-only` (default), `plan` (read-only, plus a
-  convention that the agent presents a plan first), `auto-edit` (writes
+- **Permission modes.** `read-only` (default), `plan` (read-only until you
+  `/approve` the agent's plan, then auto-edit), `auto-edit` (writes
   inside the project tree and shell auto-allowed, subject to the shell
   denylist), and `yolo` (no guardrails; per-session only, never persisted).
   Modes are enforced centrally: each tool declares what it needs
@@ -953,7 +953,7 @@ is resolved against the environment at load time.
 | Mode         | Reads / Search | Writes inside project | Shell                        | Out-of-tree paths |
 | ------------ | -------------- | --------------------- | ---------------------------- | ----------------- |
 | `read-only`  | allowed        | denied                | denied                       | denied            |
-| `plan`       | allowed        | denied                | denied                       | denied            |
+| `plan`       | allowed        | after `/approve`      | after `/approve`             | denied            |
 | `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | denied for writes |
 | `yolo`       | allowed        | auto-allowed          | auto-allowed                 | allowed           |
 
@@ -972,13 +972,16 @@ those turns a single bad edit into a change that outlives the session (a git
 hook that fires on your next commit, a config that grants the agent more
 permission next time). Edit them yourself if you mean to.
 
-**About `plan`.** Today `plan` behaves exactly like `read-only`; the
-difference is a system-prompt convention that the agent presents a plan
-before proposing changes. `present_plan` formats that plan, but nothing
-currently gates on it and there is no approve-and-promote step — so treat
-`plan` as "read-only, and it'll show you its thinking", not as an
-enforcement boundary. (Tracked in
-[#84](https://github.com/vedantnimbarte/Wingman/issues/84).)
+**About `plan`.** `plan` starts out identical to `read-only`: the agent can
+read and search, but every write and shell call is refused. It calls
+`present_plan` to show you what it intends to do; you run **`/approve`** in
+the TUI to accept, and only then does it behave like `auto-edit` for the rest
+of the session (still project-confined, and protected paths still refused).
+Switching modes clears the approval, so returning to `plan` later needs a
+fresh one — consent applies to the plan you actually read.
+
+Headless (`--print`) has nobody to approve, so `plan` there stays read-only
+for the whole run. Use `auto-edit` for unattended work.
 
 **About `auto-edit`.** Writes are confined to the project tree, but shell is
 not: `run_shell` can reach anything your user account can, and the shell
