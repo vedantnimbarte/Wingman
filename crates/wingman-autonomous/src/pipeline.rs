@@ -157,6 +157,10 @@ pub async fn run_to_completion(
     // Captured before `inputs.manager_model` is moved into build_manager, so
     // the manager phase's tokens can be priced below.
     let manager_model = inputs.manager_model.clone();
+    // Verdicts recorded by the inline reviewer, keyed by task id. Feeds the
+    // auto-merge gate below so its severity branch is live.
+    let review_log: std::sync::Arc<std::sync::Mutex<Vec<(String, InlineReview)>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let reviewer: Option<orchestrator::Reviewer> = if inputs.run_reviewer {
         let provider = aux_provider.clone();
         let model = inputs.reviewer_model.clone();
@@ -173,19 +177,28 @@ pub async fn run_to_completion(
         let repo = project_root.clone();
         let run_id_for_review = run_id.clone();
         let base_for_review = state_at_start.base_commit.clone();
+        let review_log_for_closure = review_log.clone();
         Some(std::sync::Arc::new(move |task: crate::model::Task| {
             let provider = provider.clone();
             let model = model.clone();
             let repo = repo.clone();
             let run_id = run_id_for_review.clone();
             let base = base_for_review.clone();
+            let log = review_log_for_closure.clone();
             Box::pin(async move {
                 // Review the task's real diff. With no diff to show (git error,
                 // empty change), approve rather than reject a change the model
                 // can't see — the old sight-unseen path rejected correct work
                 // and deadlocked the run.
                 let diff = crate::worktree::task_diff(&repo, &run_id, &task.id, &base)?;
-                review_task_inline(provider.as_ref(), &model, &task, &diff, gate).await
+                let (rework, outcome) =
+                    review_task_inline(provider.as_ref(), &model, &task, &diff, gate).await;
+                if let Some(o) = outcome {
+                    log.lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push((task.id.clone(), o));
+                }
+                rework
             })
                 as std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
         }))
@@ -513,8 +526,15 @@ pub async fn run_to_completion(
     // the manager calling finalize_task) skips the inline gate — that path is
     // only hit when the manager never finalized incrementally, which the
     // common flow avoids.
-    let reviews: Vec<(String, crate::review::Verdict)> = Vec::new();
-    let review_max_severity: Option<crate::severity::Severity> = None;
+    let recorded = review_log.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let reviews: Vec<(String, crate::review::Verdict)> = recorded
+        .iter()
+        .map(|(id, o)| (id.clone(), o.verdict))
+        .collect();
+    let review_max_severity: Option<crate::severity::Severity> =
+        crate::severity::max_severity(&recorded, |(_, o)| {
+            o.max_severity.unwrap_or(crate::severity::Severity::Low)
+        });
 
     // J10 — critic pass (opt-in). A high+ risk vetoes auto-merge.
     let mut critic_usage = wingman_core::Usage::default();
@@ -542,7 +562,11 @@ pub async fn run_to_completion(
         inputs.tier,
         // J15 blocking triggers veto the merge alongside the R6 security gate.
         security_blocks || escalation_blocks,
-        inputs.run_reviewer,
+        // Whether a review actually ran on this run's diffs — not merely
+        // whether the reviewer was enabled. A run whose tasks were batch-
+        // finalized (skipping the inline choke point) records no verdicts and
+        // is therefore correctly reported as unreviewed.
+        inputs.run_reviewer && !reviews.is_empty(),
         review_max_severity,
         critic_vetoed,
         dangerous_paths_touched,
@@ -579,7 +603,7 @@ fn compute_sandbox_tiers(
     default_tier: &str,
     runner: &dyn CommandRunner,
 ) -> Vec<(String, String)> {
-    let floor = crate::sandbox::SandboxTier::parse(default_tier);
+    let floor = crate::sandbox::IsolationTier::parse(default_tier);
     // Probe Docker once; container/vm tiers degrade to host when absent.
     let docker = crate::sandbox::docker_available(runner);
     state
@@ -1036,7 +1060,7 @@ async fn review_task_inline(
     task: &crate::model::Task,
     diff: &str,
     block_gate: crate::severity::Severity,
-) -> Option<String> {
+) -> (Option<String>, Option<InlineReview>) {
     const SYSTEM: &str = "You are a pragmatic code reviewer. Review the task's actual diff \
         (below) against its stated goal and reply with ONLY a JSON object: \
         {\"verdict\":\"approve\"|\"rework\", \
@@ -1068,13 +1092,41 @@ async fn review_task_inline(
         summary,
         diff_block,
     );
-    let (text, _usage) = complete_text(provider, model, SYSTEM, &user).await.ok()?;
-    let report = crate::review::parse_review(extract_json(&text)).ok()?;
-    if report.next_status(block_gate) == TaskStatus::Todo {
-        Some(report.rework_notes(block_gate))
+    // A failed call or unparseable reply means "no verdict", which the caller
+    // records as *unreviewed* rather than silently counting as approved.
+    let Ok((text, _usage)) = complete_text(provider, model, SYSTEM, &user).await else {
+        return (None, None);
+    };
+    let Ok(report) = crate::review::parse_review(extract_json(&text)) else {
+        return (None, None);
+    };
+    let rework = report.next_status(block_gate) == TaskStatus::Todo;
+    let outcome = InlineReview {
+        verdict: if rework {
+            crate::review::Verdict::Rework
+        } else {
+            crate::review::Verdict::Approve
+        },
+        max_severity: report.max_severity(),
+    };
+    if rework {
+        (Some(report.rework_notes(block_gate)), Some(outcome))
     } else {
-        None
+        (None, Some(outcome))
     }
+}
+
+/// What the inline reviewer concluded about one task.
+///
+/// Recorded per task so the auto-merge gate can answer "was this diff actually
+/// reviewed, and how bad was the worst finding" — previously the gate was
+/// handed an empty verdict list and a `None` severity, so its
+/// `auto_merge_max_severity` branch could never fire and `reviewed` reported
+/// whether the reviewer was *enabled* rather than whether it *ran*.
+#[derive(Debug, Clone, Copy)]
+struct InlineReview {
+    verdict: crate::review::Verdict,
+    max_severity: Option<crate::severity::Severity>,
 }
 
 /// J10 — run a critic on the whole run; returns true if it vetoes
@@ -1751,6 +1803,7 @@ mod tests {
                 base_commit: base_commit.clone(),
                 use_real_worktrees: true,
                 max_usd: 0.0,
+                max_total_tokens: 0,
                 max_retries_per_task: 0,
                 enforce_checkpoint_hygiene: false,
             },
@@ -2448,8 +2501,13 @@ mod tests {
             crate::severity::Severity::Medium,
         )
         .await;
+        let (notes, outcome) = notes;
         assert!(notes.is_some(), "rework verdict must return notes");
         assert!(notes.unwrap().contains("no error handling"));
+        // The verdict is now recorded too, so the auto-merge gate can see it.
+        let outcome = outcome.expect("a parsed review must yield a verdict");
+        assert_eq!(outcome.verdict, crate::review::Verdict::Rework);
+        assert!(outcome.max_severity.is_some());
     }
 
     #[tokio::test]
@@ -2467,7 +2525,15 @@ mod tests {
             crate::severity::Severity::Medium,
         )
         .await;
+        let (notes, outcome) = notes;
         assert!(notes.is_none(), "garbage must fail open to approve");
+        // But an unparseable reply is *not* a review: recording it as one
+        // would let the auto-merge gate believe a diff was reviewed when the
+        // reviewer never actually produced a verdict.
+        assert!(
+            outcome.is_none(),
+            "an unparseable reply must not count as a recorded review"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

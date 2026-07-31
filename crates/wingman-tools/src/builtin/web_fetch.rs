@@ -4,7 +4,7 @@
 //! schemes. Subject to a hard byte cap so a huge page can't blow the
 //! tool-output budget.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,6 +31,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for WebFetch {
+    fn capabilities(&self) -> Capability {
+        Capability::NETWORK
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "web_fetch".into(),
@@ -124,7 +128,12 @@ impl Tool for WebFetch {
             "url: {final_url}\nstatus: {status}{trunc}\n---\n",
             trunc = if truncated { "  [truncated]" } else { "" }
         );
-        ToolOutcome::ok(format!("{header}{body}"))
+        // Web pages are the classic injection vector: an attacker controls
+        // the bytes and wants them read as instructions. Fence them.
+        ToolOutcome::ok(format!(
+            "{header}{}",
+            crate::wrap_untrusted(&format!("web_fetch {final_url}"), &body)
+        ))
     }
 }
 

@@ -135,6 +135,11 @@ pub enum AgentStop {
     MaxTurns,
     MaxTokens,
     Error,
+    /// The turn ended with the verification gate still red, after the
+    /// retry budget (`gate_max_retries`) was spent. Distinct from
+    /// `EndTurn` so callers — CI in particular — can tell "finished"
+    /// from "gave up on a failing build".
+    GateFailed,
 }
 
 /// Construction-time options for the loop.
@@ -205,12 +210,18 @@ impl Default for AgentConfig {
             learning: None,
             gate: None,
             gate_max_retries: 2,
+            // Any tool that can change the working tree belongs here, or the
+            // turn ends unverified. `lsp_rename` / `lsp_code_action` write via
+            // the language server's WorkspaceEdit, which is exactly the kind of
+            // sweeping multi-file change the gate exists to catch.
             mutating_tools: vec![
                 "write_file".into(),
                 "edit_file".into(),
                 "apply_patch".into(),
                 "edit_symbol".into(),
                 "run_shell".into(),
+                "lsp_rename".into(),
+                "lsp_code_action".into(),
             ],
         }
     }
@@ -471,7 +482,7 @@ impl AgentLoop {
                     _ => None,
                 };
 
-                if let Some(reason) = stop_now {
+                if let Some(mut reason) = stop_now {
                     // Post-edit verification: when mutating tools ran this
                     // user turn, the gate must pass before an EndTurn stop is
                     // accepted. Failures are fed back to the model (bounded by
@@ -496,6 +507,11 @@ impl AgentLoop {
                                     report.summary,
                                 )));
                                 continue;
+                            }
+                            // Retries exhausted (or disallowed) and still red:
+                            // report it as such rather than as a clean finish.
+                            if !report.passed {
+                                reason = AgentStop::GateFailed;
                             }
                         }
                     }
@@ -853,8 +869,46 @@ mod tests {
         );
         let events = collect_events(&mut agent).await;
 
-        // One failure fed back, second failure accepted: stop anyway.
+        // One failure fed back, second failure exhausts the budget: the loop
+        // stops, but it must NOT look like a clean finish. `GateFailed` is what
+        // lets `wingman --print` exit non-zero in CI instead of reporting
+        // success on code that doesn't build.
         assert_eq!(gate.calls.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(
+                events.last(),
+                Some(AgentEvent::Stop {
+                    reason: AgentStop::GateFailed
+                })
+            ),
+            "expected GateFailed, got {:?}",
+            events.last()
+        );
+    }
+
+    /// The converse: a gate that passes must still stop with a plain EndTurn,
+    /// or every successful verified turn would fail CI.
+    #[tokio::test]
+    async fn passing_gate_still_stops_with_end_turn() {
+        // Passes on the very first check.
+        let gate = Arc::new(CountingGate {
+            fail_first: 0,
+            calls: AtomicUsize::new(0),
+        });
+        let mut agent = AgentLoop::new(
+            Arc::new(ScriptedProvider::new(vec![
+                tool_use_response(),
+                end_turn_response("a"),
+            ])),
+            Arc::new(OkDispatcher),
+            AgentConfig {
+                model: "scripted/test".into(),
+                gate: Some(gate.clone()),
+                gate_max_retries: 1,
+                ..Default::default()
+            },
+        );
+        let events = collect_events(&mut agent).await;
         assert!(matches!(
             events.last(),
             Some(AgentEvent::Stop {

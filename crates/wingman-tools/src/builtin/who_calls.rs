@@ -10,7 +10,7 @@
 //! over-report (same name, different symbol) and can't see dynamic/aliased
 //! calls. Upgrade path: per-grammar reference queries in `wingman-ts`.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -55,6 +55,10 @@ fn contains_word(line: &str, needle: &str) -> bool {
 
 #[async_trait]
 impl Tool for WhoCalls {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "who_calls".into(),

@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use wingman_config::PermissionMode;
 
@@ -20,6 +20,14 @@ pub struct ToolCtx {
     /// mode (including read-only/plan), not just the edit-capable ones. Off by
     /// default so network egress stays gated unless the user asks for it.
     pub allow_network: bool,
+    /// `[tools].shell_sandbox`: `auto` | `off` | `required`. See
+    /// [`crate::sandbox`].
+    pub shell_sandbox: String,
+    /// Has the user approved a plan this session? Only meaningful in
+    /// [`PermissionMode::Plan`], where writes and shell stay denied until the
+    /// agent has presented a plan *and* the user accepted it. Shared like
+    /// `mode`, so approving once re-gates every clone.
+    plan_approved: Arc<AtomicBool>,
 }
 
 /// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
@@ -51,6 +59,8 @@ impl ToolCtx {
             project_root,
             extra_denylist: Vec::new(),
             allow_network: false,
+            shell_sandbox: "auto".into(),
+            plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -69,6 +79,8 @@ impl ToolCtx {
             project_root,
             extra_denylist,
             allow_network,
+            shell_sandbox: "auto".into(),
+            plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -79,8 +91,36 @@ impl ToolCtx {
 
     /// Switch the permission mode live. Shared across clones of this ctx, so
     /// the running agent's next tool call is gated by the new mode.
+    ///
+    /// Switching *out* of `Plan` clears any plan approval, so returning to
+    /// plan mode later starts from "no plan approved" rather than inheriting
+    /// consent given for different work.
     pub fn set_mode(&self, mode: PermissionMode) {
+        if mode != PermissionMode::Plan {
+            self.plan_approved.store(false, Ordering::SeqCst);
+        }
         self.mode.store(mode_to_u8(mode), Ordering::SeqCst);
+    }
+
+    /// Set the shell-sandbox policy (`[tools].shell_sandbox`). Builder-style.
+    pub fn with_shell_sandbox(mut self, policy: impl Into<String>) -> Self {
+        self.shell_sandbox = policy.into();
+        self
+    }
+
+    /// Record that the user accepted the agent's plan.
+    ///
+    /// This is what makes `plan` mode a gate rather than a naming convention:
+    /// until it is called, `plan` denies writes and shell exactly like
+    /// `read-only`; afterwards it behaves like `auto-edit` for the rest of the
+    /// session. Only a human action should call this — never a tool.
+    pub fn approve_plan(&self) {
+        self.plan_approved.store(true, Ordering::SeqCst);
+    }
+
+    /// Has a plan been approved this session?
+    pub fn plan_approved(&self) -> bool {
+        self.plan_approved.load(Ordering::SeqCst)
     }
 
     /// Returns `true` if `command` matches any entry in the project-level
@@ -141,11 +181,83 @@ impl ToolCtx {
     }
 
     /// Permission for a write/edit operation on `path`.
+    ///
+    /// Protected paths (see [`Self::is_protected_path`]) are refused in *every*
+    /// mode, `yolo` included — those are the files that turn a single bad edit
+    /// into a permanent compromise.
     pub fn allows_write(&self, path: &Path) -> bool {
+        if self.is_protected_path(path) {
+            return false;
+        }
         match self.mode() {
             PermissionMode::Yolo => true,
             PermissionMode::AutoEdit => self.is_inside_project(path),
-            PermissionMode::ReadOnly | PermissionMode::Plan => false,
+            // Plan is read-only until the user accepts a plan, then behaves
+            // like auto-edit. Before this, `plan` was byte-identical to
+            // read-only and `present_plan` gated nothing.
+            PermissionMode::Plan => self.plan_approved() && self.is_inside_project(path),
+            PermissionMode::ReadOnly => false,
+        }
+    }
+
+    /// Why a write to `path` was refused, phrased for the model.
+    ///
+    /// Distinguishes "this mode forbids writing" from "this file is protected
+    /// in every mode", because the remedy differs — switching to `yolo` will
+    /// not unlock a protected path, and telling the model otherwise just makes
+    /// it retry.
+    pub fn write_denial_reason(&self, path: &Path) -> String {
+        if self.is_protected_path(path) {
+            format!(
+                "write denied for {}: this path is protected in every mode, \
+                 including yolo (writing it would let a change persist beyond \
+                 this session). Edit it yourself if you meant to.",
+                path.display()
+            )
+        } else {
+            format!(
+                "write denied for {} under permission mode {}",
+                path.display(),
+                self.mode()
+            )
+        }
+    }
+
+    /// Files the agent must never write, regardless of permission mode.
+    ///
+    /// Each of these converts one successful edit into durable, out-of-band
+    /// code execution or a permission escalation that survives the session:
+    ///
+    ///   - `.git/` — a `hooks/pre-commit` fires on the developer's next commit,
+    ///     entirely outside Wingman; `config` can point `origin` elsewhere.
+    ///   - `.wingman/config.toml` — the agent could grant itself `yolo`, add
+    ///     `[hooks]`, or redirect a provider `base_url` (see the config trust
+    ///     boundary in `wingman_config`).
+    ///   - `.wingman/skills/` — skills are injected into the system prompt and
+    ///     returned with an instruction to obey them.
+    ///   - `.wingman/trusted.toml` — the record of what the *user* trusted.
+    ///
+    /// `yolo` is documented as "no guardrails" for the agent's own work; it is
+    /// not an invitation to rewrite the mechanism that enforces the guardrails.
+    /// A user who genuinely needs to change these can edit them directly.
+    pub fn is_protected_path(&self, path: &Path) -> bool {
+        let resolved = resolve_for_containment(path);
+        let root =
+            std::fs::canonicalize(&self.project_root).unwrap_or_else(|_| self.project_root.clone());
+        let Ok(rel) = resolved.strip_prefix(&root) else {
+            // Outside the project: mode checks already govern it, and there is
+            // no project-relative protected path to match.
+            return false;
+        };
+
+        let mut comps = rel.components().map(|c| c.as_os_str().to_string_lossy());
+        match comps.next().as_deref() {
+            Some(".git") => true,
+            Some(".wingman") => matches!(
+                comps.next().as_deref(),
+                Some("config.toml") | Some("skills") | Some("trusted.toml")
+            ),
+            _ => false,
         }
     }
 
@@ -164,9 +276,27 @@ impl ToolCtx {
         }
     }
 
+    /// May the agent write *anywhere at all* in the current mode?
+    ///
+    /// The coarse counterpart to [`Self::allows_write`], used by
+    /// [`crate::ToolRegistry`] to gate a tool that declares
+    /// [`crate::Capability::WRITE`] before it runs. `allows_write` still
+    /// decides *which* paths; this decides whether writing is on the table.
+    pub fn allows_any_write(&self) -> bool {
+        match self.mode() {
+            PermissionMode::AutoEdit | PermissionMode::Yolo => true,
+            PermissionMode::Plan => self.plan_approved(),
+            PermissionMode::ReadOnly => false,
+        }
+    }
+
     /// Permission for any shell execution.
     pub fn allows_shell(&self) -> bool {
-        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+        match self.mode() {
+            PermissionMode::AutoEdit | PermissionMode::Yolo => true,
+            PermissionMode::Plan => self.plan_approved(),
+            PermissionMode::ReadOnly => false,
+        }
     }
 
     /// Permission for outbound network access (web_fetch / web_search).
@@ -196,10 +326,19 @@ impl ToolCtx {
 /// lexically fold the remaining, not-yet-existing components.
 fn resolve_for_containment(path: &Path) -> PathBuf {
     // Peel off trailing components until we reach an ancestor that exists.
+    //
+    // `symlink_metadata`, not `exists()`: `exists()` follows symlinks, so a
+    // *dangling* symlink reports false, gets peeled off as a "doesn't exist
+    // yet" component, and is then folded back in lexically — landing inside
+    // the project by construction. `write_file` would then follow it out of
+    // the tree. A repo can commit such a link (`docs/notes.md ->
+    // ../../../.ssh/authorized_keys`), so this must not depend on the target
+    // existing. `symlink_metadata` succeeds for a dangling link, which stops
+    // the peel and lets the containment check below see it for what it is.
     let mut existing = path;
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if existing.exists() {
+        if existing.symlink_metadata().is_ok() {
             break;
         }
         match (existing.parent(), existing.file_name()) {
@@ -212,11 +351,46 @@ fn resolve_for_containment(path: &Path) -> PathBuf {
             _ => break,
         }
     }
-    let mut base = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    let mut base = resolve_existing(existing, 0);
     for component in tail.iter().rev() {
         base.push(component);
     }
     normalize_lexical(&base)
+}
+
+/// Maximum symlink hops before we give up. Matches the usual OS limit closely
+/// enough and bounds a link cycle.
+const MAX_SYMLINK_HOPS: u32 = 16;
+
+/// Resolve an existing path to its real location.
+///
+/// `canonicalize` handles the normal case, but it *fails* on a dangling
+/// symlink — and falling back to the raw path there would put an escaping link
+/// back inside the project. So dangling links are followed manually: read the
+/// target, resolve it against the link's parent, and recurse.
+fn resolve_existing(path: &Path, hops: u32) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    if hops >= MAX_SYMLINK_HOPS {
+        return path.to_path_buf();
+    }
+    // Dangling symlink: follow it by hand so the escape is visible to the
+    // containment check.
+    if let Ok(md) = path.symlink_metadata() {
+        if md.file_type().is_symlink() {
+            if let Ok(target) = std::fs::read_link(path) {
+                let joined = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent().unwrap_or(Path::new("")).join(target)
+                };
+                let folded = normalize_lexical(&joined);
+                return resolve_existing(&folded, hops + 1);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Lexically normalise a path: drop `.` components and resolve `..` by
@@ -397,6 +571,145 @@ mod tests {
         let target = ctx.resolve("src/new_file.rs");
         assert!(ctx.is_inside_project(&target));
         assert!(ctx.allows_write(&target));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repo can commit a symlink pointing outside the tree. If its target
+    /// doesn't exist yet, `exists()` reports false and the old peel logic
+    /// folded the link name back in-tree — so `write_file` followed it out and
+    /// created a file at the target (`~/.ssh/authorized_keys`,
+    /// `~/.bashrc`, …). The link must be resolved, not treated as a plain
+    /// not-yet-created file.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_out_of_tree_is_denied() {
+        let base = std::env::temp_dir().join(format!("wm-symlink-{}", std::process::id()));
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+
+        // Target deliberately does NOT exist -> dangling.
+        let link = root.join("docs").join("notes.md");
+        std::os::unix::fs::symlink(base.join("outside").join("pwned.txt"), &link).unwrap();
+
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(
+            !ctx.allows_write(&link),
+            "write through a dangling symlink must not be judged inside the project"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `plan` used to be byte-identical to `read-only`: `present_plan` gated
+    /// nothing and there was no promotion step, while the README sold it as
+    /// "the agent must call present_plan before any edit".
+    #[test]
+    fn plan_mode_denies_until_the_plan_is_approved() {
+        let root = std::env::temp_dir().join(format!("wm-plan-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("src.rs");
+
+        let ctx = ToolCtx::new(PermissionMode::Plan, root.clone(), root.clone());
+
+        // Before approval: identical to read-only.
+        assert!(!ctx.allows_write(&target));
+        assert!(!ctx.allows_any_write());
+        assert!(!ctx.allows_shell());
+        assert!(!ctx.plan_approved());
+
+        // Reads were always fine, and must stay fine.
+        assert!(ctx.allows_read(&target));
+
+        ctx.approve_plan();
+
+        // After approval: behaves like auto-edit, still project-confined.
+        assert!(ctx.plan_approved());
+        assert!(ctx.allows_write(&target));
+        assert!(ctx.allows_any_write());
+        assert!(ctx.allows_shell());
+        assert!(
+            !ctx.allows_write(std::path::Path::new("/etc/passwd")),
+            "approval must not lift project containment"
+        );
+        assert!(
+            !ctx.allows_write(&root.join(".git").join("hooks").join("pre-commit")),
+            "approval must not lift protected paths"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Approval is consent for *this* plan. Leaving plan mode drops it, so
+    /// coming back later doesn't silently inherit permission for other work.
+    #[test]
+    fn leaving_plan_mode_revokes_approval() {
+        let root = std::env::temp_dir().join(format!("wm-planrevoke-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let ctx = ToolCtx::new(PermissionMode::Plan, root.clone(), root.clone());
+        ctx.approve_plan();
+        assert!(ctx.plan_approved());
+
+        ctx.set_mode(PermissionMode::ReadOnly);
+        ctx.set_mode(PermissionMode::Plan);
+
+        assert!(
+            !ctx.plan_approved(),
+            "returning to plan mode must require a fresh approval"
+        );
+        assert!(!ctx.allows_shell());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// One injected edit must not be able to buy persistence. These paths stay
+    /// refused even in `yolo`, which is the whole point of the list.
+    #[test]
+    fn protected_paths_are_refused_in_every_mode() {
+        let root = std::env::temp_dir().join(format!("wm-protected-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
+        std::fs::create_dir_all(root.join(".wingman").join("skills")).unwrap();
+
+        let protected = [
+            root.join(".git").join("hooks").join("pre-commit"),
+            root.join(".git").join("config"),
+            root.join(".wingman").join("config.toml"),
+            root.join(".wingman").join("skills").join("evil.md"),
+            root.join(".wingman").join("trusted.toml"),
+        ];
+
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::Plan,
+            PermissionMode::AutoEdit,
+            PermissionMode::Yolo,
+        ] {
+            let ctx = ToolCtx::new(mode, root.clone(), root.clone());
+            for p in &protected {
+                assert!(
+                    !ctx.allows_write(p),
+                    "{} must be refused in {mode:?}",
+                    p.display()
+                );
+            }
+        }
+
+        // Ordinary project files under .wingman are still writable.
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(ctx.allows_write(&root.join(".wingman").join("memory").join("note.md")));
+        assert!(ctx.allows_write(&root.join("src.rs")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The in-tree case must keep working — this is an ordinary new file.
+    #[test]
+    fn new_file_inside_project_is_allowed() {
+        let root = std::env::temp_dir().join(format!("wm-newfile-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(ctx.allows_write(&root.join("src").join("brand_new.rs")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

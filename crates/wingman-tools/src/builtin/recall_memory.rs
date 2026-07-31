@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -48,6 +48,10 @@ fn fmt_date(t: std::time::SystemTime) -> String {
 
 #[async_trait]
 impl Tool for RecallMemory {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "recall_memory".into(),

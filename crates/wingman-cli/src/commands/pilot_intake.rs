@@ -140,6 +140,29 @@ pub async fn email(maildir: String) -> Result<ExitCode> {
 pub async fn slack(addr: String) -> Result<ExitCode> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let dir = intake_dir()?;
+
+    // A Slack signing secret is mandatory. This listener writes intake files
+    // whose `author` field can promote a goal to TrustLevel::Trusted, which is
+    // what permits unattended AutoRun — so an unauthenticated request here is
+    // remote task execution against the repository. Refuse to start rather
+    // than run an open door.
+    let cfg = load_intake_config()?;
+    let secret = cfg
+        .pilot
+        .daemon
+        .slack_signing_secret
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "refusing to start: [pilot.daemon].slack_signing_secret is not set.\n\
+                 Slack request signatures cannot be verified without it, and an \
+                 unauthenticated intake server lets anyone who can reach the port \
+                 queue work as a trusted author.\n\
+                 Set it to your Slack app signing secret (a ${{ENV_VAR}} placeholder works)."
+            )
+        })?;
+
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
@@ -147,6 +170,7 @@ pub async fn slack(addr: String) -> Result<ExitCode> {
         "wingman pilot intake slack: listening on {addr}, writing to {}",
         dir.display()
     );
+    eprintln!("request signatures verified (Slack v0); POST /slack/events only");
 
     loop {
         let (mut sock, _) = match listener.accept().await {
@@ -157,32 +181,39 @@ pub async fn slack(addr: String) -> Result<ExitCode> {
             }
         };
         let dir = dir.clone();
+        let secret = secret.clone();
         tokio::spawn(async move {
             let mut buf = Vec::new();
-            let mut tmp = [0u8; 4096];
-            // Read until we have headers + full body (bounded).
+            let mut tmp = [0u8; 8192];
+            // Read headers, then exactly `Content-Length` bytes of body. The
+            // old code broke as soon as it saw the header terminator and
+            // assumed the body had arrived in the same read — a split request
+            // was silently dropped, and once signatures are checked a partial
+            // body would fail verification for the wrong reason.
             loop {
+                if let Some((body_start, len)) =
+                    wingman_autonomous::webhook::header_boundary_and_len(&buf)
+                {
+                    if buf.len() >= body_start.saturating_add(len) {
+                        break;
+                    }
+                }
+                if buf.len() >= MAX_SLACK_REQUEST_BYTES {
+                    break;
+                }
                 match sock.read(&mut tmp).await {
                     Ok(0) => break,
                     Ok(n) => {
-                        buf.extend_from_slice(&tmp[..n]);
-                        if buf.windows(4).any(|w| w == b"\r\n\r\n") && buf.len() > 4 {
-                            // Heuristic: got headers; assume small JSON bodies
-                            // arrive in the same read burst.
-                            break;
-                        }
-                        if buf.len() > 1_000_000 {
-                            break;
-                        }
+                        let room = MAX_SLACK_REQUEST_BYTES.saturating_sub(buf.len());
+                        buf.extend_from_slice(&tmp[..n.min(room)]);
                     }
                     Err(_) => break,
                 }
             }
-            let req = String::from_utf8_lossy(&buf);
-            let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
-            let reply = handle_slack_body(&dir, body);
+
+            let (status, reply) = handle_slack_request(&dir, &secret, &buf, now_unix());
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 reply.len(),
                 reply
             );
@@ -190,6 +221,66 @@ pub async fn slack(addr: String) -> Result<ExitCode> {
             let _ = sock.flush().await;
         });
     }
+}
+
+/// Cap on a single Slack request, headers included.
+const MAX_SLACK_REQUEST_BYTES: usize = 1024 * 1024;
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Case-insensitively read one header value out of a raw request.
+fn header_value(headers: &str, name: &str) -> String {
+    for line in headers.lines() {
+        if let Some((k, v)) = line.split_once(':') {
+            if k.trim().eq_ignore_ascii_case(name) {
+                return v.trim().to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+/// Route, authenticate, and handle one raw Slack request.
+///
+/// Returns `(status_line, body)`. Split out from the socket loop so the
+/// security-relevant decisions are testable without binding a port.
+fn handle_slack_request(dir: &Path, secret: &str, raw: &[u8], now: i64) -> (&'static str, String) {
+    let Some((body_start, len)) = wingman_autonomous::webhook::header_boundary_and_len(raw) else {
+        return ("400 Bad Request", String::new());
+    };
+    let head = String::from_utf8_lossy(&raw[..body_start]);
+    let end = body_start.saturating_add(len).min(raw.len());
+    let body = &raw[body_start..end];
+
+    // Only the Slack events endpoint, and only POST. The previous version
+    // never parsed the request line at all, so any method on any path was
+    // accepted — and the url_verification branch echoed attacker-chosen bytes
+    // back in a 200.
+    let request_line = head.lines().next().unwrap_or("");
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    if !method.eq_ignore_ascii_case("POST") || !path.starts_with("/slack/events") {
+        return ("404 Not Found", String::new());
+    }
+
+    let ts = header_value(&head, "X-Slack-Request-Timestamp");
+    let sig = header_value(&head, "X-Slack-Signature");
+    if !wingman_autonomous::intake::slack_signature_valid(secret, &ts, body, &sig, now) {
+        tracing::warn!(
+            target: "pilot::intake",
+            "rejected Slack request: signature invalid, stale, or missing"
+        );
+        return ("401 Unauthorized", String::new());
+    }
+
+    let reply = handle_slack_body(dir, &String::from_utf8_lossy(body));
+    ("200 OK", reply)
 }
 
 /// Handle a Slack request body: answer url_verification, or write an intake
@@ -212,19 +303,171 @@ fn handle_slack_body(dir: &Path, body: &str) -> String {
 }
 
 fn intake_dir() -> Result<PathBuf> {
+    let project = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let cfg = load_intake_config()?;
+    Ok(project.root.join(&cfg.pilot.daemon.intake_dir))
+}
+
+/// The merged config, for the intake commands.
+fn load_intake_config() -> Result<wingman_config::Config> {
     let global = wingman_config::global_config_path()?;
     let project = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
     let project_file = project
         .config_file
         .exists()
         .then_some(project.config_file.clone());
-    let cfg = wingman_config::Config::load(Some(&global), project_file.as_deref())?;
-    Ok(project.root.join(&cfg.pilot.daemon.intake_dir))
+    Ok(wingman_config::Config::load(
+        Some(&global),
+        project_file.as_deref(),
+    )?)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a raw HTTP request with the given method/path/headers/body.
+    fn raw_req(method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Vec<u8> {
+        let mut s = format!(
+            "{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n",
+            body.len()
+        );
+        for (k, v) in headers {
+            s.push_str(&format!("{k}: {v}\r\n"));
+        }
+        s.push_str("\r\n");
+        s.push_str(body);
+        s.into_bytes()
+    }
+
+    fn slack_sig(secret: &str, ts: &str, body: &str) -> String {
+        let mut base = Vec::new();
+        base.extend_from_slice(b"v0:");
+        base.extend_from_slice(ts.as_bytes());
+        base.push(b':');
+        base.extend_from_slice(body.as_bytes());
+        format!(
+            "v0={}",
+            wingman_autonomous::webhook::to_hex(&wingman_autonomous::webhook::hmac_sha256(
+                secret.as_bytes(),
+                &base
+            ))
+        )
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wm-slack-{tag}-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    }
+
+    /// The whole point: an unsigned request must not be able to queue work.
+    #[test]
+    fn unsigned_slack_request_is_rejected_and_writes_nothing() {
+        let dir = tmpdir("unsigned");
+        let body = r#"{"type":"event_callback","event":{"type":"message","user":"vedant","text":"do a thing"}}"#;
+        let raw = raw_req("POST", "/slack/events", &[], body);
+
+        let (status, _) = handle_slack_request(&dir, "shh", &raw, 1_700_000_000);
+        assert_eq!(status, "401 Unauthorized");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "no intake file may be written for an unauthenticated request"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn forged_signature_is_rejected() {
+        let dir = tmpdir("forged");
+        let body =
+            r#"{"type":"event_callback","event":{"type":"message","user":"vedant","text":"x"}}"#;
+        let ts = "1700000000";
+        // Signed with the wrong secret.
+        let raw = raw_req(
+            "POST",
+            "/slack/events",
+            &[
+                ("X-Slack-Request-Timestamp", ts),
+                ("X-Slack-Signature", &slack_sig("wrong", ts, body)),
+            ],
+            body,
+        );
+        let (status, _) = handle_slack_request(&dir, "shh", &raw, 1_700_000_010);
+        assert_eq!(status, "401 Unauthorized");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn properly_signed_request_is_accepted() {
+        let dir = tmpdir("signed");
+        let body = r#"{"type":"event_callback","event":{"type":"message","user":"vedant","text":"fix the flaky test"}}"#;
+        let ts = "1700000000";
+        let raw = raw_req(
+            "POST",
+            "/slack/events",
+            &[
+                ("X-Slack-Request-Timestamp", ts),
+                ("X-Slack-Signature", &slack_sig("shh", ts, body)),
+            ],
+            body,
+        );
+        let (status, reply) = handle_slack_request(&dir, "shh", &raw, 1_700_000_010);
+        assert_eq!(status, "200 OK");
+        assert_eq!(reply, "ok");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a signed message should produce exactly one intake file"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Previously any method on any path was accepted, and url_verification
+    /// echoed attacker-chosen bytes back in a 200.
+    #[test]
+    fn wrong_method_or_path_is_not_found() {
+        let dir = tmpdir("routing");
+        let body = r#"{"type":"url_verification","challenge":"reflect-me"}"#;
+
+        let (status, reply) =
+            handle_slack_request(&dir, "shh", &raw_req("GET", "/slack/events", &[], body), 0);
+        assert_eq!(status, "404 Not Found");
+        assert!(reply.is_empty());
+
+        let (status, reply) =
+            handle_slack_request(&dir, "shh", &raw_req("POST", "/anything", &[], body), 0);
+        assert_eq!(status, "404 Not Found");
+        assert!(reply.is_empty(), "must not reflect attacker-chosen bytes");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A body split across TCP reads must still verify: the reader now honours
+    /// Content-Length instead of assuming one burst.
+    #[test]
+    fn body_is_taken_from_content_length_not_the_first_read() {
+        let dir = tmpdir("contentlen");
+        let body = r#"{"type":"event_callback","event":{"type":"message","user":"vedant","text":"hello"}}"#;
+        let ts = "1700000000";
+        let mut raw = raw_req(
+            "POST",
+            "/slack/events",
+            &[
+                ("X-Slack-Request-Timestamp", ts),
+                ("X-Slack-Signature", &slack_sig("shh", ts, body)),
+            ],
+            body,
+        );
+        // Trailing bytes beyond Content-Length must not be folded into the
+        // signed body.
+        raw.extend_from_slice(b"GARBAGE");
+        let (status, _) = handle_slack_request(&dir, "shh", &raw, 1_700_000_010);
+        assert_eq!(status, "200 OK");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn slack_message_event_extracts_user_and_text() {

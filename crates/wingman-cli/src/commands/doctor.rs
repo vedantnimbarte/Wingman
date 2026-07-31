@@ -44,11 +44,41 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     emit(bin_status("git", &["--version"]));
     emit(bin_status("gh", &["--version"]));
 
+    // 1b. Shell containment.
+    section("shell sandbox");
+    {
+        let avail = wingman_tools::sandbox::availability();
+        let policy = cfg.tools.shell_sandbox.as_str();
+        match (policy, avail.is_some()) {
+            ("off", _) => emit(Status::Warn(
+                "disabled ([tools].shell_sandbox = \"off\") — run_shell is unconfined".into(),
+            )),
+            (_, true) => emit(Status::Ok(format!(
+                "{} — run_shell writes are confined to the project",
+                avail.label()
+            ))),
+            ("required", false) => emit(Status::Bad(
+                "[tools].shell_sandbox = \"required\" but no mechanism is available; \
+                 run_shell will refuse to run"
+                    .into(),
+            )),
+            (_, false) => emit(Status::Warn(
+                "no sandbox available — run_shell is unconfined. \
+                 Install bubblewrap (Linux) for filesystem containment"
+                    .into(),
+            )),
+        }
+    }
+
     // 2. Providers + credentials.
     section("providers");
     if cfg.providers.is_empty() {
-        emit(Status::Warn(
-            "no [providers] configured — run `wingman config init`".into(),
+        // Blocking, not advisory: with no provider the agent cannot run at
+        // all, so reporting "healthy" here was actively misleading.
+        emit(Status::Bad(
+            "no provider configured — run `wingman login anthropic` \
+             (or `wingman discover` for a local model)"
+                .into(),
         ));
     }
     for (id, pc) in &cfg.providers {
@@ -140,6 +170,7 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         println!("{bad} problem(s) found (✗). See above.");
+        println!("(⚠ lines are optional extras — only ✗ lines block a session.)");
         Ok(ExitCode::from(1))
     }
 }

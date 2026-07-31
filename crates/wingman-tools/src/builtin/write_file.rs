@@ -1,4 +1,4 @@
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -14,6 +14,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for WriteFile {
+    fn capabilities(&self) -> Capability {
+        Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "write_file".into(),
@@ -39,11 +43,7 @@ impl Tool for WriteFile {
         };
         let path = ctx.resolve(&args.path);
         if !ctx.allows_write(&path) {
-            return ToolOutcome::err(format!(
-                "write denied for {} under permission mode {}",
-                path.display(),
-                ctx.mode()
-            ));
+            return ToolOutcome::err(ctx.write_denial_reason(&path));
         }
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {

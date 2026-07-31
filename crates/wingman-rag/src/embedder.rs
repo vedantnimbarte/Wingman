@@ -99,8 +99,28 @@ mod fastembed_impl {
 
     impl FastembedEmbedder {
         pub fn new(cache_dir: Option<PathBuf>) -> Result<Self> {
-            let mut opts =
-                InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+            // On a cold cache this fetches ~120 MB from HuggingFace. With
+            // progress suppressed the tool just appeared to hang on first use,
+            // with no output and no explanation — which reads as a freeze, and
+            // is a poor look for a tool that advertises a local-only mode.
+            // Announce it, and let fastembed draw the progress bar.
+            // "Cached" = the cache directory exists and has something in it.
+            // Matching an exact model directory name is brittle: fastembed's
+            // layout is its own business and changes between versions, and a
+            // stale guess here means the banner prints on every single run.
+            let already_cached = cache_dir
+                .as_ref()
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false);
+            if !already_cached {
+                eprintln!(
+                    "wingman: downloading the embedding model (~120 MB, one time) \
+                     for semantic search…"
+                );
+            }
+            let mut opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_show_download_progress(!already_cached);
             if let Some(dir) = cache_dir {
                 opts = opts.with_cache_dir(dir);
             }

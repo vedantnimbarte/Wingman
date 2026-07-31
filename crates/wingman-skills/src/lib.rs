@@ -67,7 +67,65 @@ pub fn load_all(project_root: &Path) -> Vec<Skill> {
         by_name.insert(s.name.clone(), s);
     }
 
+    // Cross-tool `SKILL.md` bundles. The portable format is a per-skill
+    // directory containing a `SKILL.md`, and it is a de-facto standard across
+    // agents — a repository that already has `.claude/skills/` or
+    // `.agents/skills/` should work here without an import step.
+    for dir in portable_skill_dirs(project_root) {
+        for s in load_portable_dir(&dir) {
+            // Only fill gaps: a native Wingman skill of the same name wins,
+            // since the user wrote it for this tool specifically.
+            by_name.entry(s.name.clone()).or_insert(s);
+        }
+    }
+
     by_name.into_values().collect()
+}
+
+/// Directories that may hold portable `<name>/SKILL.md` bundles, project-local
+/// then global. Order is irrelevant — the caller only fills gaps.
+fn portable_skill_dirs(project_root: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        project_root.join(".agents").join("skills"),
+        project_root.join(".claude").join("skills"),
+    ];
+    if let Ok(home) = wingman_config::ensure_global_dir() {
+        if let Some(parent) = home.parent() {
+            dirs.push(parent.join(".claude").join("skills"));
+            dirs.push(parent.join(".agents").join("skills"));
+        }
+    }
+    dirs
+}
+
+/// Load every `<dir>/<name>/SKILL.md` bundle under `dir`.
+fn load_portable_dir(dir: &Path) -> Vec<Skill> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path().join("SKILL.md");
+        if !candidate.is_file() {
+            continue;
+        }
+        // Portable skills come from the project tree, so they are treated as
+        // project-scoped for trust purposes.
+        match load_one(&candidate, SkillSource::Project) {
+            Ok(mut s) => {
+                // The bundle directory names the skill; SKILL.md's stem is
+                // always "SKILL", which would collide across every bundle.
+                if let Some(name) = entry.file_name().to_str() {
+                    if !name.is_empty() {
+                        s.name = name.to_string();
+                    }
+                }
+                out.push(s);
+            }
+            Err(e) => tracing::warn!("skipping portable skill {}: {e}", candidate.display()),
+        }
+    }
+    out
 }
 
 /// Path under `~/.wingman/skills/` where `/skills new` should write a new
@@ -424,5 +482,51 @@ mod tests {
             .iter()
             .any(|s| s.name == "Demo Skill" && s.description == "does things"));
         std::fs::remove_dir_all(&root).ok();
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use super::*;
+
+    /// A repository that already carries `.claude/skills/` or `.agents/skills/`
+    /// should work without an import step — `wingman skill import` existed, but
+    /// nothing discovered the portable layout at runtime.
+    #[test]
+    fn portable_bundles_are_discovered_and_named_by_directory() {
+        let root = std::env::temp_dir().join(format!("wm-portable-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let bundle = root.join(".agents").join("skills").join("code-review");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(
+            bundle.join("SKILL.md"),
+            "---\ndescription: Review a diff\n---\nLook for bugs.\n",
+        )
+        .unwrap();
+
+        let found = load_portable_dir(&root.join(".agents").join("skills"));
+        assert_eq!(found.len(), 1);
+        // Named for the bundle directory, not SKILL.md's stem — otherwise
+        // every portable skill would collide on the name "SKILL".
+        assert_eq!(found[0].name, "code-review");
+        assert!(found[0].body.contains("Look for bugs"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_directory_without_skill_md_is_ignored() {
+        let root = std::env::temp_dir().join(format!("wm-portable-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("skills").join("not-a-skill")).unwrap();
+
+        assert!(load_portable_dir(&root.join("skills")).is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn missing_directory_is_not_an_error() {
+        assert!(load_portable_dir(std::path::Path::new("no-such-dir-9f3a")).is_empty());
     }
 }

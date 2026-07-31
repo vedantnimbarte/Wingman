@@ -13,7 +13,7 @@ use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
     long_about = None,
 )]
 pub struct Cli {
-    /// Permission mode for this session: read-only | auto-edit | yolo.
+    /// Permission mode for this session: read-only | plan | auto-edit | yolo.
     #[arg(long, value_name = "MODE", global = true)]
     pub mode: Option<String>,
 
@@ -81,31 +81,38 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Inspect or scaffold configuration.
+    #[command(display_order = 1)]
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Generate or refresh WINGMAN.md by introspecting the current project.
+    /// Generate or refresh the project's agent instructions (AGENTS.md, or
+    /// WINGMAN.md if the project already uses one) by introspecting it.
+    #[command(display_order = 4)]
     Init {
-        /// Overwrite an existing WINGMAN.md.
+        /// Overwrite an existing instructions file.
         #[arg(long)]
         force: bool,
     },
     /// Checkpoint the working tree into a named git stash for /undo recovery.
+    #[command(display_order = 15)]
     Checkpoint {
         /// Optional label.
         #[arg(long)]
         label: Option<String>,
     },
     /// Restore the most recent wingman checkpoint via `git stash pop`.
+    #[command(display_order = 13)]
     Undo,
     /// Scrub back through per-edit checkpoints. No args prints the timeline;
     /// `wingman rewind <n>` reverts the last n mutating edits (newest first).
+    #[command(display_order = 14)]
     Rewind {
         /// Number of edits to revert. Omit to just print the timeline.
         steps: Option<usize>,
     },
     /// Show estimated token spend by model from ~/.wingman/usage.json.
+    #[command(display_order = 17)]
     Cost {
         /// Output as JSON instead of a table.
         #[arg(long)]
@@ -116,21 +123,25 @@ pub enum Command {
         compare: bool,
     },
     /// Session utilities.
+    #[command(display_order = 16)]
     Session {
         #[command(subcommand)]
         action: SessionAction,
     },
     /// `git worktree` helper — isolate an experiment under .wingman/worktrees.
+    #[command(display_order = 45)]
     Worktree {
         #[command(subcommand)]
         action: WorktreeAction,
     },
     /// Memory pack utilities.
+    #[command(display_order = 23)]
     Memory {
         #[command(subcommand)]
         action: MemoryAction,
     },
     /// One-shot code review of a PR or local diff.
+    #[command(display_order = 10)]
     Review {
         /// PR number to review (uses `gh pr diff`).
         pr: Option<String>,
@@ -143,24 +154,48 @@ pub enum Command {
     },
     /// Probe localhost for running Ollama / LM Studio / vLLM and print
     /// discovered models.
+    #[command(display_order = 34)]
     Discover,
     /// Health check: config, provider credentials, local servers, the semantic
     /// index, language servers on PATH, and git/gh tooling.
+    #[command(display_order = 3)]
     Doctor,
     /// Report the air-gapped / local-only posture (`[privacy].local_only`):
     /// what leaves the machine, verified against config, for compliance.
+    #[command(display_order = 33)]
     Attest,
+    /// Trust this project's `.wingman/config.toml` so its executable keys
+    /// (`[hooks]`, `[mcp]`, `[verify]`, `[providers]`, `permission_mode`, …)
+    /// are honoured. Untrusted project configs may only pick a model and tune
+    /// presentation — a cloned repo must not be able to run commands. Trust is
+    /// pinned to the file's contents and lapses whenever it changes.
+    #[command(display_order = 32)]
+    Trust {
+        #[command(subcommand)]
+        action: Option<TrustAction>,
+    },
     /// Characterization / golden-master testing: snapshot a command's output,
     /// then fail if a later change alters it (regression net for legacy code).
+    #[command(display_order = 22)]
     Golden {
         #[command(subcommand)]
         action: GoldenAction,
     },
     /// Show what Wingman knows about this project: memories, skills,
     /// model routing, the verification gate, and index freshness.
+    #[command(display_order = 5)]
     Knows,
+    /// Show what Wingman sends before you type: system-prompt and tool-schema
+    /// token counts, the first-turn total, and what that costs per turn.
+    #[command(display_order = 6)]
+    Context {
+        /// Machine-readable output, including every tool's size.
+        #[arg(long)]
+        json: bool,
+    },
     /// Benchmark harness: run a suite of prompts and record time-to-first-token,
     /// tokens/task, wall time, and verified-done rate. Needs a live provider.
+    #[command(display_order = 42)]
     Bench {
         /// JSONL suite file ({"id","prompt"} per line). Omit for a built-in suite.
         #[arg(long, value_name = "FILE")]
@@ -170,6 +205,7 @@ pub enum Command {
         json: bool,
     },
     /// Model routing utilities.
+    #[command(display_order = 41)]
     Router {
         #[command(subcommand)]
         action: RouterAction,
@@ -179,9 +215,17 @@ pub enum Command {
     /// notably `semantic_search` (warm repo index) and `recall_memory` (team
     /// memory). Read-only by default; raise with `--mode`.
     #[command(name = "mcp-serve")]
+    #[command(display_order = 30)]
     McpServe,
+    /// Speak the Agent Client Protocol over stdio, so ACP-capable editors
+    /// (Zed, JetBrains, Neovim, Emacs) can drive Wingman as their agent —
+    /// one protocol instead of a plugin per editor.
+    #[command(name = "acp")]
+    #[command(display_order = 30)]
+    Acp,
     /// Distill durable facts from a past session into a pending-review file
     /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
+    #[command(display_order = 25)]
     Distill {
         /// Session JSONL to distill. Defaults to the most recent session.
         #[arg(long)]
@@ -189,24 +233,28 @@ pub enum Command {
     },
     /// Keep this project's semantic index warm: initial reindex, then watch
     /// the tree and refresh on change until interrupted.
+    #[command(display_order = 26)]
     Indexd {
         /// Report whether a daemon is running and index freshness, then exit.
         #[arg(long)]
         status: bool,
     },
     /// Run any [[schedule]] entries whose cadence is due.
+    #[command(display_order = 43)]
     Schedule {
         /// Force-run all configured schedule entries regardless of cadence.
         #[arg(long)]
         all: bool,
     },
     /// Skill utilities.
+    #[command(display_order = 24)]
     Skill {
         #[command(subcommand)]
         action: SkillAction,
     },
     /// Multi-model code review: run review against several models in
     /// parallel and merge findings.
+    #[command(display_order = 44)]
     ReviewMulti {
         /// PR number to review (uses `gh pr diff`).
         pr: Option<String>,
@@ -219,18 +267,21 @@ pub enum Command {
     },
     /// Onboard onto this codebase: architecture, entry points, key modules,
     /// conventions, and where to start reading.
+    #[command(display_order = 20)]
     Tour {
         /// Optional focus area (e.g. "the agent loop", "auth").
         focus: Option<String>,
     },
     /// Implement an intent test-first: write failing tests, then implement
     /// until the verification gate is green. Runs in auto-edit.
+    #[command(display_order = 21)]
     Spec {
         /// The intent to implement, in natural language.
         intent: String,
     },
     /// PR-native: address a PR's review comments and failing CI checks on the
     /// current branch (needs `gh`).
+    #[command(display_order = 31)]
     Pr {
         #[command(subcommand)]
         action: PrAction,
@@ -238,6 +289,7 @@ pub enum Command {
     /// Explain-and-teach the current changes: a per-file "what changed and
     /// why it matters" walkthrough of the working diff, aimed at a reviewer or
     /// junior. Routes to the fast model when configured.
+    #[command(display_order = 12)]
     Explain {
         /// Explain the diff against this base ref instead of the working tree.
         #[arg(long, value_name = "BASE")]
@@ -248,6 +300,7 @@ pub enum Command {
     },
     /// Interactive diff viewer: walk a unified diff hunk by hunk and
     /// accept or reject each one before writing the result.
+    #[command(display_order = 11)]
     Diff {
         /// File to view the working-tree diff for (calls `git diff -- <file>`).
         file: Option<String>,
@@ -257,6 +310,7 @@ pub enum Command {
     },
     /// Authenticate a provider non-interactively: probe the key and store it
     /// in the OS keyring + config. The TUI `/login` wizard equivalent.
+    #[command(display_order = 2)]
     Login {
         /// Provider id (e.g. anthropic, openai, gemini). Omit with --list.
         provider: Option<String>,
@@ -283,12 +337,14 @@ pub enum Command {
         list: bool,
     },
     /// Remove a provider's stored credential from the OS keyring.
+    #[command(display_order = 35)]
     Logout {
         /// Provider id whose keyring entry to delete.
         provider: String,
     },
     /// Pilot mode: plan a multi-task goal, delegate to worker agents in
     /// isolated worktrees, converge into a PR.
+    #[command(display_order = 40)]
     Pilot {
         #[command(subcommand)]
         action: PilotAction,
@@ -604,6 +660,19 @@ pub enum PrAction {
     },
 }
 
+#[derive(Subcommand, Debug, Clone, Copy, Default)]
+pub enum TrustAction {
+    /// Trust this project's config as it currently stands (the default).
+    #[default]
+    Add,
+    /// Revoke trust for this project's config.
+    Remove,
+    /// Report whether this project's config is currently trusted.
+    Show,
+    /// List every trusted project config, flagging any that have changed.
+    List,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum GoldenAction {
     /// Capture a command's output as a golden snapshot: `golden capture <name> -- <cmd…>`.
@@ -779,6 +848,17 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Discover) => commands::discover::run().await,
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
         Some(Command::Attest) => commands::attest::run(load_config()?).await,
+        Some(Command::Context { json }) => commands::context::run(load_config()?, json).await,
+        Some(Command::Acp) => {
+            let cfg = load_config()?;
+            let mode = cli
+                .mode
+                .as_deref()
+                .and_then(|m| m.parse().ok())
+                .unwrap_or(cfg.permission_mode);
+            commands::acp_serve::run(cfg, mode).await
+        }
+        Some(Command::Trust { action }) => commands::trust::run(action).await,
         Some(Command::Golden { action }) => match action {
             GoldenAction::Capture { name, command } => {
                 commands::golden::capture(name, command).await
@@ -1137,6 +1217,20 @@ pub async fn run() -> Result<ExitCode> {
                     }
                 });
 
+            // `/approve` in plan mode records consent on the shared ToolCtx,
+            // which is what actually re-gates the next tool call. Reached
+            // through the same handle the mode setter uses.
+            let mcp_handle_for_approve = mcp_handle.clone();
+            let plan_approver: wingman_tui::PlanApprover = std::sync::Arc::new(move || {
+                if let Some(mcp) = mcp_handle_for_approve
+                    .lock()
+                    .expect("mcp_handle poisoned")
+                    .as_ref()
+                {
+                    mcp.approve_plan();
+                }
+            });
+
             let (provider_id, model) = selection
                 .as_ref()
                 .map(|s| (s.provider_id.clone(), s.model.clone()))
@@ -1228,6 +1322,7 @@ pub async fn run() -> Result<ExitCode> {
                 mcp_list_runner,
                 models_runner,
                 mode_setter,
+                plan_approver,
                 recall_runner,
                 session_indexer,
             };

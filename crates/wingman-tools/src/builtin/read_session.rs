@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -28,6 +28,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for ReadSession {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "read_session".into(),

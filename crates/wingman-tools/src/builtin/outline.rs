@@ -4,7 +4,7 @@
 //! you want to know what's in a file without burning the token budget on
 //! its bodies.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,6 +19,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for Outline {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "outline".into(),
@@ -43,6 +47,16 @@ impl Tool for Outline {
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
         let path = ctx.resolve(&args.path);
+        // Outline emits file *content* (symbol names and signatures), so it is
+        // subject to the same project containment as `read_file`. Without this
+        // it accepted the absolute path its own schema advertises and read
+        // anything on disk, in every mode.
+        if !ctx.allows_read(&path) {
+            return ToolOutcome::err(format!(
+                "reading {} is not permitted in the current mode",
+                path.display()
+            ));
+        }
         #[cfg(feature = "treesitter")]
         {
             let Some(lang) = wingman_ts::Language::from_path(&path) else {

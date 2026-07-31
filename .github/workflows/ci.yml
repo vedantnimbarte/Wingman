@@ -16,6 +16,14 @@ concurrency:
 permissions:
   contents: read
 
+# Third-party actions are pinned to commit SHAs (tags are mutable, and a
+# compromised upstream tag would run in a workflow that can publish
+# releases). Dependabot's github-actions ecosystem keeps them current.
+#
+# `dtolnay/rust-toolchain` is the deliberate exception: it selects the
+# toolchain *by ref name* (`@stable`, `@1.88`), so pinning it to a SHA
+# would silently change which Rust it installs.
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -35,13 +43,13 @@ jobs:
         #   - macos-14 is Apple Silicon; windows-latest is x86_64-msvc.
         os: [ubuntu-24.04, macos-14, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
@@ -53,7 +61,7 @@ jobs:
     name: fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -69,13 +77,61 @@ jobs:
     name: msrv (1.88)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Rust 1.88
         uses: dtolnay/rust-toolchain@1.88
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: cargo check on MSRV
         run: cargo check --workspace
+
+  # Syntax-check the install scripts. `install.ps1` shipped broken once: it was
+  # UTF-8 without a BOM, PowerShell 5.1 read it as the ANSI codepage, and an
+  # em-dash decoded to a character PowerShell accepts as a string terminator —
+  # so the whole script failed to parse and the Windows install path was dead.
+  # This must run under `powershell` (5.1), not `pwsh`, or it won't reproduce.
+  scripts:
+    name: install scripts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Parse PowerShell scripts (5.1)
+        shell: powershell
+        run: |
+          $failed = $false
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $e = $null; $t = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$t, [ref]$e) | Out-Null
+            if ($e -and $e.Count -gt 0) {
+              $failed = $true
+              $e | ForEach-Object { Write-Host "::error file=$($_.Extent.File),line=$($_.Extent.StartLineNumber)::$($_.Message)" }
+            }
+          }
+          if ($failed) { exit 1 }
+      - name: Reject non-ASCII in .ps1 (PS 5.1 misdecodes it)
+        shell: powershell
+        run: |
+          $bad = Get-ChildItem -Recurse -Filter *.ps1 | Where-Object {
+            (Get-Content $_.FullName -Raw).ToCharArray() | Where-Object { [int]$_ -gt 127 }
+          }
+          if ($bad) {
+            $bad | ForEach-Object { Write-Host "::error file=$($_.FullName)::contains non-ASCII; keep .ps1 ASCII-only" }
+            exit 1
+          }
+
+  # install.sh gets its own Linux job: the PowerShell checks above need
+  # windows-latest for PS 5.1, but install.sh deliberately refuses to run on
+  # Windows (it tells you to use install.ps1), so shell-checking it there fails
+  # by design.
+  scripts-posix:
+    name: install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Syntax + dry run
+        run: |
+          sh -n scripts/install.sh
+          DRY_RUN=1 sh scripts/install.sh
 
   # Advisory scan. Informational (not in the required aggregate): some
   # advisories come from transitive deps (ort/fastembed) we can't immediately
@@ -85,7 +141,7 @@ jobs:
     name: audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
       - name: cargo audit
@@ -98,8 +154,8 @@ jobs:
     name: vscode-extension
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
       - name: Install deps
@@ -118,8 +174,8 @@ jobs:
     name: deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check
 
@@ -129,21 +185,25 @@ jobs:
     name: coverage
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        with:
+          # The tool used to be selected by the tag (`@cargo-llvm-cov`);
+          # pinning to a SHA drops that, so name it explicitly.
+          tool: cargo-llvm-cov
       - name: Generate coverage (lcov)
         run: cargo llvm-cov --workspace --lcov --output-path lcov.info
       - name: Coverage summary
         run: cargo llvm-cov --workspace --summary-only
       - name: Upload lcov artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lcov
           path: lcov.info

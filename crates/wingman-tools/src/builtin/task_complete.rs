@@ -8,7 +8,7 @@
 //! Registered only in worker mode (the registry omits it for normal TUI
 //! sessions) — the manager has its own `finalize_task` tool.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -36,6 +36,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for TaskComplete {
+    fn capabilities(&self) -> Capability {
+        Capability::NONE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "task_complete".into(),

@@ -1,5 +1,12 @@
 //! J4 — conversational mid-run interjection.
 //!
+//! **STATUS: PARKED — no production callers.** The logic below is implemented
+//! and unit-tested, but nothing in a real run reaches it; its only callers are
+//! its own tests. It is kept because the design is worth preserving, not
+//! because it is live. Do not cite it as a shipped capability, and check
+//! `git grep` before assuming a change here affects behaviour.
+//! Tracked in https://github.com/vedantnimbarte/Wingman/issues/105
+//!
 //! Once a run is in flight the user can redirect it without killing it:
 //!
 //! ```text

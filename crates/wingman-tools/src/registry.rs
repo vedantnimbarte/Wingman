@@ -92,6 +92,51 @@ impl ToolRegistry {
         &self.hooks
     }
 
+    /// Fire `[[hooks.user_prompt_submit]]` for a submitted prompt.
+    ///
+    /// Returns `Err(reason)` when a hook with `block = true` exits non-zero, so
+    /// the caller can refuse to send the prompt. This is the natural place for
+    /// a policy or content filter, which is why it failing silently was worse
+    /// than not offering it: the hooks parsed fine from config and then never
+    /// ran at all.
+    pub async fn run_user_prompt_submit_hooks(&self, prompt: &str) -> Result<(), String> {
+        for hook in &self.hooks.user_prompt_submit {
+            let env = vec![("WINGMAN_USER_PROMPT", prompt.to_string())];
+            let res = run_hook(&hook.command, hook.timeout_secs, &env).await;
+            if !res.success {
+                tracing::warn!(
+                    target: "wingman::hooks",
+                    blocking = hook.block,
+                    "user_prompt_submit hook failed: {}",
+                    res.stderr.trim()
+                );
+                if hook.block {
+                    return Err(res.stderr.trim().to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fire `[[hooks.stop]]` when a user turn finishes. `reason` is the agent's
+    /// stop reason (`end_turn`, `max_turns`, `gate_failed`, …).
+    ///
+    /// Advisory: there is nothing left to block by the time the turn is over,
+    /// so failures are logged rather than propagated.
+    pub async fn run_stop_hooks(&self, reason: &str) {
+        for hook in &self.hooks.stop {
+            let env = vec![("WINGMAN_STOP_REASON", reason.to_string())];
+            let res = run_hook(&hook.command, hook.timeout_secs, &env).await;
+            if !res.success {
+                tracing::warn!(
+                    target: "wingman::hooks",
+                    "stop hook failed: {}",
+                    res.stderr.trim()
+                );
+            }
+        }
+    }
+
     /// Register a concrete tool at build time. Used by the chained-builder
     /// flow (`ToolRegistry::new(ctx).with_builtins()`) before the registry
     /// is wrapped in `Arc`.
@@ -231,6 +276,21 @@ impl ToolDispatcher for ToolRegistry {
                 ),
             ];
             let res = run_hook(&hook.command, hook.timeout_secs, &env).await;
+            if !res.success {
+                // Always surface the failure. Previously a non-blocking hook's
+                // result was dropped on the floor, so a policy hook whose
+                // binary was missing, renamed, non-executable, or timing out
+                // produced no output on any channel and every tool call
+                // proceeded — a security control failing silently and open.
+                // `post_tool_use` already warned; this matches it.
+                tracing::warn!(
+                    target: "wingman::hooks",
+                    tool = %name,
+                    blocking = hook.block,
+                    "pre_tool_use hook failed: {}",
+                    res.stderr.trim()
+                );
+            }
             if hook.block && !res.success {
                 return ToolOutcome::err(format!(
                     "pre_tool_use hook blocked: {}",
@@ -255,7 +315,12 @@ impl ToolDispatcher for ToolRegistry {
             .get(name)
             .cloned();
         let mut outcome = match tool {
-            Some(tool) => tool.run(args.clone(), &self.ctx).await,
+            // Central capability gate. Enforcement lives here rather than in
+            // each tool so that forgetting to check `ToolCtx` fails closed.
+            Some(tool) => match capability_denial(name, tool.capabilities(), &self.ctx) {
+                Some(msg) => ToolOutcome::err(msg),
+                None => tool.run(args.clone(), &self.ctx).await,
+            },
             None => ToolOutcome::err(format!("unknown tool: {name}")),
         };
 
@@ -397,6 +462,41 @@ pub struct HookResult {
     pub stderr: String,
 }
 
+/// Refuse a tool whose declared capabilities the active permission mode does
+/// not grant. Returns the message to hand back to the model, or `None` to let
+/// the call proceed.
+///
+/// Deliberately coarse: it does not know which path a tool will touch, only
+/// whether writing / shelling out / reaching the network is permitted at all
+/// right now. Path containment stays inside the tools, which know their own
+/// arguments.
+fn capability_denial(name: &str, caps: crate::Capability, ctx: &ToolCtx) -> Option<String> {
+    use crate::Capability;
+
+    if caps.contains(Capability::WRITE) && !ctx.allows_any_write() {
+        return Some(format!(
+            "{name} modifies files, which is not permitted in {:?} mode \
+             (switch to auto-edit or yolo)",
+            ctx.mode()
+        ));
+    }
+    if caps.contains(Capability::SHELL) && !ctx.allows_shell() {
+        return Some(format!(
+            "{name} executes commands, which is not permitted in {:?} mode \
+             (switch to auto-edit or yolo)",
+            ctx.mode()
+        ));
+    }
+    if caps.contains(Capability::NETWORK) && !ctx.allows_network() {
+        return Some(format!(
+            "{name} accesses the network, which is not permitted in {:?} mode \
+             (set [tools].allow_network, or switch to auto-edit/yolo)",
+            ctx.mode()
+        ));
+    }
+    None
+}
+
 pub async fn run_hook(command: &str, timeout_secs: u64, env: &[(&str, String)]) -> HookResult {
     let command = command.to_string();
     let env: Vec<(String, String)> = env
@@ -474,6 +574,192 @@ mod tests {
         async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
             ToolOutcome::ok("ok")
         }
+    }
+
+    /// A tool that declares a capability but would happily do the work — the
+    /// point is that the registry stops it before `run` is reached.
+    struct CapTool(&'static str, crate::Capability);
+
+    #[async_trait]
+    impl Tool for CapTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.0.into(),
+                description: "cap".into(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+        async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("DID THE THING")
+        }
+        fn capabilities(&self) -> crate::Capability {
+            self.1
+        }
+    }
+
+    fn ctx_in(mode: PermissionMode) -> ToolCtx {
+        let cwd = std::env::temp_dir();
+        ToolCtx::new(mode, cwd.clone(), cwd)
+    }
+
+    /// The gate this table encodes is the whole point of declaring
+    /// capabilities: a tool that forgets to consult `ToolCtx` must still be
+    /// refused. Previously `save_memory`/`forget_memory` wrote files in
+    /// read-only mode precisely because nothing checked centrally.
+    #[tokio::test]
+    async fn capability_gate_matrix() {
+        use crate::Capability;
+        use wingman_core::ToolDispatcher;
+
+        // (capability, mode, should_be_allowed)
+        let cases = [
+            (Capability::WRITE, PermissionMode::ReadOnly, false),
+            (Capability::WRITE, PermissionMode::Plan, false),
+            (Capability::WRITE, PermissionMode::AutoEdit, true),
+            (Capability::WRITE, PermissionMode::Yolo, true),
+            (Capability::SHELL, PermissionMode::ReadOnly, false),
+            (Capability::SHELL, PermissionMode::Plan, false),
+            (Capability::SHELL, PermissionMode::AutoEdit, true),
+            (Capability::SHELL, PermissionMode::Yolo, true),
+            (Capability::NETWORK, PermissionMode::ReadOnly, false),
+            (Capability::NETWORK, PermissionMode::Plan, false),
+            (Capability::NETWORK, PermissionMode::AutoEdit, true),
+            (Capability::NETWORK, PermissionMode::Yolo, true),
+            // Reads are allowed in every mode; containment is per-path.
+            (Capability::READ, PermissionMode::ReadOnly, true),
+            (Capability::NONE, PermissionMode::ReadOnly, true),
+        ];
+
+        for (cap, mode, allowed) in cases {
+            let mut reg = ToolRegistry::new(ctx_in(mode));
+            reg.register(CapTool("t", cap));
+            let out = reg.dispatch("t", serde_json::json!({})).await;
+            assert_eq!(
+                !out.is_error, allowed,
+                "cap {cap:?} in {mode:?}: expected allowed={allowed}, got {out:?}"
+            );
+            if allowed {
+                assert_eq!(out.content, "DID THE THING");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_capable_tool_is_refused_before_it_runs_in_read_only() {
+        use crate::Capability;
+        use wingman_core::ToolDispatcher;
+
+        let mut reg = ToolRegistry::new(ctx_in(PermissionMode::ReadOnly));
+        reg.register(CapTool("save_memory", Capability::WRITE));
+        let out = reg.dispatch("save_memory", serde_json::json!({})).await;
+
+        assert!(out.is_error);
+        assert_ne!(
+            out.content, "DID THE THING",
+            "the tool body must not have executed"
+        );
+        assert!(out.content.contains("read-only") || out.content.contains("ReadOnly"));
+    }
+
+    /// These two hooks were documented with working examples and never fired —
+    /// the env vars they promise appeared only in config docstrings. A policy
+    /// hook that silently does nothing is worse than one that isn't offered.
+    #[tokio::test]
+    async fn user_prompt_submit_hook_can_block_a_prompt() {
+        use wingman_config::{Hook, HooksConfig};
+
+        let blocking = HooksConfig {
+            user_prompt_submit: vec![Hook {
+                // Non-zero exit == refuse. `exit 1` works in both cmd and sh.
+                command: "exit 1".into(),
+                match_tool: String::new(),
+                block: true,
+                timeout_secs: 10,
+            }],
+            ..Default::default()
+        };
+        let reg = ToolRegistry::new(ctx_in(PermissionMode::ReadOnly)).with_hooks(blocking);
+        assert!(
+            reg.run_user_prompt_submit_hooks("anything").await.is_err(),
+            "a blocking hook exiting non-zero must refuse the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_blocking_user_prompt_submit_hook_does_not_refuse() {
+        use wingman_config::{Hook, HooksConfig};
+
+        let advisory = HooksConfig {
+            user_prompt_submit: vec![Hook {
+                command: "exit 1".into(),
+                match_tool: String::new(),
+                block: false,
+                timeout_secs: 10,
+            }],
+            ..Default::default()
+        };
+        let reg = ToolRegistry::new(ctx_in(PermissionMode::ReadOnly)).with_hooks(advisory);
+        assert!(reg.run_user_prompt_submit_hooks("anything").await.is_ok());
+    }
+
+    /// `WINGMAN_STOP_REASON` must actually reach the hook process — that env
+    /// var existed only in a config docstring before this.
+    #[tokio::test]
+    async fn stop_reason_reaches_the_hook_process() {
+        let cmd = if cfg!(windows) {
+            "echo %WINGMAN_STOP_REASON%"
+        } else {
+            "echo \"$WINGMAN_STOP_REASON\""
+        };
+        let res = run_hook(
+            cmd,
+            10,
+            &[("WINGMAN_STOP_REASON", "gate_failed".to_string())],
+        )
+        .await;
+        assert!(res.success, "hook failed: {}", res.stderr);
+        assert!(
+            res.stdout.contains("gate_failed"),
+            "hook did not receive WINGMAN_STOP_REASON, stdout was {:?}",
+            res.stdout
+        );
+    }
+
+    /// Likewise for the prompt hook's env var.
+    #[tokio::test]
+    async fn user_prompt_reaches_the_hook_process() {
+        let cmd = if cfg!(windows) {
+            "echo %WINGMAN_USER_PROMPT%"
+        } else {
+            "echo \"$WINGMAN_USER_PROMPT\""
+        };
+        let res = run_hook(
+            cmd,
+            10,
+            &[("WINGMAN_USER_PROMPT", "refactor auth".to_string())],
+        )
+        .await;
+        assert!(res.success, "hook failed: {}", res.stderr);
+        assert!(res.stdout.contains("refactor auth"));
+    }
+
+    #[tokio::test]
+    async fn stop_hooks_run_without_blocking_the_caller() {
+        use wingman_config::{Hook, HooksConfig};
+
+        // A failing stop hook is advisory — the turn is already over, so there
+        // is nothing left to block. It must not panic or hang.
+        let hooks = HooksConfig {
+            stop: vec![Hook {
+                command: "exit 3".into(),
+                match_tool: String::new(),
+                block: true,
+                timeout_secs: 10,
+            }],
+            ..Default::default()
+        };
+        let reg = ToolRegistry::new(ctx_in(PermissionMode::ReadOnly)).with_hooks(hooks);
+        reg.run_stop_hooks("end_turn").await;
     }
 
     #[tokio::test]

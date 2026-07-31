@@ -62,6 +62,12 @@ impl McpRegistry {
         self.tools.set_mode(mode);
     }
 
+    /// Record the user's acceptance of a presented plan on the shared
+    /// `ToolCtx`. In `plan` mode this is what unlocks writes and shell.
+    pub fn approve_plan(&self) {
+        self.tools.ctx().approve_plan();
+    }
+
     /// Seed the registry from an already-loaded config + best-effort
     /// connect-all (the runtime does this at startup so the TUI can later
     /// see what's there).
@@ -191,8 +197,11 @@ impl McpRegistry {
     fn register_server_tools(&self, server: &McpServer, into: &mut Vec<String>) {
         for tool in &server.tools {
             let handle: Arc<dyn McpToolHandle> = Arc::new(McpTool::build(server, tool));
-            let adapter: Arc<dyn wingman_tools::Tool> =
-                Arc::new(McpToolAdapter::new(handle, server.trusted));
+            let adapter: Arc<dyn wingman_tools::Tool> = Arc::new(McpToolAdapter::with_server(
+                handle,
+                server.trusted,
+                server.name.clone(),
+            ));
             let name = adapter.spec().name;
             self.tools.register_arc(adapter);
             into.push(name);

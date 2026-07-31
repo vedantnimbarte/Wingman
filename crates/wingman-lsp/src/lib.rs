@@ -66,6 +66,11 @@ impl std::fmt::Display for Unavailable {
 /// single project root.
 pub struct LspManager {
     root: PathBuf,
+    /// Write policy handed to every client this manager starts, so a
+    /// server-initiated `workspace/applyEdit` is contained. Shared (not
+    /// copied) so switching permission mode re-gates servers that are
+    /// already running.
+    authorizer: crate::client::SharedAuthorizer,
     // Per-language slot. `Some(Ok)` = live client; `Some(Err)` = known
     // unavailable (cached so we don't re-probe a missing server every call).
     clients: Mutex<HashMap<Lang, std::result::Result<Arc<LspClient>, Unavailable>>>,
@@ -75,12 +80,20 @@ impl LspManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         LspManager {
             root: root.into(),
+            authorizer: Arc::new(std::sync::RwLock::new(None)),
             clients: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Install the policy that decides whether a server-initiated
+    /// `workspace/applyEdit` may touch a given path. Until this is called
+    /// every such edit is refused, which is the safe default.
+    pub fn set_write_authorizer(&self, allow: Option<crate::edit::WriteAuthorizer>) {
+        *self.authorizer.write().unwrap_or_else(|e| e.into_inner()) = allow;
     }
 
     /// Get (or lazily start) the client that handles `path`'s language.
@@ -106,7 +119,7 @@ impl LspManager {
                 looked_for: spec.candidate_names(),
             });
         };
-        match LspClient::start(&self.root, &program, &args, lang).await {
+        match LspClient::start(&self.root, &program, &args, lang, self.authorizer.clone()).await {
             Ok(c) => Ok(c),
             Err(e) => Err(Unavailable::StartFailed {
                 lang,
@@ -131,6 +144,24 @@ impl LspManager {
 fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<LspManager>>> {
     static REG: OnceLock<Mutex<HashMap<PathBuf, Arc<LspManager>>>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Shut down every language server this process started, across all project
+/// roots.
+///
+/// Language servers are long-lived child processes (rust-analyzer in
+/// particular is expensive). `LspClient` sets `kill_on_drop(true)`, but the
+/// process-wide registry holds an `Arc` for the lifetime of the process, so
+/// nothing was ever dropped and `LspManager::shutdown_all` had no callers —
+/// servers leaked until the process died. Call this on a clean exit.
+pub async fn shutdown_all_managers() {
+    let managers: Vec<Arc<LspManager>> = {
+        let mut reg = registry().lock().await;
+        reg.drain().map(|(_, m)| m).collect()
+    };
+    for m in managers {
+        m.shutdown_all().await;
+    }
 }
 
 /// The shared [`LspManager`] for `root`, created on first use.

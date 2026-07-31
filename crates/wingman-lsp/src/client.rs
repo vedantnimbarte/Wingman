@@ -87,6 +87,10 @@ impl Diagnostic {
 }
 
 type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
+/// Shared, live-updatable write policy for server-initiated edits. `None`
+/// means "refuse everything", which is the correct default: a server must
+/// not be able to write just because it asked.
+pub type SharedAuthorizer = Arc<std::sync::RwLock<Option<crate::edit::WriteAuthorizer>>>;
 type Diags = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
 
 /// A live connection to one language server, scoped to one project root.
@@ -112,6 +116,7 @@ impl LspClient {
         program: &str,
         args: &[String],
         lang: Lang,
+        authorizer: SharedAuthorizer,
     ) -> Result<Arc<LspClient>> {
         let mut child = tokio::process::Command::new(program)
             .args(args)
@@ -135,13 +140,16 @@ impl LspClient {
 
         // Reader task: route responses to callers, collect diagnostics, and
         // answer the handful of server→client requests that would otherwise
-        // stall initialization.
+        // stall initialization. It owns the only handle to the write
+        // authorizer — server-initiated edits are handled here and nowhere
+        // else, so the client struct has no reason to keep a copy.
         {
             let pending = pending.clone();
             let diagnostics = diagnostics.clone();
             let writer = writer.clone();
+            let authorizer = authorizer.clone();
             tokio::spawn(async move {
-                reader_loop(stdout, pending, diagnostics, writer).await;
+                reader_loop(stdout, pending, diagnostics, writer, authorizer).await;
             });
         }
 
@@ -473,6 +481,7 @@ async fn reader_loop(
     pending: Pending,
     diagnostics: Diags,
     writer: Arc<Mutex<ChildStdin>>,
+    authorizer: SharedAuthorizer,
 ) {
     let mut reader = BufReader::new(stdout);
     loop {
@@ -508,15 +517,56 @@ async fn reader_loop(
                 }
                 // A code action's command asks us to apply an edit — do it and
                 // report the result, so command-based fixes actually land.
+                // A *server-initiated* write. Nothing about this request came
+                // from a tool call, so without a gate any language server we
+                // started — including one a cloned repo put on PATH or in
+                // node_modules — could rewrite arbitrary files, in any
+                // permission mode. Refuse unless the session installed an
+                // authorizer, and let that authorizer see every path.
                 "workspace/applyEdit" => {
                     let edit = msg
                         .get("params")
                         .and_then(|p| p.get("edit"))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    match crate::edit::apply_workspace_edit(&edit).await {
-                        Ok(_) => json!({ "applied": true }),
-                        Err(e) => json!({ "applied": false, "failureReason": e.to_string() }),
+                    let allow = authorizer.read().unwrap_or_else(|e| e.into_inner()).clone();
+                    match allow {
+                        None => {
+                            tracing::warn!(
+                                "refused server-initiated workspace/applyEdit: \
+                                 writes are not permitted in this session"
+                            );
+                            json!({
+                                "applied": false,
+                                "failureReason": "writes are not permitted in the current permission mode",
+                            })
+                        }
+                        Some(allow) => match crate::edit::apply_workspace_edit(&edit, &allow).await
+                        {
+                            Ok(applied) if applied.refused.is_empty() => json!({ "applied": true }),
+                            Ok(applied) => {
+                                let list: Vec<String> = applied
+                                    .refused
+                                    .iter()
+                                    .map(|p| p.display().to_string())
+                                    .collect();
+                                tracing::warn!(
+                                    "refused server-initiated workspace/applyEdit touching \
+                                     paths outside the project: {}",
+                                    list.join(", ")
+                                );
+                                json!({
+                                    "applied": false,
+                                    "failureReason": format!(
+                                        "refused: outside the project or not writable ({})",
+                                        list.join(", ")
+                                    ),
+                                })
+                            }
+                            Err(e) => {
+                                json!({ "applied": false, "failureReason": e.to_string() })
+                            }
+                        },
                     }
                 }
                 // Everything else we don't implement → null result is safe.

@@ -20,7 +20,7 @@
 //!
 //! All edits are validated up front; on any failure, no file is touched.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -51,6 +51,10 @@ enum Op {
 
 #[async_trait]
 impl Tool for ApplyPatch {
+    fn capabilities(&self) -> Capability {
+        Capability::READ | Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "apply_patch".into(),
@@ -98,11 +102,7 @@ impl Tool for ApplyPatch {
             match &op {
                 Op::Update { path, old, .. } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     let original = match tokio::fs::read_to_string(path).await {
                         Ok(s) => s,
@@ -125,11 +125,7 @@ impl Tool for ApplyPatch {
                 }
                 Op::Add { path, .. } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     if path.exists() {
                         return ToolOutcome::err(format!(
@@ -141,11 +137,7 @@ impl Tool for ApplyPatch {
                 }
                 Op::Delete { path } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     if !path.exists() {
                         return ToolOutcome::err(format!(

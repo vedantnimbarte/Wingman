@@ -7,7 +7,7 @@
 //!
 //! They deliberately avoid network / provider calls (run in CI without API
 //! keys) and never write to the developer's real `~/.wingman`: the only
-//! mutating command exercised (`wingman init`) writes `WINGMAN.md` into an
+//! mutating command exercised (`wingman init`) writes `AGENTS.md` into an
 //! isolated scratch *project* directory (its cwd), not the global home.
 
 use std::path::PathBuf;
@@ -151,10 +151,11 @@ fn bad_model_flag_errors_without_panicking() {
 }
 
 #[test]
-fn init_writes_wingman_md_into_isolated_project() {
-    // `wingman init` writes WINGMAN.md into the project root, which (for a dir
-    // with no .git/.wingman marker) is the cwd itself — so a scratch cwd fully
-    // isolates the side effect from the real home.
+fn init_writes_agents_md_into_isolated_project() {
+    // `wingman init` writes AGENTS.md — the cross-tool standard — into the
+    // project root, which (for a dir with no .git/.wingman marker) is the cwd
+    // itself, so a scratch cwd fully isolates the side effect from the real
+    // home.
     let s = Scratch::new();
     // Give the project something to introspect.
     std::fs::write(s.dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
@@ -169,8 +170,42 @@ fn init_writes_wingman_md_into_isolated_project() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        s.dir.join("WINGMAN.md").exists(),
-        "init did not write WINGMAN.md into the project dir"
+        s.dir.join("AGENTS.md").exists(),
+        "init did not write AGENTS.md into the project dir"
+    );
+}
+
+#[test]
+fn init_refreshes_an_existing_wingman_md_instead_of_adding_agents_md() {
+    // A project that already uses WINGMAN.md keeps it: switching the default
+    // shouldn't leave two instruction files disagreeing with each other.
+    let s = Scratch::new();
+    std::fs::write(
+        s.dir.join("Cargo.toml"),
+        "[package]
+name = \"x\"
+",
+    )
+    .unwrap();
+    std::fs::write(
+        s.dir.join("WINGMAN.md"),
+        "# existing
+",
+    )
+    .unwrap();
+
+    let out = wingman()
+        .arg("init")
+        .arg("--force")
+        .current_dir(&s.dir)
+        .output()
+        .expect("run init");
+    assert!(out.status.success());
+
+    assert!(s.dir.join("WINGMAN.md").exists());
+    assert!(
+        !s.dir.join("AGENTS.md").exists(),
+        "should refresh the existing WINGMAN.md, not add a second file"
     );
 }
 

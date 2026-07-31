@@ -6,21 +6,45 @@
 
 [![ci](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml/badge.svg)](https://github.com/vedantnimbarte/Wingman/actions/workflows/ci.yml)
 
-`wingman` is a multi-provider, terminal-first **self-improving** coding agent
-written in Rust. It runs as a TUI for interactive sessions and as a headless
-one-shot (`--print "prompt"`) for scripting, talks to 73+ LLM providers behind
-a single streaming interface, ships a built-in tool layer for reading,
-searching, and editing the project tree, and learns from every conversation:
-it builds a persistent model of you and your projects, proposes reusable
-skills mined from your session history (which you review and promote), scores
-how well its skills perform, and recalls past sessions across projects.
+**A terminal coding agent that asks the compiler instead of guessing.**
 
-It is positioned as an open, provider-agnostic alternative to Claude Code,
-Cursor, and Aider — with native support for Anthropic, OpenAI, ChatGPT
-(OAuth), Google Gemini, OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama,
-a built-in MCP host that adapts external MCP-server tools as first-class
-tools, and a multi-agent **pilot mode** that plans a goal, delegates to
-worker agents in isolated worktrees, and converges into a PR.
+Most agents answer "where is this used, and what breaks if I change it" by
+grepping and reading files until the context window fills. `wingman` asks the
+language server and a local semantic index, so it resolves imports, types, and
+re-exports rather than matching names — and it spends a fraction of the
+context doing it.
+
+That is the part worth choosing it for. Everything else is table stakes, and
+this README tries to be honest about which is which.
+
+```
+$ wingman context
+  system prompt       583 tokens
+  tool schemas       3653 tokens  (24 tools)
+  --------------------------------------------
+  first turn         4236 tokens  before your prompt
+```
+
+Run that in your own repo. Every agent pays a per-turn context tax and almost
+none of them will tell you what it is.
+
+**What else you get:** a `ratatui` TUI and a headless `--print` mode; one
+streaming interface over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
+OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama; an MCP host; a verification
+gate that runs your build and tests before the agent may call a turn done; and
+a multi-agent **pilot mode** that plans a goal, delegates to workers in
+isolated worktrees, and converges into a PR.
+
+**What it deliberately doesn't do.** It doesn't push your code to anyone's
+cloud — BYO key, everything local. It doesn't reuse a subscription token to
+dodge API billing. It doesn't headline agent count: the two firms who have
+published the most on parallel agents both concluded that writes should stay
+single-threaded, and pilot mode serialises tasks whose write-sets overlap
+rather than racing them. And it doesn't claim your shell is sandboxed when it
+isn't — `wingman doctor` tells you exactly which containment is active on your
+machine.
+
+Pre-1.0. See [Maturity](#maturity) for what that means in practice.
 
 ---
 
@@ -47,11 +71,13 @@ worker agents in isolated worktrees, and converges into a PR.
 
 ## Highlights
 
-- **Self-improving learning loop.** Persistent memories (markdown +
-  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/`),
-  skill usage stats with outcome scoring, cross-session semantic recall via
-  the existing RAG pipeline, and quiet-session nudges that ask the agent to
-  consider persisting something when it's been a while since a save. See
+- **Persistent memory and skills.** Memories are plain markdown +
+  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/` —
+  files you can read, edit, and delete, not an opaque store. Plus skill usage
+  stats, cross-session semantic recall through the RAG pipeline, and
+  quiet-session nudges to persist something worth keeping. Note the outcome
+  "scoring" behind skill stats is a phrase heuristic over your replies, not a
+  learned signal; treat the numbers as a rough tally. See
   [Self-improving loop](#self-improving-loop) below.
 - **73+ providers, one shape.** Anthropic is the reference implementation
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
@@ -89,13 +115,26 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Layered configuration.** Defaults → global `~/.wingman/config.toml` →
   project `.wingman/config.toml` → `WINGMAN_*` env vars → CLI flags. TOML
   sub-tables merge instead of clobbering.
-- **Permission modes.** `read-only` (default), `plan` (read-only + the
-  agent must call `present_plan` before any edit), `auto-edit` (writes/shell
-  inside the project tree auto-allowed, denylist still prompts), and `yolo`
-  (no prompts; per-session only, never persisted).
-- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `stop`, and
-  `user_prompt_submit` shell hooks fire from the agent loop and can
-  block a tool call by exiting non-zero (`[hooks]` in config).
+- **Permission modes.** `read-only` (default), `plan` (read-only until you
+  `/approve` the agent's plan, then auto-edit), `auto-edit` (writes
+  inside the project tree and shell auto-allowed, subject to the shell
+  denylist), and `yolo` (no guardrails; per-session only, never persisted).
+  Modes are enforced centrally: each tool declares what it needs
+  (read / write / shell / network) and the registry refuses anything the
+  active mode doesn't grant. A few paths — `.git/`, `.wingman/config.toml`,
+  `.wingman/skills/` — are never writable, in any mode. `run_shell` is
+  additionally confined by the OS where possible (`bwrap` / `sandbox-exec`);
+  see [Permission modes](#permission-modes).
+- **Untrusted project config.** A cloned repo's `.wingman/config.toml` may
+  pick a model and tune the UI, but not run commands: `[hooks]`, `[mcp]`,
+  `[verify]`, `[providers]`, and `permission_mode` are ignored unless you
+  run `wingman trust` in that repo. Trust is pinned to the file's contents
+  and lapses whenever it changes.
+- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `user_prompt_submit`,
+  and `stop` shell hooks (`[hooks]` in config). A hook with `block = true`
+  that exits non-zero refuses the tool call (`pre_tool_use`) or the prompt
+  (`user_prompt_submit`); `stop` is advisory, since the turn is already
+  over. Hook failures are always logged, whether or not they block.
 - **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a
@@ -179,9 +218,13 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
   into a reviewable, revertable commit with a generated message (Aider-style),
   composing with the rewind timeline and verification gate.
-- **Local-first privacy preset.** `wingman router preset local` routes the
-  cheap steps (summarize / compaction / commit-message / title) to a local
-  model — simple steps never leave your machine.
+- **Local-first privacy preset.** `wingman router preset local` prints a
+  `[router.classes]` block that points the cheap task classes at a local
+  model. Caveat worth knowing: compaction and commit messages are currently
+  computed without a model call at all, and `[router.classes]` is consulted
+  only for subagents — so today the preset is a starting point for your own
+  config rather than a switch that redirects live traffic. For a real
+  guarantee use `[privacy].local_only` and `wingman attest`.
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
   why it matters" walkthrough of the working diff (fast-model), for reviewers
   and juniors.
@@ -192,9 +235,10 @@ worker agents in isolated worktrees, and converges into a PR.
   time-to-first-token, tokens/task, and verified-done rate.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [docs/SDK.md](docs/SDK.md).
-- **Visual verification.** Build with `--features browser` and set
-  `[verify.browser].url` to make the turn gate load a URL, screenshot it, and
-  fail if it drifts from a baseline — proof a UI change renders.
+- **Visual verification.** *(Opt-in build.)* Build with `--features browser`
+  and set `[verify.browser].url` to make the turn gate load a URL, screenshot
+  it, and fail if it drifts from a baseline. Not in the default build, and it
+  fails open — with no browser present the gate passes rather than blocking.
 - **Server-backed team memory.** Beyond the git-backed `memory sync`,
   `wingman memory push` / `pull` sync memories through a team HTTP endpoint
   (`[team]`), merging non-destructively.
@@ -224,12 +268,18 @@ worker agents in isolated worktrees, and converges into a PR.
   just verified builds").
 - **Ask, don't guess.** The `ask_user` tool lets the agent pause and ask at a
   genuine fork or before an irreversible action instead of guessing.
-- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider and
-  disables network tools; `wingman attest` reports what leaves the machine.
+- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider
+  and removes the network tools. `wingman attest` audits every configured
+  egress channel — MCP servers, hooks, custom tools, team endpoint, and
+  whether `run_shell` is reachable — and states its own scope: it reflects
+  configuration, and cannot vouch for what a local model or a spawned process
+  does with the data.
 - **Cited memory.** `recall_memory` returns provenance (source + date) and the
   agent cites the memory it acts on.
-- **Test-first.** `wingman spec "<intent>"` writes failing tests, then implements
-  until the gate is green.
+- **Test-first.** `wingman spec "<intent>"` writes failing tests, then
+  implements against them. The `[verify]` gate pushes back on a red build for
+  up to `[verify].max_retries` forced corrections (default 2), then stops and
+  exits non-zero — bounded retries, not a loop until green.
 - **PR-native.** `wingman pr address <pr#>` addresses a PR's review comments and
   failing CI on the current branch.
 - **Repo onboarding.** `wingman tour` orients you on an unfamiliar codebase.
@@ -926,17 +976,56 @@ is resolved against the environment at load time.
 
 ### Permission modes
 
-| Mode         | Reads / Search | Writes inside project | Shell                       | Out-of-tree paths |
-| ------------ | -------------- | --------------------- | --------------------------- | ----------------- |
-| `read-only`  | allowed        | prompts               | prompts                     | prompts           |
-| `plan`       | allowed        | denied (plan first)   | denied                      | denied            |
-| `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | prompts           |
-| `yolo`       | allowed        | auto-allowed          | auto-allowed                | auto-allowed      |
+| Mode         | Reads / Search | Writes inside project | Shell                        | Out-of-tree paths |
+| ------------ | -------------- | --------------------- | ---------------------------- | ----------------- |
+| `read-only`  | allowed        | denied                | denied                       | denied            |
+| `plan`       | allowed        | after `/approve`      | after `/approve`             | denied            |
+| `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | denied for writes |
+| `yolo`       | allowed        | auto-allowed          | auto-allowed                 | allowed           |
 
-In `plan` mode the assistant is expected to call `present_plan` and wait for
-the user before requesting any write/shell tool. The `present_plan` tool is
-always available so the model can produce a structured plan even outside
-plan mode (it just won't gate anything in that case).
+**There are no interactive approval prompts.** A tool call that the active
+mode doesn't permit is refused outright, with the reason returned to the
+model. Choose the mode that matches the latitude you want to grant.
+
+Enforcement is central: every tool declares what it needs
+(`read` / `write` / `shell` / `network`), and the registry refuses the call
+before the tool runs. A tool that declares nothing can only do pure
+computation, so the default for anything new is deny.
+
+**Protected paths.** `.git/`, `.wingman/config.toml`, `.wingman/skills/`, and
+`.wingman/trusted.toml` are never writable — including in `yolo`. Each of
+those turns a single bad edit into a change that outlives the session (a git
+hook that fires on your next commit, a config that grants the agent more
+permission next time). Edit them yourself if you mean to.
+
+**About `plan`.** `plan` starts out identical to `read-only`: the agent can
+read and search, but every write and shell call is refused. It calls
+`present_plan` to show you what it intends to do; you run **`/approve`** in
+the TUI to accept, and only then does it behave like `auto-edit` for the rest
+of the session (still project-confined, and protected paths still refused).
+Switching modes clears the approval, so returning to `plan` later needs a
+fresh one — consent applies to the plan you actually read.
+
+Headless (`--print`) has nobody to approve, so `plan` there stays read-only
+for the whole run. Use `auto-edit` for unattended work.
+
+**About `auto-edit`.** Writes are confined to the project tree. Shell is
+confined too *when the platform provides a mechanism* — `bwrap` on Linux,
+`sandbox-exec` on macOS — which bounds `run_shell` writes to the project and
+blocks reads of `~/.ssh`, `~/.aws`, `~/.gnupg`. Set it with
+`[tools].shell_sandbox`:
+
+| value      | behaviour                                                        |
+| ---------- | ---------------------------------------------------------------- |
+| `auto`     | default — confine when available, otherwise run unconfined and warn |
+| `required` | refuse to run shell at all when no mechanism is available          |
+| `off`      | never wrap                                                        |
+
+`wingman doctor` reports which mechanism is active, so it is a claim you can
+check rather than take on trust. Two honest limits: there is **no Windows
+mechanism wired up yet** (use `required` if that matters to you), and this
+confines the filesystem, not the network — a sandboxed command can still
+`curl`. The shell denylist remains a convenience, not a boundary.
 
 `yolo` is per-session only — never persisted to config.
 
@@ -1071,6 +1160,32 @@ model can call — the tool input JSON arrives on stdin and in
 
 ---
 
+## Maturity
+
+Pre-1.0, and the honest breakdown matters more than a version number. This
+table is what "shipped" means per area, so you can decide what to lean on.
+
+| Area | State | What that means |
+| --- | --- | --- |
+| Agent loop, tools, providers | **Solid** | The daily path. Streaming, tool dispatch, compaction, session resume, live model swap. |
+| LSP code intelligence | **Solid** | Real definition/references/hover/diagnostics/rename, 11 languages, degrades to tree-sitter when no server is installed. |
+| Semantic index (RAG) | **Solid** | Hybrid dense + BM25. Downloads a ~120 MB embedding model on first use. |
+| Verification gate | **Solid, bounded** | Runs your build/tests before the agent may finish. Gives up after `[verify].max_retries` (default 2) and exits non-zero — bounded retries, not loop-until-green. |
+| Permission model | **Solid** | Central capability gate; protected paths refused in every mode. No interactive approval prompts by design — a disallowed call is refused, not queued. |
+| Shell containment | **Platform-dependent** | Real via `bwrap`/`sandbox-exec`; **nothing on Windows yet**. `wingman doctor` reports which. |
+| Pilot (multi-agent) | **Works, user-validated** | Genuine parallel workers in worktrees converging to a PR. Not CI-validated end-to-end; treat unattended runs with a spend cap and read the PR. |
+| Memory / skills | **Works, modest** | Memories are plain files you can read and delete. Skill "outcome scoring" is a phrase heuristic over your replies, not a learned signal. |
+| Browser verification | **Opt-in, fails open** | Needs `--features browser` and Chrome. Absent a browser the gate passes. |
+| Team memory, Slack intake | **Needs your infrastructure** | Speak simple HTTP contracts; you supply the endpoint/ingress. |
+| Editor integration | **ACP turn loop** | `wingman acp` speaks the Agent Client Protocol, so ACP-capable editors (Zed, JetBrains, Neovim, Emacs) can drive it. Covers the streaming turn loop; per-tool-call approval from the editor (`session/request_permission`) is not wired yet — Wingman applies its own permission model. A VS Code bridge over `mcp-serve` also exists as a context provider. |
+
+Known gaps are tracked as issues rather than hidden: see the
+[issue tracker](https://github.com/vedantnimbarte/Wingman/issues), and
+[SECURITY.md](SECURITY.md) for the threat model and what is deliberately out
+of scope.
+
+---
+
 ## Roadmap
 
 The project is being built milestone by milestone:
@@ -1094,9 +1209,13 @@ The project is being built milestone by milestone:
   tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
   end-to-end runs are user-validated)* `wingman autonomous` is a deprecated
   alias.
-- **Next** — Interactive TUI approval modal for skill/memory proposals,
-  session logging from the TUI (currently headless-only), autopilot-tier
-  hardening (critic, knowledge graph, tool synthesis).
+- **ACP** — `wingman acp` speaks the Agent Client Protocol over stdio
+  (initialize / session/new / session/prompt / session/cancel, streaming
+  `session/update`), so one implementation reaches Zed, JetBrains, Neovim, and
+  Emacs. *(shipped; turn loop)*
+- **Next** — editor-driven per-tool approval over ACP
+  (`session/request_permission`), Windows shell containment, and an
+  interactive TUI approval modal for skill/memory proposals.
 
 ---
 

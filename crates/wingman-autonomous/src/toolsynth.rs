@@ -1,5 +1,12 @@
 //! J7 — tool synthesis (the agent grows its own capabilities).
 //!
+//! **STATUS: PARKED — no production callers.** The logic below is implemented
+//! and unit-tested, but nothing in a real run reaches it; its only callers are
+//! its own tests. It is kept because the design is worth preserving, not
+//! because it is live. Do not cite it as a shipped capability, and check
+//! `git grep` before assuming a change here affects behaviour.
+//! Tracked in https://github.com/vedantnimbarte/Wingman/issues/105
+//!
 //! When a worker repeatedly hits the same gap ("I keep needing to query
 //! the SQLite DB but there's no tool"), it emits a `propose_tool`. The
 //! orchestrator queues it as a `meta` task; a `tool-smith` role generates

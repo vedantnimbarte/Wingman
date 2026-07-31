@@ -1,8 +1,10 @@
+pub mod acp_serve;
 pub mod attest;
 pub mod batch;
 pub mod bench;
 pub mod checkpoint;
 pub mod config;
+pub mod context;
 pub mod cost;
 pub mod diff;
 pub mod diff_annotate;
@@ -31,5 +33,6 @@ pub mod session;
 pub mod skill;
 pub mod spec;
 pub mod tour;
+pub mod trust;
 pub mod worker;
 pub mod worktree;

@@ -172,9 +172,155 @@ fn parse_inbox_body(body: &str) -> (Option<String>, String) {
     (None, body.trim().to_string())
 }
 
+/// Slack's replay window. Slack's own guidance is 5 minutes; requests older
+/// than this are rejected even with a valid signature so a captured request
+/// can't be replayed indefinitely.
+pub const SLACK_MAX_SKEW_SECS: i64 = 60 * 5;
+
+/// Verify a Slack request signature (signing scheme `v0`).
+///
+/// Slack signs `v0:{timestamp}:{raw_body}` with the app's signing secret and
+/// sends the result as `X-Slack-Signature: v0=<hex>`, alongside
+/// `X-Slack-Request-Timestamp`. Both the signature *and* the timestamp matter:
+/// without the freshness check a captured request replays forever.
+///
+/// `raw_body` must be the exact bytes received — re-serializing the parsed JSON
+/// changes the signature.
+pub fn slack_signature_valid(
+    signing_secret: &str,
+    timestamp: &str,
+    raw_body: &[u8],
+    provided: &str,
+    now_unix: i64,
+) -> bool {
+    if signing_secret.is_empty() {
+        // Fail closed: an unconfigured secret must not mean "accept anything".
+        return false;
+    }
+    let Ok(ts) = timestamp.parse::<i64>() else {
+        return false;
+    };
+    if (now_unix - ts).abs() > SLACK_MAX_SKEW_SECS {
+        return false;
+    }
+    let Some(provided_hex) = provided.strip_prefix("v0=") else {
+        return false;
+    };
+
+    let mut basestring = Vec::with_capacity(raw_body.len() + timestamp.len() + 8);
+    basestring.extend_from_slice(b"v0:");
+    basestring.extend_from_slice(timestamp.as_bytes());
+    basestring.push(b':');
+    basestring.extend_from_slice(raw_body);
+
+    let expected = crate::webhook::hmac_sha256(signing_secret.as_bytes(), &basestring);
+    let expected_hex = crate::webhook::to_hex(&expected);
+
+    // Constant-time compare — a byte-by-byte early exit leaks the signature.
+    use subtle::ConstantTimeEq;
+    if provided_hex.len() != expected_hex.len() {
+        return false;
+    }
+    expected_hex
+        .as_bytes()
+        .ct_eq(provided_hex.as_bytes())
+        .into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper: produce the signature Slack would send for this body.
+    fn sign(secret: &str, ts: &str, body: &[u8]) -> String {
+        let mut base = Vec::new();
+        base.extend_from_slice(b"v0:");
+        base.extend_from_slice(ts.as_bytes());
+        base.push(b':');
+        base.extend_from_slice(body);
+        format!(
+            "v0={}",
+            crate::webhook::to_hex(&crate::webhook::hmac_sha256(secret.as_bytes(), &base))
+        )
+    }
+
+    #[test]
+    fn slack_signature_accepts_a_genuine_request() {
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        let sig = sign("shh", ts, body);
+        assert!(slack_signature_valid("shh", ts, body, &sig, 1_700_000_010));
+    }
+
+    #[test]
+    fn slack_signature_rejects_tampering_and_forgery() {
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        let sig = sign("shh", ts, body);
+
+        // Wrong secret (an attacker who does not have it).
+        assert!(!slack_signature_valid(
+            "other",
+            ts,
+            body,
+            &sig,
+            1_700_000_010
+        ));
+        // Body altered after signing.
+        assert!(!slack_signature_valid(
+            "shh",
+            ts,
+            br#"{"type":"event_callback","evil":true}"#,
+            &sig,
+            1_700_000_010
+        ));
+        // Missing / malformed signature.
+        assert!(!slack_signature_valid("shh", ts, body, "", 1_700_000_010));
+        assert!(!slack_signature_valid(
+            "shh",
+            ts,
+            body,
+            "deadbeef",
+            1_700_000_010
+        ));
+        // No secret configured must fail closed, not open.
+        assert!(!slack_signature_valid("", ts, body, &sig, 1_700_000_010));
+    }
+
+    #[test]
+    fn slack_signature_rejects_replayed_requests() {
+        let body = br#"{"type":"event_callback"}"#;
+        let ts = "1700000000";
+        let sig = sign("shh", ts, body);
+        // Valid signature, but the request is an hour old.
+        assert!(!slack_signature_valid(
+            "shh",
+            ts,
+            body,
+            &sig,
+            1_700_000_000 + 3600
+        ));
+        // ...and a timestamp from the future is equally suspect.
+        assert!(!slack_signature_valid(
+            "shh",
+            ts,
+            body,
+            &sig,
+            1_700_000_000 - 3600
+        ));
+    }
+
+    #[test]
+    fn slack_signature_rejects_unparsable_timestamp() {
+        let body = b"{}";
+        assert!(!slack_signature_valid(
+            "shh",
+            "not-a-number",
+            body,
+            "v0=abcd",
+            1_700_000_000
+        ));
+    }
 
     #[test]
     fn cli_is_always_trusted() {

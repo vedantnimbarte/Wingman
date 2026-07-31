@@ -50,6 +50,8 @@ pub enum OrchestratorError {
     ConcurrencyCap(u32),
     #[error("cost cap reached: spent ${spent:.2} of ${cap:.2}")]
     CostCap { spent: f64, cap: f64 },
+    #[error("token cap reached: used {spent} of {cap} tokens")]
+    TokenCap { spent: u64, cap: u64 },
     #[error(
         "task {0} write-set overlaps in-progress task {1}; serialising to avoid a conflict (E4)"
     )]
@@ -354,6 +356,14 @@ pub struct OrchestratorConfig {
     /// the orchestrator refuses new assignments and the budget watchdog
     /// (spawned alongside the actor) aborts in-flight workers. 0 = disabled.
     pub max_usd: f64,
+    /// Hard cap on total tokens (in + out) for the run. 0 = disabled.
+    ///
+    /// This is the backstop for `max_usd`. Cost is computed from a hardcoded
+    /// price table, and an unpriced model prices at $0 — so on any model not
+    /// in that table the USD cap never trips, and the budget watchdog, which
+    /// reads the same total, is defeated with it. Token counts are recorded
+    /// correctly regardless of pricing, so this bound holds for every model.
+    pub max_total_tokens: u64,
     /// Per-task retry budget for the auto-retry watchdog. Each failed
     /// attempt advances the E5 retry ladder one rung; the watchdog
     /// stops when this many retries have been exhausted (or rung 4 is
@@ -379,6 +389,7 @@ impl Default for OrchestratorConfig {
             base_commit: String::new(),
             use_real_worktrees: false,
             max_usd: 10.0,
+            max_total_tokens: 20_000_000,
             max_retries_per_task: 3,
             enforce_checkpoint_hygiene: false,
         }
@@ -436,14 +447,16 @@ pub fn spawn_full(
     // The pre-spawn check in handle_assign catches the easy case; this
     // watchdog catches the case where a task starts cheap and a later
     // turn pushes us over.
-    if cfg.max_usd > 0.0 {
+    if cfg.max_usd > 0.0 || cfg.max_total_tokens > 0 {
         let watchdog_tx = tx.clone();
         let cap = cfg.max_usd;
+        let token_cap = cfg.max_total_tokens;
         let store_for_watchdog = store.clone();
         tokio::spawn(budget_watchdog(
             budget_rx,
             store_for_watchdog,
             cap,
+            token_cap,
             watchdog_tx,
         ));
     } else {
@@ -480,18 +493,27 @@ async fn budget_watchdog(
     mut events: tokio::sync::broadcast::Receiver<Event>,
     store: Arc<Mutex<RunStore>>,
     cap: f64,
+    token_cap: u64,
     orch: mpsc::Sender<OrchestratorCommand>,
 ) {
     loop {
         match events.recv().await {
             Ok(Event::AgentUsd { .. }) => {
                 let totals = store.lock().await.state().totals;
-                if totals.usd >= cap {
+                let tokens = totals.tokens_in.saturating_add(totals.tokens_out);
+                let over_usd = cap > 0.0 && totals.usd >= cap;
+                // Token backstop: holds even when the model is unpriced and
+                // `totals.usd` is stuck at zero.
+                let over_tokens = token_cap > 0 && tokens >= token_cap;
+                if over_usd || over_tokens {
                     tracing::warn!(
                         target: "pilot::budget",
                         spent = totals.usd,
                         cap,
-                        "budget watchdog: cost cap reached, aborting all in-flight tasks"
+                        tokens,
+                        token_cap,
+                        reason = if over_usd { "cost cap" } else { "token cap" },
+                        "budget watchdog: cap reached, aborting all in-flight tasks"
                     );
                     let task_ids: Vec<String> = store
                         .lock()
@@ -806,6 +828,19 @@ async fn handle_assign(
                 cap: cfg.max_usd,
             });
         }
+        // Token backstop, for the (common) case of a model with no entry in
+        // the price table, where `totals.usd` stays at 0 no matter how much
+        // work happens and the USD check above can never fire.
+        if cfg.max_total_tokens > 0 {
+            let totals = store_g.state().totals;
+            let tokens = totals.tokens_in.saturating_add(totals.tokens_out);
+            if tokens >= cfg.max_total_tokens {
+                return Err(OrchestratorError::TokenCap {
+                    spent: tokens,
+                    cap: cfg.max_total_tokens,
+                });
+            }
+        }
         let task = store_g
             .state()
             .task(task_id)
@@ -863,17 +898,26 @@ async fn handle_assign(
         }
 
         // E4 — write-set conflict avoidance: never run two tasks whose
-        // declared `writes` overlap concurrently, so most merge conflicts
-        // are designed out. `writes_overlap` is false when either side has
-        // no declared writes, so tasks that don't declare a write-set are
-        // unaffected (they fall back to the end-of-run merge strategy).
+        // declared `writes` overlap concurrently, so most merge conflicts are
+        // designed out.
+        //
+        // Uses `scheduler::tasks_conflict`, not `writes_overlap`: the former
+        // treats an *undeclared* write-set as conflicting with everything,
+        // because a task that didn't say what it touches cannot be proven
+        // disjoint from one that did. This path previously called
+        // `writes_overlap` directly, which returns false whenever either side
+        // is empty — so exactly the tasks with no declared writes, the ones we
+        // know least about, were the ones allowed to run concurrently. Parallel
+        // agents editing the same files is the failure that turns multi-agent
+        // runs into merge-conflict cleanup.
         if let Some(conflict) = store_g
             .state()
             .tasks
             .iter()
             .find(|t| {
                 t.status == TaskStatus::InProgress
-                    && crate::scheduler::writes_overlap(&task.writes, &t.writes)
+                    && t.id != task.id
+                    && crate::scheduler::tasks_conflict(&task, t)
             })
             .map(|t| t.id.clone())
         {
@@ -1550,6 +1594,42 @@ pub fn fake_flaky_spawner() -> WorkerSpawner {
 /// task.tool → task_complete) directly into the run store, then returning
 /// a successful [`WorkerSpawnResult`]. Used by integration tests.
 #[cfg(test)]
+/// Test spawner that moves a task to `InProgress` and then never finishes, so
+/// callers can observe behaviour *while* work is live (concurrency caps,
+/// write-set conflicts).
+#[cfg(test)]
+pub fn fake_hanging_spawner() -> WorkerSpawner {
+    Arc::new(|ctx: SpawnContext| {
+        Box::pin(async move {
+            {
+                let mut store = ctx.store.lock().await;
+                let _ = store
+                    .append(Event::AgentSpawn {
+                        t: RunStore::now(),
+                        agent: ctx.agent_id.clone(),
+                        role: ctx.task.role.clone(),
+                        pid: Some(0),
+                        session_id: Some(ctx.session_id.clone()),
+                    })
+                    .await;
+                let _ = store
+                    .append(Event::TaskStatus {
+                        t: RunStore::now(),
+                        id: ctx.task.id.clone(),
+                        status: TaskStatus::InProgress,
+                        outcome: None,
+                    })
+                    .await;
+            }
+            // Park until the test drops the orchestrator. The type still has
+            // to line up with the spawner signature, hence the never-reached
+            // Ok below.
+            futures::future::pending::<()>().await;
+            unreachable!("hanging spawner is never resumed")
+        })
+    })
+}
+
 pub fn fake_happy_spawner() -> WorkerSpawner {
     Arc::new(|ctx: SpawnContext| {
         Box::pin(async move {
@@ -1721,7 +1801,8 @@ mod tests {
             run_id: "test-run".into(),
             base_commit: String::new(),
             use_real_worktrees: false,
-            max_usd: 0.0,            // disabled in unit tests
+            max_usd: 0.0,
+            max_total_tokens: 0,     // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
             enforce_checkpoint_hygiene: false,
         }
@@ -2552,6 +2633,112 @@ mod tests {
         // here. Pick (b) — the unit test in the watchdog path below
         // covers the real eviction.
         let _ = handle.assign_task("t2").await;
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// A task that never declared what it writes cannot be proven disjoint
+    /// from one that did, so it must not run concurrently. The assignment path
+    /// used to call `writes_overlap` directly, which returns false whenever
+    /// either side is empty — so the tasks we know least about were exactly
+    /// the ones allowed to run in parallel.
+    #[tokio::test]
+    async fn task_without_declared_writes_is_serialised() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_hanging_spawner());
+
+        // t1 declares a write-set; t2 declares none. (dev_task declares one
+        // by default, so clear it — the undeclared case is the point.)
+        let mut t1 = dev_task("t1", vec![]);
+        t1.writes = vec!["src/a.rs".into()];
+        let mut t2 = dev_task("t2", vec![]);
+        t2.writes.clear();
+
+        handle.add_task(t1).await.unwrap();
+        handle.add_task(t2).await.unwrap();
+
+        handle.assign_task("t1").await.unwrap();
+
+        // assign_task returns once the worker is spawned; the spawner records
+        // InProgress asynchronously. Wait for that to land so the conflict
+        // check has a live task to see, rather than racing it.
+        for _ in 0..100 {
+            let st = handle.snapshot().await.unwrap();
+            if st
+                .tasks
+                .iter()
+                .any(|t| t.id == "t1" && t.status == TaskStatus::InProgress)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        match handle.assign_task("t2").await {
+            Err(OrchestratorError::WriteConflict(a, b)) => {
+                assert_eq!(a, "t2");
+                assert_eq!(b, "t1");
+            }
+            other => panic!("expected WriteConflict for an undeclared write-set, got {other:?}"),
+        }
+
+        // The hanging spawner never returns, so don't await `join` — abort the
+        // actor and let the temp dir drop.
+        join.abort();
+    }
+
+    /// The USD cap is computed from a hardcoded price table, so an unpriced
+    /// model reports $0 spend forever and the cost cap can never fire. Token
+    /// counts are recorded regardless of pricing — this is the bound that
+    /// actually holds for the majority of models Wingman can talk to.
+    #[tokio::test]
+    async fn token_cap_stops_a_run_on_an_unpriced_model() {
+        let dir = tempdir().unwrap();
+        let mut store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        // A lot of work on a model with no price-table entry: usd stays 0.
+        store
+            .append(Event::AgentUsd {
+                t: RunStore::now(),
+                agent: "agent-pre".into(),
+                model: "some-brand-new-model".into(),
+                input_tokens: 900_000,
+                output_tokens: 200_000,
+                usd: 0.0,
+            })
+            .await
+            .unwrap();
+
+        let mut config = cfg(dir.path().to_path_buf());
+        config.max_usd = 10.0; // would never trip: spend is priced at $0
+        config.max_total_tokens = 1_000_000;
+
+        let (handle, join) = spawn(store, config, fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        match handle.assign_task("t1").await {
+            Err(OrchestratorError::TokenCap { spent, cap }) => {
+                assert_eq!(spent, 1_100_000);
+                assert_eq!(cap, 1_000_000);
+            }
+            other => panic!("expected TokenCap, got {other:?}"),
+        }
         handle.shutdown().await;
         let _ = join.await;
     }

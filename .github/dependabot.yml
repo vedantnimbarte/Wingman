@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  # Rust dependencies. Grouped so a routine week is one PR rather than twenty.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions. This is the half that matters most: actions are currently
+  # pinned to commit SHAs for supply-chain reasons, and without Dependabot a
+  # pinned SHA is a dependency nobody ever updates.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+
+  # The VS Code extension has its own npm toolchain.
+  - package-ecosystem: npm
+    directory: "/editors/vscode"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
