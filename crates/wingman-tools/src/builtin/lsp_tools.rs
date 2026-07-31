@@ -94,6 +94,21 @@ async fn client_for(
     }
 }
 
+/// Snapshot the files a `WorkspaceEdit` is about to touch, so `/undo` and
+/// `wingman rewind` can roll an LSP-driven change back.
+///
+/// The generic checkpoint path (`wingman_core::checkpoint::mutating_paths`)
+/// derives the affected files from a tool's *arguments*, which works for
+/// `write_file` but not here: a rename's arguments name one position while the
+/// server may rewrite a dozen files. So these tools capture their own
+/// pre-images from the parsed edit, and commit them only if the write succeeds.
+fn capture_edit_pre_images(ctx: &ToolCtx, edit: &Value) -> Vec<wingman_core::checkpoint::Pre> {
+    wingman_lsp::edit::parse_workspace_edit(edit)
+        .into_iter()
+        .map(|fe| wingman_core::checkpoint::capture(&ctx.project_root, &fe.path.to_string_lossy()))
+        .collect()
+}
+
 /// Build the write policy for edits a language server produces.
 ///
 /// A `WorkspaceEdit` names its own paths, so checking the single `path`
@@ -445,6 +460,7 @@ impl Tool for LspRename {
             }
             Err(e) => return ToolOutcome::err(format!("lsp rename failed: {e}")),
         };
+        let pres = capture_edit_pre_images(ctx, &edit);
         match wingman_lsp::edit::apply_workspace_edit(&edit, &write_authorizer(ctx)).await {
             Ok(applied) if !applied.refused.is_empty() => ToolOutcome::err(format!(
                 "refused: the rename would write outside the project (or where this \n                 mode forbids): {}",
@@ -459,6 +475,7 @@ impl Tool for LspRename {
                 ToolOutcome::ok("(rename produced no changes)")
             }
             Ok(applied) => {
+                wingman_core::checkpoint::commit(&ctx.project_root, pres);
                 let changed = applied.changed;
                 let list = changed
                     .iter()
@@ -653,6 +670,7 @@ async fn apply_code_action(
     let mut changed: Vec<PathBuf> = Vec::new();
 
     if let Some(edit) = action.get("edit") {
+        let pres = capture_edit_pre_images(ctx, edit);
         match wingman_lsp::edit::apply_workspace_edit(edit, &write_authorizer(ctx)).await {
             Ok(applied) if !applied.refused.is_empty() => {
                 return ToolOutcome::err(format!(
@@ -665,7 +683,10 @@ async fn apply_code_action(
                         .join(", ")
                 ))
             }
-            Ok(mut applied) => changed.append(&mut applied.changed),
+            Ok(mut applied) => {
+                wingman_core::checkpoint::commit(&ctx.project_root, pres);
+                changed.append(&mut applied.changed);
+            }
             Err(e) => return ToolOutcome::err(format!("applying `{title}` edit failed: {e}")),
         }
     }

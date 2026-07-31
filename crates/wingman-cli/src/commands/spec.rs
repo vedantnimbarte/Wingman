@@ -1,9 +1,14 @@
 //! `wingman spec` — intent-first / test-first implementation.
 //!
 //! Instead of prompt→code, work spec→tests→code: state the intent, the agent
-//! writes tests that capture it (failing first), then implements until the
-//! verification gate is green. The gate ([verify]) is what makes "until green"
-//! real — the agent can't declare done on red. Runs in auto-edit.
+//! writes tests that capture it (failing first), then implements against them.
+//!
+//! Scope, honestly: this command is a structured prompt plus one headless
+//! turn. The `[verify]` gate is what pushes back on a red build, but it is
+//! bounded — it feeds failures to the model up to `[verify].max_retries`
+//! (default 2) and then stops anyway, reporting `AgentStop::GateFailed` and
+//! exiting non-zero. So "until green" means "with a bounded number of forced
+//! corrections", not "loops until it passes". Runs in auto-edit.
 
 use anyhow::Result;
 use std::process::ExitCode;

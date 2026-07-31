@@ -98,6 +98,13 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
             AgentEvent::Stop {
                 reason: wingman_core::AgentStop::Error,
             } => exit = ExitCode::from(1),
+            // A turn that ended with the verification gate red must fail the
+            // process. Exiting 0 here meant `wingman --print` in CI reported
+            // success on code that did not compile or whose tests failed —
+            // the exact thing the gate exists to prevent.
+            AgentEvent::Stop {
+                reason: wingman_core::AgentStop::GateFailed,
+            } => exit = ExitCode::from(2),
             AgentEvent::Usage { usage } => {
                 // Soft cost guardrail: warn once when the estimated spend
                 // crosses `[tokens].max_usd_per_session`. Usage is cumulative
