@@ -183,7 +183,7 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Locate the header/body boundary and parse `Content-Length`. Returns
 /// `(body_start_index, content_length)`; `content_length` is 0 when absent.
-fn header_boundary_and_len(buf: &[u8]) -> Option<(usize, usize)> {
+pub fn header_boundary_and_len(buf: &[u8]) -> Option<(usize, usize)> {
     let (idx, sep) = if let Some(i) = find_subslice(buf, b"\r\n\r\n") {
         (i, 4)
     } else {
@@ -241,7 +241,7 @@ fn verify_signature(secret: &[u8], body: &[u8], provided_hex: &str) -> bool {
 
 /// HMAC-SHA256 (RFC 2104) over `msg` with `key`, built on `sha2` so we don't
 /// pull in the `hmac` crate for one call site.
-fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     const BLOCK: usize = 64;
     let mut k = [0u8; BLOCK];
@@ -268,7 +268,7 @@ fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     out
 }
 
-fn to_hex(bytes: &[u8]) -> String {
+pub fn to_hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {

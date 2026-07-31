@@ -753,6 +753,13 @@ impl Config {
         }
         // The webhook HMAC secret supports the same `${ENV_VAR}` indirection so
         // it need not be stored in plaintext config.
+        if let Some(s) = self.pilot.daemon.slack_signing_secret.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(v) = std::env::var(name) {
+                    *s = v;
+                }
+            }
+        }
         if let Some(s) = self.pilot.daemon.webhook_secret.as_mut() {
             if let Some(name) = strip_env_placeholder(s) {
                 if let Ok(val) = std::env::var(name) {
@@ -1972,6 +1979,13 @@ pub struct PilotDaemonConfig {
     /// `${ENV_VAR}` placeholder so the secret isn't stored in plaintext.
     #[serde(default)]
     pub webhook_secret: Option<String>,
+    /// Slack app **signing secret**, used to verify `X-Slack-Signature` on
+    /// every request to `wingman pilot intake slack`. Without it the intake
+    /// server refuses all requests — an unauthenticated listener that
+    /// accepts a body-supplied author is remote task execution. Supports a
+    /// `${ENV_VAR}` placeholder so the secret isn't stored in plaintext.
+    #[serde(default)]
+    pub slack_signing_secret: Option<String>,
     /// J2 — when true, a candidate the daemon scores as `AutoRun` is
     /// dispatched into a real nested pilot run (plans, spawns workers, opens
     /// a PR) instead of only being queued. Default false so enabling the
@@ -2009,6 +2023,7 @@ impl Default for PilotDaemonConfig {
             // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             webhook_secret: None,
+            slack_signing_secret: None,
             intake_dir: default_intake_dir(),
         }
     }
