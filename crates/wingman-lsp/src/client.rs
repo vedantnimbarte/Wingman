@@ -103,9 +103,6 @@ pub struct LspClient {
     diagnostics: Diags,
     opened: Mutex<HashSet<String>>,
     child: Mutex<Child>,
-    /// Gate for `workspace/applyEdit`. Shared with the manager so a mode
-    /// change takes effect on an already-running server.
-    authorizer: SharedAuthorizer,
 }
 
 impl LspClient {
@@ -143,7 +140,9 @@ impl LspClient {
 
         // Reader task: route responses to callers, collect diagnostics, and
         // answer the handful of server→client requests that would otherwise
-        // stall initialization.
+        // stall initialization. It owns the only handle to the write
+        // authorizer — server-initiated edits are handled here and nowhere
+        // else, so the client struct has no reason to keep a copy.
         {
             let pending = pending.clone();
             let diagnostics = diagnostics.clone();
@@ -163,7 +162,6 @@ impl LspClient {
             diagnostics,
             opened: Mutex::new(HashSet::new()),
             child: Mutex::new(child),
-            authorizer,
         });
 
         client.handshake().await?;
