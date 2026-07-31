@@ -239,6 +239,25 @@ pub struct Config {
     /// Privacy / air-gapped mode.
     #[serde(default)]
     pub privacy: PrivacyConfig,
+
+    /// Self-improvement loop (memory, skills).
+    #[serde(default)]
+    pub learn: LearnConfig,
+}
+
+/// Settings for the memory / skills loop.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LearnConfig {
+    /// May the *agent* write global memories (`~/.wingman/memory/`)?
+    ///
+    /// Global memories are rendered into the system prompt of every future
+    /// session in every project, so a prompt injection in one cloned repo
+    /// that induces `save_memory` gets attacker-chosen text into unrelated
+    /// work indefinitely. Off by default: the agent may still write
+    /// project-scoped memories freely, and you can always write global ones
+    /// yourself (they are plain markdown files).
+    pub allow_global_memory_writes: bool,
 }
 
 /// Fully-local, air-gapped operation. When `local_only` is on, Wingman refuses

@@ -532,10 +532,13 @@ pub async fn build_registry_with_learn(
                 }
             });
         }
-        reg.register(wingman_tools::builtin::SaveMemory::new(
-            handles.memory.clone(),
-            handles.signals.clone(),
-        ));
+        reg.register(
+            wingman_tools::builtin::SaveMemory::new(
+                handles.memory.clone(),
+                handles.signals.clone(),
+            )
+            .with_global_writes(cfg.learn.allow_global_memory_writes),
+        );
         reg.register(wingman_tools::builtin::RecallMemory::new(
             handles.memory.clone(),
         ));

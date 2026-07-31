@@ -1,38 +1,47 @@
-//! J11 — sandboxed execution tiers (selection core).
+//! J11 — per-task isolation *classification*.
 //!
-//! Trust tier (E1) is about *whether* to approve; sandbox tier is about
-//! *where to execute*. Risky work runs off the host so an errant `rm -rf`
-//! or a malicious dependency can't touch the developer's machine:
+//! **This module classifies risk. It does not isolate anything.** The name
+//! "sandbox tier" has been a persistent source of confusion, so to be blunt:
 //!
-//! | tier      | when                                            |
-//! | --------- | ----------------------------------------------- |
-//! | host      | default for low-risk edits                       |
-//! | container | deps / build-script / config changes            |
-//! | vm        | migrations, infra, irreversible, untrusted goals |
+//!   - `IsolationTier::Host` — runs on your machine. (Everything does.)
+//!   - `IsolationTier::Container` — *recommends* a container. Worker execution
+//!     is not containerised; `run_in_container` wraps acceptance commands only,
+//!     and `resolve_effective_tier` silently degrades to Host whenever no
+//!     Docker daemon is reachable, which is most machines.
+//!   - `IsolationTier::Vm` — the one tier with teeth, and only because it
+//!     **fails closed**: `pilot run` refuses to start a vm-tier task rather
+//!     than run it unisolated, unless the operator sets
+//!     `[pilot.sandbox].allow_unsandboxed_vm_tasks`.
 //!
-//! Actually running containers/microVMs is the executor's job (and needs
-//! Docker/Firecracker the plan defers to the user). This module is the
-//! per-task tier *selection*, driven by the task's `writes` + acceptance
-//! commands + reversibility.
+//! Two further caveats worth stating, since they bound how much this is worth:
+//! the tier is derived from the *model-produced plan* (`writes`,
+//! `reversibility`), so a prompt injection that shapes the plan also shapes
+//! its own tier; and the worker agent that performs the edits and calls
+//! `run_shell` always runs on the host regardless of tier.
 //!
-//! Enforcement: because real sandboxed *worker* execution isn't wired yet,
-//! `pilot run` fails closed on the top (`vm`) tier — it refuses to start a
-//! vm-tier task rather than run it unsandboxed on the host, unless the
-//! operator sets `[pilot.sandbox].allow_unsandboxed_vm_tasks`. `container`-
-//! tier work still degrades to host (see [`resolve_effective_tier`]); only
-//! the untrusted/irreversible tier is hard-gated.
+//! Trust tier (E1) answers *whether* to approve. This answers *how risky the
+//! work looks*, which drives the vm fail-closed gate and shows up in run
+//! reports. For real containment of untrusted code, see the OS-level sandbox
+//! work tracked in
+//! [#111](https://github.com/vedantnimbarte/Wingman/issues/111) — do not rely
+//! on this module for it.
 
 use crate::model::{Acceptance, Reversibility, Task};
+
+/// Former name. Renamed because it described containment this module does
+/// not provide; see the module docs.
+#[deprecated(note = "renamed to IsolationTier: this classifies risk, it does not isolate")]
+pub type SandboxTier = IsolationTier;
 use crate::pr::{CommandOut, CommandRunner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum SandboxTier {
+pub enum IsolationTier {
     Host,
     Container,
     Vm,
 }
 
-impl SandboxTier {
+impl IsolationTier {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Host => "host",
@@ -41,7 +50,7 @@ impl SandboxTier {
         }
     }
 
-    pub fn parse(s: &str) -> SandboxTier {
+    pub fn parse(s: &str) -> IsolationTier {
         match s.trim().to_ascii_lowercase().as_str() {
             "container" => Self::Container,
             "vm" => Self::Vm,
@@ -105,23 +114,23 @@ fn acceptance_matches(task: &Task, needles: &[&str]) -> bool {
 /// Select the sandbox tier for a task. The result is the *max* of: the
 /// configured `default_tier`, the reversibility floor, and any escalation
 /// implied by the task's writes/acceptance.
-pub fn select_tier(task: &Task, default_tier: SandboxTier) -> SandboxTier {
+pub fn select_tier(task: &Task, default_tier: IsolationTier) -> IsolationTier {
     let mut tier = default_tier;
 
     // Reversibility floor.
     tier = tier.max(match task.reversibility {
-        Reversibility::Irreversible => SandboxTier::Vm,
-        Reversibility::Hard => SandboxTier::Container,
-        Reversibility::Trivial => SandboxTier::Host,
+        Reversibility::Irreversible => IsolationTier::Vm,
+        Reversibility::Hard => IsolationTier::Container,
+        Reversibility::Trivial => IsolationTier::Host,
     });
 
     // Infra/migration writes → vm.
     if writes_match(task, VM_MARKERS) {
-        tier = tier.max(SandboxTier::Vm);
+        tier = tier.max(IsolationTier::Vm);
     }
     // Dependency/build writes or risky acceptance commands → container.
     if writes_match(task, DEP_MARKERS) || acceptance_matches(task, RISKY_CMDS) {
-        tier = tier.max(SandboxTier::Container);
+        tier = tier.max(IsolationTier::Container);
     }
 
     tier
@@ -163,16 +172,16 @@ pub fn docker_available(runner: &dyn CommandRunner) -> bool {
 /// where `degraded` is true when the request was downgraded (caller
 /// warns).
 pub fn resolve_effective_tier(
-    requested: SandboxTier,
+    requested: IsolationTier,
     runner: &dyn CommandRunner,
-) -> (SandboxTier, bool) {
+) -> (IsolationTier, bool) {
     match requested {
-        SandboxTier::Host => (SandboxTier::Host, false),
-        SandboxTier::Container | SandboxTier::Vm => {
+        IsolationTier::Host => (IsolationTier::Host, false),
+        IsolationTier::Container | IsolationTier::Vm => {
             if docker_available(runner) {
                 (requested, false)
             } else {
-                (SandboxTier::Host, true)
+                (IsolationTier::Host, true)
             }
         }
     }
@@ -209,40 +218,46 @@ mod tests {
 
     #[test]
     fn tier_parse_and_str() {
-        assert_eq!(SandboxTier::parse("VM"), SandboxTier::Vm);
-        assert_eq!(SandboxTier::parse("container"), SandboxTier::Container);
-        assert_eq!(SandboxTier::parse("anything"), SandboxTier::Host);
-        assert_eq!(SandboxTier::Vm.as_str(), "vm");
+        assert_eq!(IsolationTier::parse("VM"), IsolationTier::Vm);
+        assert_eq!(IsolationTier::parse("container"), IsolationTier::Container);
+        assert_eq!(IsolationTier::parse("anything"), IsolationTier::Host);
+        assert_eq!(IsolationTier::Vm.as_str(), "vm");
     }
 
     #[test]
     fn plain_edit_stays_host() {
         let t = task(&["crates/cli/src/main.rs"], Reversibility::Trivial);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Host);
+        assert_eq!(select_tier(&t, IsolationTier::Host), IsolationTier::Host);
     }
 
     #[test]
     fn dependency_change_goes_container() {
         let t = task(&["Cargo.toml"], Reversibility::Trivial);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Container);
+        assert_eq!(
+            select_tier(&t, IsolationTier::Host),
+            IsolationTier::Container
+        );
     }
 
     #[test]
     fn migration_goes_vm() {
         let t = task(&["db/migrations/001_init.sql"], Reversibility::Trivial);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Vm);
+        assert_eq!(select_tier(&t, IsolationTier::Host), IsolationTier::Vm);
     }
 
     #[test]
     fn irreversible_floor_is_vm() {
         let t = task(&["crates/cli/src/main.rs"], Reversibility::Irreversible);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Vm);
+        assert_eq!(select_tier(&t, IsolationTier::Host), IsolationTier::Vm);
     }
 
     #[test]
     fn hard_floor_is_container() {
         let t = task(&["crates/cli/src/main.rs"], Reversibility::Hard);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Container);
+        assert_eq!(
+            select_tier(&t, IsolationTier::Host),
+            IsolationTier::Container
+        );
     }
 
     #[test]
@@ -251,7 +266,10 @@ mod tests {
         t.acceptance = vec![Acceptance::Shell {
             cmd: "docker build .".into(),
         }];
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Container);
+        assert_eq!(
+            select_tier(&t, IsolationTier::Host),
+            IsolationTier::Container
+        );
     }
 
     #[test]
@@ -259,8 +277,8 @@ mod tests {
         let t = task(&["crates/cli/src/main.rs"], Reversibility::Trivial);
         // Even a trivial edit respects a container default.
         assert_eq!(
-            select_tier(&t, SandboxTier::Container),
-            SandboxTier::Container
+            select_tier(&t, IsolationTier::Container),
+            IsolationTier::Container
         );
     }
 
@@ -302,32 +320,32 @@ mod tests {
     #[test]
     fn host_tier_never_degrades() {
         let (eff, degraded) =
-            resolve_effective_tier(SandboxTier::Host, &DockerProbe { present: false });
-        assert_eq!(eff, SandboxTier::Host);
+            resolve_effective_tier(IsolationTier::Host, &DockerProbe { present: false });
+        assert_eq!(eff, IsolationTier::Host);
         assert!(!degraded);
     }
 
     #[test]
     fn container_tier_kept_when_docker_present() {
         let (eff, degraded) =
-            resolve_effective_tier(SandboxTier::Container, &DockerProbe { present: true });
-        assert_eq!(eff, SandboxTier::Container);
+            resolve_effective_tier(IsolationTier::Container, &DockerProbe { present: true });
+        assert_eq!(eff, IsolationTier::Container);
         assert!(!degraded);
     }
 
     #[test]
     fn container_tier_degrades_to_host_without_docker() {
         let (eff, degraded) =
-            resolve_effective_tier(SandboxTier::Container, &DockerProbe { present: false });
-        assert_eq!(eff, SandboxTier::Host);
+            resolve_effective_tier(IsolationTier::Container, &DockerProbe { present: false });
+        assert_eq!(eff, IsolationTier::Host);
         assert!(degraded);
     }
 
     #[test]
     fn vm_tier_degrades_to_host_without_docker() {
         let (eff, degraded) =
-            resolve_effective_tier(SandboxTier::Vm, &DockerProbe { present: false });
-        assert_eq!(eff, SandboxTier::Host);
+            resolve_effective_tier(IsolationTier::Vm, &DockerProbe { present: false });
+        assert_eq!(eff, IsolationTier::Host);
         assert!(degraded);
     }
 
@@ -372,6 +390,6 @@ mod tests {
     fn highest_signal_wins() {
         // Both a dep change (container) and a migration (vm) → vm.
         let t = task(&["Cargo.toml", "migrations/x.sql"], Reversibility::Trivial);
-        assert_eq!(select_tier(&t, SandboxTier::Host), SandboxTier::Vm);
+        assert_eq!(select_tier(&t, IsolationTier::Host), IsolationTier::Vm);
     }
 }

@@ -419,14 +419,14 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     // guards the genuinely dangerous top tier.
     if !pilot.sandbox.allow_unsandboxed_vm_tasks {
         let default_tier =
-            wingman_autonomous::sandbox::SandboxTier::parse(&pilot.sandbox.default_tier);
+            wingman_autonomous::sandbox::IsolationTier::parse(&pilot.sandbox.default_tier);
         let vm_tasks: Vec<String> = store
             .state()
             .tasks
             .iter()
             .filter(|t| {
                 wingman_autonomous::sandbox::select_tier(t, default_tier)
-                    == wingman_autonomous::sandbox::SandboxTier::Vm
+                    == wingman_autonomous::sandbox::IsolationTier::Vm
             })
             .map(|t| t.id.clone())
             .collect();
