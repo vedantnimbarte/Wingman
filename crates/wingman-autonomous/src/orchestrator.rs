@@ -898,17 +898,26 @@ async fn handle_assign(
         }
 
         // E4 — write-set conflict avoidance: never run two tasks whose
-        // declared `writes` overlap concurrently, so most merge conflicts
-        // are designed out. `writes_overlap` is false when either side has
-        // no declared writes, so tasks that don't declare a write-set are
-        // unaffected (they fall back to the end-of-run merge strategy).
+        // declared `writes` overlap concurrently, so most merge conflicts are
+        // designed out.
+        //
+        // Uses `scheduler::tasks_conflict`, not `writes_overlap`: the former
+        // treats an *undeclared* write-set as conflicting with everything,
+        // because a task that didn't say what it touches cannot be proven
+        // disjoint from one that did. This path previously called
+        // `writes_overlap` directly, which returns false whenever either side
+        // is empty — so exactly the tasks with no declared writes, the ones we
+        // know least about, were the ones allowed to run concurrently. Parallel
+        // agents editing the same files is the failure that turns multi-agent
+        // runs into merge-conflict cleanup.
         if let Some(conflict) = store_g
             .state()
             .tasks
             .iter()
             .find(|t| {
                 t.status == TaskStatus::InProgress
-                    && crate::scheduler::writes_overlap(&task.writes, &t.writes)
+                    && t.id != task.id
+                    && crate::scheduler::tasks_conflict(&task, t)
             })
             .map(|t| t.id.clone())
         {
@@ -1585,6 +1594,42 @@ pub fn fake_flaky_spawner() -> WorkerSpawner {
 /// task.tool → task_complete) directly into the run store, then returning
 /// a successful [`WorkerSpawnResult`]. Used by integration tests.
 #[cfg(test)]
+/// Test spawner that moves a task to `InProgress` and then never finishes, so
+/// callers can observe behaviour *while* work is live (concurrency caps,
+/// write-set conflicts).
+#[cfg(test)]
+pub fn fake_hanging_spawner() -> WorkerSpawner {
+    Arc::new(|ctx: SpawnContext| {
+        Box::pin(async move {
+            {
+                let mut store = ctx.store.lock().await;
+                let _ = store
+                    .append(Event::AgentSpawn {
+                        t: RunStore::now(),
+                        agent: ctx.agent_id.clone(),
+                        role: ctx.task.role.clone(),
+                        pid: Some(0),
+                        session_id: Some(ctx.session_id.clone()),
+                    })
+                    .await;
+                let _ = store
+                    .append(Event::TaskStatus {
+                        t: RunStore::now(),
+                        id: ctx.task.id.clone(),
+                        status: TaskStatus::InProgress,
+                        outcome: None,
+                    })
+                    .await;
+            }
+            // Park until the test drops the orchestrator. The type still has
+            // to line up with the spawner signature, hence the never-reached
+            // Ok below.
+            futures::future::pending::<()>().await;
+            unreachable!("hanging spawner is never resumed")
+        })
+    })
+}
+
 pub fn fake_happy_spawner() -> WorkerSpawner {
     Arc::new(|ctx: SpawnContext| {
         Box::pin(async move {
@@ -2590,6 +2635,66 @@ mod tests {
         let _ = handle.assign_task("t2").await;
         handle.shutdown().await;
         let _ = join.await;
+    }
+
+    /// A task that never declared what it writes cannot be proven disjoint
+    /// from one that did, so it must not run concurrently. The assignment path
+    /// used to call `writes_overlap` directly, which returns false whenever
+    /// either side is empty — so the tasks we know least about were exactly
+    /// the ones allowed to run in parallel.
+    #[tokio::test]
+    async fn task_without_declared_writes_is_serialised() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_hanging_spawner());
+
+        // t1 declares a write-set; t2 declares none. (dev_task declares one
+        // by default, so clear it — the undeclared case is the point.)
+        let mut t1 = dev_task("t1", vec![]);
+        t1.writes = vec!["src/a.rs".into()];
+        let mut t2 = dev_task("t2", vec![]);
+        t2.writes.clear();
+
+        handle.add_task(t1).await.unwrap();
+        handle.add_task(t2).await.unwrap();
+
+        handle.assign_task("t1").await.unwrap();
+
+        // assign_task returns once the worker is spawned; the spawner records
+        // InProgress asynchronously. Wait for that to land so the conflict
+        // check has a live task to see, rather than racing it.
+        for _ in 0..100 {
+            let st = handle.snapshot().await.unwrap();
+            if st
+                .tasks
+                .iter()
+                .any(|t| t.id == "t1" && t.status == TaskStatus::InProgress)
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        match handle.assign_task("t2").await {
+            Err(OrchestratorError::WriteConflict(a, b)) => {
+                assert_eq!(a, "t2");
+                assert_eq!(b, "t1");
+            }
+            other => panic!("expected WriteConflict for an undeclared write-set, got {other:?}"),
+        }
+
+        // The hanging spawner never returns, so don't await `join` — abort the
+        // actor and let the temp dir drop.
+        join.abort();
     }
 
     /// The USD cap is computed from a hardcoded price table, so an unpriced
