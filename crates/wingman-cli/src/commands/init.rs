@@ -1,4 +1,4 @@
-//! `wingman init` — scaffold an WINGMAN.md by introspecting the current project.
+//! `wingman init` — scaffold an AGENTS.md by introspecting the current project.
 //!
 //! Detects:
 //!   - language(s) by manifest files (Cargo.toml, package.json, pyproject.toml,
@@ -6,8 +6,13 @@
 //!   - common build/test/lint invocations for the detected language
 //!   - top-level directories so a reader can quickly orient
 //!
-//! Writes `<project-root>/WINGMAN.md`. Existing files are preserved unless
+//! Writes `<project-root>/AGENTS.md` — the cross-tool standard, so the file
+//! is useful to other agents too — unless a `WINGMAN.md` already exists, in
+//! which case that is refreshed instead. Existing files are preserved unless
 //! `--force` is passed.
+//!
+//! Whichever name is used, `runtime::project_instructions_block` reads it
+//! into the system prompt.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -17,7 +22,13 @@ use wingman_config::ProjectPaths;
 pub async fn run(force: bool) -> Result<ExitCode> {
     let cwd = std::env::current_dir()?;
     let project = ProjectPaths::discover(&cwd);
-    let out_path = project.root.join("WINGMAN.md");
+    // Prefer AGENTS.md (the cross-tool standard) for a fresh project, but
+    // keep refreshing WINGMAN.md if the project already has one.
+    let out_path = if project.root.join("WINGMAN.md").exists() {
+        project.root.join("WINGMAN.md")
+    } else {
+        project.root.join("AGENTS.md")
+    };
 
     if out_path.exists() && !force {
         eprintln!(
