@@ -162,6 +162,12 @@ fn default_true() -> bool {
     true
 }
 
+/// Default pilot token ceiling. Generous enough not to interrupt real
+/// work, small enough to bound a runaway loop on an unpriced model.
+fn default_max_total_tokens() -> u64 {
+    20_000_000
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -1794,6 +1800,14 @@ pub struct PilotConfig {
     pub reviewer_model: Option<String>,
     pub max_concurrent_agents: u32,
     pub max_usd: f64,
+    /// Hard cap on total tokens (in + out) for a pilot run. 0 disables.
+    ///
+    /// Backstop for `max_usd`: spend is priced from a hardcoded table, and
+    /// a model that isn't in it prices at $0, which silently disables the
+    /// USD cap. Token counts are recorded for every model, so this bound
+    /// always applies.
+    #[serde(default = "default_max_total_tokens")]
+    pub max_total_tokens: u64,
     pub task_timeout_secs: u64,
     /// Shell command run between worker turns as a sanity gate (E5).
     /// Empty disables the per-turn check.
@@ -1823,6 +1837,7 @@ impl Default for PilotConfig {
             reviewer_model: None,
             max_concurrent_agents: 4,
             max_usd: 10.0,
+            max_total_tokens: default_max_total_tokens(),
             task_timeout_secs: 1800,
             turn_gate_cmd: "cargo check --workspace".into(),
             approval: PilotApprovalConfig::default(),
@@ -1898,7 +1913,12 @@ pub struct PilotPrConfig {
 impl Default for PilotPrConfig {
     fn default() -> Self {
         Self {
-            auto_merge: true,
+            // Opt-in. This squash-merges to the base branch with no human in
+            // the loop; the composite gate in `automerge::decide_auto_merge`
+            // is sound, but "merges to main by itself" is not a thing a tool
+            // should start doing because someone ran `pilot` without reading
+            // the config reference.
+            auto_merge: false,
             auto_merge_max_severity: "low".into(),
             require_ci_green: true,
             base_branch: "main".into(),
@@ -2389,7 +2409,9 @@ mod tests {
         assert!((cfg.max_usd - 10.0).abs() < 1e-9);
         assert_eq!(cfg.task_timeout_secs, 1800);
         assert_eq!(cfg.turn_gate_cmd, "cargo check --workspace");
-        assert!(cfg.pr.auto_merge);
+        // Auto-merge is opt-in: nothing merges to the base branch without the
+        // user having asked for it in config.
+        assert!(!cfg.pr.auto_merge);
         assert_eq!(cfg.sandbox.default_tier, "host");
         assert!(!cfg.daemon.enabled);
     }

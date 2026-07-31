@@ -1751,6 +1751,7 @@ mod tests {
                 base_commit: base_commit.clone(),
                 use_real_worktrees: true,
                 max_usd: 0.0,
+                max_total_tokens: 0,
                 max_retries_per_task: 0,
                 enforce_checkpoint_hygiene: false,
             },

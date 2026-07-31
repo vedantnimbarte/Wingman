@@ -458,6 +458,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         base_commit: base_commit.clone(),
         use_real_worktrees: true,
         max_usd: pilot.max_usd,
+        max_total_tokens: pilot.max_total_tokens,
         max_retries_per_task: 1,
         enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
     };
@@ -1230,6 +1231,7 @@ pub async fn resume(
         base_commit: state.base_commit.clone(),
         use_real_worktrees: true,
         max_usd: cfg.pilot.max_usd,
+        max_total_tokens: cfg.pilot.max_total_tokens,
         max_retries_per_task: 1,
         enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
     };

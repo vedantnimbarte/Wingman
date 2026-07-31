@@ -231,6 +231,21 @@ impl ToolDispatcher for ToolRegistry {
                 ),
             ];
             let res = run_hook(&hook.command, hook.timeout_secs, &env).await;
+            if !res.success {
+                // Always surface the failure. Previously a non-blocking hook's
+                // result was dropped on the floor, so a policy hook whose
+                // binary was missing, renamed, non-executable, or timing out
+                // produced no output on any channel and every tool call
+                // proceeded — a security control failing silently and open.
+                // `post_tool_use` already warned; this matches it.
+                tracing::warn!(
+                    target: "wingman::hooks",
+                    tool = %name,
+                    blocking = hook.block,
+                    "pre_tool_use hook failed: {}",
+                    res.stderr.trim()
+                );
+            }
             if hook.block && !res.success {
                 return ToolOutcome::err(format!(
                     "pre_tool_use hook blocked: {}",
