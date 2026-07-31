@@ -20,6 +20,9 @@ pub struct ToolCtx {
     /// mode (including read-only/plan), not just the edit-capable ones. Off by
     /// default so network egress stays gated unless the user asks for it.
     pub allow_network: bool,
+    /// `[tools].shell_sandbox`: `auto` | `off` | `required`. See
+    /// [`crate::sandbox`].
+    pub shell_sandbox: String,
     /// Has the user approved a plan this session? Only meaningful in
     /// [`PermissionMode::Plan`], where writes and shell stay denied until the
     /// agent has presented a plan *and* the user accepted it. Shared like
@@ -56,6 +59,7 @@ impl ToolCtx {
             project_root,
             extra_denylist: Vec::new(),
             allow_network: false,
+            shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -75,6 +79,7 @@ impl ToolCtx {
             project_root,
             extra_denylist,
             allow_network,
+            shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -95,6 +100,12 @@ impl ToolCtx {
             self.plan_approved.store(false, Ordering::SeqCst);
         }
         self.mode.store(mode_to_u8(mode), Ordering::SeqCst);
+    }
+
+    /// Set the shell-sandbox policy (`[tools].shell_sandbox`). Builder-style.
+    pub fn with_shell_sandbox(mut self, policy: impl Into<String>) -> Self {
+        self.shell_sandbox = policy.into();
+        self
     }
 
     /// Record that the user accepted the agent's plan.

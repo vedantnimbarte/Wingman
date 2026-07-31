@@ -98,7 +98,9 @@ worker agents in isolated worktrees, and converges into a PR.
   Modes are enforced centrally: each tool declares what it needs
   (read / write / shell / network) and the registry refuses anything the
   active mode doesn't grant. A few paths — `.git/`, `.wingman/config.toml`,
-  `.wingman/skills/` — are never writable, in any mode.
+  `.wingman/skills/` — are never writable, in any mode. `run_shell` is
+  additionally confined by the OS where possible (`bwrap` / `sandbox-exec`);
+  see [Permission modes](#permission-modes).
 - **Untrusted project config.** A cloned repo's `.wingman/config.toml` may
   pick a model and tune the UI, but not run commands: `[hooks]`, `[mcp]`,
   `[verify]`, `[providers]`, and `permission_mode` are ignored unless you
@@ -983,10 +985,23 @@ fresh one — consent applies to the plan you actually read.
 Headless (`--print`) has nobody to approve, so `plan` there stays read-only
 for the whole run. Use `auto-edit` for unattended work.
 
-**About `auto-edit`.** Writes are confined to the project tree, but shell is
-not: `run_shell` can reach anything your user account can, and the shell
-denylist is empty by default. It is a convenience, not a boundary. If you
-need real containment for untrusted code, don't rely on `auto-edit`.
+**About `auto-edit`.** Writes are confined to the project tree. Shell is
+confined too *when the platform provides a mechanism* — `bwrap` on Linux,
+`sandbox-exec` on macOS — which bounds `run_shell` writes to the project and
+blocks reads of `~/.ssh`, `~/.aws`, `~/.gnupg`. Set it with
+`[tools].shell_sandbox`:
+
+| value      | behaviour                                                        |
+| ---------- | ---------------------------------------------------------------- |
+| `auto`     | default — confine when available, otherwise run unconfined and warn |
+| `required` | refuse to run shell at all when no mechanism is available          |
+| `off`      | never wrap                                                        |
+
+`wingman doctor` reports which mechanism is active, so it is a claim you can
+check rather than take on trust. Two honest limits: there is **no Windows
+mechanism wired up yet** (use `required` if that matters to you), and this
+confines the filesystem, not the network — a sandboxed command can still
+`curl`. The shell denylist remains a convenience, not a boundary.
 
 `yolo` is per-session only — never persisted to config.
 

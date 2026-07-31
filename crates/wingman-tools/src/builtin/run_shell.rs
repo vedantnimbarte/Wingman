@@ -23,6 +23,19 @@ struct Args {
     timeout_secs: Option<u64>,
 }
 
+/// Say once per process that shell commands are running unconfined, so the
+/// user knows which guarantee they do *not* have. Once, because run_shell is
+/// called constantly and a per-call warning would be noise.
+fn warn_unconfined_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "wingman::sandbox",
+            "shell commands run unconfined: no sandbox mechanism found.              Install bubblewrap (Linux) for filesystem containment, or set              [tools].shell_sandbox = \"required\" to refuse instead."
+        );
+    });
+}
+
 #[async_trait]
 impl Tool for RunShell {
     fn capabilities(&self) -> Capability {
@@ -70,16 +83,59 @@ impl Tool for RunShell {
 
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(60).min(600));
 
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd.exe");
-            c.arg("/C").arg(&args.command);
-            c
+        // OS-level containment. The permission modes confine the *file
+        // tools* to the project tree, but a shell command can otherwise read
+        // anything the user can — so `cat ~/.ssh/id_rsa` succeeded in the very
+        // mode where `read_file` on that path was refused. See `crate::sandbox`.
+        let policy = ctx.shell_sandbox.as_str();
+        let sandboxed = if policy == "off" {
+            None
         } else {
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(&args.command);
-            c
+            crate::sandbox::wrap(&args.command, &ctx.project_root, &std::env::temp_dir())
+        };
+
+        if policy == "required" && sandboxed.is_none() {
+            return ToolOutcome::err(format!(
+                "refusing to run: [tools].shell_sandbox is `required` but no sandbox                  mechanism is available on this machine ({}). Install bubblewrap                  (Linux), use macOS, or set `shell_sandbox = \"auto\"` to accept                  unconfined execution.",
+                crate::sandbox::availability().label()
+            ));
+        }
+
+        let mut cmd = match &sandboxed {
+            Some(argv) => {
+                let mut c = Command::new(&argv[0]);
+                c.args(&argv[1..]);
+                c
+            }
+            None => {
+                if policy == "auto" {
+                    warn_unconfined_once();
+                }
+                if cfg!(windows) {
+                    let mut c = Command::new("cmd.exe");
+                    c.arg("/C").arg(&args.command);
+                    c
+                } else {
+                    let mut c = Command::new("sh");
+                    c.arg("-c").arg(&args.command);
+                    c
+                }
+            }
         };
         cmd.current_dir(&cwd);
+        // Don't hand the child our API keys. It has no need for them, and a
+        // shell command is the easiest place for an injected instruction to
+        // read one out of the environment and send it somewhere.
+        for (k, _) in std::env::vars() {
+            let upper = k.to_ascii_uppercase();
+            if upper.ends_with("_API_KEY")
+                || upper.ends_with("_TOKEN")
+                || upper.starts_with("AWS_")
+                || upper == "GITHUB_TOKEN"
+            {
+                cmd.env_remove(k);
+            }
+        }
 
         let output = match tokio::time::timeout(timeout, cmd.output()).await {
             Ok(Ok(o)) => o,

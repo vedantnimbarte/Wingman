@@ -498,7 +498,8 @@ pub async fn build_registry_with_learn(
         paths.root.clone(),
         cfg.tools.shell_denylist.clone(),
         cfg.tools.allow_network,
-    );
+    )
+    .with_shell_sandbox(cfg.tools.shell_sandbox.clone());
     let mut reg = base_registry(ctx, cfg, audit_path_for(cfg, &paths));
     let indexer = build_indexer(&paths)?;
     if let Some(idx) = indexer.clone() {

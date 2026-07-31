@@ -8,6 +8,7 @@
 
 mod ctx;
 mod registry;
+pub mod sandbox;
 
 pub mod builtin;
 pub mod prefetch;

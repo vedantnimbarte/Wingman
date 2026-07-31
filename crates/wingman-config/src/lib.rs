@@ -109,6 +109,21 @@ impl std::fmt::Display for PermissionMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
+    /// OS-level containment for `run_shell`: `auto` | `off` | `required`.
+    ///
+    /// The permission modes confine the *file tools* to the project tree, but
+    /// a shell command can read anything the user can — so in `auto-edit` the
+    /// agent could `cat ~/.ssh/id_rsa` while `read_file` on the same path was
+    /// refused. The denylist cannot close that; it is pattern matching against
+    /// someone who can spell things differently.
+    ///
+    ///   - `auto` (default) — confine when the platform provides a mechanism
+    ///     (`bwrap` on Linux, `sandbox-exec` on macOS), otherwise run
+    ///     unconfined and say so once.
+    ///   - `required` — refuse to run shell commands at all when no mechanism
+    ///     is available. Use for untrusted code.
+    ///   - `off` — never wrap.
+    pub shell_sandbox: String,
     /// Additional shell patterns to always deny even in yolo mode.
     /// e.g. ["rm -rf /", "sudo"]
     #[serde(default)]
@@ -171,6 +186,7 @@ fn default_max_total_tokens() -> u64 {
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
+            shell_sandbox: "auto".into(),
             shell_denylist: Vec::new(),
             tool_output_max_lines: None,
             disabled_tools: Vec::new(),
