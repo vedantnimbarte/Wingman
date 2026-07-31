@@ -89,13 +89,24 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Layered configuration.** Defaults → global `~/.wingman/config.toml` →
   project `.wingman/config.toml` → `WINGMAN_*` env vars → CLI flags. TOML
   sub-tables merge instead of clobbering.
-- **Permission modes.** `read-only` (default), `plan` (read-only + the
-  agent must call `present_plan` before any edit), `auto-edit` (writes/shell
-  inside the project tree auto-allowed, denylist still prompts), and `yolo`
-  (no prompts; per-session only, never persisted).
-- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `stop`, and
-  `user_prompt_submit` shell hooks fire from the agent loop and can
-  block a tool call by exiting non-zero (`[hooks]` in config).
+- **Permission modes.** `read-only` (default), `plan` (read-only, plus a
+  convention that the agent presents a plan first), `auto-edit` (writes
+  inside the project tree and shell auto-allowed, subject to the shell
+  denylist), and `yolo` (no guardrails; per-session only, never persisted).
+  Modes are enforced centrally: each tool declares what it needs
+  (read / write / shell / network) and the registry refuses anything the
+  active mode doesn't grant. A few paths — `.git/`, `.wingman/config.toml`,
+  `.wingman/skills/` — are never writable, in any mode.
+- **Untrusted project config.** A cloned repo's `.wingman/config.toml` may
+  pick a model and tune the UI, but not run commands: `[hooks]`, `[mcp]`,
+  `[verify]`, `[providers]`, and `permission_mode` are ignored unless you
+  run `wingman trust` in that repo. Trust is pinned to the file's contents
+  and lapses whenever it changes.
+- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `user_prompt_submit`,
+  and `stop` shell hooks (`[hooks]` in config). A hook with `block = true`
+  that exits non-zero refuses the tool call (`pre_tool_use`) or the prompt
+  (`user_prompt_submit`); `stop` is advisory, since the turn is already
+  over. Hook failures are always logged, whether or not they block.
 - **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a
@@ -926,17 +937,40 @@ is resolved against the environment at load time.
 
 ### Permission modes
 
-| Mode         | Reads / Search | Writes inside project | Shell                       | Out-of-tree paths |
-| ------------ | -------------- | --------------------- | --------------------------- | ----------------- |
-| `read-only`  | allowed        | prompts               | prompts                     | prompts           |
-| `plan`       | allowed        | denied (plan first)   | denied                      | denied            |
-| `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | prompts           |
-| `yolo`       | allowed        | auto-allowed          | auto-allowed                | auto-allowed      |
+| Mode         | Reads / Search | Writes inside project | Shell                        | Out-of-tree paths |
+| ------------ | -------------- | --------------------- | ---------------------------- | ----------------- |
+| `read-only`  | allowed        | denied                | denied                       | denied            |
+| `plan`       | allowed        | denied                | denied                       | denied            |
+| `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | denied for writes |
+| `yolo`       | allowed        | auto-allowed          | auto-allowed                 | allowed           |
 
-In `plan` mode the assistant is expected to call `present_plan` and wait for
-the user before requesting any write/shell tool. The `present_plan` tool is
-always available so the model can produce a structured plan even outside
-plan mode (it just won't gate anything in that case).
+**There are no interactive approval prompts.** A tool call that the active
+mode doesn't permit is refused outright, with the reason returned to the
+model. Choose the mode that matches the latitude you want to grant.
+
+Enforcement is central: every tool declares what it needs
+(`read` / `write` / `shell` / `network`), and the registry refuses the call
+before the tool runs. A tool that declares nothing can only do pure
+computation, so the default for anything new is deny.
+
+**Protected paths.** `.git/`, `.wingman/config.toml`, `.wingman/skills/`, and
+`.wingman/trusted.toml` are never writable — including in `yolo`. Each of
+those turns a single bad edit into a change that outlives the session (a git
+hook that fires on your next commit, a config that grants the agent more
+permission next time). Edit them yourself if you mean to.
+
+**About `plan`.** Today `plan` behaves exactly like `read-only`; the
+difference is a system-prompt convention that the agent presents a plan
+before proposing changes. `present_plan` formats that plan, but nothing
+currently gates on it and there is no approve-and-promote step — so treat
+`plan` as "read-only, and it'll show you its thinking", not as an
+enforcement boundary. (Tracked in
+[#84](https://github.com/vedantnimbarte/Wingman/issues/84).)
+
+**About `auto-edit`.** Writes are confined to the project tree, but shell is
+not: `run_shell` can reach anything your user account can, and the shell
+denylist is empty by default. It is a convenience, not a boundary. If you
+need real containment for untrusted code, don't rely on `auto-edit`.
 
 `yolo` is per-session only — never persisted to config.
 

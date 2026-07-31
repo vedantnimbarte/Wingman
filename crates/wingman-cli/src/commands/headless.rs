@@ -26,6 +26,7 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         runtime::build_agent_registry_with_fallback(&cfg, &selection, mode).await?;
     // Seed MCP servers so `mcp__*` tools are available in headless mode too.
     // Held for the whole run; dropping it tears down the server subprocesses.
+    let hooks_registry = registry.clone();
     let _mcp = runtime::seed_mcp(&cfg, registry).await;
 
     // Open session log under the project's .wingman/sessions/ dir.
@@ -66,6 +67,16 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     // `wingman router stats` can show which model wins per class in this repo.
     let routing_stats = wingman_learn::StatsStore::open_default().ok();
     let repo = paths.root.to_string_lossy().to_string();
+
+    // `[[hooks.user_prompt_submit]]` — the policy/content-filter hook. A
+    // blocking hook that exits non-zero refuses the prompt outright.
+    if let Err(reason) = hooks_registry
+        .run_user_prompt_submit_hooks(&opts.prompt)
+        .await
+    {
+        eprintln!("wingman: prompt blocked by user_prompt_submit hook: {reason}");
+        return Ok(ExitCode::from(1));
+    }
 
     // Keep the prompt for an auto-commit message after the turn.
     let prompt_for_commit = opts.prompt.clone();
@@ -175,7 +186,15 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
             }
         }
 
-        if matches!(event, AgentEvent::Stop { .. }) {
+        if let AgentEvent::Stop { reason } = &event {
+            let label = match reason {
+                wingman_core::AgentStop::EndTurn => "end_turn",
+                wingman_core::AgentStop::MaxTurns => "max_turns",
+                wingman_core::AgentStop::MaxTokens => "max_tokens",
+                wingman_core::AgentStop::Error => "error",
+                wingman_core::AgentStop::GateFailed => "gate_failed",
+            };
+            hooks_registry.run_stop_hooks(label).await;
             break;
         }
     }
