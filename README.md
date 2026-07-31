@@ -47,11 +47,13 @@ worker agents in isolated worktrees, and converges into a PR.
 
 ## Highlights
 
-- **Self-improving learning loop.** Persistent memories (markdown +
-  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/`),
-  skill usage stats with outcome scoring, cross-session semantic recall via
-  the existing RAG pipeline, and quiet-session nudges that ask the agent to
-  consider persisting something when it's been a while since a save. See
+- **Persistent memory and skills.** Memories are plain markdown +
+  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/` —
+  files you can read, edit, and delete, not an opaque store. Plus skill usage
+  stats, cross-session semantic recall through the RAG pipeline, and
+  quiet-session nudges to persist something worth keeping. Note the outcome
+  "scoring" behind skill stats is a phrase heuristic over your replies, not a
+  learned signal; treat the numbers as a rough tally. See
   [Self-improving loop](#self-improving-loop) below.
 - **73+ providers, one shape.** Anthropic is the reference implementation
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
@@ -190,9 +192,13 @@ worker agents in isolated worktrees, and converges into a PR.
 - **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
   into a reviewable, revertable commit with a generated message (Aider-style),
   composing with the rewind timeline and verification gate.
-- **Local-first privacy preset.** `wingman router preset local` routes the
-  cheap steps (summarize / compaction / commit-message / title) to a local
-  model — simple steps never leave your machine.
+- **Local-first privacy preset.** `wingman router preset local` prints a
+  `[router.classes]` block that points the cheap task classes at a local
+  model. Caveat worth knowing: compaction and commit messages are currently
+  computed without a model call at all, and `[router.classes]` is consulted
+  only for subagents — so today the preset is a starting point for your own
+  config rather than a switch that redirects live traffic. For a real
+  guarantee use `[privacy].local_only` and `wingman attest`.
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
   why it matters" walkthrough of the working diff (fast-model), for reviewers
   and juniors.
@@ -203,9 +209,10 @@ worker agents in isolated worktrees, and converges into a PR.
   time-to-first-token, tokens/task, and verified-done rate.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [docs/SDK.md](docs/SDK.md).
-- **Visual verification.** Build with `--features browser` and set
-  `[verify.browser].url` to make the turn gate load a URL, screenshot it, and
-  fail if it drifts from a baseline — proof a UI change renders.
+- **Visual verification.** *(Opt-in build.)* Build with `--features browser`
+  and set `[verify.browser].url` to make the turn gate load a URL, screenshot
+  it, and fail if it drifts from a baseline. Not in the default build, and it
+  fails open — with no browser present the gate passes rather than blocking.
 - **Server-backed team memory.** Beyond the git-backed `memory sync`,
   `wingman memory push` / `pull` sync memories through a team HTTP endpoint
   (`[team]`), merging non-destructively.
@@ -235,12 +242,18 @@ worker agents in isolated worktrees, and converges into a PR.
   just verified builds").
 - **Ask, don't guess.** The `ask_user` tool lets the agent pause and ask at a
   genuine fork or before an irreversible action instead of guessing.
-- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider and
-  disables network tools; `wingman attest` reports what leaves the machine.
+- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider
+  and removes the network tools. `wingman attest` audits every configured
+  egress channel — MCP servers, hooks, custom tools, team endpoint, and
+  whether `run_shell` is reachable — and states its own scope: it reflects
+  configuration, and cannot vouch for what a local model or a spawned process
+  does with the data.
 - **Cited memory.** `recall_memory` returns provenance (source + date) and the
   agent cites the memory it acts on.
-- **Test-first.** `wingman spec "<intent>"` writes failing tests, then implements
-  until the gate is green.
+- **Test-first.** `wingman spec "<intent>"` writes failing tests, then
+  implements against them. The `[verify]` gate pushes back on a red build for
+  up to `[verify].max_retries` forced corrections (default 2), then stops and
+  exits non-zero — bounded retries, not a loop until green.
 - **PR-native.** `wingman pr address <pr#>` addresses a PR's review comments and
   failing CI on the current branch.
 - **Repo onboarding.** `wingman tour` orients you on an unfamiliar codebase.

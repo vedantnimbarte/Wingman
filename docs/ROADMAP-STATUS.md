@@ -6,6 +6,13 @@ whose *runtime* needs external infrastructure (a browser binary, a mail system,
 Slack, a hosted server) are noted — the code is complete and tested; only the
 live end-to-end run needs that infrastructure.
 
+**Read "implemented and tested" as exactly that, and not as "wired into a
+default run."** Several entries are opt-in (a cargo feature, a config switch)
+or are logic cores whose production call site is still pending. Where that is
+true it is called out in the row. `wingman-autonomous` in particular carries a
+number of tested-but-uncalled modules; see
+[#105](https://github.com/vedantnimbarte/Wingman/issues/105).
+
 ## Shipped
 
 | Item | What | Runtime needs |
@@ -21,7 +28,7 @@ live end-to-end run needs that infrastructure.
 | Agent SDK (T2.5) | `docs/SDK.md`; embed core or drive over MCP | — |
 | Audit trail (T3.9) | `[audit].enabled` JSONL compliance log | — |
 | **reqwest 0.13 unify (L2)** | All first-party crates on reqwest 0.13 + ring; only `hf-hub` (embeddings) keeps a transitive 0.12 | — |
-| **Browser verification (T2.4)** | `wingman-browser` crate + `BrowserGate` (`[verify].browser`); screenshot diff vs baseline | a Chrome binary + `--features browser` |
+| **Browser verification (T2.4)** | `wingman-browser` crate + `BrowserGate` (`[verify].browser`); screenshot diff vs baseline. **Not in the default build, and the gate fails open when no browser is present.** | a Chrome binary + `--features browser` |
 | **Server-backed team memory (T3.9)** | `[team].endpoint` + `wingman memory push` / `pull` (non-clobbering merge) | a team memory HTTP endpoint |
 | **Pilot Slack/email/voice intake (L4)** | `wingman pilot intake slack\|email\|voice` → intake files | Slack app / mail delivery / an STT transcript |
 | **Editor bridge (T2.6)** | `editors/vscode` — VS Code extension over `wingman mcp-serve` | npm build + VS Code |

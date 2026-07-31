@@ -13,7 +13,7 @@ use wingman_config::{global_config_path, Config, PermissionMode, ProjectPaths};
     long_about = None,
 )]
 pub struct Cli {
-    /// Permission mode for this session: read-only | auto-edit | yolo.
+    /// Permission mode for this session: read-only | plan | auto-edit | yolo.
     #[arg(long, value_name = "MODE", global = true)]
     pub mode: Option<String>,
 
@@ -85,9 +85,10 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Generate or refresh WINGMAN.md by introspecting the current project.
+    /// Generate or refresh the project's agent instructions (AGENTS.md, or
+    /// WINGMAN.md if the project already uses one) by introspecting it.
     Init {
-        /// Overwrite an existing WINGMAN.md.
+        /// Overwrite an existing instructions file.
         #[arg(long)]
         force: bool,
     },
