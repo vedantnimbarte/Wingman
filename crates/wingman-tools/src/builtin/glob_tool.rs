@@ -1,6 +1,6 @@
 //! `glob`: list files matching a glob pattern, respecting `.gitignore`.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use globset::{Glob as GlobPat, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -21,6 +21,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for Glob {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "glob".into(),

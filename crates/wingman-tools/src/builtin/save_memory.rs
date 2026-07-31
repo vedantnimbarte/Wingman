@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -35,6 +35,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for SaveMemory {
+    fn capabilities(&self) -> Capability {
+        Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "save_memory".into(),

@@ -6,7 +6,7 @@
 //! bounded by the runner itself (the closure that builds the inner agent
 //! should refuse to register another `spawn_subagent`, so depth caps at 2).
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde::Deserialize;
@@ -60,6 +60,13 @@ struct Args {
 
 #[async_trait]
 impl Tool for SpawnSubagent {
+    fn capabilities(&self) -> Capability {
+        // The subagent runs its own ToolRegistry, which applies this same
+        // gate to every tool it dispatches, so there is nothing to declare
+        // here beyond what the inner tools declare for themselves.
+        Capability::NONE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "spawn_subagent".into(),

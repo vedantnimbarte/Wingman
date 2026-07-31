@@ -4,7 +4,7 @@
 //! with a hard 60s timeout; stderr is appended after stdout under a marker
 //! so the model can tell them apart.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,6 +25,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for RunShell {
+    fn capabilities(&self) -> Capability {
+        Capability::SHELL
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "run_shell".into(),

@@ -164,6 +164,16 @@ impl ToolCtx {
         }
     }
 
+    /// May the agent write *anywhere at all* in the current mode?
+    ///
+    /// The coarse counterpart to [`Self::allows_write`], used by
+    /// [`crate::ToolRegistry`] to gate a tool that declares
+    /// [`crate::Capability::WRITE`] before it runs. `allows_write` still
+    /// decides *which* paths; this decides whether writing is on the table.
+    pub fn allows_any_write(&self) -> bool {
+        matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)
+    }
+
     /// Permission for any shell execution.
     pub fn allows_shell(&self) -> bool {
         matches!(self.mode(), PermissionMode::AutoEdit | PermissionMode::Yolo)

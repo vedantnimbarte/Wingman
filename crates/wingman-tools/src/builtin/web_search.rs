@@ -3,7 +3,7 @@
 //! Returns the top N results as `title :: url :: snippet` lines. Intended
 //! to be paired with `web_fetch` on a chosen URL.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use regex::Regex;
 use serde::Deserialize;
@@ -25,6 +25,10 @@ fn default_limit() -> u32 {
 
 #[async_trait]
 impl Tool for WebSearch {
+    fn capabilities(&self) -> Capability {
+        Capability::NETWORK
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "web_search".into(),

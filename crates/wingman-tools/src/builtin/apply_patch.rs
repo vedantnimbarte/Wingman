@@ -20,7 +20,7 @@
 //!
 //! All edits are validated up front; on any failure, no file is touched.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -51,6 +51,10 @@ enum Op {
 
 #[async_trait]
 impl Tool for ApplyPatch {
+    fn capabilities(&self) -> Capability {
+        Capability::READ | Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "apply_patch".into(),

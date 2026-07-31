@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -43,6 +43,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for InvokeSkill {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "invoke_skill".into(),

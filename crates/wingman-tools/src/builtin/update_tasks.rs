@@ -3,7 +3,7 @@
 //! list in a side panel; each call REPLACES the whole list. The tool itself
 //! just returns a short receipt — the value is the visible progress.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -25,6 +25,10 @@ struct TaskArg {
 
 #[async_trait]
 impl Tool for UpdateTasks {
+    fn capabilities(&self) -> Capability {
+        Capability::NONE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "update_tasks".into(),

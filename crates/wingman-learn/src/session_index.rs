@@ -216,12 +216,36 @@ impl From<ScoredChunk> for SessionHit {
 /// know about. Currently we only check the project-local dir; cross-project
 /// retrieval requires the caller to maintain its own session-id-to-path map.
 pub fn session_path_for(project_root: &std::path::Path, session_id: &str) -> Option<PathBuf> {
+    // `session_id` arrives from the model, so it is untrusted. `Path::join`
+    // with an absolute path silently replaces the base, and `..` walks out of
+    // the sessions directory — either would turn this into an arbitrary
+    // `*.jsonl` read (session transcripts contain whole conversations and all
+    // tool output). Accept only a bare file-stem.
+    if !is_safe_session_id(session_id) {
+        return None;
+    }
     let dir = project_root.join(".wingman").join("sessions");
     let candidate = dir.join(format!("{session_id}.jsonl"));
     if candidate.exists() {
         return Some(candidate);
     }
     None
+}
+
+/// A session id must be a single path component with no traversal, no
+/// separators, and no drive/UNC prefix. Session ids Wingman generates look
+/// like `2026-01-01-1200`, so this is deliberately strict.
+fn is_safe_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && !id.contains("..")
+        && !id.contains('/')
+        && !id.contains('\\')
+        && !id.contains(':')
+        && !id.contains('\0')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
 /// Walk the project's sessions dir and embed any sessions that aren't yet
@@ -273,6 +297,54 @@ mod tests {
     use super::*;
     use std::io::Write;
     use wingman_rag::HashEmbedder;
+
+    #[test]
+    fn session_id_rejects_traversal_and_absolute_paths() {
+        for bad in [
+            "../../../etc/passwd",
+            "..\\..\\Windows\\System32\\config",
+            "/etc/shadow",
+            "C:/Users/victim/.ssh/id_rsa",
+            "\\\\server\\share\\x",
+            "a/b",
+            "a\\b",
+            "..",
+            "",
+            "has space",
+            "semi;colon",
+        ] {
+            assert!(
+                !is_safe_session_id(bad),
+                "should have rejected session id {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn session_id_accepts_generated_shapes() {
+        for good in ["2026-01-01-1200", "abc_123", "session.1", "A-b_C.9"] {
+            assert!(
+                is_safe_session_id(good),
+                "should have accepted session id {good:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn traversal_id_resolves_to_none_even_if_target_exists() {
+        let dir = std::env::temp_dir().join("wingman-sessid-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let outside = dir.join("outside.jsonl");
+        let _ = std::fs::write(&outside, "{}");
+
+        let root = dir.join("proj");
+        let _ = std::fs::create_dir_all(root.join(".wingman").join("sessions"));
+
+        // Would previously escape to ../outside.jsonl.
+        assert!(session_path_for(&root, "../outside").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn write_session(path: &std::path::Path) {
         let mut f = std::fs::File::create(path).unwrap();

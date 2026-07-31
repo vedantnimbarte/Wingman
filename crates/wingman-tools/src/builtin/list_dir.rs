@@ -1,4 +1,4 @@
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -15,6 +15,10 @@ struct Args {
 
 #[async_trait]
 impl Tool for ListDir {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "list_dir".into(),

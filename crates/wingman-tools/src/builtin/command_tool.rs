@@ -3,7 +3,7 @@
 //! stdin and in `$WINGMAN_TOOL_INPUT`; stdout becomes the result. Gated behind
 //! the shell permission — these run arbitrary commands.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -35,6 +35,10 @@ impl CommandTool {
 
 #[async_trait]
 impl Tool for CommandTool {
+    fn capabilities(&self) -> Capability {
+        Capability::SHELL
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name.clone(),

@@ -255,7 +255,12 @@ impl ToolDispatcher for ToolRegistry {
             .get(name)
             .cloned();
         let mut outcome = match tool {
-            Some(tool) => tool.run(args.clone(), &self.ctx).await,
+            // Central capability gate. Enforcement lives here rather than in
+            // each tool so that forgetting to check `ToolCtx` fails closed.
+            Some(tool) => match capability_denial(name, tool.capabilities(), &self.ctx) {
+                Some(msg) => ToolOutcome::err(msg),
+                None => tool.run(args.clone(), &self.ctx).await,
+            },
             None => ToolOutcome::err(format!("unknown tool: {name}")),
         };
 
@@ -397,6 +402,41 @@ pub struct HookResult {
     pub stderr: String,
 }
 
+/// Refuse a tool whose declared capabilities the active permission mode does
+/// not grant. Returns the message to hand back to the model, or `None` to let
+/// the call proceed.
+///
+/// Deliberately coarse: it does not know which path a tool will touch, only
+/// whether writing / shelling out / reaching the network is permitted at all
+/// right now. Path containment stays inside the tools, which know their own
+/// arguments.
+fn capability_denial(name: &str, caps: crate::Capability, ctx: &ToolCtx) -> Option<String> {
+    use crate::Capability;
+
+    if caps.contains(Capability::WRITE) && !ctx.allows_any_write() {
+        return Some(format!(
+            "{name} modifies files, which is not permitted in {:?} mode \
+             (switch to auto-edit or yolo)",
+            ctx.mode()
+        ));
+    }
+    if caps.contains(Capability::SHELL) && !ctx.allows_shell() {
+        return Some(format!(
+            "{name} executes commands, which is not permitted in {:?} mode \
+             (switch to auto-edit or yolo)",
+            ctx.mode()
+        ));
+    }
+    if caps.contains(Capability::NETWORK) && !ctx.allows_network() {
+        return Some(format!(
+            "{name} accesses the network, which is not permitted in {:?} mode \
+             (set [tools].allow_network, or switch to auto-edit/yolo)",
+            ctx.mode()
+        ));
+    }
+    None
+}
+
 pub async fn run_hook(command: &str, timeout_secs: u64, env: &[(&str, String)]) -> HookResult {
     let command = command.to_string();
     let env: Vec<(String, String)> = env
@@ -474,6 +514,91 @@ mod tests {
         async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
             ToolOutcome::ok("ok")
         }
+    }
+
+    /// A tool that declares a capability but would happily do the work — the
+    /// point is that the registry stops it before `run` is reached.
+    struct CapTool(&'static str, crate::Capability);
+
+    #[async_trait]
+    impl Tool for CapTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.0.into(),
+                description: "cap".into(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+        async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+            ToolOutcome::ok("DID THE THING")
+        }
+        fn capabilities(&self) -> crate::Capability {
+            self.1
+        }
+    }
+
+    fn ctx_in(mode: PermissionMode) -> ToolCtx {
+        let cwd = std::env::temp_dir();
+        ToolCtx::new(mode, cwd.clone(), cwd)
+    }
+
+    /// The gate this table encodes is the whole point of declaring
+    /// capabilities: a tool that forgets to consult `ToolCtx` must still be
+    /// refused. Previously `save_memory`/`forget_memory` wrote files in
+    /// read-only mode precisely because nothing checked centrally.
+    #[tokio::test]
+    async fn capability_gate_matrix() {
+        use crate::Capability;
+        use wingman_core::ToolDispatcher;
+
+        // (capability, mode, should_be_allowed)
+        let cases = [
+            (Capability::WRITE, PermissionMode::ReadOnly, false),
+            (Capability::WRITE, PermissionMode::Plan, false),
+            (Capability::WRITE, PermissionMode::AutoEdit, true),
+            (Capability::WRITE, PermissionMode::Yolo, true),
+            (Capability::SHELL, PermissionMode::ReadOnly, false),
+            (Capability::SHELL, PermissionMode::Plan, false),
+            (Capability::SHELL, PermissionMode::AutoEdit, true),
+            (Capability::SHELL, PermissionMode::Yolo, true),
+            (Capability::NETWORK, PermissionMode::ReadOnly, false),
+            (Capability::NETWORK, PermissionMode::Plan, false),
+            (Capability::NETWORK, PermissionMode::AutoEdit, true),
+            (Capability::NETWORK, PermissionMode::Yolo, true),
+            // Reads are allowed in every mode; containment is per-path.
+            (Capability::READ, PermissionMode::ReadOnly, true),
+            (Capability::NONE, PermissionMode::ReadOnly, true),
+        ];
+
+        for (cap, mode, allowed) in cases {
+            let mut reg = ToolRegistry::new(ctx_in(mode));
+            reg.register(CapTool("t", cap));
+            let out = reg.dispatch("t", serde_json::json!({})).await;
+            assert_eq!(
+                !out.is_error, allowed,
+                "cap {cap:?} in {mode:?}: expected allowed={allowed}, got {out:?}"
+            );
+            if allowed {
+                assert_eq!(out.content, "DID THE THING");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_capable_tool_is_refused_before_it_runs_in_read_only() {
+        use crate::Capability;
+        use wingman_core::ToolDispatcher;
+
+        let mut reg = ToolRegistry::new(ctx_in(PermissionMode::ReadOnly));
+        reg.register(CapTool("save_memory", Capability::WRITE));
+        let out = reg.dispatch("save_memory", serde_json::json!({})).await;
+
+        assert!(out.is_error);
+        assert_ne!(
+            out.content, "DID THE THING",
+            "the tool body must not have executed"
+        );
+        assert!(out.content.contains("read-only") || out.content.contains("ReadOnly"));
     }
 
     #[tokio::test]

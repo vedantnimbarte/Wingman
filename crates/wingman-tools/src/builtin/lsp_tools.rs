@@ -11,7 +11,7 @@
 //! 1-based, as shown in editors/`grep` output) OR as a `line` plus a `symbol`
 //! name we locate on that line. The latter is what models reliably produce.
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -113,6 +113,10 @@ pub struct LspDefinition;
 
 #[async_trait]
 impl Tool for LspDefinition {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_definition".into(),
@@ -161,6 +165,10 @@ pub struct LspReferences;
 
 #[async_trait]
 impl Tool for LspReferences {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_references".into(),
@@ -206,6 +214,10 @@ pub struct LspHover;
 
 #[async_trait]
 impl Tool for LspHover {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_hover".into(),
@@ -253,6 +265,10 @@ pub struct LspDiagnostics;
 
 #[async_trait]
 impl Tool for LspDiagnostics {
+    fn capabilities(&self) -> Capability {
+        Capability::READ
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_diagnostics".into(),
@@ -338,6 +354,10 @@ pub struct LspRename;
 
 #[async_trait]
 impl Tool for LspRename {
+    fn capabilities(&self) -> Capability {
+        Capability::READ | Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_rename".into(),
@@ -430,6 +450,10 @@ pub struct LspCodeAction;
 
 #[async_trait]
 impl Tool for LspCodeAction {
+    fn capabilities(&self) -> Capability {
+        Capability::READ | Capability::WRITE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "lsp_code_action".into(),

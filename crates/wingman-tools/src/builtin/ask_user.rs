@@ -7,7 +7,7 @@
 //! reads the user's answer from stdin; otherwise it returns a clear note so the
 //! model proceeds with its best judgment (and says so).
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -26,6 +26,10 @@ pub struct AskUser;
 
 #[async_trait]
 impl Tool for AskUser {
+    fn capabilities(&self) -> Capability {
+        Capability::NONE
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "ask_user".into(),
