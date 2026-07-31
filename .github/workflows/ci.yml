@@ -118,8 +118,17 @@ jobs:
             $bad | ForEach-Object { Write-Host "::error file=$($_.FullName)::contains non-ASCII; keep .ps1 ASCII-only" }
             exit 1
           }
-      - name: Shell-check install.sh
-        shell: bash
+
+  # install.sh gets its own Linux job: the PowerShell checks above need
+  # windows-latest for PS 5.1, but install.sh deliberately refuses to run on
+  # Windows (it tells you to use install.ps1), so shell-checking it there fails
+  # by design.
+  scripts-posix:
+    name: install.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Syntax + dry run
         run: |
           sh -n scripts/install.sh
           DRY_RUN=1 sh scripts/install.sh
