@@ -9,7 +9,7 @@
 //! units**, so we convert carefully rather than assuming one char == one byte.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -149,29 +149,184 @@ pub fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
     out
 }
 
-/// Apply a whole `WorkspaceEdit` to disk. Returns the list of paths changed.
-/// Best-effort: a file that can't be read is skipped (reported via the return
-/// set only including files actually written).
-pub async fn apply_workspace_edit(we: &Value) -> std::io::Result<Vec<PathBuf>> {
+/// Decides whether a path named by the language server may be written.
+///
+/// A `WorkspaceEdit` carries whatever `file://` URIs the server chose, so it is
+/// an unbounded write primitive unless every path is checked. The authorizer is
+/// supplied by the caller (which knows the project root and the active
+/// permission mode); `wingman-lsp` deliberately does not implement containment
+/// itself.
+pub type WriteAuthorizer = std::sync::Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+
+/// Outcome of applying a `WorkspaceEdit`.
+#[derive(Debug, Default, Clone)]
+pub struct AppliedEdit {
+    /// Paths actually written.
+    pub changed: Vec<PathBuf>,
+    /// Paths the authorizer refused. Non-empty means nothing was written.
+    pub refused: Vec<PathBuf>,
+}
+
+/// Apply a whole `WorkspaceEdit` to disk, subject to `allow`.
+///
+/// Every path is validated *before* anything is written, so a rejected edit
+/// leaves the tree untouched rather than half-applied. If any path is refused,
+/// the whole edit is refused — a rename that silently dropped the files it
+/// wasn't allowed to touch would corrupt the codebase more subtly than one that
+/// fails outright.
+pub async fn apply_workspace_edit(
+    we: &Value,
+    allow: &WriteAuthorizer,
+) -> std::io::Result<AppliedEdit> {
     let file_edits = parse_workspace_edit(we);
-    let mut changed = Vec::new();
+
+    let refused: Vec<PathBuf> = file_edits
+        .iter()
+        .filter(|fe| !allow(&fe.path))
+        .map(|fe| fe.path.clone())
+        .collect();
+    if !refused.is_empty() {
+        return Ok(AppliedEdit {
+            changed: Vec::new(),
+            refused,
+        });
+    }
+
+    // Read and compute everything first; only then write. Keeps a failure
+    // part-way through from leaving an unenumerable mix of old and new files.
+    let mut staged: Vec<(PathBuf, String)> = Vec::new();
     for fe in file_edits {
         let Ok(text) = tokio::fs::read_to_string(&fe.path).await else {
             continue;
         };
         let updated = apply_edits(&text, &fe.edits);
         if updated != text {
-            tokio::fs::write(&fe.path, updated).await?;
-            changed.push(fe.path);
+            staged.push((fe.path, updated));
         }
     }
-    Ok(changed)
+
+    let mut changed = Vec::new();
+    for (path, text) in staged {
+        tokio::fs::write(&path, text).await?;
+        changed.push(path);
+    }
+    Ok(AppliedEdit {
+        changed,
+        refused: Vec::new(),
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn allow_all() -> WriteAuthorizer {
+        std::sync::Arc::new(|_: &Path| true)
+    }
+
+    fn allow_none() -> WriteAuthorizer {
+        std::sync::Arc::new(|_: &Path| false)
+    }
+
+    /// `file://` URI for a local path, with Windows separators normalised.
+    fn uri(p: &Path) -> String {
+        let s = p
+            .display()
+            .to_string()
+            .replace(std::path::MAIN_SEPARATOR, "/");
+        format!("file:///{s}")
+    }
+
+    fn we_for(path: &Path) -> Value {
+        json!({
+            "changes": {
+                uri(path): [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end":   {"line": 0, "character": 3}
+                    },
+                    "newText": "XXX"
+                }]
+            }
+        })
+    }
+
+    /// A WorkspaceEdit names its own paths, so an unauthorized one must not
+    /// touch the disk at all.
+    #[tokio::test]
+    async fn refused_edit_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("wm-we-refuse-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("victim.txt");
+        std::fs::write(&f, "abc").unwrap();
+
+        let out = apply_workspace_edit(&we_for(&f), &allow_none())
+            .await
+            .unwrap();
+
+        assert!(out.changed.is_empty(), "nothing should have been written");
+        assert_eq!(out.refused.len(), 1, "the path should be reported refused");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "abc",
+            "file content must be untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One refused path poisons the whole edit — a partially applied rename is
+    /// worse than a refused one.
+    #[tokio::test]
+    async fn one_refused_path_blocks_the_whole_edit() {
+        let dir = std::env::temp_dir().join(format!("wm-we-mixed-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("in")).unwrap();
+        let inside = dir.join("in").join("a.txt");
+        let outside = dir.join("b.txt");
+        std::fs::write(&inside, "abc").unwrap();
+        std::fs::write(&outside, "abc").unwrap();
+
+        let inside_dir = dir.join("in");
+        let allow: WriteAuthorizer =
+            std::sync::Arc::new(move |p: &Path| p.starts_with(&inside_dir));
+
+        let we = json!({
+            "changes": {
+                uri(&inside): [{
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                    "newText": "XXX"
+                }],
+                uri(&outside): [{
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}},
+                    "newText": "XXX"
+                }]
+            }
+        });
+
+        let out = apply_workspace_edit(&we, &allow).await.unwrap();
+        assert!(out.changed.is_empty());
+        assert_eq!(out.refused.len(), 1);
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "abc");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "abc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn authorized_edit_still_applies() {
+        let dir = std::env::temp_dir().join(format!("wm-we-ok-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("ok.txt");
+        std::fs::write(&f, "abc").unwrap();
+
+        let out = apply_workspace_edit(&we_for(&f), &allow_all())
+            .await
+            .unwrap();
+
+        assert_eq!(out.changed.len(), 1);
+        assert!(out.refused.is_empty());
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "XXX");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn single_line_replace() {

@@ -206,10 +206,19 @@ impl ToolCtx {
 /// lexically fold the remaining, not-yet-existing components.
 fn resolve_for_containment(path: &Path) -> PathBuf {
     // Peel off trailing components until we reach an ancestor that exists.
+    //
+    // `symlink_metadata`, not `exists()`: `exists()` follows symlinks, so a
+    // *dangling* symlink reports false, gets peeled off as a "doesn't exist
+    // yet" component, and is then folded back in lexically — landing inside
+    // the project by construction. `write_file` would then follow it out of
+    // the tree. A repo can commit such a link (`docs/notes.md ->
+    // ../../../.ssh/authorized_keys`), so this must not depend on the target
+    // existing. `symlink_metadata` succeeds for a dangling link, which stops
+    // the peel and lets the containment check below see it for what it is.
     let mut existing = path;
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
     loop {
-        if existing.exists() {
+        if existing.symlink_metadata().is_ok() {
             break;
         }
         match (existing.parent(), existing.file_name()) {
@@ -222,11 +231,46 @@ fn resolve_for_containment(path: &Path) -> PathBuf {
             _ => break,
         }
     }
-    let mut base = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    let mut base = resolve_existing(existing, 0);
     for component in tail.iter().rev() {
         base.push(component);
     }
     normalize_lexical(&base)
+}
+
+/// Maximum symlink hops before we give up. Matches the usual OS limit closely
+/// enough and bounds a link cycle.
+const MAX_SYMLINK_HOPS: u32 = 16;
+
+/// Resolve an existing path to its real location.
+///
+/// `canonicalize` handles the normal case, but it *fails* on a dangling
+/// symlink — and falling back to the raw path there would put an escaping link
+/// back inside the project. So dangling links are followed manually: read the
+/// target, resolve it against the link's parent, and recurse.
+fn resolve_existing(path: &Path, hops: u32) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    if hops >= MAX_SYMLINK_HOPS {
+        return path.to_path_buf();
+    }
+    // Dangling symlink: follow it by hand so the escape is visible to the
+    // containment check.
+    if let Ok(md) = path.symlink_metadata() {
+        if md.file_type().is_symlink() {
+            if let Ok(target) = std::fs::read_link(path) {
+                let joined = if target.is_absolute() {
+                    target
+                } else {
+                    path.parent().unwrap_or(Path::new("")).join(target)
+                };
+                let folded = normalize_lexical(&joined);
+                return resolve_existing(&folded, hops + 1);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Lexically normalise a path: drop `.` components and resolve `..` by
@@ -407,6 +451,43 @@ mod tests {
         let target = ctx.resolve("src/new_file.rs");
         assert!(ctx.is_inside_project(&target));
         assert!(ctx.allows_write(&target));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A repo can commit a symlink pointing outside the tree. If its target
+    /// doesn't exist yet, `exists()` reports false and the old peel logic
+    /// folded the link name back in-tree — so `write_file` followed it out and
+    /// created a file at the target (`~/.ssh/authorized_keys`,
+    /// `~/.bashrc`, …). The link must be resolved, not treated as a plain
+    /// not-yet-created file.
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_out_of_tree_is_denied() {
+        let base = std::env::temp_dir().join(format!("wm-symlink-{}", std::process::id()));
+        let root = base.join("proj");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+
+        // Target deliberately does NOT exist -> dangling.
+        let link = root.join("docs").join("notes.md");
+        std::os::unix::fs::symlink(base.join("outside").join("pwned.txt"), &link).unwrap();
+
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(
+            !ctx.allows_write(&link),
+            "write through a dangling symlink must not be judged inside the project"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The in-tree case must keep working — this is an ordinary new file.
+    #[test]
+    fn new_file_inside_project_is_allowed() {
+        let root = std::env::temp_dir().join(format!("wm-newfile-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(ctx.allows_write(&root.join("src").join("brand_new.rs")));
         let _ = std::fs::remove_dir_all(&root);
     }
 

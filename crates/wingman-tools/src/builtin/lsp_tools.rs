@@ -80,6 +80,11 @@ async fn client_for(
         )));
     }
     let manager = wingman_lsp::manager_for(&ctx.project_root).await;
+    // Contain server-initiated `workspace/applyEdit` as well as the edits
+    // we request. The closure captures a ToolCtx clone, whose mode lives
+    // behind a shared atomic, so a later `/mode` switch re-gates servers
+    // that are already running.
+    manager.set_write_authorizer(Some(write_authorizer(ctx)));
     match manager.client_for_path(&abs).await {
         Ok(c) => Ok((abs, c)),
         Err(unavailable) => Err(ToolOutcome::ok(format!(
@@ -87,6 +92,43 @@ async fn client_for(
              for a tree-sitter answer.)"
         ))),
     }
+}
+
+/// Build the write policy for edits a language server produces.
+///
+/// A `WorkspaceEdit` names its own paths, so checking the single `path`
+/// argument the model supplied authorizes nothing about what actually gets
+/// written. This closure applies the real containment check to every path,
+/// against a `ToolCtx` clone whose permission mode is shared (not copied) so
+/// live `/mode` changes are respected.
+fn write_authorizer(ctx: &ToolCtx) -> wingman_lsp::edit::WriteAuthorizer {
+    let ctx = ctx.clone();
+    std::sync::Arc::new(move |p: &Path| ctx.allows_write(p))
+}
+
+/// Commands a code action may replay via `workspace/executeCommand`.
+///
+/// Servers expose commands that run builds and tests (`rust-analyzer.runSingle`
+/// and friends); replaying an arbitrary one turns a code action into process
+/// execution. These are the edit-shaped commands that code actions actually
+/// need, matched case-insensitively on the trailing segment so the
+/// `<server>.<command>` prefix doesn't have to be enumerated.
+fn is_allowed_lsp_command(name: &str) -> bool {
+    const ALLOWED_SUFFIXES: &[&str] = &[
+        "applyfix",
+        "applysuggestion",
+        "organizeimports",
+        "sortimports",
+        "addmissingimports",
+        "removeunused",
+        "removeunusedimports",
+        "fixall",
+        "applyworkspaceedit",
+        "resolvecodeaction",
+    ];
+    let lower = name.to_ascii_lowercase();
+    let tail = lower.rsplit('.').next().unwrap_or(&lower);
+    ALLOWED_SUFFIXES.contains(&tail)
 }
 
 fn rel(root: &Path, p: &Path) -> String {
@@ -403,9 +445,21 @@ impl Tool for LspRename {
             }
             Err(e) => return ToolOutcome::err(format!("lsp rename failed: {e}")),
         };
-        match wingman_lsp::edit::apply_workspace_edit(&edit).await {
-            Ok(changed) if changed.is_empty() => ToolOutcome::ok("(rename produced no changes)"),
-            Ok(changed) => {
+        match wingman_lsp::edit::apply_workspace_edit(&edit, &write_authorizer(ctx)).await {
+            Ok(applied) if !applied.refused.is_empty() => ToolOutcome::err(format!(
+                "refused: the rename would write outside the project (or where this \n                 mode forbids): {}",
+                applied
+                    .refused
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            Ok(applied) if applied.changed.is_empty() => {
+                ToolOutcome::ok("(rename produced no changes)")
+            }
+            Ok(applied) => {
+                let changed = applied.changed;
                 let list = changed
                     .iter()
                     .map(|p| rel(&ctx.project_root, p))
@@ -579,7 +633,7 @@ impl Tool for LspCodeAction {
             ));
         };
 
-        apply_code_action(&client, action, &ctx.project_root).await
+        apply_code_action(&client, action, &ctx.project_root, ctx).await
     }
 }
 
@@ -589,6 +643,7 @@ async fn apply_code_action(
     client: &wingman_lsp::LspClient,
     action: &Value,
     root: &Path,
+    ctx: &ToolCtx,
 ) -> ToolOutcome {
     let title = action
         .get("title")
@@ -598,8 +653,19 @@ async fn apply_code_action(
     let mut changed: Vec<PathBuf> = Vec::new();
 
     if let Some(edit) = action.get("edit") {
-        match wingman_lsp::edit::apply_workspace_edit(edit).await {
-            Ok(mut c) => changed.append(&mut c),
+        match wingman_lsp::edit::apply_workspace_edit(edit, &write_authorizer(ctx)).await {
+            Ok(applied) if !applied.refused.is_empty() => {
+                return ToolOutcome::err(format!(
+                    "refused `{title}`: it would write outside the project (or where \n                     this mode forbids): {}",
+                    applied
+                        .refused
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+            Ok(mut applied) => changed.append(&mut applied.changed),
             Err(e) => return ToolOutcome::err(format!("applying `{title}` edit failed: {e}")),
         }
     }
@@ -620,6 +686,15 @@ async fn apply_code_action(
             )
         };
         if !name.is_empty() {
+            // The command name and its arguments come from the server. Some
+            // language-server commands spawn processes, so replaying an
+            // arbitrary one is a shell primitive by proxy. Allow only the
+            // edit-shaped commands a code action legitimately needs.
+            if !is_allowed_lsp_command(&name) {
+                return ToolOutcome::err(format!(
+                    "refused `{title}`: the server asked to run the command `{name}`, \n                     which is not on the allowlist of edit-only commands"
+                ));
+            }
             if let Err(e) = client.execute_command(&name, arguments).await {
                 return ToolOutcome::err(format!("executing `{title}` command failed: {e}"));
             }
@@ -658,6 +733,44 @@ fn pos_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A code action replays whatever command the server put in it. Commands
+    /// that build or run code must not be replayable, or a code action becomes
+    /// process execution by proxy.
+    #[test]
+    fn lsp_command_allowlist_rejects_execution_commands() {
+        for bad in [
+            "rust-analyzer.runSingle",
+            "rust-analyzer.debugSingle",
+            "rust-analyzer.run",
+            "typescript.restartTsServer",
+            "workspace.executeShell",
+            "editor.action.doSomethingElse",
+            "",
+        ] {
+            assert!(
+                !is_allowed_lsp_command(bad),
+                "should have refused command {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn lsp_command_allowlist_accepts_edit_commands() {
+        for good in [
+            "rust-analyzer.applyFix",
+            "_typescript.organizeImports",
+            "typescript.sortImports",
+            "source.fixAll",
+            "eslint.applySuggestion",
+            "RUST-ANALYZER.APPLYFIX",
+        ] {
+            assert!(
+                is_allowed_lsp_command(good),
+                "should have allowed command {good:?}"
+            );
+        }
+    }
 
     #[test]
     fn resolve_position_uses_explicit_column() {

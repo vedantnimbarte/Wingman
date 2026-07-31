@@ -66,6 +66,11 @@ impl std::fmt::Display for Unavailable {
 /// single project root.
 pub struct LspManager {
     root: PathBuf,
+    /// Write policy handed to every client this manager starts, so a
+    /// server-initiated `workspace/applyEdit` is contained. Shared (not
+    /// copied) so switching permission mode re-gates servers that are
+    /// already running.
+    authorizer: crate::client::SharedAuthorizer,
     // Per-language slot. `Some(Ok)` = live client; `Some(Err)` = known
     // unavailable (cached so we don't re-probe a missing server every call).
     clients: Mutex<HashMap<Lang, std::result::Result<Arc<LspClient>, Unavailable>>>,
@@ -75,12 +80,20 @@ impl LspManager {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         LspManager {
             root: root.into(),
+            authorizer: Arc::new(std::sync::RwLock::new(None)),
             clients: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Install the policy that decides whether a server-initiated
+    /// `workspace/applyEdit` may touch a given path. Until this is called
+    /// every such edit is refused, which is the safe default.
+    pub fn set_write_authorizer(&self, allow: Option<crate::edit::WriteAuthorizer>) {
+        *self.authorizer.write().unwrap_or_else(|e| e.into_inner()) = allow;
     }
 
     /// Get (or lazily start) the client that handles `path`'s language.
@@ -106,7 +119,7 @@ impl LspManager {
                 looked_for: spec.candidate_names(),
             });
         };
-        match LspClient::start(&self.root, &program, &args, lang).await {
+        match LspClient::start(&self.root, &program, &args, lang, self.authorizer.clone()).await {
             Ok(c) => Ok(c),
             Err(e) => Err(Unavailable::StartFailed {
                 lang,
