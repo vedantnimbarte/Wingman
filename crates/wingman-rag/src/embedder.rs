@@ -99,8 +99,22 @@ mod fastembed_impl {
 
     impl FastembedEmbedder {
         pub fn new(cache_dir: Option<PathBuf>) -> Result<Self> {
-            let mut opts =
-                InitOptions::new(EmbeddingModel::BGESmallENV15).with_show_download_progress(false);
+            // On a cold cache this fetches ~120 MB from HuggingFace. With
+            // progress suppressed the tool just appeared to hang on first use,
+            // with no output and no explanation — which reads as a freeze, and
+            // is a poor look for a tool that advertises a local-only mode.
+            // Announce it, and let fastembed draw the progress bar.
+            let already_cached = cache_dir
+                .as_ref()
+                .map(|d| d.join("models--Qdrant--bge-small-en-v1.5-onnx-Q").exists())
+                .unwrap_or(false);
+            if !already_cached {
+                eprintln!(
+                    "wingman: downloading the embedding model (~120 MB, one time) for                      semantic search…"
+                );
+            }
+            let mut opts = InitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_show_download_progress(!already_cached);
             if let Some(dir) = cache_dir {
                 opts = opts.with_cache_dir(dir);
             }

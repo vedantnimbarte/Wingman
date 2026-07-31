@@ -614,8 +614,52 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
     let embedder = pick_embedder();
     let store = match IndexStore::open(&paths.index_db, embedder.id(), embedder.dim()) {
         Ok(s) => s,
+        // The index is a derived cache, so a mismatch between the embedder that
+        // built it and the one running now is a rebuild, not a fatal error.
+        //
+        // This used to disable `semantic_search` outright — and silently, since
+        // the only signal was a tracing warning invisible in the TUI. It bites
+        // exactly when a user's first run is offline: the db gets stamped with
+        // the 64-dim hash fallback, and every later run with real embeddings
+        // available fails to open it. The feature simply vanished, permanently,
+        // with nothing to rebuild it.
+        Err(wingman_rag::RagError::DimMismatch { expected, actual }) => {
+            tracing::info!(
+                "rebuilding semantic index: it was built with a {expected}-dim embedder, \
+                 this session uses {actual}-dim"
+            );
+            eprintln!(
+                "wingman: the semantic index was built by a different embedding model \
+                 ({expected}-dim vs {actual}-dim); rebuilding it."
+            );
+            // Remove the stale db (and any sqlite sidecars) and open fresh.
+            let _ = std::fs::remove_file(&paths.index_db);
+            for suffix in ["-wal", "-shm"] {
+                let mut p = paths.index_db.clone().into_os_string();
+                p.push(suffix);
+                let _ = std::fs::remove_file(std::path::PathBuf::from(p));
+            }
+            match IndexStore::open(&paths.index_db, embedder.id(), embedder.dim()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("disabling RAG: could not recreate index db: {e}");
+                    eprintln!(
+                        "wingman: could not rebuild the semantic index ({e}); \
+                         `semantic_search` is unavailable this session."
+                    );
+                    return Ok(None);
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!("disabling RAG: could not open index db: {e}");
+            // Say it on stderr too: a tool disappearing from the model's
+            // toolset with no user-visible reason reads as "the feature is
+            // broken", which is how it was being reported.
+            eprintln!(
+                "wingman: semantic index unavailable ({e}); `semantic_search` is \
+                 disabled this session."
+            );
             return Ok(None);
         }
     };
@@ -631,7 +675,20 @@ pub fn pick_embedder_pub() -> Arc<dyn Embedder> {
     pick_embedder()
 }
 
+/// The process-wide embedder.
+///
+/// Constructing a fastembed embedder builds an ONNX session and holds the
+/// model resident (~120 MB). `pick_embedder` is reached from four separate
+/// places during a TUI startup — the registry, the learn handles, the subagent
+/// runner, and the background indexer — and each used to build its own, so a
+/// single launch could keep four copies of the same model in memory. It is
+/// immutable and thread-safe, so one shared instance is all that's needed.
 fn pick_embedder() -> Arc<dyn Embedder> {
+    static EMBEDDER: std::sync::OnceLock<Arc<dyn Embedder>> = std::sync::OnceLock::new();
+    EMBEDDER.get_or_init(build_embedder).clone()
+}
+
+fn build_embedder() -> Arc<dyn Embedder> {
     #[cfg(feature = "embeddings")]
     {
         match wingman_rag::FastembedEmbedder::new(Some(model_cache_dir())) {
