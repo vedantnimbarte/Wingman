@@ -43,11 +43,7 @@ impl Tool for WriteFile {
         };
         let path = ctx.resolve(&args.path);
         if !ctx.allows_write(&path) {
-            return ToolOutcome::err(format!(
-                "write denied for {} under permission mode {}",
-                path.display(),
-                ctx.mode()
-            ));
+            return ToolOutcome::err(ctx.write_denial_reason(&path));
         }
         if let Some(parent) = path.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {

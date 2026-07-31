@@ -141,11 +141,79 @@ impl ToolCtx {
     }
 
     /// Permission for a write/edit operation on `path`.
+    ///
+    /// Protected paths (see [`Self::is_protected_path`]) are refused in *every*
+    /// mode, `yolo` included — those are the files that turn a single bad edit
+    /// into a permanent compromise.
     pub fn allows_write(&self, path: &Path) -> bool {
+        if self.is_protected_path(path) {
+            return false;
+        }
         match self.mode() {
             PermissionMode::Yolo => true,
             PermissionMode::AutoEdit => self.is_inside_project(path),
             PermissionMode::ReadOnly | PermissionMode::Plan => false,
+        }
+    }
+
+    /// Why a write to `path` was refused, phrased for the model.
+    ///
+    /// Distinguishes "this mode forbids writing" from "this file is protected
+    /// in every mode", because the remedy differs — switching to `yolo` will
+    /// not unlock a protected path, and telling the model otherwise just makes
+    /// it retry.
+    pub fn write_denial_reason(&self, path: &Path) -> String {
+        if self.is_protected_path(path) {
+            format!(
+                "write denied for {}: this path is protected in every mode, \
+                 including yolo (writing it would let a change persist beyond \
+                 this session). Edit it yourself if you meant to.",
+                path.display()
+            )
+        } else {
+            format!(
+                "write denied for {} under permission mode {}",
+                path.display(),
+                self.mode()
+            )
+        }
+    }
+
+    /// Files the agent must never write, regardless of permission mode.
+    ///
+    /// Each of these converts one successful edit into durable, out-of-band
+    /// code execution or a permission escalation that survives the session:
+    ///
+    ///   - `.git/` — a `hooks/pre-commit` fires on the developer's next commit,
+    ///     entirely outside Wingman; `config` can point `origin` elsewhere.
+    ///   - `.wingman/config.toml` — the agent could grant itself `yolo`, add
+    ///     `[hooks]`, or redirect a provider `base_url` (see the config trust
+    ///     boundary in `wingman_config`).
+    ///   - `.wingman/skills/` — skills are injected into the system prompt and
+    ///     returned with an instruction to obey them.
+    ///   - `.wingman/trusted.toml` — the record of what the *user* trusted.
+    ///
+    /// `yolo` is documented as "no guardrails" for the agent's own work; it is
+    /// not an invitation to rewrite the mechanism that enforces the guardrails.
+    /// A user who genuinely needs to change these can edit them directly.
+    pub fn is_protected_path(&self, path: &Path) -> bool {
+        let resolved = resolve_for_containment(path);
+        let root =
+            std::fs::canonicalize(&self.project_root).unwrap_or_else(|_| self.project_root.clone());
+        let Ok(rel) = resolved.strip_prefix(&root) else {
+            // Outside the project: mode checks already govern it, and there is
+            // no project-relative protected path to match.
+            return false;
+        };
+
+        let mut comps = rel.components().map(|c| c.as_os_str().to_string_lossy());
+        match comps.next().as_deref() {
+            Some(".git") => true,
+            Some(".wingman") => matches!(
+                comps.next().as_deref(),
+                Some("config.toml") | Some("skills") | Some("trusted.toml")
+            ),
+            _ => false,
         }
     }
 
@@ -479,6 +547,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// One injected edit must not be able to buy persistence. These paths stay
+    /// refused even in `yolo`, which is the whole point of the list.
+    #[test]
+    fn protected_paths_are_refused_in_every_mode() {
+        let root = std::env::temp_dir().join(format!("wm-protected-{}", std::process::id()));
+        std::fs::create_dir_all(root.join(".git").join("hooks")).unwrap();
+        std::fs::create_dir_all(root.join(".wingman").join("skills")).unwrap();
+
+        let protected = [
+            root.join(".git").join("hooks").join("pre-commit"),
+            root.join(".git").join("config"),
+            root.join(".wingman").join("config.toml"),
+            root.join(".wingman").join("skills").join("evil.md"),
+            root.join(".wingman").join("trusted.toml"),
+        ];
+
+        for mode in [
+            PermissionMode::ReadOnly,
+            PermissionMode::Plan,
+            PermissionMode::AutoEdit,
+            PermissionMode::Yolo,
+        ] {
+            let ctx = ToolCtx::new(mode, root.clone(), root.clone());
+            for p in &protected {
+                assert!(
+                    !ctx.allows_write(p),
+                    "{} must be refused in {mode:?}",
+                    p.display()
+                );
+            }
+        }
+
+        // Ordinary project files under .wingman are still writable.
+        let ctx = ToolCtx::new(PermissionMode::AutoEdit, root.clone(), root.clone());
+        assert!(ctx.allows_write(&root.join(".wingman").join("memory").join("note.md")));
+        assert!(ctx.allows_write(&root.join("src.rs")));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The in-tree case must keep working — this is an ordinary new file.

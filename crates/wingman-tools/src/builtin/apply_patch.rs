@@ -102,11 +102,7 @@ impl Tool for ApplyPatch {
             match &op {
                 Op::Update { path, old, .. } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     let original = match tokio::fs::read_to_string(path).await {
                         Ok(s) => s,
@@ -129,11 +125,7 @@ impl Tool for ApplyPatch {
                 }
                 Op::Add { path, .. } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     if path.exists() {
                         return ToolOutcome::err(format!(
@@ -145,11 +137,7 @@ impl Tool for ApplyPatch {
                 }
                 Op::Delete { path } => {
                     if !ctx.allows_write(path) {
-                        return ToolOutcome::err(format!(
-                            "write denied for {} under permission mode {}",
-                            path.display(),
-                            ctx.mode()
-                        ));
+                        return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
                     if !path.exists() {
                         return ToolOutcome::err(format!(

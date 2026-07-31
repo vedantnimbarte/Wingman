@@ -64,11 +64,7 @@ impl Tool for EditFile {
         }
         let path = ctx.resolve(&args.path);
         if !ctx.allows_write(&path) {
-            return ToolOutcome::err(format!(
-                "edit denied for {} under permission mode {}",
-                path.display(),
-                ctx.mode()
-            ));
+            return ToolOutcome::err(ctx.write_denial_reason(&path));
         }
 
         let original = match tokio::fs::read_to_string(&path).await {
