@@ -252,29 +252,27 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         }
     }
 
-    // Index the just-finished session into the global sessions store so
-    // future runs can `recall_session` against it.
-    if let Some(s) = session.as_ref() {
-        let session_path = s.path().to_path_buf();
-        tokio::spawn(async move {
-            let embedder = crate::runtime::pick_embedder_pub();
-            match wingman_learn::session_index::open_global_store(&*embedder) {
-                Ok(store) => {
-                    match wingman_learn::session_index::index_session_into(
-                        &store,
-                        &*embedder,
-                        &session_path,
-                    )
-                    .await
-                    {
-                        Ok(n) => tracing::info!("indexed session ({n} chunks) into sessions.db"),
-                        Err(e) => tracing::warn!("session indexing failed: {e}"),
-                    }
-                }
-                Err(e) => tracing::warn!("could not open sessions store: {e}"),
-            }
-        });
-    }
+    // This session is indexed for `recall_session` by the startup backfill of
+    // the *next* run in this project, not here.
+    //
+    // A `tokio::spawn` at this point was never going to finish: `run` returns
+    // on the next line, the runtime is dropped, and the task dies mid-embed —
+    // which is where the recurring "session indexing failed: … task was
+    // cancelled" warning came from. It reported data loss for work that had
+    // simply been abandoned a millisecond after being started.
+    //
+    // Awaiting it instead would be correct but expensive in exactly the wrong
+    // place: it would put an embedding-model load plus the embed itself on the
+    // exit path of every `--print`, every pilot worker, and every HTTP turn.
+    // `backfill_project_sessions` exists precisely so session indexing does
+    // not need a shutdown hook, and it already runs when the registry is
+    // built. The cost is that a session becomes recallable from the next run
+    // rather than seconds after this one exits — which is what was actually
+    // happening anyway, minus the alarming warning.
+    //
+    // The interactive TUI is different and keeps its own indexer: it awaits
+    // it (see `wingman_tui::run`), a person closes it once, and the wait is
+    // not on a hot path.
 
     Ok(exit)
 }
