@@ -33,6 +33,12 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Continue a past session: replay its transcript as history, then run
+    /// `--print`'s prompt in it and append to the same log. Takes a session
+    /// id as shown by `wingman session list`.
+    #[arg(long, value_name = "SESSION_ID")]
+    pub resume: Option<String>,
+
     /// Preview only: with `--print`, force read-only and describe the changes
     /// that would be made without applying them.
     #[arg(long)]
@@ -798,6 +804,8 @@ pub async fn run() -> Result<ExitCode> {
             json: cli.json,
             mode_override,
             model_override: cli.model,
+            session_id: cli.session_id,
+            resume: cli.resume,
         };
         return commands::headless::run(cfg, opts).await;
     }

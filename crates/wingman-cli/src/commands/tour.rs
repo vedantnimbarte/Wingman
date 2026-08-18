@@ -40,6 +40,9 @@ pub async fn run(focus: Option<String>) -> Result<ExitCode> {
         json: false,
         mode_override: Some(wingman_config::PermissionMode::ReadOnly),
         model_override: None,
+        // Not a resumable conversation: this command runs one framed prompt.
+        session_id: None,
+        resume: None,
     };
     crate::commands::headless::run(cfg, opts).await
 }

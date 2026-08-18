@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{auth, pilot, projects, ServeState};
+use super::{auth, pilot, projects, sessions, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -84,6 +84,15 @@ async fn project_route(
             pilot::control(project, run, action, req, sock).await
         }
         ("POST", ["pilot", "goals"]) => pilot::add_goal(state, project, req, sock).await,
+
+        ("POST", ["sessions"]) => sessions::create(sock).await,
+        ("GET", ["sessions"]) => sessions::list(project, sock).await,
+        ("GET", ["sessions", id]) => sessions::get(project, id, sock).await,
+        ("DELETE", ["sessions", id]) => sessions::delete(project, id, sock).await,
+        ("POST", ["sessions", id, "turns"]) => {
+            sessions::turn(state, project, Some(id), req, sock).await
+        }
+        ("POST", ["turns"]) => sessions::turn(state, project, None, req, sock).await,
         _ => http::write_err(sock, 404, "no such route (see GET /v1/schema)").await,
     }
 }
@@ -105,7 +114,7 @@ async fn health(state: &Arc<ServeState>, sock: &mut TcpStream) -> std::io::Resul
 /// serves, so a client can discover the surface instead of pinning to a doc
 /// that drifts.
 fn schema(state: &Arc<ServeState>) -> serde_json::Value {
-    json!({
+    let mut doc = json!({
         "version": env!("CARGO_PKG_VERSION"),
         "ceiling": state.ceiling.to_string(),
         "routes": [
@@ -142,7 +151,11 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
               "body": { "text": "string", "author": "string?" },
               "returns": "queues an intake file for the discovery daemon" },
         ],
-    })
+    });
+    if let Some(routes) = doc["routes"].as_array_mut() {
+        routes.extend(sessions::schema());
+    }
+    doc
 }
 
 #[cfg(test)]
@@ -265,6 +278,10 @@ mod tests {
 
     fn get(path: &str) -> String {
         format!("GET {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    fn del(path: &str) -> String {
+        format!("DELETE {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
     }
 
     fn post(path: &str, body: &str) -> String {
@@ -424,6 +441,90 @@ mod tests {
         assert_eq!(written.len(), 1);
         let body = std::fs::read_to_string(written[0].path()).unwrap();
         assert!(body.contains("fix the flaky test"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_turn_above_the_ceiling_is_refused_before_anything_spawns() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/turns",
+                "{\"prompt\":\"rm -rf everything\",\"mode\":\"yolo\"}",
+            ),
+        )
+        .await;
+        // The default ceiling in these tests is auto-edit.
+        assert!(resp.starts_with("HTTP/1.1 403"), "{resp}");
+        assert!(resp.contains("exceeds"), "{resp}");
+        // The accepted case is covered by `serve::tests::a_lower_request_is
+        // _honoured` rather than here: a route test that gets past the mode
+        // check spawns a real child, and under `cargo test` `current_exe()`
+        // is the test binary.
+    }
+
+    #[tokio::test]
+    async fn an_empty_prompt_is_rejected() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post("/v1/projects/repo/turns", "{\"prompt\":\"   \"}"),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn a_traversing_session_id_cannot_read_a_file_outside_the_project() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &get("/v1/projects/repo/sessions/..%2F..%2Fsecrets"),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 404"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn sessions_round_trip_through_the_transcript_on_disk() {
+        let (tmp, projects, _) = seed_run("running", "in_progress");
+        // A session is just a transcript file, so seeding one is enough for
+        // list/get/delete to see it — exactly what a real turn would leave.
+        let dir = tmp.path().join(".wingman").join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = [
+            r#"{"kind":"session_start","ts":"t","model":"m","provider":"p","system_hash":null}"#,
+            r#"{"kind":"user","ts":"t","text":"why is the index stale?"}"#,
+        ]
+        .join("\n");
+        std::fs::write(dir.join("20260818T104200000Z.jsonl"), transcript).unwrap();
+
+        let listed =
+            round_trip_for(projects.clone(), None, &get("/v1/projects/repo/sessions")).await;
+        assert!(listed.contains("20260818T104200000Z"), "{listed}");
+        assert!(listed.contains("why is the index stale?"), "{listed}");
+        assert!(listed.contains("\"turns\":1"), "{listed}");
+
+        let got = round_trip_for(
+            projects.clone(),
+            None,
+            &get("/v1/projects/repo/sessions/20260818T104200000Z"),
+        )
+        .await;
+        assert!(got.starts_with("HTTP/1.1 200"), "{got}");
+        assert!(got.contains("session_start"), "{got}");
+
+        let deleted = round_trip_for(
+            projects,
+            None,
+            &del("/v1/projects/repo/sessions/20260818T104200000Z"),
+        )
+        .await;
+        assert!(deleted.starts_with("HTTP/1.1 200"), "{deleted}");
+        assert!(!dir.join("20260818T104200000Z.jsonl").exists());
     }
 
     #[tokio::test]

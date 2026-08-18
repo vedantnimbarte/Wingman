@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::StreamExt;
 use wingman_config::{Config, PermissionMode, ProjectPaths};
 use wingman_core::AgentEvent;
@@ -17,6 +17,12 @@ pub struct HeadlessOptions {
     pub json: bool,
     pub mode_override: Option<PermissionMode>,
     pub model_override: Option<String>,
+    /// Name the session log instead of minting a timestamped one, so a later
+    /// `--resume` can find it. From `--session-id`.
+    pub session_id: Option<String>,
+    /// Continue the named session: its transcript is replayed into the agent
+    /// as history before the prompt runs. From `--resume`.
+    pub resume: Option<String>,
 }
 
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
@@ -32,7 +38,32 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     // Open session log under the project's .wingman/sessions/ dir.
     let cwd = std::env::current_dir()?;
     let paths = ProjectPaths::discover(&cwd);
-    let mut session = match SessionLog::create(&paths.sessions_dir).await {
+    // `--resume` replays a previous transcript into the agent, and writes
+    // this turn into that same log — so a conversation can continue across
+    // processes (which is what the HTTP API's server-held sessions ride on).
+    if let Some(id) = opts.resume.as_deref() {
+        match wingman_session::session_path(&paths.sessions_dir, id) {
+            Some(path) => {
+                let records = wingman_session::load_session(&path)
+                    .with_context(|| format!("reading session {id}"))?;
+                let history = wingman_session::records_to_messages(&records);
+                if !opts.json {
+                    eprintln!("wingman: resumed session {id} ({} messages)", history.len());
+                }
+                agent.set_history(history);
+            }
+            None => anyhow::bail!("no session '{id}' under {}", paths.sessions_dir.display()),
+        }
+    }
+
+    // A named log (`--session-id`, implied by `--resume`) appends to one file
+    // across turns; without one, each run gets a fresh timestamped session.
+    let log_name = opts.session_id.clone().or_else(|| opts.resume.clone());
+    let opened = match log_name.as_deref() {
+        Some(id) => SessionLog::open_named(&paths.sessions_dir, id).await,
+        None => SessionLog::create(&paths.sessions_dir).await,
+    };
+    let mut session = match opened {
         Ok(s) => Some(s),
         Err(e) => {
             tracing::warn!("session log disabled: {e}");

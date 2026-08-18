@@ -18,10 +18,12 @@
 //!    every request; a request may ask for less and never for more.
 
 pub mod auth;
+mod child;
 mod http;
 mod pilot;
 pub mod projects;
 mod routes;
+mod sessions;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -49,7 +51,6 @@ pub struct ServeOptions {
 
 /// Everything a request handler needs. Shared behind an `Arc` across
 /// connections.
-#[allow(dead_code)] // `turns` is read by the turn routes (phase 3)
 pub struct ServeState {
     pub cfg: Config,
     pub projects: Vec<Project>,
@@ -68,7 +69,6 @@ impl ServeState {
     /// Returns `Err` with the offending mode when the request asked for more
     /// than the ceiling — a 403, not a silent downgrade, so a client never
     /// believes it got authority it did not get.
-    #[allow(dead_code)] // phase 3
     pub fn effective_mode(
         &self,
         requested: Option<PermissionMode>,
@@ -83,7 +83,6 @@ impl ServeState {
 
 /// Order the permission modes by how much authority they grant, so the
 /// ceiling comparison is a number rather than a match arm per pair.
-#[allow(dead_code)] // phase 3
 pub fn rank(mode: PermissionMode) -> u8 {
     match mode {
         PermissionMode::ReadOnly => 0,

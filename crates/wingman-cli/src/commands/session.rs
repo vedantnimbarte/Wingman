@@ -45,6 +45,10 @@ async fn replay(src: String) -> Result<ExitCode> {
             json: false,
             mode_override: Some(wingman_config::PermissionMode::ReadOnly),
             model_override: None,
+            // Replay deliberately starts each prompt fresh: the point is to
+            // reproduce prompts against current code, not to continue a chat.
+            session_id: None,
+            resume: None,
         };
         // Best-effort reproduction; keep going across prompts.
         let _ = crate::commands::headless::run(cfg.clone(), opts).await?;
