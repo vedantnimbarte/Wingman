@@ -1,9 +1,13 @@
 # HTTP API — implementation plan
 
-Companion to [HTTP-API.md](HTTP-API.md) (the spec). This is the build order:
-what each phase adds, which files it touches, what it reuses, and what proves it
-works. Branch: `feat/http-api`. Every phase is one commit that builds green and
-passes `cargo test` + `cargo clippy -- -D warnings`.
+Companion to [HTTP-API.md](HTTP-API.md) (the surface). This is the build order:
+what each phase added, which files it touched, what it reused, and what proves
+it works. Branch: `feat/http-api`. Every phase is one commit that builds green
+and passes `cargo test` + `cargo clippy -- -D warnings`.
+
+**All five phases have shipped.** Kept as the design record — the "why" behind
+each decision, and the two bugs that only surfaced when a real server was
+driven rather than tested.
 
 ## Decisions taken (and why)
 
@@ -135,6 +139,34 @@ Changed: `cli.rs` (`--remote`, `WINGMAN_REMOTE`), `commands/pilot_watch_tui.rs`
 **Proof:** a loopback test that the push payload is emitted once per transition
 (not once per poll), and a round-trip test running a real `wingman serve` on
 `127.0.0.1:0` driven by `--remote --print`.
+
+## What the smoke test caught
+
+Both of these passed the unit suite and failed the moment a real daemon was
+driven over a socket, which is the argument for doing that before calling a
+phase done:
+
+- **Both new reqwest clients panicked on construction.** The workspace builds
+  reqwest with `rustls-no-provider`, so every client must call
+  `wingman_core::ensure_tls_provider()` first. Nothing enforces that; the
+  convention lives in a doc comment. `--remote` and push both missed it.
+- **Windows verbatim paths leaked into the API.** Project roots are
+  canonicalised so containment checks cannot be defeated by `..` or a symlink,
+  and on Windows that yields `\?\C:\...`. Right to compare against, wrong to
+  hand a client — display strips the prefix.
+
+## Deviations from the original plan
+
+- **No `/v1/skills`, `/v1/mcp`, or `/v1/providers`.** No CLI command backs a
+  listing for those, and a route that fabricated one would report something the
+  tool cannot actually tell you. `knows` and `doctor` cover the ground.
+- **Table routes are project-scoped without exception**, including
+  config-adjacent ones: the merged view depends on which repo you are in.
+- **`--remote pilot watch` polls the server's ASCII dashboard** instead of
+  teaching the 2,200-line watch TUI to read remote state. It is the same
+  `render_dashboard` output, so the two cannot drift, for about forty lines.
+- **`/v1/events` and push carry run transitions only.** Turn events already
+  stream to whoever asked for them; a notification per verification is noise.
 
 ## Risks
 
