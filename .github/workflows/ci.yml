@@ -204,7 +204,7 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@6a1bd70eaac3c8bdf093356838d7ee09fda951cf # v2
+        uses: taiki-e/install-action@288e746965032cfcc232e09af2daf5f23c14d780 # v2
         with:
           # The tool used to be selected by the tag (`@cargo-llvm-cov`);
           # pinning to a SHA drops that, so name it explicitly.
