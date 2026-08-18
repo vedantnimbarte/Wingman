@@ -252,27 +252,27 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         }
     }
 
-    // This session is indexed for `recall_session` by the startup backfill of
-    // the *next* run in this project, not here.
+    // Queue this session for indexing rather than indexing it here.
     //
-    // A `tokio::spawn` at this point was never going to finish: `run` returns
-    // on the next line, the runtime is dropped, and the task dies mid-embed —
-    // which is where the recurring "session indexing failed: … task was
-    // cancelled" warning came from. It reported data loss for work that had
-    // simply been abandoned a millisecond after being started.
+    // A `tokio::spawn` at this point never finished: `run` returns on the next
+    // line, the runtime is dropped, and the task dies mid-embed — the source
+    // of the old "session indexing failed: … task was cancelled" warning.
+    // Awaiting it instead would put an embedding-model load plus the embed on
+    // the exit path of every `--print`, every pilot worker, and every HTTP
+    // turn.
     //
-    // Awaiting it instead would be correct but expensive in exactly the wrong
-    // place: it would put an embedding-model load plus the embed itself on the
-    // exit path of every `--print`, every pilot worker, and every HTTP turn.
-    // `backfill_project_sessions` exists precisely so session indexing does
-    // not need a shutdown hook, and it already runs when the registry is
-    // built. The cost is that a session becomes recallable from the next run
-    // rather than seconds after this one exits — which is what was actually
-    // happening anyway, minus the alarming warning.
+    // So exit does the cheap durable half — record that there is work to do —
+    // and the next run does the embedding. Unlike the per-project backfill,
+    // the queue is global, so a session written in a repo that is never opened
+    // again still becomes recallable from anywhere.
     //
-    // The interactive TUI is different and keeps its own indexer: it awaits
-    // it (see `wingman_tui::run`), a person closes it once, and the wait is
-    // not on a hot path.
+    // The interactive TUI keeps its own indexer: it awaits it, a person closes
+    // it once, and that wait is not on a hot path.
+    if let Some(s) = session.as_ref() {
+        if let Err(e) = wingman_learn::session_index::enqueue_pending(s.path()) {
+            tracing::warn!("could not queue session for indexing: {e}");
+        }
+    }
 
     Ok(exit)
 }
