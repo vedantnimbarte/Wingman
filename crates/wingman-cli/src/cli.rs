@@ -513,8 +513,8 @@ pub enum PilotAction {
         /// Run id; defaults to the most recently updated.
         run_id: Option<String>,
     },
-    /// External intake transports: turn Slack / email / voice into pilot
-    /// requests (written to the daemon's intake dir).
+    /// External intake transports: turn Slack / email into pilot requests
+    /// (written to the daemon's intake dir).
     Intake {
         #[command(subcommand)]
         channel: IntakeChannel,
@@ -533,14 +533,6 @@ pub enum IntakeChannel {
     Email {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
-    },
-    /// Ingest a speech-to-text transcript file as a request.
-    Voice {
-        /// Path to the transcript text file (from any STT tool).
-        transcript: String,
-        /// Optional author name for trust classification.
-        #[arg(long)]
-        author: Option<String>,
     },
 }
 
@@ -983,9 +975,6 @@ pub async fn run() -> Result<ExitCode> {
             PilotAction::Intake { channel } => match channel {
                 IntakeChannel::Slack { addr } => commands::pilot_intake::slack(addr).await,
                 IntakeChannel::Email { maildir } => commands::pilot_intake::email(maildir).await,
-                IntakeChannel::Voice { transcript, author } => {
-                    commands::pilot_intake::voice(transcript, author).await
-                }
             },
         },
         Some(Command::Autonomous {

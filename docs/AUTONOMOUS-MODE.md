@@ -457,6 +457,40 @@ The feature is complete when:
 3. **Custom roles:** Should Wingman ship with default roles, or encourage users to define their own? (Current plan: ship defaults, make user override easy.)
 4. **Manager fallibility:** If the manager agent makes a bad plan, can the user edit it interactively? (Current plan: render + approve/edit/reject; edit opens `$EDITOR` on task JSON.)
 
+## Removed designs (kept for the record)
+
+Four modules in `wingman-autonomous` were written as logic-only cores, never
+acquired a production caller, and were deleted in the #129 cleanup. Their
+tests inflated the crate's test count without covering any live path. The
+designs are recorded here so the intent is not lost; none of this is shipped
+behaviour today.
+
+- **`watcher.rs` (J13 — reactive hooks).** Where the daemon *polls*, this
+  mapped watch events to immediate actions: a failing test on the default
+  branch → a fixer run; a green dependabot PR inside the path allowlist →
+  auto-merge; a new labelled issue from a trusted author → triage; a saved
+  `// ASK: <question>` comment → research. The listeners (fs-watch, git hook,
+  webhook) were never built. It also carried the tree's only `#!/bin/sh` git
+  hook, which does not run on Windows — anything reviving this must install a
+  hook that works on all three platforms.
+- **`toolsynth.rs` (J7 — tool synthesis).** Parsed a `ToolProposal` from an
+  agent, validated it (name shape, JSON schema, duplicate detection), and
+  deduplicated a batch of proposals. It only ever emitted scaffolds plus a
+  registry line — never a live, callable tool — which is the gap any revival
+  has to close first.
+- **`interject.rs` (J4 — mid-run interjection).** Parsed `tell <run> <msg>` /
+  `ask <run> <msg>` into a `Dispatch` over the E10 IPC channel: `tell` became a
+  `ManagerCommand::Pivot`, `ask` a query. It was never reachable because the
+  agent loop has no hook to inject a user turn into a running stream. That hook
+  is the actual blocker, and is tracked in
+  [#35](https://github.com/vedantnimbarte/Wingman/issues/35) — rebuild the
+  parser there once the injection API exists.
+- **`voice.rs` (J14 — voice intake).** Turned an STT transcript into an intake
+  `Goal` and shelled out to `whisper.cpp`. **Removed as a product decision, not
+  a deferral: voice is out of scope for Wingman.** The `Channel::Voice` intake
+  variant and the `wingman pilot intake voice` subcommand went with it. Do not
+  reintroduce.
+
 ## Related Documentation
 
 - See `plan.md` for the full phased implementation roadmap.

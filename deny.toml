@@ -1,15 +1,40 @@
 # cargo-deny policy. See https://embarkstudios.github.io/cargo-deny/
-# The `deny` CI job is informational today; tighten `[bans]`/`[advisories]` to
-# `deny` once the tree is clean (notably: unify reqwest, drop the ort RC).
+#
+# This file covers licences, bans, and sources. Security advisories are handled
+# by the required `audit` CI job via cargo-audit + .cargo/audit.toml — see the
+# advisories section below for why they are not checked here.
+#
+# The `deny` job stays informational until `multiple-versions` flips to "deny"
+# (pending the reqwest unify).
 
 [graph]
-all-features = true
+# Default features only. `all-features = true` dragged in the optional `chrome`
+# feature (headless_chrome → auto_generate_cdp, which is GPL-3.0-or-later) and
+# the fuzz harness (libfuzzer-sys, NCSA) — neither ships in a default build, so
+# checking them made the licence policy fail on code nobody distributes.
+#
+# The trade-off this accepts: the `chrome` feature is NOT licence-checked here,
+# and a binary built with `--features browser` links GPL-3.0-or-later code.
+# That combination is not redistributable under Apache-2.0. Build it for local
+# verification only. See docs/DEPENDENCIES.md.
+all-features = false
+
+# rav1e (via image → ravif, pulled by fastembed and wingman-browser) declares
+# libfuzzer-sys behind its optional `fuzzing` feature. Nothing enables it —
+# `cargo tree -i libfuzzer-sys -e normal` finds no path — but cargo-deny's
+# graph walk includes optional deps that cargo's resolver drops, so it would
+# otherwise fail the licence check (NCSA) on a crate no build links. Excluded
+# rather than allow-listed: we don't ship NCSA code, and allow-listing it would
+# also wave through a future dependency that genuinely did.
+exclude = ["libfuzzer-sys"]
 
 [advisories]
 version = 2
-# Advisories we knowingly tolerate for now. Add entries with a comment naming
-# the crate, the reason, and the tracking issue. Keep this list short.
-ignore = []
+# Advisory ignores live in .cargo/audit.toml, not here. The required `audit`
+# job runs cargo-audit, which flags the `unsound` advisories currently open
+# against lru; cargo-deny does not, so the two are not interchangeable. Keeping
+# one list stops them drifting apart. The `deny` job runs
+# `check licenses bans sources` and never consults this section.
 
 [licenses]
 version = 2
@@ -29,8 +54,20 @@ allow = [
     "Unlicense",
     "BSL-1.0",
     "OpenSSL",
+    # webpki-roots / webpki-root-certs — Mozilla's CA certificate bundle,
+    # redistributed as data under CDLA-Permissive-2.0. Permissive, with no
+    # copyleft obligation on the linking binary.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
+
+# ring ships no SPDX expression in its manifest, so it is reported as
+# `unlicensed`. Its LICENSE file is a composite: ISC/MIT-style for the Rust
+# code, OpenSSL/BoringSSL for the vendored crypto.
+[[licenses.clarify]]
+crate = "ring"
+expression = "ISC AND MIT AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
 
 [bans]
 # We currently ship two reqwest majors (0.12 + 0.13) and two hyper/http stacks.
