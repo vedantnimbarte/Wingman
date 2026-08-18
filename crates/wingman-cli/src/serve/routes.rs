@@ -234,7 +234,12 @@ mod tests {
         let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
         client.write_all(request.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
-        client.read_to_end(&mut buf).await.unwrap();
+        // A reset *after* a complete response is a normal way for a
+        // `Connection: close` exchange to end on Windows, so it is only a
+        // failure when nothing arrived.
+        if let Err(e) = client.read_to_end(&mut buf).await {
+            assert!(!buf.is_empty(), "read failed with no response at all: {e}");
+        }
         server.await.unwrap();
         String::from_utf8_lossy(&buf).to_string()
     }

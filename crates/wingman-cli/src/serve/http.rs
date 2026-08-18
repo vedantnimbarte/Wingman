@@ -217,7 +217,13 @@ async fn write_raw(
     );
     sock.write_all(head.as_bytes()).await?;
     sock.write_all(body).await?;
-    sock.flush().await
+    sock.flush().await?;
+    // Half-close rather than just dropping the socket. With `Connection:
+    // close`, dropping it immediately after the write makes Windows send an
+    // RST when anything is still in flight, which the client sees as
+    // "connection forcibly closed" instead of a clean end of response. A FIN
+    // says the same thing without the error.
+    sock.shutdown().await
 }
 
 fn reason(status: u16) -> &'static str {
