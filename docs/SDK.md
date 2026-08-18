@@ -90,7 +90,7 @@ client library (Python, TypeScript, Go, …) can:
 
 This is the recommended integration path from non-Rust code: you get Wingman's
 repo index + memory + LSP tools without linking Rust. See
-[README](../README.md#wingman-as-an-mcp-server).
+[FEATURES.md](FEATURES.md).
 
 ## Stability
 

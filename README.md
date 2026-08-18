@@ -9,13 +9,10 @@
 **A terminal coding agent that asks the compiler instead of guessing.**
 
 Most agents answer "where is this used, and what breaks if I change it" by
-grepping and reading files until the context window fills. `wingman` asks the
+grepping and reading files until the context window fills. Wingman asks the
 language server and a local semantic index, so it resolves imports, types, and
-re-exports rather than matching names — and it spends a fraction of the
-context doing it.
-
-That is the part worth choosing it for. Everything else is table stakes, and
-this README tries to be honest about which is which.
+re-exports rather than matching names — and it spends a fraction of the context
+doing it.
 
 ```
 $ wingman context
@@ -28,576 +25,60 @@ $ wingman context
 Run that in your own repo. Every agent pays a per-turn context tax and almost
 none of them will tell you what it is.
 
-**What else you get:** a `ratatui` TUI and a headless `--print` mode; one
-streaming interface over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
-OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama; an MCP host; a verification
-gate that runs your build and tests before the agent may call a turn done; and
-a multi-agent **pilot mode** that plans a goal, delegates to workers in
-isolated worktrees, and converges into a PR.
-
-**What it deliberately doesn't do.** It doesn't push your code to anyone's
-cloud — BYO key, everything local. It doesn't reuse a subscription token to
-dodge API billing. It doesn't headline agent count: the two firms who have
-published the most on parallel agents both concluded that writes should stay
-single-threaded, and pilot mode serialises tasks whose write-sets overlap
-rather than racing them. And it doesn't claim your shell is sandboxed when it
-isn't — `wingman doctor` tells you exactly which containment is active on your
-machine.
-
-Pre-1.0. See [Maturity](#maturity) for what that means in practice.
-
 ---
 
-## Quick Links
+## What makes it different
 
-- **Getting Started:** See [Installation](#installation) and [Quick Start](#quick-start) below.
-- **CLI Subcommands:** [CLI Reference](#cli-reference).
-- **Documentation:** See [docs/](docs/) for detailed guides:
-  - [docs/INDEX.md](docs/INDEX.md) — navigation guide for all technical docs.
-  - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — system design, crate overview, data flows.
-  - [docs/TREE-SITTER.md](docs/TREE-SITTER.md) — language-aware parsing integration.
-  - [docs/LEARNING-LOOP.md](docs/LEARNING-LOOP.md) — memories, skills, session recall.
-  - [docs/TOOLS.md](docs/TOOLS.md) — complete reference for all 20+ built-in tools.
-  - [docs/AUTONOMOUS-MODE.md](docs/AUTONOMOUS-MODE.md) — design doc for multi-task orchestration (now shipped as [Pilot mode](#pilot-mode)).
-  - [docs/DIFFERENTIATION.md](docs/DIFFERENTIATION.md) — single-agent differentiation roadmap (routing, warm index, verification receipts, team memory).
-  - [docs/LSP.md](docs/LSP.md) — LSP-backed code intelligence (definition/references/hover/diagnostics/rename/code-actions) and LSP-backed verification receipts.
-  - [docs/SDK.md](docs/SDK.md) — embed `wingman-core` as a library, or drive Wingman from any language over MCP.
-  - [docs/PACKAGING.md](docs/PACKAGING.md) — winget / Homebrew / Scoop packaging and release flow.
-  - [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md) — tracked dependency notes (reqwest/ort).
-  - [docs/ROADMAP-STATUS.md](docs/ROADMAP-STATUS.md) — what's shipped and what needs external infra to run.
-- **For Developers:** See [Development](#development) below.
+Five things Wingman does that comparable agents don't. Everything else it does
+is table stakes, and lives in [docs/FEATURES.md](docs/FEATURES.md).
 
----
+**1. Resolved code intelligence, not grep.**
+`lsp_definition`, `lsp_references`, `lsp_hover`, `lsp_rename`, and
+`lsp_code_action` run through whatever language server is on your `PATH`
+(rust-analyzer, pyright, typescript-language-server, gopls — 11 languages).
+A rename is the language server's rename, not a find-and-replace that catches
+a comment. With no server installed the tools degrade to tree-sitter
+heuristics rather than failing. See [docs/LSP.md](docs/LSP.md).
 
-## Highlights
+**2. It has to prove the work before it says "done".**
+The verification gate runs your build, the affected tests, and the language
+server's diagnostics for the changed files before the agent may end a turn:
+`✓ builds  ✓ affected tests  ✓ 0 new LSP diagnostics`. On red it retries a
+bounded number of times (`[verify].max_retries`, default 2), then stops and
+exits non-zero. Bounded correction, not loop-until-green.
 
-- **Persistent memory and skills.** Memories are plain markdown +
-  frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/` —
-  files you can read, edit, and delete, not an opaque store. Plus skill usage
-  stats, cross-session semantic recall through the RAG pipeline, and
-  quiet-session nudges to persist something worth keeping. Note the outcome
-  "scoring" behind skill stats is a phrase heuristic over your replies, not a
-  learned signal; treat the numbers as a rough tally. See
-  [Self-improving loop](#self-improving-loop) below.
-- **73+ providers, one shape.** Anthropic is the reference implementation
-  (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
-  adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.
-  Gemini and ChatGPT (OAuth) have their own adapters. All speak the same
-  `wingman_core::Message` contract.
-- **Three surfaces.** A `ratatui`-based TUI for interactive coding, a
-  headless `--print` mode that emits either text or newline-delimited JSON
-  events, and a `--batch <file.jsonl>` mode that runs a file of prompts
-  non-interactively — all ready to pipe into other tools or CI.
-- **MCP host.** Declare Model Context Protocol servers under `[mcp.<name>]`
-  in config (stdio or HTTP transport); their tools are namespaced as
-  `mcp__<server>__<tool>` and dispatched like built-ins. Manage them live
-  from the TUI with `/mcp`.
-- **Guided provider login.** `wingman login <provider>` (or `/login` in the
-  TUI) probes the key, stores it in the OS keyring, and records the default
-  model; `wingman logout <provider>` clears it. ChatGPT uses a browser
-  OAuth flow.
-- **Multi-agent pilot mode.** `wingman pilot run "<goal>"` plans, spawns
-  worker agents in isolated worktrees, and opens a PR. See
-  [Pilot mode](#pilot-mode).
-- **`wingman knows`.** Prints what Wingman knows about the current project:
-  memories, skills, model routing, the verification gate, and index
-  freshness.
-- **Built-in tool layer.** File read/write/edit, glob, grep, directory
-  listing, shell execution, semantic search, and the new learning tools
-  (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
-  `read_session`), each gated by the active permission mode.
-- **Live model swap.** Change provider/model mid-session with `/model
-  <provider>/<id>` from inside the TUI — no restart, history preserved.
-- **Token-aware pipeline.** Per-tool output budgets with head/tail
-  truncation, history token estimation, and a compaction trigger
-  (`compact_at_tokens`) so long sessions stay inside the active model's
-  context window.
-- **Layered configuration.** Defaults → global `~/.wingman/config.toml` →
-  project `.wingman/config.toml` → `WINGMAN_*` env vars → CLI flags. TOML
-  sub-tables merge instead of clobbering.
-- **Permission modes.** `read-only` (default), `plan` (read-only until you
-  `/approve` the agent's plan, then auto-edit), `auto-edit` (writes
-  inside the project tree and shell auto-allowed, subject to the shell
-  denylist), and `yolo` (no guardrails; per-session only, never persisted).
-  Modes are enforced centrally: each tool declares what it needs
-  (read / write / shell / network) and the registry refuses anything the
-  active mode doesn't grant. A few paths — `.git/`, `.wingman/config.toml`,
-  `.wingman/skills/` — are never writable, in any mode. `run_shell` is
-  additionally confined by the OS where possible (`bwrap` / `sandbox-exec`);
-  see [Permission modes](#permission-modes).
-- **Untrusted project config.** A cloned repo's `.wingman/config.toml` may
-  pick a model and tune the UI, but not run commands: `[hooks]`, `[mcp]`,
-  `[verify]`, `[providers]`, and `permission_mode` are ignored unless you
-  run `wingman trust` in that repo. Trust is pinned to the file's contents
-  and lapses whenever it changes.
-- **Lifecycle hooks.** `pre_tool_use`, `post_tool_use`, `user_prompt_submit`,
-  and `stop` shell hooks (`[hooks]` in config). A hook with `block = true`
-  that exits non-zero refuses the tool call (`pre_tool_use`) or the prompt
-  (`user_prompt_submit`); `stop` is advisory, since the turn is already
-  over. Hook failures are always logged, whether or not they block.
-- **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
-  (DuckDuckGo HTML, no API key) tools pair for "look something up".
-- **Atomic multi-file patches.** The `apply_patch` tool applies a
-  multi-file edit block atomically — no partial writes on failure.
-- **Working-tree checkpoints.** `wingman checkpoint` snapshots the tree
-  into a tagged `git stash`; `wingman undo` restores the most recent one.
-- **`wingman init`.** Scans the project (Cargo.toml, package.json,
-  pyproject.toml, go.mod, …) and writes a starter `WINGMAN.md`.
-- **`wingman cost`.** Per-model token + USD spend table derived from
-  `~/.wingman/usage.json` and `pricing.rs`.
-- **`wingman session list / fork`.** Browse recent session JSONLs;
-  fork an old session (optionally truncating to N records) and resume it.
-- **User-defined slash commands.** Drop a markdown file at
-  `~/.wingman/commands/<name>.md` (or `<project>/.wingman/commands/`) and
-  it becomes `/<name>` in the TUI. `$ARGS` is substituted.
-- **In-transcript search.** `/find <query>`, `/findnext`, `/findprev`,
-  `/findclear` walk hits inside the current transcript. Mouse wheel
-  scrolling is enabled.
-- **File-tree sidebar.** `Ctrl+B` toggles a left-side file browser; `j`/`k`
-  move, `Tab` descends, `Enter` inserts the path into the composer.
-- **Themes.** `tui.theme = "default" | "light" | "mono"`, plus optional
-  per-role color overrides under `tui.colors` (`"#rrggbb"` hex or named).
-- **Model fallback.** `router.fallback_models = ["openai/gpt-4.1",
-  "openrouter/anthropic/claude-opus-4-7"]` — on primary failure the
-  runtime walks the chain in order.
-- **Subagent tool.** The model can call `spawn_subagent` to run an
-  isolated inner agent loop on a focused sub-task (depth-capped at 1).
-- **Notebook reads.** `read_file` on a `.ipynb` returns cells as fenced
-  code blocks + markdown, not raw JSON.
-- **Scheduled tasks.** `[[schedule]]` config entries fire from
-  `wingman schedule` (call from cron / Task Scheduler).
-- **Memory packs.** `wingman memory export/import/diff` for sharing
-  team-level memory.
-- **Worktree sandbox.** `wingman worktree create <branch>` spins up an
-  isolated working copy under `.wingman/worktrees/`.
-- **PR review.** `wingman review <pr#>` (or `--local <base>`) runs a
-  one-shot review prompt against the diff.
-- **Local model auto-discovery.** `wingman discover` probes localhost
-  Ollama / LM Studio / vLLM and prints available models.
-- **Skill auto-extraction.** `wingman skill extract` scans recent session
-  JSONLs for repeated tool-call sequences (e.g. `grep_tool → read_file →
-  edit_file`) and writes draft skill markdown files under
-  `~/.wingman/skills/proposed/` for you to review.
-- **Tree-sitter powered code understanding.** Deep language-aware parsing
-  (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
-  index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
-  so the workspace builds without the C toolchain if you don't need parsing.
-- **LSP-backed code intelligence.** Real, *resolved* go-to-definition,
-  find-references, hover, diagnostics, and project-wide rename via whatever
-  language server you have on `PATH` (rust-analyzer, pyright/pylsp,
-  typescript-language-server, gopls) — the semantic upgrade over the
-  tree-sitter heuristics. Tools `lsp_definition`, `lsp_references`, `lsp_hover`,
-  `lsp_diagnostics`, `lsp_rename` degrade gracefully to the heuristic tools when
-  no server is installed. See [docs/LSP.md](docs/LSP.md).
-- **LSP-backed verification receipts.** The post-edit turn gate can fold the
-  language server's diagnostics for the *changed* files into the verdict
-  (`[verify].lsp_diagnostics`), so a change that introduces a type error the
-  compile step missed fails verification: `✓ builds  ✓ affected tests  ✓ 0 new
-  LSP diagnostics`.
-- **Git-backed team memory.** `wingman memory sync [<git-ref>]` reconciles the
-  team-shared `<project>/.wingman/memory/` — rebuilds the `MEMORY.md` index from
-  the files on disk (resolving the "two teammates both added a memory" merge
-  conflict) and optionally folds in memory files from a git ref without
-  clobbering local ones.
-- **Provider-cost arbitrage.** `wingman cost --compare` reprices your actual
-  token volume against a spread of models (Opus / Sonnet / Haiku / GPT-5 /
-  Gemini / DeepSeek) — what the same work would have cost elsewhere. Only a
-  provider-agnostic agent can show this.
-- **Portable skill interop.** `wingman skill import <path>` /
-  `wingman skill export <name> <dir>` bridge wingman skills and the
-  ecosystem-standard `SKILL.md` format (Claude Code, Codex, Cursor, Gemini CLI,
-  Copilot, Cline, Goose).
-- **LSP code-actions.** The `lsp_code_action` tool lists and applies the
-  language server's *own* canonical fixes — add missing import, implement trait,
-  fix lint, and `organize_imports` — instead of hand-editing.
-- **Wingman as an MCP server.** `wingman mcp-serve` exposes Wingman's tools over
-  MCP stdio so any MCP client (Claude Code, Cursor, another Wingman) can consume
-  them — most valuably `semantic_search` (the warm repo index) and
-  `recall_memory` (team memory). Read-only by default. Wingman is both an MCP
-  host *and* an MCP server.
-- **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
-  into a reviewable, revertable commit with a generated message (Aider-style),
-  composing with the rewind timeline and verification gate.
-- **Local-first privacy preset.** `wingman router preset local` prints a
-  `[router.classes]` block that points the cheap task classes at a local
-  model. Caveat worth knowing: compaction and commit messages are currently
-  computed without a model call at all, and `[router.classes]` is consulted
-  only for subagents — so today the preset is a starting point for your own
-  config rather than a switch that redirects live traffic. For a real
-  guarantee use `[privacy].local_only` and `wingman attest`.
-- **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
-  why it matters" walkthrough of the working diff (fast-model), for reviewers
-  and juniors.
-- **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
-  tool, redacted input, error flag) for every tool call — a compliance trail
-  for teams.
-- **Benchmark harness.** `wingman bench` runs a suite of prompts and records
-  time-to-first-token, tokens/task, and verified-done rate.
-- **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
-  language over MCP (`wingman mcp-serve`). See [docs/SDK.md](docs/SDK.md).
-- **Visual verification.** *(Opt-in build.)* Build with `--features browser`
-  and set `[verify.browser].url` to make the turn gate load a URL, screenshot
-  it, and fail if it drifts from a baseline. Not in the default build, and it
-  fails open — with no browser present the gate passes rather than blocking.
-- **Server-backed team memory.** Beyond the git-backed `memory sync`,
-  `wingman memory push` / `pull` sync memories through a team HTTP endpoint
-  (`[team]`), merging non-destructively.
-- **Multi-channel pilot intake.** `wingman pilot intake slack | email | voice`
-  turns Slack events, delivered `.eml` files, or an STT transcript into pilot
-  requests.
-- **VS Code extension.** `editors/vscode` brings `semantic_search` and
-  `recall_memory` into the editor over `wingman mcp-serve`.
-- **Hybrid semantic search.** The index fuses dense vector similarity with BM25
-  keyword scoring (reciprocal-rank fusion), so exact identifier/error-string
-  matches surface alongside semantic ones.
-- **Secret-scanned tool output.** High-confidence tokens (OpenAI/GitHub/AWS/
-  Slack/JWT/PEM) are redacted from tool output before the model sees them
-  (`[tools].redact_output_secrets`).
-- **Custom command tools.** Define a tool as a shell command under
-  `[[tools.custom]]` — extend the agent without recompiling.
-- **`wingman doctor`.** One health check for config, credentials, local servers,
-  the index, and language servers on PATH.
-- **`wingman memory review`.** Promote or discard the facts `wingman distill`
-  proposes — the review queue that closes the learning loop.
-- **11 LSP languages.** Rust, Python, JS/TS, Go, Java, C/C++, Ruby, C#, PHP.
-- **Session cost budget.** `[tokens].max_usd_per_session` warns when a session's
-  estimated spend crosses your limit.
-- **Characterization / golden testing.** `wingman golden capture/check` snapshots
-  a command's output and the verification gate (`[verify].golden`) fails on any
-  drift — a regression net for undertested/legacy code ("verified correct, not
-  just verified builds").
-- **Ask, don't guess.** The `ask_user` tool lets the agent pause and ask at a
-  genuine fork or before an irreversible action instead of guessing.
-- **Air-gapped mode.** `[privacy].local_only` refuses any non-local provider
-  and removes the network tools. `wingman attest` audits every configured
-  egress channel — MCP servers, hooks, custom tools, team endpoint, and
-  whether `run_shell` is reachable — and states its own scope: it reflects
-  configuration, and cannot vouch for what a local model or a spawned process
-  does with the data.
-- **Cited memory.** `recall_memory` returns provenance (source + date) and the
-  agent cites the memory it acts on.
-- **Test-first.** `wingman spec "<intent>"` writes failing tests, then
-  implements against them. The `[verify]` gate pushes back on a red build for
-  up to `[verify].max_retries` forced corrections (default 2), then stops and
-  exits non-zero — bounded retries, not a loop until green.
-- **PR-native.** `wingman pr address <pr#>` addresses a PR's review comments and
-  failing CI on the current branch.
-- **Repo onboarding.** `wingman tour` orients you on an unfamiliar codebase.
-- **Preview & replay.** `wingman --print --dry-run` shows what it *would* do
-  without changing anything; `wingman session replay <file>` re-runs a past
-  session's prompts to reproduce it.
-- **Multi-model code review.** `wingman review-multi <pr#> --models
-  anthropic/claude-opus-4-7,openai/gpt-4.1,gemini/gemini-2.5-pro` fans the
-  review out across reviewers in parallel and merges findings by
-  file:line, marking which ones each reviewer raised.
-- **Interactive hunk review.** `wingman diff <file>` walks each hunk of
-  the working-tree diff one at a time with `[a]ccept / [r]eject / [s]kip
-  / [q]uit`, then writes the merged result. Also accepts `--patch
-  <file.patch>` for an arbitrary unified diff.
+**3. No provider lock-in — and it will price the alternative for you.**
+One `Message` contract over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
+OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama. `wingman cost --compare`
+reprices your actual token volume against a spread of models, showing what the
+same work would have cost elsewhere. Only a provider-agnostic agent can show
+you that number. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
----
+**4. It remembers your repo between sessions.**
+Memories are plain markdown files under `~/.wingman/memory/` and
+`<project>/.wingman/memory/` — readable, editable, deletable, and shareable
+over git (`wingman memory sync`). Plus a hybrid dense + BM25 index of the
+codebase and semantic recall across past sessions. Not an opaque store you
+have to trust. See [docs/LEARNING-LOOP.md](docs/LEARNING-LOOP.md).
 
-## Workspace layout
+**5. Windows is a first-class target.**
+Developed and tested on Windows from day one, not ported to it. The one place
+this is currently *not* true is shell containment — see
+[Known limits](#known-limits), which says so rather than hiding it.
 
-This is a Cargo workspace. Each crate has a narrow, well-defined responsibility.
+### What it deliberately doesn't do
 
-| Crate                | Role                                                                                                  |
-| -------------------- | ----------------------------------------------------------------------------------------------------- |
-| `wingman-cli`        | Binary entry point. Argument parsing, logging, runtime wiring, headless mode.                          |
-| `wingman-core`       | Provider-agnostic types: `Message`, `ContentBlock`, `CompletionRequest`, `Provider`, agent loop, streaming events, tool dispatch, token estimation. |
-| `wingman-config`     | TOML config loading, layered merge, env-var resolution, permission model.                              |
-| `wingman-providers`  | Concrete `Provider` implementations: Anthropic, Gemini, ChatGPT, Cohere, Watsonx, OpenAI-compatible (68 variants). |
-| `wingman-tools`      | Built-in tool implementations (`read_file`, `write_file`, `edit_file`, `glob`, `grep`, `list_dir`, `run_shell`) and the `ToolRegistry`. |
-| `wingman-tui`        | `ratatui` interactive surface: composer, transcript, status bar, slash commands.                       |
-| `wingman-session`    | Append-only JSONL session log + replay/reconstruction for `/resume`.                                   |
-| `wingman-rag`        | SQLite-backed code index with `fastembed` (BGE small) or a deterministic hash embedder fallback.       |
-| `wingman-skills`     | Markdown-frontmatter skill files (global + project), auto-loaded into the system prompt.               |
-| `wingman-learn`      | Self-improving loop: persistent memory store, skill usage stats, session embedding/recall, agent hooks.|
-| `wingman-mcp`        | MCP host: connects to stdio/HTTP MCP servers and adapts their tools as `wingman_core` tool dispatchers, namespaced `mcp__<server>__<tool>`. |
-| `wingman-ts`         | Tree-sitter facade: language detection, symbol extraction, semantic chunking, syntax-aware diffs.    |
-| `wingman-autonomous` | Pilot mode: multi-agent orchestrator that delegates a goal to worker agents in isolated worktrees and converges into a PR — planner, manager, control channel, sandbox tiers, discovery daemon. |
-
----
-
-## Pilot mode
-
-`wingman pilot run "<goal>"` plans a multi-task piece of work, spawns
-specialised worker agents in isolated git worktrees, and converges their
-output into a single PR. The full design lives in [`plan.md`](plan.md).
-
-### Capability tiers
-
-```
-assist     You approve every decision. Agent plans, you confirm, agent executes
-           one run, opens a PR, exits. No daemon, no critic, no learning.
-copilot    Default. Agent flies; you monitor and intervene at decision points.
-           Trust-tiered approval, self-healing retries, per-task reviewer,
-           real verification, PR automation, cross-run learning.
-autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
-           agent, knowledge graph, tool synthesis, sandboxed execution.
-           Several autopilot capabilities are partial — see Maturity below.
-```
-
-> **Maturity.** `assist` and `copilot` are the supported tiers, and `copilot`
-> now runs **end-to-end against a live provider** — it plans, spawns workers
-> that write and commit code, reviews each task's real diff, squash-merges,
-> and opens a PR. Validated on OpenRouter/DeepSeek (any tool-use-capable
-> provider from the table below works). The per-task reviewer sends work back
-> only on **high-severity** findings — a task's acceptance checks already gate
-> functional correctness before it reaches review, so an over-eager reviewer
-> model can't loop a correct change. The PR base branch is configurable via
-> `[pilot.pr].base_branch` (default `main`).
-> `autopilot` is experimental but most of its edges are now wired. The
-> discovery daemon polls `github_issues`, `todos`, `ci_failures`,
-> `dependabot`, `coverage_gaps` (reads an existing `lcov.info`), and
-> `intake`. **Intake** is transport-agnostic: a Slack/email (or voice→STT)
-> gateway writes `*.md` requests into `[pilot.daemon].intake_dir` and the
-> daemon ingests them with per-author trust — no in-process listener needed.
-> **Notification** delivery is wired via `[pilot.notifications.webhooks]`
-> (channel → URL; Slack incoming-webhook shape; terminal fallback). **Mid-run
-> steering** works — `pivot`/`clarify` IPC inject into the worker's next
-> turn. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
-> opens real PRs autonomously; validate its trust config safely with
-> `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
-> before enabling it. Genuinely still open: a **live mic-capture** voice
-> front-end (needs audio hardware + a speech-to-text model; transcript
-> file-drop already works via intake), and the **`vm` sandbox tier** (real
-> VM/Firecracker isolation — fail-closed today: pilot refuses vm-tier tasks
-> rather than run them unsandboxed).
-
-Pick a tier in `~/.wingman/config.toml`:
-
-```toml
-[pilot]
-tier                  = "copilot"
-default_model         = "anthropic/claude-opus-4-7"   # manager + reviewers
-worker_model          = "anthropic/claude-haiku-4-5"  # workers
-max_concurrent_agents = 4
-max_usd               = 10.0
-task_timeout_secs     = 1800
-```
-
-### Quick start
-
-```bash
-# One-shot: plan, approve, spawn workers, open PR
-wingman pilot run "add a --version-only flag to wingman-cli"
-
-# Plan only — write tasks.jsonl and exit
-wingman pilot run --plan-only "<goal>"
-
-# Auto-approve the plan (skip the y/e/n gate)
-wingman pilot run --yes "<goal>"
-
-# Dashboard
-wingman pilot status              # one-shot summary of the latest run
-wingman pilot watch               # live ASCII dashboard, polls state.json
-wingman pilot watch <run-id>      # specific run
-
-# Control a live run (via the control channel)
-wingman pilot approve             # release a run waiting at the plan gate
-wingman pilot veto                # reject a gated run
-wingman pilot abort [--task <id>] # abort the whole run or one task
-wingman pilot retry <task>        # retry a failed/blocked task
-wingman pilot resume <run-id>     # resume an interrupted run
-```
-
-Per-run artefacts land under `<project>/.wingman/autonomous/<run-id>/`:
-
-```
-<run-id>/
-  tasks.jsonl   # append-only event log
-  state.json    # latest snapshot (rewritten after every event)
-```
-
-### Status
-
-The full M1 pipeline is implemented (RunStore, planner, worker subprocess
-with cross-platform supervisor, manager + orchestrator, git worktrees +
-squash-merge, gh PR creation, dashboard, cost-cap enforcement, and the
-provider-support gate). On top of that, the crate now ships the
-`copilot`/`autopilot` machinery: a live control channel (`approve` /
-`veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
-sandbox tiers (`host` / `container` / `vm`, degrading to `host` when no
-Docker daemon is present), and the always-on discovery `daemon` (five
-sources: GitHub issues, TODOs, CI failures, Dependabot PRs, coverage gaps).
-End-to-end `copilot` runs have been validated on a live provider
-(OpenRouter/DeepSeek) — plan through PR; they need real API keys and are
-**user-validated, not CI-validated** (CI runs the unit suite). Remaining
-`autopilot`-only gaps: inbound Slack/email intake, voice intake, the `vm`
-sandbox tier, and live-validated auto-dispatch (see Maturity above).
-
-### Provider support for pilot mode
-
-Pilot mode requires the model to emit structured tool-use blocks. The
-table below classifies each backend; `untested` providers can still be
-used, but quality depends on the local model's tool-use training.
-
-| Provider     | Tier            | Notes                                                                  |
-| ------------ | --------------- | ---------------------------------------------------------------------- |
-| Anthropic    | `native`        | First-class tool use. Reference implementation.                        |
-| Gemini       | `native`        | `functionCall` shape; first-class.                                     |
-| OpenAI       | `openai-compat` | `tool_calls` shape; works on gpt-4o, gpt-4.1.                          |
-| ChatGPT      | `openai-compat` | OAuth-backed; same shape as OpenAI.                                    |
-| OpenRouter   | `openai-compat` | Aggregator — pass `provider/model` as model id.                        |
-| LiteLLM      | `openai-compat` | Self-hosted gateway; works for any backend that LiteLLM speaks to.     |
-| Groq         | `openai-compat` | Fast Llama/Mixtral hosting; native `tool_calls`.                       |
-| Together     | `openai-compat` | OSS model catalog; tool-calls on Llama 3.1/3.3 + Qwen-Coder.           |
-| Fireworks    | `openai-compat` | OSS + fine-tunes; documented tool-call support.                        |
-| DeepInfra    | `openai-compat` | Cheap OSS hosting; OpenAI-shape.                                       |
-| xAI (Grok)   | `openai-compat` | `grok-2` / `grok-2-vision`; supports `tool_calls`.                     |
-| DeepSeek     | `openai-compat` | `deepseek-chat` / `deepseek-reasoner`.                                 |
-| Mistral      | `openai-compat` | La Plateforme; codestral + mistral-large.                              |
-| Cerebras     | `openai-compat` | Very fast Llama inference.                                             |
-| SambaNova    | `openai-compat` | Llama 3.1 8B/70B/405B hosting.                                         |
-| Azure OpenAI | `openai-compat` | Uses `api-key:` header; set `base_url` to your deployment.             |
-| GitHub Models| `openai-compat` | Auth via `GITHUB_TOKEN`; rate-limited but free tier.                   |
-| Perplexity   | `untested`      | Sonar models are search-augmented; tool use not guaranteed.            |
-| LM Studio    | `untested`      | OpenAI-compat shim; depends on the loaded model.                       |
-| vLLM         | `untested`      | Same: shape works, model has to be tool-trained.                       |
-| Ollama       | `untested`      | Same: `/v1` shim, picks up whatever model you've pulled.               |
-| llama.cpp    | `untested`      | `./server`'s `/v1` shim; depends on the loaded gguf.                   |
-| HF TGI       | `untested`      | Text Generation Inference; OpenAI-compat endpoint on `:3000/v1`.       |
-| AWS Bedrock  | `openai-compat` | Via Bedrock OpenAI surface + API key; Claude/Llama/Nova/Mistral.       |
-| GCP Vertex AI| `openai-compat` | Via Vertex OpenAPI endpoint + `gcloud auth print-access-token`.        |
-| IBM watsonx  | `native`        | Granite + hosted Llama; adapter handles IAM token exchange.            |
-| Cohere       | `native`        | Command-R/A; native `/v2/chat` adapter with tool calls.                |
-| Anyscale     | `openai-compat` | Endpoints hosting Llama 3.1/3.3 + Mixtral.                             |
-| Lepton AI    | `openai-compat` | OSS + custom fine-tunes.                                               |
-| Novita AI    | `openai-compat` | Cheap OSS hosting.                                                     |
-| Hyperbolic   | `openai-compat` | Llama, DeepSeek, Qwen.                                                 |
-| Lambda       | `openai-compat` | Lambda Labs Inference; Llama 3.1/3.3.                                  |
-| Nebius       | `openai-compat` | Nebius AI Studio.                                                      |
-| HF Inference | `openai-compat` | HuggingFace router; one HF token, many backends.                       |
-| NVIDIA NIM   | `openai-compat` | `build.nvidia.com`; Llama-Nemotron, DeepSeek-R1.                       |
-| Databricks   | `openai-compat` | Foundation Model APIs in your Databricks workspace.                    |
-| Snowflake    | `openai-compat` | Cortex inference; set `base_url` to your account.                      |
-| Replicate    | `untested`      | Via OpenAI proxy; tool support is model-dependent.                     |
-| GLHF         | `untested`      | Long-tail HF model hosting.                                            |
-| Featherless  | `untested`      | Long-tail HF model hosting.                                            |
-| OctoAI       | `untested`      | Being deprecated; endpoint still works.                                |
-| Avian        | `untested`      | Llama 3.1 hosting.                                                     |
-| Kluster      | `untested`      | Llama hosting.                                                         |
-| Inference.net| `untested`      | Batch + real-time OSS hosting.                                         |
-| Writer       | `untested`      | Palmyra; tool-use varies by model.                                     |
-| GPT4All      | `untested`      | Local REST server on `:4891/v1`.                                       |
-| Jan / Cortex | `untested`      | Local on `:1337/v1`.                                                   |
-| KoboldCpp    | `untested`      | Local OpenAI shim on `:5001/v1`.                                       |
-| Oobabooga    | `untested`      | text-generation-webui OpenAI shim on `:5000/v1`.                       |
-
-`wingman pilot run` prints a one-line support notice at startup and
-refuses to start when the planner provider is `unsupported` (no current
-backends are; the tier exists for future providers that can't emit
-tool calls at all).
-
----
-
-## Supported providers
-
-| Provider           | id          | Env var                  | Default base URL                                  |
-| ------------------ | ----------- | ------------------------ | ------------------------------------------------- |
-| Anthropic          | `anthropic` | `ANTHROPIC_API_KEY`      | (native adapter)                                  |
-| Google Gemini      | `gemini`    | `GOOGLE_API_KEY`         | (native adapter)                                  |
-| ChatGPT (OAuth)    | `chatgpt`   | OAuth via `/login`       | (token in OS keychain)                            |
-| OpenAI             | `openai`    | `OPENAI_API_KEY`         | `https://api.openai.com/v1`                       |
-| OpenRouter         | `openrouter`| `OPENROUTER_API_KEY`     | `https://openrouter.ai/api/v1`                    |
-| LiteLLM            | `litellm`   | `LITELLM_API_KEY`        | `http://localhost:4000/v1`                        |
-| Groq               | `groq`      | `GROQ_API_KEY`           | `https://api.groq.com/openai/v1`                  |
-| Together AI        | `together`  | `TOGETHER_API_KEY`       | `https://api.together.xyz/v1`                     |
-| Fireworks AI       | `fireworks` | `FIREWORKS_API_KEY`      | `https://api.fireworks.ai/inference/v1`           |
-| DeepInfra          | `deepinfra` | `DEEPINFRA_API_KEY`      | `https://api.deepinfra.com/v1/openai`             |
-| Perplexity         | `perplexity`| `PERPLEXITY_API_KEY`     | `https://api.perplexity.ai`                       |
-| xAI (Grok)         | `xai`       | `XAI_API_KEY`            | `https://api.x.ai/v1`                             |
-| DeepSeek           | `deepseek`  | `DEEPSEEK_API_KEY`       | `https://api.deepseek.com/v1`                     |
-| Mistral            | `mistral`   | `MISTRAL_API_KEY`        | `https://api.mistral.ai/v1`                       |
-| Cerebras           | `cerebras`  | `CEREBRAS_API_KEY`       | `https://api.cerebras.ai/v1`                      |
-| SambaNova          | `sambanova` | `SAMBANOVA_API_KEY`      | `https://api.sambanova.ai/v1`                     |
-| Azure OpenAI       | `azure`     | `AZURE_OPENAI_API_KEY`   | (set to your deployment URL)                      |
-| GitHub Models      | `github`    | `GITHUB_TOKEN`           | `https://models.inference.ai.azure.com`           |
-| LM Studio          | `lmstudio`  | (none — local)           | `http://localhost:1234/v1`                        |
-| vLLM               | `vllm`      | (none — local)           | `http://localhost:8000/v1`                        |
-| Ollama             | `ollama`    | (none — local)           | `http://localhost:11434/v1`                       |
-| llama.cpp server   | `llamacpp`  | (none — local)           | `http://localhost:8080/v1`                        |
-| HF TGI             | `tgi`       | (none — local)           | `http://localhost:3000/v1`                        |
-| Cohere             | `cohere`    | `COHERE_API_KEY`         | `https://api.cohere.com` (native `/v2/chat`)      |
-| Anyscale           | `anyscale`  | `ANYSCALE_API_KEY`       | `https://api.endpoints.anyscale.com/v1`           |
-| Lepton AI          | `lepton`    | `LEPTON_API_KEY`         | `https://api.lepton.ai/api/v1`                    |
-| Replicate          | `replicate` | `REPLICATE_API_TOKEN`    | `https://openai-proxy.replicate.com/v1`           |
-| Novita AI          | `novita`    | `NOVITA_API_KEY`         | `https://api.novita.ai/v3/openai`                 |
-| Hyperbolic         | `hyperbolic`| `HYPERBOLIC_API_KEY`     | `https://api.hyperbolic.xyz/v1`                   |
-| Lambda Inference   | `lambda`    | `LAMBDA_API_KEY`         | `https://api.lambdalabs.com/v1`                   |
-| Nebius AI Studio   | `nebius`    | `NEBIUS_API_KEY`         | `https://api.studio.nebius.ai/v1`                 |
-| HF Inference       | `hf`        | `HF_TOKEN`               | `https://router.huggingface.co/v1`                |
-| GLHF.chat          | `glhf`      | `GLHF_API_KEY`           | `https://glhf.chat/api/openai/v1`                 |
-| Featherless        | `featherless`| `FEATHERLESS_API_KEY`   | `https://api.featherless.ai/v1`                   |
-| OctoAI             | `octoai`    | `OCTOAI_API_KEY`         | `https://text.octoai.run/v1`                      |
-| NVIDIA NIM         | `nvidia`    | `NVIDIA_API_KEY`         | `https://integrate.api.nvidia.com/v1`             |
-| Avian              | `avian`     | `AVIAN_API_KEY`          | `https://api.avian.io/v1`                         |
-| Kluster.ai         | `kluster`   | `KLUSTER_API_KEY`        | `https://api.kluster.ai/v1`                       |
-| Inference.net      | `inferencenet`| `INFERENCE_NET_API_KEY`| `https://api.inference.net/v1`                    |
-| Snowflake Cortex   | `snowflake` | `SNOWFLAKE_API_KEY`      | (set to your account URL)                         |
-| Databricks         | `databricks`| `DATABRICKS_TOKEN`       | (set to your workspace URL)                       |
-| Writer Palmyra     | `writer`    | `WRITER_API_KEY`         | `https://api.writer.com/v1`                       |
-| GPT4All            | `gpt4all`   | (none — local)           | `http://localhost:4891/v1`                        |
-| Jan / Cortex       | `jan`       | (none — local)           | `http://localhost:1337/v1`                        |
-| KoboldCpp          | `koboldcpp` | (none — local)           | `http://localhost:5001/v1`                        |
-| Oobabooga          | `oobabooga` | (none — local)           | `http://localhost:5000/v1`                        |
-| Alibaba Qwen       | `qwen`      | `DASHSCOPE_API_KEY`      | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` |
-| Zhipu GLM          | `zhipu`     | `ZHIPU_API_KEY`          | `https://open.bigmodel.cn/api/paas/v4`            |
-| Moonshot Kimi      | `moonshot`  | `MOONSHOT_API_KEY`       | `https://api.moonshot.cn/v1`                      |
-| MiniMax            | `minimax`   | `MINIMAX_API_KEY`        | `https://api.minimaxi.com/v1`                     |
-| Yi (01.AI)         | `yi`        | `YI_API_KEY`             | `https://api.lingyiwanwu.com/v1`                  |
-| Baichuan           | `baichuan`  | `BAICHUAN_API_KEY`       | `https://api.baichuan-ai.com/v1`                  |
-| Tencent Hunyuan    | `hunyuan`   | `HUNYUAN_API_KEY`        | `https://api.hunyuan.cloud.tencent.com/v1`        |
-| ByteDance Doubao   | `doubao`    | `ARK_API_KEY`            | `https://ark.cn-beijing.volces.com/api/v3`        |
-| SiliconFlow        | `siliconflow`| `SILICONFLOW_API_KEY`   | `https://api.siliconflow.cn/v1`                   |
-| Cloudflare Workers | `cloudflare`| `CLOUDFLARE_API_TOKEN`   | (set to your account-id URL)                      |
-| Vercel AI Gateway  | `vercel`    | `VERCEL_AI_GATEWAY_KEY`  | `https://gateway.ai.vercel.com/v1`                |
-| AIMLAPI            | `aimlapi`   | `AIMLAPI_KEY`            | `https://api.aimlapi.com/v1`                      |
-| OpenPipe           | `openpipe`  | `OPENPIPE_API_KEY`       | `https://api.openpipe.ai/api/v1`                  |
-| Targon             | `targon`    | `TARGON_API_KEY`         | `https://api.targon.com/v1`                       |
-| Pollinations       | `pollinations`| (none — free tier)     | `https://text.pollinations.ai/openai/v1`          |
-| AI21 Jamba         | `ai21`      | `AI21_API_KEY`           | `https://api.ai21.com/studio/v1`                  |
-| Z.ai (GLM coding)  | `zai`       | `ZAI_API_KEY`            | `https://api.z.ai/api/coding/paas/v4`             |
-| Friendli AI        | `friendli`  | `FRIENDLI_TOKEN`         | `https://inference.friendli.ai/v1`                |
-| Mancer             | `mancer`    | `MANCER_API_KEY`         | `https://neuro.mancer.tech/oai/v1`                |
-| Reka               | `reka`      | `REKA_API_KEY`           | `https://api.reka.ai/v1`                          |
-| mlx-lm-server      | `mlx`       | (none — local)           | `http://localhost:8080/v1`                        |
-| LocalAI            | `localai`   | (none — local)           | `http://localhost:8080/v1`                        |
-| Aphrodite Engine   | `aphrodite` | (none — local)           | `http://localhost:2242/v1`                        |
-| Mistral.rs server  | `mistralrs` | (none — local)           | `http://localhost:1234/v1`                        |
-| AWS Bedrock        | `bedrock`   | `AWS_BEARER_TOKEN_BEDROCK`| `https://bedrock-runtime.<region>.amazonaws.com/openai/v1` |
-| GCP Vertex AI      | `vertex`    | `GOOGLE_VERTEX_TOKEN`    | (set to your project/region OpenAPI URL)          |
-| IBM watsonx.ai     | `watsonx`   | `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` | `https://<region>.ml.cloud.ibm.com` |
-
-All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
-`OpenAiCompatProvider` adapter (`crates/wingman-providers/src/openai_compat.rs`).
-Add a new hosted OpenAI-shape clone by extending its `Variant` enum and the
-mapper functions in `runtime.rs` + `login.rs`.
-
-**Notes on the enterprise providers (Bedrock / Vertex / watsonx):**
-
-- **AWS Bedrock** ships via the OpenAI-compat surface released in 2024 —
-  set `AWS_BEARER_TOKEN_BEDROCK` (long-term API key generated from the
-  AWS console) and adjust the region in `base_url`. The SigV4 path
-  against `/model/<id>/invoke-with-response-stream` (with the AWS Event
-  Stream binary framing) is **not** implemented; if your AWS setup
-  doesn't permit Bedrock API keys, that adapter is the follow-up work.
-- **GCP Vertex AI** uses the OpenAPI endpoint with an OAuth2 access
-  token. Populate `GOOGLE_VERTEX_TOKEN` with the output of
-  `gcloud auth print-access-token` (refresh hourly) and set `base_url`
-  to your project + region. Service-account JWT signing is the
-  follow-up work for unattended use.
-- **IBM watsonx.ai** is a native adapter (`watsonx.rs`) — provide
-  `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` and the adapter exchanges
-  the API key for an IAM token internally (cached for ~1h). Pass
-  `WATSONX_ACCESS_TOKEN` instead if you've already minted one.
+It doesn't push your code to anyone's cloud — BYO key, everything local. It
+doesn't reuse a subscription token to dodge API billing. It doesn't headline
+agent count: the two firms who have published the most on parallel agents both
+concluded that writes should stay single-threaded, and pilot mode serialises
+tasks whose write-sets overlap rather than racing them. And it doesn't claim
+your shell is sandboxed when it isn't — `wingman doctor` reports exactly which
+containment is active on your machine.
 
 ---
 
 ## Installation
-
-### Quick install (prebuilt binary — no Rust needed)
 
 **macOS / Linux:**
 
@@ -611,705 +92,195 @@ curl -fsSL https://raw.githubusercontent.com/vedantnimbarte/Wingman/main/scripts
 irm https://raw.githubusercontent.com/vedantnimbarte/Wingman/main/scripts/install.ps1 | iex
 ```
 
-This downloads the `wingman` binary for your platform from the latest
-[GitHub Release](https://github.com/vedantnimbarte/Wingman/releases) and puts
-it on your `PATH` (default `~/.local/bin`; override with
-`WINGMAN_INSTALL_DIR`, pin a tag with `VERSION=v0.1.0`). Then run
-`wingman --help`.
+Downloads the `wingman` binary for your platform from the latest
+[release](https://github.com/vedantnimbarte/Wingman/releases) and puts it on
+your `PATH` (default `~/.local/bin`; override with `WINGMAN_INSTALL_DIR`, pin a
+tag with `VERSION=v0.1.0`).
 
-Supported prebuilt targets: Linux x86_64/aarch64 (gnu, glibc >= 2.38 —
-e.g. Ubuntu 24.04+, Debian 13+, Fedora 39+; on older distros build from
-source), macOS Apple-silicon, Windows x86_64. Intel macOS has no prebuilt
-binary (GitHub is retiring Intel runners) — install it with
-`cargo install --git https://github.com/vedantnimbarte/Wingman wingman-cli`.
-
-### With Rust already installed
+Prebuilt targets: Linux x86_64/aarch64 (glibc ≥ 2.38 — Ubuntu 24.04+, Debian
+13+, Fedora 39+), macOS Apple silicon, Windows x86_64. On anything else, build
+it:
 
 ```bash
 cargo install --git https://github.com/vedantnimbarte/Wingman wingman-cli
 ```
 
-### Build from source
-
-```bash
-git clone git@github.com:vedantnimbarte/Wingman.git
-cd Wingman
-cargo build --release        # binary at target/release/wingman
-cargo install --path crates/wingman-cli   # or install onto PATH
-```
-
-Prerequisites for building: Rust 1.80+ and a C toolchain for some transitive
-crates. (Optional) an API key for the provider(s) you use.
-
-> **Maintainers:** the prebuilt binaries are produced by
-> `.github/workflows/release.yml` on every `v*` tag — `git tag v0.1.0 && git
-> push origin v0.1.0` builds and publishes the assets the install scripts
-> download.
+Building needs Rust 1.80+ and a C toolchain for some transitive crates.
 
 ---
 
 ## Quick start
 
-### 1. Scaffold a config
-
 ```bash
-wingman config init
-```
-
-This writes a starter `~/.wingman/config.toml` populated with entries for every
-supported provider, each pointing at a `${ENV_VAR}` placeholder for the API
-key.
-
-### 2. Set an API key
-
-Pick one of the supported providers and export its key. Anthropic is the
-default:
-
-```bash
+wingman config init             # scaffold ~/.wingman/config.toml
 export ANTHROPIC_API_KEY=sk-ant-...
-# or
-export OPENAI_API_KEY=sk-...
-export OPENROUTER_API_KEY=...
-export GOOGLE_API_KEY=...
+wingman                         # interactive TUI in the current project
 ```
 
-For local providers (Ollama, LM Studio, vLLM) no key is needed — just point
-the `base_url` at the running instance.
-
-### 3. Use it
+Local providers (Ollama, LM Studio, vLLM) need no key — point `base_url` at
+the running instance.
 
 ```bash
-# Interactive TUI in the current project
-wingman
-
 # Headless one-shot
 wingman --print "explain the agent loop in crates/wingman-core"
 
-# Headless, streaming JSON events (newline-delimited)
+# Headless, newline-delimited JSON events
 wingman --print "list the public types in wingman-core" --json
 
 # Pick a model for this session only
-wingman --model anthropic/claude-opus-4-7
 wingman --model openai/gpt-4.1
-wingman --model gemini/gemini-2.5-pro
-wingman --model openrouter/anthropic/claude-opus-4-7
 
 # Loosen the permission model for this session
 wingman --mode auto-edit
-wingman --mode yolo            # no prompts; per-session only
 ```
 
-### Inside the TUI
+Useful TUI commands: `/model` swaps the active model live, `/mode` changes the
+permission mode, `/mcp` manages MCP servers, `/memory` lists saved facts,
+`/recall <query>` searches past sessions, `/find <query>` searches the
+transcript. Full list in [docs/CLI.md](docs/CLI.md).
 
-- Type a prompt and hit Enter to send. A `/`-prefixed line shows a slash
-  autocomplete popup.
-- `/model [<provider>/<model-id>]` — swap the active model live; empty arg
-  opens the picker.
-- `/mode <read-only|auto-edit|yolo>` — change the permission mode live.
-- `/login` (`/connect`) — guided provider-connect wizard; `/logout [name]`.
-- `/mcp` — add / remove / connect / disconnect MCP servers.
-- `/memory` — list saved memories. `/memory forget <name>` to delete one.
-- `/recall <query>` — search across past sessions for prior context.
-- `/skills [new <name>]` — browse and apply skills, or scaffold a new one;
-  `/skill <name>` queues a skill and `/skill stats [name]` shows usage counts.
-- `/learn [status|reset]` — self-learning loop dashboard.
-- `/usage` — per-model token + cost breakdown. `/params` — model params.
-- `/add <path>` — attach a file to the next prompt.
-- `/export [md]` — write the transcript to a file. `/resume` — reload the
-  last session.
-- `/find <query>` — search the transcript (`/findnext`, `/findprev`,
-  `/findclear`).
-- Tool calls render inline with their output (head/tail truncated per the
-  active budget) and the token-usage strip updates after each turn.
-
-Tell the agent things like "remember that I prefer pnpm over npm" or "from
-now on always run `cargo fmt` before commits" — it will call `save_memory`
-and the next session will see it in the system prompt.
+Tell it things like "remember that I prefer pnpm over npm" and it will call
+`save_memory`; the next session sees it in the system prompt.
 
 ---
 
-## Self-improving loop
+## Permission model
 
-Every session contributes to a small set of files under `~/.wingman/` and
-`<project>/.wingman/` that subsequent runs read on startup. There is no
-cloud component — everything is local-first.
+`read-only` is the default. Each tool declares what it needs (read / write /
+shell / network) and the registry refuses anything the active mode doesn't
+grant — enforced centrally, not per-tool.
 
-### What's persisted
+| Mode | What the agent may do |
+| --- | --- |
+| `read-only` | Read and search. No writes, no shell. Default. |
+| `plan` | Read-only until you `/approve` its plan, then auto-edit. |
+| `auto-edit` | Write inside the project tree; shell auto-allowed, subject to the denylist. |
+| `yolo` | No guardrails. Per-session only, never persisted. |
 
-- **Memories** at `~/.wingman/memory/<slug>.md` (global) or
-  `<project>/.wingman/memory/<slug>.md` (project), indexed by a sibling
-  `MEMORY.md`. Each memory is markdown with YAML frontmatter
-  (`name`, `description`, `type`). Four types:
+`.git/`, `.wingman/config.toml`, and `.wingman/skills/` are never writable, in
+any mode. A cloned repo's `.wingman/config.toml` may pick a model and tune the
+UI but not run commands — `[hooks]`, `[mcp]`, `[verify]`, `[providers]`, and
+`permission_mode` are ignored until you run `wingman trust` in that repo, and
+trust lapses whenever the file changes.
 
-  | Type        | Default scope | Used for                                                       |
-  | ----------- | ------------- | -------------------------------------------------------------- |
-  | `user`      | global        | Facts about the human (role, expertise, working style).        |
-  | `feedback`  | global        | How to behave (terse responses, avoid mocks, etc.).            |
-  | `project`   | project       | Facts about this codebase (build commands, conventions).       |
-  | `reference` | global        | Pointers to external systems (issue tracker, dashboards).      |
-
-  The memory **index** (one bullet per memory) is rendered into the system
-  prompt every turn. Full bodies stay on disk; the agent fetches them via
-  `recall_memory` when relevant.
-
-- **Skill usage** at `~/.wingman/learn.db` (SQLite). Every `invoke_skill`
-  call is recorded; the next user turn flips its outcome to `success` or
-  `corrected` based on negation heuristics ("no,", "wait,", "wrong,",
-  "actually,"…). When a skill crosses 3 invocations with ≥50% correction
-  rate, the next session's system prompt suggests a rewrite.
-
-- **Session embeddings** at `~/.wingman/sessions.db`. Finished session
-  JSONLs are chunked into thread-shaped windows and embedded using the
-  same `fastembed`/hash backend that powers `semantic_search`. The CLI
-  backfills any unindexed sessions in the background at startup.
-
-### Learning tools (callable by the agent)
-
-| Tool             | When the agent uses it                                                          |
-| ---------------- | ------------------------------------------------------------------------------- |
-| `save_memory`    | User says "remember", "from now on", expresses a stable preference.             |
-| `recall_memory`  | The memory index in the prompt hints at relevance and the agent needs the body.|
-| `forget_memory`  | User explicitly asks to forget, or a memory is clearly wrong.                   |
-| `invoke_skill`   | A skill from the catalog matches the task; instructions apply for the turn.    |
-| `recall_session` | "Have we discussed X before?" / "How did we fix Y last time?"                   |
-| `read_session`   | Drill into a specific session id returned by `recall_session`.                  |
-
-### Nudges
-
-After a configurable number of quiet sessions (default 5 — no saves), the
-system prompt for the next turn includes a one-line nudge asking the agent
-to consider proposing a memory if anything surprising came up. `/learn
-reset` zeros the counter; `/learn status` shows where you stand.
-
----
-
-## Hooks
-
-User-defined shell hooks fire at four well-known points. Configure under
-`[hooks]` in `config.toml`:
-
-```toml
-[[hooks.pre_tool_use]]
-command = "cargo fmt --check"
-match_tool = "edit_file"      # also matches "edit_file*" or "*"
-block = true                  # exit != 0 cancels the tool call
-timeout_secs = 10
-
-[[hooks.post_tool_use]]
-command = "echo \"$WINGMAN_TOOL_NAME ran\""
-
-[[hooks.stop]]
-command = "notify-send 'wingman done'"
-
-[[hooks.user_prompt_submit]]
-command = "grep -qiv secret <<< \"$WINGMAN_USER_PROMPT\""
-block = true                  # reject prompts containing 'secret'
-```
-
-The agent loop populates per-event environment variables
-(`WINGMAN_TOOL_NAME`, `WINGMAN_TOOL_INPUT`, `WINGMAN_TOOL_OUTPUT`,
-`WINGMAN_TOOL_IS_ERROR`, `WINGMAN_STOP_REASON`, `WINGMAN_USER_PROMPT`).
-Hooks run via `sh -c` on Unix and `cmd /C` on Windows, with the
-configured `timeout_secs` (default 10).
-
----
-
-## User-defined slash commands
-
-Place markdown files at `~/.wingman/commands/<name>.md` (global) or
-`<project>/.wingman/commands/<name>.md` (project). When the user types
-`/<name> rest of line` in the TUI, the markdown body is expanded into the
-prompt with the literal token `$ARGS` replaced by `rest of line`, and
-submitted as if typed directly. Project-local commands shadow globals.
-
-Example `~/.wingman/commands/refactor.md`:
-
-```markdown
-Refactor the following Rust code with these constraints:
-1. Keep the public API unchanged.
-2. Prefer iterators over explicit loops.
-3. Run `cargo clippy` mentally and address obvious lints.
-
-$ARGS
-```
-
-Then in the TUI: `/refactor crates/foo/src/lib.rs` expands to a complete prompt.
+There are no interactive approval prompts by design: a disallowed call is
+refused, not queued.
 
 ---
 
 ## Configuration
 
-`wingman` resolves configuration in this order (lowest to highest precedence):
-
-1. Built-in defaults.
-2. `~/.wingman/config.toml` (global).
-3. `<project>/.wingman/config.toml` (project-local).
-4. `WINGMAN_*` environment variables.
-5. CLI flags.
-
-TOML sub-tables are merged at the raw-TOML level, so an absent section in the
-project file does **not** wipe out the global values for that section.
-
-### Example `~/.wingman/config.toml`
+Layered: defaults → `~/.wingman/config.toml` → `<project>/.wingman/config.toml`
+→ `WINGMAN_*` env vars → CLI flags. TOML sub-tables merge instead of
+clobbering.
 
 ```toml
 default_provider = "anthropic"
-permission_mode = "read-only"
-
-[tokens]
-compact_at_tokens = 120000
-tool_output_max_lines = 400
-prompt_cache = true
-# max_usd_per_session = 5.0   # soft warning when estimated spend crosses this
-
-[router]
-fast_model = "anthropic/claude-haiku-4-5-20251001"
-# local_model = "ollama/llama3.1"   # target of the `local` class keyword
-
-[tui]
-theme = "default"
-show_token_usage = true
-
-[tools]
-# web_fetch/web_search are gated to auto-edit/yolo by default (network egress
-# is an exfiltration channel). Set true to also allow them in read-only/plan.
-allow_network = false
-redact_output_secrets = true   # redact secret tokens in tool output (default on)
-
-# Verification gate (runs after edits): compile check + affected tests + LSP
-# diagnostics, and optional headless-browser visual check.
-[verify]
-turn_gate = "auto"        # "auto" | "off" | an explicit command
-affected_tests = true
-lsp_diagnostics = true
-# [verify.browser]
-# url = "http://localhost:5173"
-# baseline = "tests/baseline.png"
-
-# Aider-style: commit each turn's edits automatically.
-[git]
-auto_commit = false
-
-# Append a compliance audit trail of every tool call.
-[audit]
-enabled = false
-
-# Server-backed team memory (beyond the git-backed `memory sync`).
-# [team]
-# endpoint = "https://memory.example.com"
-# token = "${WINGMAN_TEAM_TOKEN}"
-
-# Extend the agent with your own shell-command tools (no recompile).
-# [[tools.custom]]
-# name = "run_migration"
-# description = "Apply the latest DB migration"
-# command = "make migrate"
+permission_mode  = "read-only"
 
 [providers.anthropic]
 api_key = "${ANTHROPIC_API_KEY}"
-model = "claude-opus-4-7"
+model   = "claude-opus-4-7"
 
-[providers.openai]
-api_key = "${OPENAI_API_KEY}"
-model = "gpt-4.1"
+[verify]
+enabled = true              # build + affected tests before a turn may finish
 
-[providers.gemini]
-api_key = "${GOOGLE_API_KEY}"
-model = "gemini-2.5-pro"
-
-[providers.openrouter]
-api_key = "${OPENROUTER_API_KEY}"
-model = "anthropic/claude-opus-4-7"
-
-[providers.ollama]
-base_url = "http://localhost:11434/v1"
-model = "llama3.1:8b"
-
-[providers.lmstudio]
-base_url = "http://localhost:1234/v1"
-model = "local-model"
-
-[providers.vllm]
-base_url = "http://localhost:8000/v1"
-model = "local-model"
-
-[providers.litellm]
-api_key = "${LITELLM_API_KEY}"
-base_url = "http://localhost:4000/v1"
-model = "anthropic/claude-opus-4-7"
-
-# MCP servers — each becomes a set of `mcp__<name>__<tool>` tools.
-[mcp.filesystem]
-transport = "stdio"                 # "stdio" (default) or "http"
-command = "npx"
-args = ["-y", "@modelcontextprotocol/server-filesystem", "."]
-env = { API_KEY = "${SOME_KEY}" }   # env vars for the child process
-# cwd = "/path/to/run/in"           # working directory for the child
-# trusted = false                   # MCP tools are gated to auto-edit/yolo
-                                    # unless a server is marked trusted (it
-                                    # may run in read-only/plan mode then)
-
-[mcp.remote]
-transport = "http"                  # spec-compliant Streamable-HTTP client
-url = "https://mcp.example.com/mcp" # (initialize handshake, SSE, session id)
-headers = { Authorization = "Bearer ${MCP_TOKEN}" }  # auth / custom headers
-
-[logging]
-filter = "info,wingman=info"
-file = true
+[tools]
+shell_sandbox = "auto"      # bwrap / sandbox-exec where available
 ```
 
-### Environment variables
-
-| Variable                            | Effect                                                              |
-| ----------------------------------- | ------------------------------------------------------------------- |
-| `WINGMAN_MODEL`                     | Overrides `default_model`. Same syntax as `--model`.                |
-| `WINGMAN_PROVIDER`                  | Overrides `default_provider`.                                       |
-| `WINGMAN_PERMISSION_MODE`           | `read-only` \| `auto-edit` \| `yolo`.                               |
-| `WINGMAN_LOG`                       | `tracing-subscriber` env-filter directive.                          |
-| `WINGMAN_<PROVIDER>_API_KEY`        | Sets `providers.<provider>.api_key`.                                |
-| `WINGMAN_<PROVIDER>_BASE_URL`       | Sets `providers.<provider>.base_url`.                               |
-| `WINGMAN_<PROVIDER>_MODEL`          | Sets `providers.<provider>.model`.                                  |
-
-Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
-is resolved against the environment at load time.
-
-### Permission modes
-
-| Mode         | Reads / Search | Writes inside project | Shell                        | Out-of-tree paths |
-| ------------ | -------------- | --------------------- | ---------------------------- | ----------------- |
-| `read-only`  | allowed        | denied                | denied                       | denied            |
-| `plan`       | allowed        | after `/approve`      | after `/approve`             | denied            |
-| `auto-edit`  | allowed        | auto-allowed          | auto-allowed except denylist | denied for writes |
-| `yolo`       | allowed        | auto-allowed          | auto-allowed                 | allowed           |
-
-**There are no interactive approval prompts.** A tool call that the active
-mode doesn't permit is refused outright, with the reason returned to the
-model. Choose the mode that matches the latitude you want to grant.
-
-Enforcement is central: every tool declares what it needs
-(`read` / `write` / `shell` / `network`), and the registry refuses the call
-before the tool runs. A tool that declares nothing can only do pure
-computation, so the default for anything new is deny.
-
-**Protected paths.** `.git/`, `.wingman/config.toml`, `.wingman/skills/`, and
-`.wingman/trusted.toml` are never writable — including in `yolo`. Each of
-those turns a single bad edit into a change that outlives the session (a git
-hook that fires on your next commit, a config that grants the agent more
-permission next time). Edit them yourself if you mean to.
-
-**About `plan`.** `plan` starts out identical to `read-only`: the agent can
-read and search, but every write and shell call is refused. It calls
-`present_plan` to show you what it intends to do; you run **`/approve`** in
-the TUI to accept, and only then does it behave like `auto-edit` for the rest
-of the session (still project-confined, and protected paths still refused).
-Switching modes clears the approval, so returning to `plan` later needs a
-fresh one — consent applies to the plan you actually read.
-
-Headless (`--print`) has nobody to approve, so `plan` there stays read-only
-for the whole run. Use `auto-edit` for unattended work.
-
-**About `auto-edit`.** Writes are confined to the project tree. Shell is
-confined too *when the platform provides a mechanism* — `bwrap` on Linux,
-`sandbox-exec` on macOS — which bounds `run_shell` writes to the project and
-blocks reads of `~/.ssh`, `~/.aws`, `~/.gnupg`. Set it with
-`[tools].shell_sandbox`:
-
-| value      | behaviour                                                        |
-| ---------- | ---------------------------------------------------------------- |
-| `auto`     | default — confine when available, otherwise run unconfined and warn |
-| `required` | refuse to run shell at all when no mechanism is available          |
-| `off`      | never wrap                                                        |
-
-`wingman doctor` reports which mechanism is active, so it is a claim you can
-check rather than take on trust. Two honest limits: there is **no Windows
-mechanism wired up yet** (use `required` if that matters to you), and this
-confines the filesystem, not the network — a sandboxed command can still
-`curl`. The shell denylist remains a convenience, not a boundary.
-
-`yolo` is per-session only — never persisted to config.
+Every knob, plus environment variables and on-disk layout, is in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ---
 
-## CLI reference
+## Pilot mode
 
-```text
-wingman [OPTIONS] [COMMAND]
+`wingman pilot run "<goal>"` plans a multi-task piece of work, spawns worker
+agents in isolated git worktrees, and converges their output into one PR.
+
+```bash
+wingman pilot run "add a --version-only flag to wingman-cli"
+wingman pilot run --plan-only "<goal>"   # write tasks.jsonl and exit
+wingman pilot watch                      # live dashboard
 ```
 
-**Top-level flags**
-
-| Flag                     | Description                                                                 |
-| ------------------------ | --------------------------------------------------------------------------- |
-| `--mode <MODE>`          | `read-only` \| `auto-edit` \| `yolo`.                                       |
-| `--model <MODEL>`        | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Env: `WINGMAN_MODEL`. |
-| `--print <PROMPT>`       | Run a single prompt and exit (non-interactive).                              |
-| `--batch <FILE>`         | Run a JSONL file of prompts non-interactively. Pairs with `--json`.          |
-| `--json`                 | Emit newline-delimited JSON events instead of text. Use with `--print`/`--batch`. |
-| `-v`, `-vv`              | Increase log verbosity.                                                      |
-| `--quiet`                | Suppress non-error stderr output.                                            |
-| `--version`              | Print version and exit.                                                      |
-| `--help`                 | Print help.                                                                  |
-
-**Subcommands**
-
-| Command              | Description                                            |
-| -------------------- | ------------------------------------------------------ |
-| `config init`        | Write a starter `~/.wingman/config.toml`. `--force` to overwrite. |
-| `config show`        | Print the merged effective configuration. `--json` for JSON output. |
-| `config paths`       | Print the resolved global and project config paths.    |
-| `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
-| `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
-| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
-| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, and git/gh tooling. |
-| `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
-| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
-| `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
-| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
-| `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
-| `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
-| `router stats`       | Per-class model win-rates (gate pass-rate) for this repo. `--all` across repos. |
-| `router preset local`| Print a recommended local-first `[router]` preset. `--model <provider/model>`. |
-| `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
-| `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
-| `undo`               | Restore the most recent `wingman checkpoint` via `git stash pop`. |
-| `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. `--compare` reprices your volume against other models (provider-cost arbitrage). |
-| `session list`       | List recent session JSONL files for this project.       |
-| `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
-| `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
-| `worktree list`      | `git worktree list` passthrough.                        |
-| `worktree remove <path>` | Remove a worktree by path.                          |
-| `memory export <out>` | Export the global memory dir to a directory or `.json` pack. |
-| `memory import <path>` | Import a memory pack (`--force` to overwrite).        |
-| `memory diff <a> <b>` | Show differences between two packs (or live dir vs. pack). |
-| `memory sync [<ref>]` | Reconcile team-shared project memory: rebuild `MEMORY.md` from files (resolving index merge conflicts), optionally fold in a git ref's memories. |
-| `memory push` / `memory pull` | Sync memories through a team HTTP endpoint (`[team]`), non-clobbering. |
-| `memory review`      | Review distilled pending memories: list, or `--promote N` / `--discard N` / `--promote-all`. |
-| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
-| `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
-| `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
-| `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
-| `skill import <path>` | Import portable `SKILL.md` skills (a file, its dir, or a dir of them). `--project`, `--force`. |
-| `skill export <name> <dir>` | Export a wingman skill as a portable `<dir>/<name>/SKILL.md` bundle. |
-| `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
-| `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
-| `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
-| `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
-| `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
-| `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
-| `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
-| `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
-| `pilot intake slack\|email\|voice` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion, STT transcript). |
-
-Running `wingman` with no subcommand launches the TUI against the resolved
-provider and model.
-
-> `wingman autonomous "<goal>"` is a deprecated alias for `wingman pilot
-> run` — kept through M3, removed at M4.
+Three capability tiers — `assist` (you approve everything), `copilot` (the
+default; the agent flies, you intervene at decision points), and `autopilot`
+(experimental, adds the discovery daemon and critic agent). `copilot` runs
+end-to-end against a live provider and is user-validated, not CI-validated:
+use a spend cap and read the PR. Details in
+[docs/PILOT-MODE.md](docs/PILOT-MODE.md).
 
 ---
 
-## Built-in tools
+## Known limits
 
-Each tool runs through the registry, which receives a `ToolCtx` carrying the
-active permission mode, current working directory, and project root. Tools
-decide whether to act, prompt, or refuse based on that context.
+Pre-1.0. The parts worth knowing before you lean on them:
 
-| Tool              | Purpose                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| `read_file`       | Read a file by absolute path. Returns content with line numbers.        |
-| `write_file`      | Create or overwrite a file.                                             |
-| `edit_file`       | Exact string replacement inside an existing file.                       |
-| `apply_patch`     | Multi-file atomic edit (Update / Add / Delete blocks).                  |
-| `spawn_subagent`  | Run an isolated inner agent loop on a sub-task; depth-capped at 1.      |
-| `glob_tool`       | Find files by glob pattern (e.g. `**/*.rs`).                            |
-| `grep_tool`       | Content search via ripgrep semantics.                                   |
-| `list_dir`        | List a directory.                                                       |
-| `run_shell`       | Execute a shell command. Subject to the permission denylist.            |
-| `web_fetch`       | Download an http(s) URL, strip HTML, return text.                       |
-| `web_search`      | DuckDuckGo HTML search (no API key); pairs with `web_fetch`.            |
-| `semantic_search` | Hybrid search (dense vectors + BM25) the project RAG index for relevant code chunks. |
-| `find_symbol`     | Locate a symbol's definition via tree-sitter (feature-gated).           |
-| `edit_symbol`     | Replace a symbol's body via tree-sitter (feature-gated).                |
-| `outline`         | Structural outline of a file's symbols (feature-gated).                 |
-| `who_calls`       | Find references to a symbol, annotated with the enclosing function (feature-gated). |
-| `lsp_definition`  | Resolved go-to-definition via a language server.                        |
-| `lsp_references`  | Resolved find-references via a language server.                         |
-| `lsp_hover`       | Type / signature / doc summary via a language server.                   |
-| `lsp_diagnostics` | Live errors/warnings for a file via a language server.                  |
-| `lsp_rename`      | Project-wide rename via a language server (needs write permission).     |
-| `lsp_code_action` | List/apply the language server's quick-fixes / organize-imports.        |
-| `present_plan`    | Structured plan block; required step before edits in `plan` mode.       |
-| `save_memory`     | Persist a fact / preference / instruction across sessions.              |
-| `recall_memory`   | Read the full body of a memory by slug.                                 |
-| `forget_memory`   | Delete a memory by slug.                                                |
-| `invoke_skill`    | Load a named skill's body for the current turn; records into stats.     |
-| `recall_session`  | Cross-project semantic search over past session transcripts.            |
-| `read_session`    | Fetch a full session JSONL by id.                                       |
+- **Shell containment is platform-dependent.** Real via `bwrap` on Linux and
+  `sandbox-exec` on macOS; **nothing on Windows yet** — `shell_sandbox = "auto"`
+  runs unconfined and warns, `"required"` refuses to run shell at all. `wingman
+  doctor` reports which you have.
+- **Pilot mode is user-validated, not CI-validated** end-to-end. CI runs the
+  unit suite.
+- **Browser verification fails open.** Needs `--features browser` and Chrome;
+  with no browser present the gate passes rather than blocking.
+- **Skill "outcome scoring" is a phrase heuristic** over your replies, not a
+  learned signal. Treat the numbers as a rough tally.
+- **Team memory and Slack intake need your infrastructure** — they speak simple
+  HTTP contracts, you supply the endpoint.
+- **The `vm` sandbox tier is fail-closed**: pilot refuses vm-tier tasks rather
+  than running them unsandboxed.
 
-Tool output is bounded by `tokens.tool_output_max_lines`; anything longer is
-head/tail truncated before being fed back into the model. High-confidence secret
-tokens are redacted from tool output before it reaches the model
-(`[tools].redact_output_secrets`, default on).
-
-You can add your own tools without recompiling: define a shell command under
-`[[tools.custom]]` (`name`, `description`, `command`) and it becomes a tool the
-model can call — the tool input JSON arrives on stdin and in
-`$WINGMAN_TOOL_INPUT`, and stdout is the result (runs under the shell permission).
+Known gaps are tracked as
+[issues](https://github.com/vedantnimbarte/Wingman/issues) rather than hidden.
+[SECURITY.md](SECURITY.md) has the threat model and what is deliberately out of
+scope.
 
 ---
 
-## Maturity
+## Documentation
 
-Pre-1.0, and the honest breakdown matters more than a version number. This
-table is what "shipped" means per area, so you can decide what to lean on.
-
-| Area | State | What that means |
-| --- | --- | --- |
-| Agent loop, tools, providers | **Solid** | The daily path. Streaming, tool dispatch, compaction, session resume, live model swap. |
-| LSP code intelligence | **Solid** | Real definition/references/hover/diagnostics/rename, 11 languages, degrades to tree-sitter when no server is installed. |
-| Semantic index (RAG) | **Solid** | Hybrid dense + BM25. Downloads a ~120 MB embedding model on first use. |
-| Verification gate | **Solid, bounded** | Runs your build/tests before the agent may finish. Gives up after `[verify].max_retries` (default 2) and exits non-zero — bounded retries, not loop-until-green. |
-| Permission model | **Solid** | Central capability gate; protected paths refused in every mode. No interactive approval prompts by design — a disallowed call is refused, not queued. |
-| Shell containment | **Platform-dependent** | Real via `bwrap`/`sandbox-exec`; **nothing on Windows yet**. `wingman doctor` reports which. |
-| Pilot (multi-agent) | **Works, user-validated** | Genuine parallel workers in worktrees converging to a PR. Not CI-validated end-to-end; treat unattended runs with a spend cap and read the PR. |
-| Memory / skills | **Works, modest** | Memories are plain files you can read and delete. Skill "outcome scoring" is a phrase heuristic over your replies, not a learned signal. |
-| Browser verification | **Opt-in, fails open** | Needs `--features browser` and Chrome. Absent a browser the gate passes. |
-| Team memory, Slack intake | **Needs your infrastructure** | Speak simple HTTP contracts; you supply the endpoint/ingress. |
-| Editor integration | **ACP turn loop** | `wingman acp` speaks the Agent Client Protocol, so ACP-capable editors (Zed, JetBrains, Neovim, Emacs) can drive it. Covers the streaming turn loop; per-tool-call approval from the editor (`session/request_permission`) is not wired yet — Wingman applies its own permission model. A VS Code bridge over `mcp-serve` also exists as a context provider. |
-
-Known gaps are tracked as issues rather than hidden: see the
-[issue tracker](https://github.com/vedantnimbarte/Wingman/issues), and
-[SECURITY.md](SECURITY.md) for the threat model and what is deliberately out
-of scope.
-
----
-
-## Roadmap
-
-The project is being built milestone by milestone:
-
-- **M0** — Workspace scaffold, CLI surface, layered config loader. *(shipped)*
-- **M1** — Headless and TUI agent loop against Anthropic with built-in tools. *(shipped)*
-- **M2** — Six more providers, token pipeline, live `/model` swap. *(shipped)*
-- **M3** — Session persistence (`wingman-session`), `/resume`, MCP host
-  (`wingman-mcp`): stdio/HTTP transports, `[mcp]` config, `/mcp` management,
-  tools namespaced as `mcp__<server>__<tool>`. *(shipped)*
-- **M4** — Repo index / RAG (`wingman-rag`) with SQLite store and `fastembed`
-  or hash-embedder fallback. *(shipped)*
-- **M5** — Skills (`wingman-skills`), ChatGPT OAuth, TUI polish (welcome
-  screen, slash autocomplete). *(shipped)*
-- **M6** — Self-improving learning loop (`wingman-learn`): persistent
-  memories, skill usage stats with outcome scoring, cross-session recall,
-  nudges. *(shipped)*
-- **M7** — Tree-sitter integration across RAG, tools, diff/review, TUI. *(shipped)*
-- **Pilot mode** — Multi-agent orchestration (`wingman pilot`): multi-task
-  planning, worker agents in isolated worktrees, squash-merge + PR, capability
-  tiers, control channel, resume, sandbox tiers, discovery daemon. *(shipped;
-  end-to-end runs are user-validated)* `wingman autonomous` is a deprecated
-  alias.
-- **ACP** — `wingman acp` speaks the Agent Client Protocol over stdio
-  (initialize / session/new / session/prompt / session/cancel, streaming
-  `session/update`), so one implementation reaches Zed, JetBrains, Neovim, and
-  Emacs. *(shipped; turn loop)*
-- **Next** — editor-driven per-tool approval over ACP
-  (`session/request_permission`), Windows shell containment, and an
-  interactive TUI approval modal for skill/memory proposals.
+| Doc | What's in it |
+| --- | --- |
+| [FEATURES.md](docs/FEATURES.md) | The complete feature list |
+| [CLI.md](docs/CLI.md) | Every subcommand |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | Every config knob, env vars, disk layout |
+| [TOOLS.md](docs/TOOLS.md) | Built-in tool reference |
+| [PROVIDERS.md](docs/PROVIDERS.md) | Supported backends and pilot-mode support |
+| [PILOT-MODE.md](docs/PILOT-MODE.md) | Multi-agent orchestration |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, crates, data flows |
+| [LSP.md](docs/LSP.md) | Code intelligence and verification receipts |
+| [LEARNING-LOOP.md](docs/LEARNING-LOOP.md) | Memories, skills, session recall |
+| [EXTENDING.md](docs/EXTENDING.md) | Hooks, slash commands, custom tools |
+| [SDK.md](docs/SDK.md) | Embed `wingman-core`, or drive it over MCP |
+| [INDEX.md](docs/INDEX.md) | Navigation guide for all docs |
 
 ---
 
 ## Development
 
-### Build & test
-
 ```bash
 cargo build              # debug build
-cargo build --release    # release build
 cargo test               # full test suite
-cargo fmt                # formatting (rustfmt.toml is project-pinned)
+cargo fmt                # rustfmt.toml is project-pinned
 cargo clippy             # lints
-```
-
-### Run the TUI from source
-
-```bash
-cargo run -- --mode auto-edit
-```
-
-### Run a headless one-shot from source
-
-```bash
+cargo run -- --mode auto-edit          # TUI from source
 cargo run -- --print "what does crates/wingman-core do?"
 ```
 
-### Logs
-
-By default, logs are written to `~/.wingman/logs/`. Override with
-`WINGMAN_LOG=debug` or via the `[logging]` block in config.
-
----
-
-## Project layout on disk
-
-```
-.
-├── Cargo.toml              # workspace manifest
-├── Cargo.lock
-├── rustfmt.toml
-├── crates/
-│   ├── wingman-cli/        # binary entry point
-│   ├── wingman-config/     # config loading + merge
-│   ├── wingman-core/       # provider-agnostic types + agent loop + LearningHook
-│   ├── wingman-learn/      # memory, skill stats, session recall, hooks
-│   ├── wingman-mcp/        # MCP host (M3)
-│   ├── wingman-providers/  # Anthropic, ChatGPT, Gemini, OpenAI-compat
-│   ├── wingman-rag/        # repo + session index (SQLite + fastembed/hash)
-│   ├── wingman-session/    # JSONL session log + replay
-│   ├── wingman-skills/     # markdown-frontmatter skills loader
-│   ├── wingman-tools/      # built-in tools + registry
-│   └── wingman-tui/        # ratatui surface
-└── target/                 # build output (gitignored)
-```
-
-On the user's machine:
-
-```
-~/.wingman/
-├── config.toml             # global config
-├── credentials.toml        # provider credentials (optional)
-├── logs/                   # tracing output
-├── skills/                 # global skills (*.md)
-├── memory/                 # global memories
-│   ├── MEMORY.md           #   index — one bullet per memory
-│   └── <slug>.md           #   per-memory body
-├── learn.db                # skill usage + outcome stats (SQLite)
-└── sessions.db             # cross-project session embeddings (SQLite)
-```
-
-```
-<project-root>/.wingman/
-├── config.toml             # project-local overrides
-├── sessions/               # per-session JSONL logs (append-only)
-├── index.db                # project RAG index (SQLite + embeddings)
-├── skills/                 # project-scoped skills (override globals by name)
-└── memory/                 # project-scoped memories
-    ├── MEMORY.md
-    └── <slug>.md
-```
-
----
-
-## License
-
-Licensed under the Apache License, Version 2.0.
+Logs go to `~/.wingman/logs/`. Override with `WINGMAN_LOG=debug` or the
+`[logging]` config block.
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome. Before opening a PR:
+Issues and pull requests are welcome. Before opening a PR: `cargo fmt` and
+`cargo clippy` clean, `cargo test` passing, and new behaviour covered by a test
+where reasonable.
 
-1. `cargo fmt` and `cargo clippy` cleanly.
-2. `cargo test` passes.
-3. New behavior is covered by a test where reasonable.
+## License
+
+Licensed under the Apache License, Version 2.0.

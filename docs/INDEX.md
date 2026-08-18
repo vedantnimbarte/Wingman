@@ -4,9 +4,15 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 
 ## Getting Started
 
-- **New to Wingman?** Start with the [README.md](../README.md) for an overview, quick start, and highlights.
-- **Installation issues?** See the [Installation](#installation) section in README.
-- **First run?** See the [Quick Start](#quick-start) section in README, then try `wingman --help`.
+- **New to Wingman?** Start with the [README.md](../README.md) — what makes it
+  different, install, and quick start.
+- **Want the full feature list?** [FEATURES.md](FEATURES.md).
+- **Looking for a subcommand?** [CLI.md](CLI.md), or `wingman --help`.
+- **Configuring it?** [CONFIGURATION.md](CONFIGURATION.md) — every knob, env
+  vars, permission modes, on-disk layout.
+- **Which models/providers work?** [PROVIDERS.md](PROVIDERS.md).
+- **Extending it?** [EXTENDING.md](EXTENDING.md) — hooks, slash commands,
+  custom tools.
 
 ## Understanding Wingman
 
@@ -36,10 +42,14 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 
 ### Pilot Mode & Roadmap
 
+- **[PILOT-MODE.md](PILOT-MODE.md)** — The shipped `wingman pilot` surface: capability tiers, quick start, run artefacts, status.
+  - Best for: Actually running multi-agent orchestration.
+  - Read this if: You want a goal planned, worked in isolated worktrees, and converged into a PR.
+
 - **[AUTONOMOUS-MODE.md](AUTONOMOUS-MODE.md)** — Design doc for multi-task agent orchestration, now shipped as **Pilot mode** (`wingman pilot`).
   - Best for: Understanding the vision, data model, architecture, TUI integration.
   - Read this if: You're using pilot mode, contributing to it, or interested in the roadmap.
-  - See also: **Pilot mode** in [README.md](../README.md#pilot-mode) for the shipped command surface.
+  - See also: **Pilot mode** in [PILOT-MODE.md](PILOT-MODE.md) for the shipped command surface.
 
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
   - Best for: Understanding how Wingman plans to beat Claude Code/Codex on speed, trust, and retention.
@@ -49,7 +59,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 
 ### Command Reference
 
-See **CLI Reference** in [README.md](../README.md#cli-reference) for all subcommands.
+See **CLI Reference** in [CLI.md](CLI.md) for all subcommands.
 
 Key commands:
 - `wingman` — launch TUI.
@@ -62,11 +72,11 @@ Key commands:
 - `wingman knows` — show what Wingman knows about this project (memories, skills, routing, verification gate, index freshness).
 - `wingman skill extract` — mine skills from sessions.
 - `wingman discover` — find local LLMs.
-- `wingman pilot run "<goal>"` — multi-agent orchestration → PR (see [README.md](../README.md#pilot-mode)).
+- `wingman pilot run "<goal>"` — multi-agent orchestration → PR (see [PILOT-MODE.md](PILOT-MODE.md)).
 
 ### Configuration
 
-See **Configuration** in [README.md](../README.md#configuration) for:
+See [CONFIGURATION.md](CONFIGURATION.md) for:
 - Layered config resolution (defaults → global → project → env vars → CLI flags).
 - Config sections (tokens, router, tui, providers, hooks, schedule, mcp, pilot).
 - Permission modes (read-only, plan, auto-edit, yolo).
@@ -74,7 +84,7 @@ See **Configuration** in [README.md](../README.md#configuration) for:
 
 ### TUI Usage
 
-See **Inside the TUI** in [README.md](../README.md#inside-the-tui) for:
+See **Quick start** in [README.md](../README.md#quick-start) for:
 - Typing prompts and hitting Enter.
 - Slash commands (`/model`, `/mode`, `/login`, `/mcp`, `/memory`, `/recall`, `/skills`, `/learn`, `/usage`).
 - File sidebar (`Ctrl+B`).
@@ -83,7 +93,7 @@ See **Inside the TUI** in [README.md](../README.md#inside-the-tui) for:
 
 ### Memory & Learning
 
-See **Self-improving loop** in [README.md](../README.md#self-improving-loop) for:
+See [LEARNING-LOOP.md](LEARNING-LOOP.md) for:
 - Memory types and scope.
 - Skill usage tracking and outcome scoring.
 - Session embeddings and cross-project recall.
@@ -240,7 +250,7 @@ Looking for:
 
 - **How to save a memory?** → [LEARNING-LOOP.md](LEARNING-LOOP.md#saving-memories) or [TOOLS.md](TOOLS.md#save_memory).
 - **How to use semantic search?** → [TOOLS.md](TOOLS.md#semantic_search) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-rag).
-- **How permissions work?** → [README.md](../README.md#permission-modes) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-config).
+- **How permissions work?** → [README.md](../README.md#permission-model) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-config).
 - **How to add a new provider?** → See `crates/wingman-providers/src/` and read [ARCHITECTURE.md](ARCHITECTURE.md#wingman-providers).
 - **What's tree-sitter doing?** → [TREE-SITTER.md](TREE-SITTER.md) or [ARCHITECTURE.md](ARCHITECTURE.md#wingman-ts).
 - **How does the agent loop work?** → [ARCHITECTURE.md](ARCHITECTURE.md#agent-loop).
