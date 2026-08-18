@@ -1,8 +1,8 @@
-//! `wingman pilot intake <slack|email|voice>` — external intake transports.
+//! `wingman pilot intake <slack|email>` — external intake transports.
 //!
 //! The pilot daemon already ingests `*.md` request files from its `intake_dir`
 //! (with per-author trust). These adapters *produce* those files from external
-//! channels, so goals can arrive from Slack, email, or voice — not just the
+//! channels, so goals can arrive from Slack or email — not just the
 //! CLI. Each adapter normalizes to the same intake file format:
 //!
 //! ```text
@@ -11,7 +11,7 @@
 //! ```
 //!
 //! The parsing/normalization is pure and unit-tested; the network/IO front ends
-//! (Slack HTTP server, IMAP/maildir, STT transcript) wrap it.
+//! (Slack HTTP server, IMAP/maildir) wrap it.
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -92,19 +92,6 @@ pub fn eml_to_intake(raw: &str) -> Option<(Option<String>, String)> {
         return None;
     }
     Some((from, text))
-}
-
-/// `wingman pilot intake voice <transcript-file>` — ingest an STT transcript
-/// (whatever tool produced it) as an intake request. The genuine "live mic"
-/// front end still needs audio hardware + a local STT model, but any STT that
-/// writes a transcript file feeds pilot through this.
-pub async fn voice(transcript: String, author: Option<String>) -> Result<ExitCode> {
-    let text = std::fs::read_to_string(&transcript)
-        .with_context(|| format!("read transcript {transcript}"))?;
-    let dir = intake_dir()?;
-    let path = write_intake(&dir, author.as_deref(), &text)?;
-    println!("voice intake → {}", path.display());
-    Ok(ExitCode::SUCCESS)
 }
 
 /// `wingman pilot intake email <maildir>` — convert every `.eml` in a directory

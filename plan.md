@@ -106,10 +106,10 @@ This builds on existing pieces:
 > `security` (R6), `severity` (shared scale), `scheduler` (E4), `critic`
 > (J10), `estimate` (J9), `automerge` (E8), `checkpoint` (E11), `notify`
 > (R5), `refine` (J1), `knowledge` (J8), `eval` (R4), `concurrency` (E9),
-> `ipc` (E10), `reporting` (J5), `toolsynth` (J7), `skillpack` (J12); plus
+> `ipc` (E10), `reporting` (J5), `skillpack` (J12); plus
 > J6 added `Acceptance::Run`/`Assert` variants; plus `daemon` (J2),
-> `intake` (J3), `interject` (J4), `sandbox` (J11), `watcher` (J13),
-> `voice` (J14). Added `[pilot.security]` + `[pilot.notifications]` config
+> `intake` (J3), `sandbox` (J11). Added `[pilot.security]` +
+> `[pilot.notifications]` config
 > sections. **372 tests** green in `wingman-autonomous` (+10 config);
 > clippy clean; `cargo check --workspace` clean. **Ten items are wired
 > into the live pipeline/orchestrator/CLI** (not just logic): **R1**
@@ -130,8 +130,7 @@ This builds on existing pieces:
 > `run_cycle` (J2: one full fetch→score→decide discovery pass),
 > `intake::scan_inbox` (J3 file-drop adapter, real fs) +
 > `notify::send_webhook` (J3 outbound, `curl`), `sandbox::container_run_argv`
-> + `run_in_container` (J11: invoke `docker run`), `voice::whisper_argv` +
-> `transcribe_file` (J14: run whisper.cpp on a clip).
+> + `run_in_container` (J11: invoke `docker run`).
 >
 > The daemon poll loop is now a real `wingman pilot daemon` CLI command
 > (`commands::pilot::daemon`), and the J3 inbound HTTP receiver
@@ -139,13 +138,12 @@ This builds on existing pieces:
 >
 > **What is genuinely left can only run against external systems** — it is
 > not unwritten *logic* but a daemon/hardware/account/credentials to talk
-> to: the actual Docker daemon (`run_in_container` shells to it), a
-> microphone (`transcribe_file` needs a captured clip), Slack/email
-> transport accounts, and the live 73-provider validation matrix (your API
+> to: the actual Docker daemon (`run_in_container` shells to it),
+> Slack/email transport accounts, and the live 73-provider validation matrix (your API
 > keys). **Every discrete, unit-testable function the plan implies now
 > exists and is green** (400 tests); the daemon, poll loop, and webhook
 > receiver are real and exercised; the residue is a running Docker daemon,
-> audio hardware, third-party accounts, and provider API keys.
+> third-party accounts, and provider API keys.
 >
 > **Every decidable logic core in plan.md now exists and is tested.** What
 > genuinely remains is *not* writable/testable in a headless session: (a)
@@ -153,8 +151,8 @@ This builds on existing pieces:
 > (best done with the ability to run real provider-backed runs), and (b)
 > the **external I/O** the plan itself files under "Deferred items
 > requiring user input" — GitHub poller/webhook (R2, J2), channel senders
-> (R5, J3), Docker/Firecracker executor (J11), whisper.cpp capture (J14),
-> the live 73-provider validation matrix (needs API keys).
+> (R5, J3), Docker/Firecracker executor (J11), the live 73-provider
+> validation matrix (needs API keys).
 
 ## Implementation status (original baseline — as of 2026-05-28)
 
@@ -208,17 +206,16 @@ Items are tagged with the git commit that landed them.
 | J1 — Goal refinement + challenge        | ✅ **wired** | `refine.rs`: parse clarify/challenge/restatement/alternatives; `decide` → Proceed / NotifyWindow / AskUser by confidence + `challenge_threshold`. **Live (session 3):** `pilot run` runs the refinement agent before E2 (gated by the `goal_refinement` capability, autopilot default); `refine_goal`/`ask_user_refinement` render the negotiation and feed the (possibly restated) goal into the run |
 | J2 — Daemon mode                        | ✅ **wired** | `daemon.rs` logic + `run_cycle`/`run_n_cycles` + **live `wingman pilot daemon` CLI command** (real poll loop: `run_cycle` on the configured interval, logs decisions, queues accepted candidates to `.wingman/daemon-queue.jsonl`; `--cycles N` for one-shot). Functions fully given a GitHub token. **Deferred:** auto-dispatching accepted goals into nested runs |
 | J3 — Multi-channel intake               | ✅ **wired** | `intake.rs` normalization + `scan_inbox` (file-drop, fs-tested) + **`webhook.rs` inbound HTTP receiver** (dependency-free `TcpListener`; `handle_connection`/`serve` loopback-tested) + outbound `notify::send_webhook`. **Deferred:** Slack/email *transports* (thin transforms over `normalize`, need live accounts) |
-| J4 — Mid-run interjection               | ✅ logic | `interject.rs`: parse `tell`/`ask` → `Dispatch` over E10 `ipc`. **Deferred:** CLI subcommands + live channel delivery |
+| J4 — Mid-run interjection               | ❌ not started | A logic-only `interject.rs` was written and then removed (never had a caller). Design retained in `docs/AUTONOMOUS-MODE.md`; tracked in #35, which needs the `AgentLoop` injection hook first. |
 | J5 — Proactive status reporting         | ✅ **wired** | `reporting.rs`: per-run start/mid(>50% est.)/complete/failure + daily standup + weekly summary renderers. **Live (session 3):** `pilot run` pushes a completion/failure report at run end, routed by severity through `[pilot.notifications]` (`report_run_outcome` → `notify::route`) to the terminal or the `.wingman/pilot-digest.jsonl` digest. **Deferred:** daemon-scheduled standup/weekly cron + Slack/email transports |
 | J6 — Real verification (run/screenshot/http) | ✅ partial | Added `Acceptance::Run` + `Acceptance::Assert` (screenshot text-contains) variants; sync runner executes both. **Deferred:** real browser/screenshot capture + async `http` runner |
-| J7 — Tool synthesis                     | ✅ logic | `toolsynth.rs`: `ToolProposal` parse + `validate` (name/schema/dup) + `accept_batch` dedupe. **Deferred:** `tool-smith` role that generates impl+test + registration |
+| J7 — Tool synthesis                     | ❌ not started | A logic-only `toolsynth.rs` was written and then removed (never had a caller; it wrote scaffolds and a registry line, not a live tool). Design retained in `docs/AUTONOMOUS-MODE.md`. |
 | J8 — Project knowledge graph            | ✅ logic | `knowledge.rs`: `Hotspots` (edit/conflict heat → scheduler bias), `decisions.jsonl` append/load, `render_architecture`. **Deferred:** knowledge-keeper agent that regenerates these post-merge |
 | J9 — Cost / time / risk estimation with confidence | ✅ **wired** | `estimate.rs` logic + **live**: `pilot.rs` prints the estimate banner before the approval decision. **Session 5** feeds real `CostSamples` from past runs' per-task USD (`estimate::cost_samples_from_runs` + `dashboard::load_all_run_states`), so the bands tighten and confidence rises once a project has history (graceful static-prior fallback with none). **Deferred:** none |
 | J10 — Critic agent                      | ✅ **wired** | `critic.rs` logic + **live**: `pipeline::run_critic_pass` runs a critic agent before the auto-merge gate (gated by the `critic` capability, autopilot default); a high+ risk vetoes auto-merge. **Deferred:** run it at plan-time too + force a different model family |
 | J11 — Sandboxed execution tiers         | ✅ **wired** | `sandbox.rs` (`select_tier`/`container_run_argv`/`run_in_container`/`docker_available`/`resolve_effective_tier`) + **live**: `pipeline::compute_sandbox_tiers` chooses each task's tier and **degrades container/vm→host when no Docker daemon is reachable** (graceful, tested); `run_in_container` invokes `docker run`. **Deferred (leaf):** a real Docker/Firecracker daemon + patch-back — needs Docker on the host |
 | J12 — Skill packs                       | ✅ logic | `skillpack.rs`: parse `owner/name@semver`, `SemVer::satisfies` caret rules, `PackManifest`, install-path resolution. **Deferred:** the git/local fetcher + installer |
-| J13 — Real-time watcher hooks           | ✅ logic | `watcher.rs`: `react` maps watch events → fixer-run / auto-merge / triage / research / propose. **Deferred:** the fs-watch + git-hook + webhook listeners |
-| J14 — Voice intake (opt-in)             | ✅ logic + transcribe | `voice.rs`: `transcript_to_goal` (gated) + `whisper_argv` + `transcribe_file` (runs whisper.cpp on a clip, tested). **Deferred:** the actual mic capture + hotkey (needs audio hardware) |
+| J13 — Real-time watcher hooks           | ❌ not started | A logic-only `watcher.rs` was written and then removed (never had a caller; also shipped a `#!/bin/sh` git hook that could not run on Windows). Design retained in `docs/AUTONOMOUS-MODE.md`. |
 | J15 — Hard escalation triggers          | ✅ **wired** | `escalation.rs`: `check_runtime` already covered the numeric triggers (net-negative tests, cost ×0.8/×1.0, 3 consecutive failures, R1 irreversible). **Session 4** added the static detectors — `dangerous_path_triggers` (dangerous_paths hit the goal never mentions, via `goal_mentions_path`), `secret_triggers` (reuses `security::scan_secrets`), `license_header_triggers`, `force_push_trigger` (`is_pilot_namespace` guard) — plus `EscalationTrigger::blocks_auto_merge`. **Live:** `pipeline::detect_escalation_triggers` runs the plan+diff checks on the PR path and feeds `dangerous_paths_touched` + a blocking-trigger veto into the E8 auto-merge gate; surfaced in `PipelineOutcome.escalation_triggers`. **Deferred:** wiring `check_runtime` (needs test-count + prior-run-outcome telemetry) and force-push detection into the live git path; folding static triggers into the blocked-run escalation packet (R3) |
 
 ### R-series (production hardening) — ❌ Not started
@@ -261,8 +258,7 @@ Items are tagged with the git commit that landed them.
    different model family.
 8. **Then the rest of M3 J-series** — daemon (J2), intake (J3, J4,
    J5), verification (J6), sandboxing (J11), knowledge (J8), critic
-   (J10), tool synthesis (J7), skill packs (J12), watcher (J13),
-   voice (J14, opt-in).
+   (J10), tool synthesis (J7), skill packs (J12).
 9. **R3, R4, R5** alongside whichever M2/M3 work surfaces them.
 
 ### Deferred items requiring user input
@@ -428,7 +424,6 @@ in this document. ✓ = on by default at this tier; — = off by default
 | Sandboxed execution tiers (J11)                  |    —    |     —      |     ✓     |
 | Skill packs (J12)                                |    —    |     —      |     ✓     |
 | Real-time watcher hooks (J13)                    |    —    |     —      |     ✓     |
-| Voice intake (J14, opt-in)                       |    —    |     —      |     ✓     |
 
 A `copilot` user who wants only the critic agent without going to
 full autopilot writes:
@@ -490,8 +485,6 @@ webhook_url              = "https://hooks.slack.com/..."
 trigger_pattern          = "@wingman"
 [pilot.intake.email]
 address                  = "wingman+arc-code@example.com"
-[pilot.intake.voice]
-enabled                  = false
 
 [pilot.refine]                                        # autopilot
 max_clarifying_questions = 3
@@ -573,7 +566,7 @@ rather than a horizontal slice.
 | **M1**    | `assist`    | Phases 1–8: scaffolding, planner, worker subprocess, manager, worktree+merge, PR, TUI, provider matrix |
 | **M2**    | `copilot` | Phases 7.5–7.9 folded in: E1, E2, E3, E4, E5, E6, E7, E8, E10, E11, J6, J9, J15                       |
 | **M3**    | `autopilot`  | Phases 9–12 folded in: J1, J2, J3, J4, J5, J7, J8, J10, J11, J12, J13                                 |
-| **M4**    | polish       | J14 voice, skill pack registry, daemon dashboards, perf tuning, removal of `autonomous` alias         |
+| **M4**    | polish       | skill pack registry, daemon dashboards, perf tuning, removal of `autonomous` alias                    |
 
 Default tier at each milestone:
 
@@ -1597,17 +1590,6 @@ in real time:
 This is the closest thing to "Jarvis is just *there*, listening." It's
 J2 with sub-second latency for specific high-value triggers.
 
-### J14. Voice intake (optional, opt-in)
-
-For the "talk to it" feel: a tiny local STT shim (whisper.cpp or
-platform-native) bound to a hotkey that captures speech, transcribes,
-and dispatches to the daemon's intake queue. Output read back via TTS
-or just routed to the notify channel.
-
-This is mostly UX gloss — useful for kicking off goals while
-context-switching, not for actual control. Behind
-`[autonomous.intake.voice].enabled = false` by default.
-
 ### J15. Honest limits & escalation triggers
 
 To stay trustworthy, the daemon must know when to *stop* and ask:
@@ -1669,12 +1651,12 @@ new tools; skill packs are installable.
 to host only after approval; a synthesized tool from one run is used
 successfully in the next; an external skill pack installs and runs.
 
-### Phase 13 — Conversational + voice (J4, J14)
+### Phase 13 — Conversational (J4)
 
-Goal: mid-run redirection works from any channel; optional voice intake.
+Goal: mid-run redirection works from any channel.
 
 **Done when:** a Slack reply mid-run changes the plan without killing
-it; voice intake (opt-in) successfully dispatches a goal end-to-end.
+it.
 
 ---
 

@@ -16,8 +16,6 @@ pub enum Channel {
     Email,
     Webhook,
     FileDrop,
-    /// J14 — voice intake, after transcription.
-    Voice,
 }
 
 impl Channel {
@@ -30,7 +28,6 @@ impl Channel {
             Self::Email => "email",
             Self::Webhook => "webhook",
             Self::FileDrop => "file_drop",
-            Self::Voice => "voice",
         }
     }
 }

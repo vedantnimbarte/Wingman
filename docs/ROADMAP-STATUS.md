@@ -30,7 +30,7 @@ number of tested-but-uncalled modules; see
 | **reqwest 0.13 unify (L2)** | All first-party crates on reqwest 0.13 + ring; only `hf-hub` (embeddings) keeps a transitive 0.12 | — |
 | **Browser verification (T2.4)** | `wingman-browser` crate + `BrowserGate` (`[verify].browser`); screenshot diff vs baseline. **Not in the default build, and the gate fails open when no browser is present.** | a Chrome binary + `--features browser` |
 | **Server-backed team memory (T3.9)** | `[team].endpoint` + `wingman memory push` / `pull` (non-clobbering merge) | a team memory HTTP endpoint |
-| **Pilot Slack/email/voice intake (L4)** | `wingman pilot intake slack\|email\|voice` → intake files | Slack app / mail delivery / an STT transcript |
+| **Pilot Slack/email intake (L4)** | `wingman pilot intake slack\|email` → intake files | Slack app / mail delivery |
 | **Editor bridge (T2.6)** | `editors/vscode` — VS Code extension over `wingman mcp-serve` | npm build + VS Code |
 
 ## Notes on the infra-dependent items
@@ -46,9 +46,8 @@ number of tested-but-uncalled modules; see
   implementing that contract (a ~20-line handler).
 - **Pilot intake** — Slack event parsing, `.eml` parsing, and intake-file
   writing are unit-tested; the Slack front end is a minimal HTTP server (put
-  TLS/ingress in front), email ingests `.eml` files your mail system delivers,
-  and voice ingests any STT transcript file. A live mic front end still needs
-  audio hardware + a local STT model, which any STT tool can supply via `voice`.
+  TLS/ingress in front), and email ingests `.eml` files your mail system
+  delivers.
 - **Editor bridge** — complete TypeScript extension (thin MCP client). Ships via
   the VS Code Marketplace on its own npm toolchain, separate from the Rust
   release pipeline; `npm install && npm run build` in `editors/vscode`.
