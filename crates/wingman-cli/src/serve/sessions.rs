@@ -93,14 +93,29 @@ pub async fn get(project: &Project, id: &str, sock: &mut TcpStream) -> std::io::
 }
 
 /// `DELETE /v1/projects/{p}/sessions/{id}`
+///
+/// Removes the transcript *and* whatever was indexed from it. A finished turn
+/// is embedded into the global session store for `recall_session`, so deleting
+/// only the JSONL would leave the conversation retrievable by search — a
+/// delete that does not delete.
 pub async fn delete(project: &Project, id: &str, sock: &mut TcpStream) -> std::io::Result<()> {
     let Some(path) = wingman_session::session_path(&sessions_dir(project), id) else {
         return http::write_err(sock, 404, "no such session").await;
     };
-    match std::fs::remove_file(&path) {
-        Ok(()) => http::write_json(sock, 200, &json!({ "deleted": id })).await,
-        Err(e) => http::write_err(sock, 500, &format!("deleting session: {e}")).await,
+    if let Err(e) = std::fs::remove_file(&path) {
+        return http::write_err(sock, 500, &format!("deleting session: {e}")).await;
     }
+    // Report the index outcome rather than swallowing it: "the transcript is
+    // gone but recall may still find it" is something the caller should learn
+    // from the response, not from a surprise later.
+    let deindexed = match wingman_learn::session_index::forget_session(id) {
+        Ok(found) => json!(found),
+        Err(e) => {
+            tracing::warn!("session {id} deleted but its index entry remains: {e}");
+            json!({ "error": e.to_string() })
+        }
+    };
+    http::write_json(sock, 200, &json!({ "deleted": id, "deindexed": deindexed })).await
 }
 
 /// Body for a turn.

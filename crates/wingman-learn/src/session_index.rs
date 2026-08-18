@@ -166,6 +166,30 @@ pub async fn index_session_into(
     Ok(chunks.len())
 }
 
+/// Forget everything indexed for `session_id` in the global session store.
+///
+/// Deleting a session's transcript is not a delete while its chunks are still
+/// in `~/.wingman/sessions.db`: `recall_session` would keep surfacing the
+/// content of a conversation the user believes is gone. Whoever removes the
+/// JSONL should call this too.
+///
+/// Opens the store for maintenance rather than with a real embedder, so this
+/// costs a SQLite `DELETE` instead of loading an embedding model. `Ok(false)`
+/// means there was no index to clean — not a failure.
+pub fn forget_session(session_id: &str) -> Result<bool> {
+    let dir = wingman_config::global_dir()?;
+    let path = dir.join("sessions.db");
+    let store = IndexStore::open_for_maintenance(&path)
+        .map_err(|e| crate::LearnError::Other(format!("open sessions.db: {e}")))?;
+    let Some(store) = store else {
+        return Ok(false);
+    };
+    store
+        .forget(&format!("session:{session_id}"))
+        .map_err(|e| crate::LearnError::Other(format!("forget session: {e}")))?;
+    Ok(true)
+}
+
 /// Search a session store and return hits with their session id parsed out
 /// of the synthetic path.
 pub async fn search_sessions(

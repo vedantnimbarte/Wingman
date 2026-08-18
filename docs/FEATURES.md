@@ -147,6 +147,11 @@ Wingman different; this is everything else it does.
   them — most valuably `semantic_search` (the warm repo index) and
   `recall_memory` (team memory). Read-only by default. Wingman is both an MCP
   host *and* an MCP server.
+- **HTTP/SSE API.** `wingman serve` puts one daemon in front of an allowlist of
+  repos so another machine, a phone, a Shortcut, or CI can drive Wingman: run
+  and steer pilot fleets, hold streaming conversations, and reach the rest of
+  the CLI. Bearer auth, and a permission ceiling a request cannot raise.
+  `--remote <url>` points the CLI at it. See [HTTP-API.md](HTTP-API.md).
 - **Git-native auto-commit.** `[git].auto_commit = true` turns each AI change
   into a reviewable, revertable commit with a generated message (Aider-style),
   composing with the rewind timeline and verification gate.
