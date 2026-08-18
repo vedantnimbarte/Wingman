@@ -224,8 +224,12 @@ Pre-1.0. The parts worth knowing before you lean on them:
   doctor` reports which you have.
 - **Pilot mode is user-validated, not CI-validated** end-to-end. CI runs the
   unit suite.
-- **Browser verification fails open.** Needs `--features browser` and Chrome;
-  with no browser present the gate passes rather than blocking.
+- **Browser verification fails open, and is local-only.** Needs
+  `--features browser` and Chrome; with no browser present the gate passes
+  rather than blocking. That feature also links a GPL-3.0 dependency, so a
+  binary built with it is not redistributable under Apache-2.0 — use it on your
+  own machine, don't ship it. See
+  [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
 - **Skill "outcome scoring" is a phrase heuristic** over your replies, not a
   learned signal. Treat the numbers as a rough tally.
 - **Team memory and Slack intake need your infrastructure** — they speak simple

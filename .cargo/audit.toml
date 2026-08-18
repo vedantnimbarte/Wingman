@@ -1,0 +1,27 @@
+# cargo-audit policy. The `audit` CI job is REQUIRED — a new RUSTSEC advisory
+# fails the build. Everything we knowingly tolerate is listed here, each with
+# the crate, the reason, and the way out. Full write-up in
+# docs/DEPENDENCIES.md.
+#
+# This is the single advisory ignore list. `deny.toml` covers licences, bans,
+# and sources only — cargo-deny does not flag the `unsound` advisories below,
+# so it is not a substitute for this job.
+
+[advisories]
+ignore = [
+    # ring 0.17.9 — AES functions may panic when overflow checking is enabled.
+    # Fixed in ring >= 0.17.12, which requires cc ^1.2.8. We are held at cc
+    # 1.0.x by tree-sitter-javascript 0.21.4 (`cc = "~1.0.90"`), so the real
+    # fix is the tree-sitter 0.22 -> 0.23 migration, not a ring bump.
+    "RUSTSEC-2025-0009",
+
+    # paste 1.0.15 — unmaintained. A proc-macro pulled transitively by
+    # tokenizers -> fastembed (embeddings). No first-party code touches it.
+    "RUSTSEC-2024-0436",
+
+    # lru 0.12.5 — two unsoundness advisories (IterMut stacked-borrows
+    # violation; panic safety in LruCache::pop). Pinned by ratatui 0.29.0 for
+    # its internal line-wrap cache; we never call lru directly.
+    "RUSTSEC-2026-0002",
+    "RUSTSEC-2026-0253",
+]
