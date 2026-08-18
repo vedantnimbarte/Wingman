@@ -272,13 +272,141 @@ fn is_safe_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
-/// Walk the project's sessions dir and embed any sessions that aren't yet
-/// in `store`. Useful at startup to backfill the index without needing to
-/// hook session shutdown. Returns the number of sessions indexed.
+/// Backfill every unindexed session in the project, with no cutoff.
 pub async fn backfill_project_sessions(
     project_root: &std::path::Path,
     store: &IndexStore,
     embedder: &dyn Embedder,
+) -> Result<usize> {
+    backfill_project_sessions_since(project_root, store, embedder, None).await
+}
+
+/// Queue of sessions waiting to be embedded, one absolute path per line.
+///
+/// Indexing a session costs an embedding-model load, which is far too much to
+/// put on a process's exit path (see the comment in `commands/headless.rs`).
+/// Recording *that there is work to do* costs a file append, so exit does that
+/// and the next run does the embedding.
+///
+/// This is what makes the backfill global rather than per-project. Scanning
+/// the current project at startup can never reach a session written in a repo
+/// you have not opened since — which is precisely the session cross-project
+/// recall exists to surface.
+fn pending_path() -> Result<PathBuf> {
+    Ok(wingman_config::ensure_global_dir()?.join("pending-sessions.txt"))
+}
+
+/// Note that `session_path` still needs indexing. Cheap enough for an exit
+/// path: one append, no embedding, no database.
+pub fn enqueue_pending(session_path: &std::path::Path) -> Result<()> {
+    enqueue_pending_at(&pending_path()?, session_path)
+}
+
+/// [`enqueue_pending`] against an explicit queue file.
+pub fn enqueue_pending_at(queue: &std::path::Path, session_path: &std::path::Path) -> Result<()> {
+    use std::io::Write;
+    let path = queue.to_path_buf();
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| crate::LearnError::Other(format!("open {}: {e}", path.display())))?;
+    writeln!(f, "{}", session_path.display())
+        .map_err(|e| crate::LearnError::Other(format!("write {}: {e}", path.display())))?;
+    Ok(())
+}
+
+/// Index everything on the queue, up to `limit` sessions, and clear it.
+///
+/// The queue is claimed by renaming it aside before any work starts, so two
+/// wingman processes starting at once do not both embed the same backlog and
+/// do not race each other's rewrite. Entries that are already indexed are
+/// skipped cheaply; entries whose file has since been deleted are dropped;
+/// anything left over — because it failed, or because `limit` was reached — is
+/// put back for the next run.
+///
+/// `limit` keeps the first run after a long gap from embedding an unbounded
+/// backlog before the user gets their prompt back.
+pub async fn drain_pending(
+    store: &IndexStore,
+    embedder: &dyn Embedder,
+    limit: usize,
+) -> Result<usize> {
+    drain_pending_at(&pending_path()?, store, embedder, limit).await
+}
+
+/// [`drain_pending`] against an explicit queue file.
+pub async fn drain_pending_at(
+    queue: &std::path::Path,
+    store: &IndexStore,
+    embedder: &dyn Embedder,
+    limit: usize,
+) -> Result<usize> {
+    let path = queue.to_path_buf();
+    if !path.exists() {
+        return Ok(0);
+    }
+    let claimed = path.with_extension("txt.claimed");
+    // Rename is the claim. Losing the race means another process owns this
+    // batch, which is a reason to do nothing rather than to duplicate it.
+    if std::fs::rename(&path, &claimed).is_err() {
+        return Ok(0);
+    }
+    let body = std::fs::read_to_string(&claimed).unwrap_or_default();
+
+    let mut indexed = 0usize;
+    let mut leftover: Vec<String> = Vec::new();
+    for (n, line) in body.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if n >= limit {
+            leftover.push(line.to_string());
+            continue;
+        }
+        let session = std::path::Path::new(line);
+        if !session.exists() {
+            continue; // deleted since it was queued — nothing to index
+        }
+        let Some(session_id) = session.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let key = format!("session:{session_id}");
+        if matches!(store.file_hash(&key), Ok(Some(_))) {
+            continue; // already indexed, by a previous drain or the TUI
+        }
+        match index_session_into(store, embedder, session).await {
+            Ok(n) if n > 0 => indexed += 1,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("pending session {line}: {e}");
+                leftover.push(line.to_string());
+            }
+        }
+    }
+
+    let _ = std::fs::remove_file(&claimed);
+    for line in leftover {
+        let _ = enqueue_pending_at(&path, std::path::Path::new(&line));
+    }
+    Ok(indexed)
+}
+
+/// Walk the project's sessions dir and embed any sessions that aren't yet
+/// in `store`. Useful at startup to backfill the index without needing to
+/// hook session shutdown. Returns the number of sessions indexed.
+/// `newer_than` excludes sessions that appeared after the caller started —
+/// they belong to a live process (usually this one), which is still appending
+/// to them and will queue them on exit via [`enqueue_pending`]. Without that
+/// cutoff the scan embeds a half-written transcript and then gets killed when
+/// the process exits, which is both wasted work and an alarming warning about
+/// a session that was never in danger.
+pub async fn backfill_project_sessions_since(
+    project_root: &std::path::Path,
+    store: &IndexStore,
+    embedder: &dyn Embedder,
+    newer_than: Option<std::time::SystemTime>,
 ) -> Result<usize> {
     let sessions_dir = project_root.join(".wingman").join("sessions");
     if !sessions_dir.exists() {
@@ -293,6 +421,16 @@ pub async fn backfill_project_sessions(
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
+        }
+        if let Some(cutoff) = newer_than {
+            let live = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|m| m >= cutoff)
+                .unwrap_or(false);
+            if live {
+                continue; // a running process owns this one
+            }
         }
         let session_id = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s.to_string(),
@@ -367,6 +505,108 @@ mod tests {
         // Would previously escape to ../outside.jsonl.
         assert!(session_path_for(&root, "../outside").is_none());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A temp dir per test — the queue must never be the user's real
+    /// `~/.wingman/pending-sessions.txt`.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wingman-pending-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn store_in(dir: &std::path::Path, emb: &HashEmbedder) -> IndexStore {
+        IndexStore::open(&dir.join("sessions.db"), emb.id(), emb.dim()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_queued_session_is_indexed_by_the_next_drain() {
+        let dir = scratch("basic");
+        let emb = HashEmbedder::default();
+        let store = store_in(&dir, &emb);
+        let session = dir.join("20260101T000000000Z.jsonl");
+        write_session(&session);
+        let queue = dir.join("pending.txt");
+
+        enqueue_pending_at(&queue, &session).unwrap();
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 25).await.unwrap(), 1);
+
+        // Recallable now, and the queue is emptied rather than replayed.
+        assert!(store
+            .file_hash("session:20260101T000000000Z")
+            .unwrap()
+            .is_some());
+        assert!(!queue.exists());
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 25).await.unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn the_limit_bounds_one_run_and_requeues_the_rest() {
+        let dir = scratch("limit");
+        let emb = HashEmbedder::default();
+        let store = store_in(&dir, &emb);
+        let queue = dir.join("pending.txt");
+        for i in 0..4 {
+            let s = dir.join(format!("2026010{i}T000000000Z.jsonl"));
+            write_session(&s);
+            enqueue_pending_at(&queue, &s).unwrap();
+        }
+
+        // A long gap must not turn the next launch into a batch job.
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 2).await.unwrap(), 2);
+        // The remainder is not lost — it waits for the run after.
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 25).await.unwrap(), 2);
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 25).await.unwrap(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn already_indexed_and_deleted_entries_are_dropped_quietly() {
+        let dir = scratch("skip");
+        let emb = HashEmbedder::default();
+        let store = store_in(&dir, &emb);
+        let queue = dir.join("pending.txt");
+
+        let indexed = dir.join("20260101T000000001Z.jsonl");
+        write_session(&indexed);
+        index_session_into(&store, &emb, &indexed).await.unwrap();
+
+        let gone = dir.join("20260101T000000002Z.jsonl");
+        write_session(&gone);
+        std::fs::remove_file(&gone).unwrap();
+
+        enqueue_pending_at(&queue, &indexed).unwrap();
+        enqueue_pending_at(&queue, &gone).unwrap();
+
+        // Neither is work: one is done, the other no longer exists.
+        assert_eq!(drain_pending_at(&queue, &store, &emb, 25).await.unwrap(), 0);
+        assert!(!queue.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn draining_a_queue_that_does_not_exist_is_not_an_error() {
+        let dir = scratch("empty");
+        let emb = HashEmbedder::default();
+        let store = store_in(&dir, &emb);
+        assert_eq!(
+            drain_pending_at(&dir.join("nope.txt"), &store, &emb, 25)
+                .await
+                .unwrap(),
+            0
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

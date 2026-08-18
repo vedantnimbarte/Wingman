@@ -514,14 +514,38 @@ pub async fn build_registry_with_learn(
                 None
             }
         };
-        // Backfill any unindexed sessions in the background so the user
-        // can immediately recall recent work.
+        // Backfill unindexed sessions in the background so the user can
+        // immediately recall recent work. Two sources, because neither covers
+        // the other: the queue holds sessions any project left behind on exit,
+        // while the project scan catches anything the queue missed (a crash
+        // before the append, a log copied in by hand).
         if let Some(store) = sess_store.clone() {
             let emb = embedder.clone();
             let root = paths.root.clone();
+            // Anything that appears from here on belongs to a live process and
+            // will be queued by its owner on exit.
+            let started_at = std::time::SystemTime::now();
             tokio::spawn(async move {
-                match wingman_learn::session_index::backfill_project_sessions(&root, &store, &*emb)
-                    .await
+                match wingman_learn::session_index::drain_pending(
+                    &store,
+                    &*emb,
+                    PENDING_DRAIN_LIMIT,
+                )
+                .await
+                {
+                    Ok(n) if n > 0 => {
+                        tracing::info!("indexed {n} queued session(s) into sessions.db")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("draining queued sessions failed: {e}"),
+                }
+                match wingman_learn::session_index::backfill_project_sessions_since(
+                    &root,
+                    &store,
+                    &*emb,
+                    Some(started_at),
+                )
+                .await
                 {
                     Ok(n) if n > 0 => {
                         tracing::info!("backfilled {n} session(s) into sessions.db")
@@ -623,6 +647,11 @@ fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathB
 /// Build the project's RAG indexer. Uses fastembed (BGE small) by default
 /// and falls back to a deterministic hash embedder if fastembed init fails
 /// (e.g. on systems without ONNX runtime libraries).
+/// How many queued sessions one startup will embed. A long gap between runs
+/// should not turn the next launch into a batch job before the user gets a
+/// prompt; the rest stay queued for the run after.
+const PENDING_DRAIN_LIMIT: usize = 25;
+
 pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
     let embedder = pick_embedder();
     let store = match IndexStore::open(&paths.index_db, embedder.id(), embedder.dim()) {
