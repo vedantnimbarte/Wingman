@@ -63,6 +63,9 @@ async fn fire(cfg: &Config, task: &ScheduledTask) -> Result<()> {
         json: false,
         mode_override: None,
         model_override: task.model.clone(),
+        // Not a resumable conversation: this command runs one framed prompt.
+        session_id: None,
+        resume: None,
     };
     let code = crate::commands::headless::run(cfg.clone(), opts).await?;
     if code != ExitCode::SUCCESS {

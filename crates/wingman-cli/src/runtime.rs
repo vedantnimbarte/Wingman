@@ -40,19 +40,15 @@ pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selec
         });
 
     let (provider_id, model) = match raw {
-        Some(s) if s.contains('/') => {
-            let (p, m) = s.split_once('/').unwrap();
-            (p.to_string(), m.to_string())
-        }
-        Some(s) => {
-            let provider = cfg.default_provider.clone().ok_or_else(|| {
-                anyhow!(
-                    "no provider configured. Run `wingman login <provider>` \
-                     (e.g. `wingman login anthropic`), or pass --model provider/model"
-                )
-            })?;
-            (provider, s)
-        }
+        // `Config::resolve_model_spec` decides whether a `/` separates a
+        // provider from a model or is part of an aggregator's model id
+        // (`openrouter` + `deepseek/deepseek-chat`).
+        Some(s) => cfg.resolve_model_spec(&s).ok_or_else(|| {
+            anyhow!(
+                "no provider configured. Run `wingman login <provider>` \
+                 (e.g. `wingman login anthropic`), or pass --model provider/model"
+            )
+        })?,
         None => {
             let provider = cfg.default_provider.clone().ok_or_else(|| {
                 anyhow!(
@@ -1432,13 +1428,13 @@ pub async fn build_agent_registry_with_fallback(
         Ok(pair) => Ok(pair),
         Err(primary_err) => {
             for raw in &cfg.router.fallback_models {
-                let Some((p, m)) = raw.split_once('/') else {
+                let Some((p, m)) = cfg.resolve_model_spec(raw) else {
                     tracing::warn!("skipping fallback '{raw}': expected provider/model");
                     continue;
                 };
                 let sel = Selection {
-                    provider_id: p.to_string(),
-                    model: m.to_string(),
+                    provider_id: p,
+                    model: m,
                 };
                 match build_agent_and_registry(cfg, &sel, mode).await {
                     Ok(pair) => {
@@ -1535,18 +1531,19 @@ pub async fn build_agent_registry_learn(
                     // Model resolution: explicit override > task-class routing
                     // ([router.classes], e.g. search/summarize → fast_model) >
                     // the session's default selection.
-                    let sel = if spec.model.contains('/') {
-                        let (p, m) = spec.model.split_once('/').unwrap();
+                    let sel = if let Some((p, m)) = (!spec.model.is_empty())
+                        .then(|| cfg.resolve_model_spec(&spec.model))
+                        .flatten()
+                    {
                         Selection {
-                            provider_id: p.to_string(),
-                            model: m.to_string(),
+                            provider_id: p,
+                            model: m,
                         }
                     } else if let Some((p, m)) = cfg
                         .router
                         .resolve_class(&spec.task_class)
                         .as_deref()
-                        .and_then(|s| s.split_once('/'))
-                        .map(|(p, m)| (p.to_string(), m.to_string()))
+                        .and_then(|s| cfg.resolve_model_spec(s))
                     {
                         tracing::info!("routing subagent (class '{}') to {p}/{m}", spec.task_class);
                         Selection {

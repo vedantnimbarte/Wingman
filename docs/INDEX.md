@@ -36,6 +36,11 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Best for: Understanding how Wingman learns from sessions, persists across projects, and builds institutional knowledge.
   - Read this if: You're using memory features, skill extraction, or cross-project recall.
 
+- **[HTTP-API.md](HTTP-API.md)** — The `wingman serve` HTTP/SSE API: one daemon over an allowlist of repos, bearer auth, a permission ceiling requests cannot raise, SSE streams, and `--remote` client mode.
+  - Best for: driving Wingman from another machine, a phone, CI, or your own app.
+  - Read this if: you want pilot runs steerable from anywhere, or a scriptable surface over the CLI.
+  - Build order and design record: [HTTP-API-PLAN.md](HTTP-API-PLAN.md).
+
 - **[TOOLS.md](TOOLS.md)** — Reference for all 20+ built-in tools (file I/O, search, shell, semantic search, memory, skills, session management).
   - Best for: Complete tool signatures, behavior, permission requirements, error handling.
   - Read this if: You want to know what tools are available or how to use a specific tool.
@@ -73,6 +78,7 @@ Key commands:
 - `wingman skill extract` — mine skills from sessions.
 - `wingman discover` — find local LLMs.
 - `wingman pilot run "<goal>"` — multi-agent orchestration → PR (see [PILOT-MODE.md](PILOT-MODE.md)).
+- `wingman serve` — HTTP/SSE API for remote control (see [HTTP-API.md](HTTP-API.md)).
 
 ### Configuration
 
@@ -236,6 +242,8 @@ docs/
 ├── TREE-SITTER.md           (language parsing integration)
 ├── LEARNING-LOOP.md         (memories, skills, session recall)
 ├── TOOLS.md                 (complete tool reference)
+├── HTTP-API.md              (the `wingman serve` API surface)
+├── HTTP-API-PLAN.md         (its build order and design record)
 ├── AUTONOMOUS-MODE.md       (pilot mode design — shipped as `wingman pilot`)
 └── DIFFERENTIATION.md       (single-agent differentiation roadmap)
 

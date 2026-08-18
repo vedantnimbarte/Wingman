@@ -259,6 +259,97 @@ pub struct Config {
     /// Self-improvement loop (memory, skills).
     #[serde(default)]
     pub learn: LearnConfig,
+
+    /// HTTP/SSE API (`wingman serve`). Global-config only — deliberately
+    /// absent from `PROJECT_SAFE_KEYS`, so a cloned repo's `.wingman/
+    /// config.toml` can never set the token, widen the project allowlist,
+    /// or raise the permission ceiling. See `docs/HTTP-API.md`.
+    #[serde(default)]
+    pub serve: ServeConfig,
+}
+
+/// Settings for the HTTP API daemon. See `docs/HTTP-API.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServeConfig {
+    /// Bind address. Binding anything other than loopback requires a token
+    /// of at least [`MIN_REMOTE_TOKEN_LEN`] characters.
+    pub addr: String,
+    /// Bearer token every request must present. Supports `${ENV_VAR}`
+    /// indirection, or the literal `"keyring"` to read the entry written by
+    /// `wingman serve --init-token`.
+    pub token: Option<String>,
+    /// Ceiling on the permission mode any request may obtain. A request may
+    /// ask for less; it can never obtain more. `yolo` additionally requires
+    /// `--allow-yolo` on the command line — remote arbitrary shell should
+    /// take a deliberate act at launch, not a config line someone forgot.
+    pub max_permission_mode: PermissionMode,
+    /// Concurrent agent turns across all projects. Further turns queue.
+    pub max_concurrent_turns: usize,
+    /// Wall clock for a single turn or exec, in seconds.
+    pub request_timeout_secs: u64,
+    /// The repos this server will serve. Nothing outside this list is
+    /// reachable, so a stolen token cannot point the agent at an arbitrary
+    /// directory.
+    pub projects: Vec<ServeProject>,
+    /// Outbound push so a phone need not poll.
+    pub push: ServePushConfig,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:8787".into(),
+            token: None,
+            // Edit-capable but not shell-unrestricted: the useful default for
+            // driving real work remotely without handing out a shell.
+            max_permission_mode: PermissionMode::AutoEdit,
+            max_concurrent_turns: 2,
+            request_timeout_secs: 1800,
+            projects: Vec::new(),
+            push: ServePushConfig::default(),
+        }
+    }
+}
+
+/// Minimum token length accepted when binding a non-loopback address.
+pub const MIN_REMOTE_TOKEN_LEN: usize = 32;
+
+/// One repo the API may operate on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServeProject {
+    /// URL-safe identifier used in paths (`/v1/projects/<id>/…`). Defaults
+    /// to the directory name when omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Absolute path to the repository root.
+    pub root: PathBuf,
+}
+
+impl ServeProject {
+    /// Effective id: the explicit one, else the directory name.
+    pub fn effective_id(&self) -> String {
+        match &self.id {
+            Some(id) => id.clone(),
+            None => self
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".into()),
+        }
+    }
+}
+
+/// Outbound push: the server POSTs to `url` on subscribed events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServePushConfig {
+    /// Target URL. Slack incoming-webhook shape, or any POST endpoint.
+    /// Supports `${ENV_VAR}` indirection.
+    pub url: Option<String>,
+    /// Event kinds to push. Empty means every kind the server emits.
+    pub events: Vec<String>,
 }
 
 /// Settings for the memory / skills loop.
@@ -677,6 +768,51 @@ impl Default for McpServerConfig {
 }
 
 impl Config {
+    /// Split a model spec such as `anthropic/claude-opus-4-7` into
+    /// `(provider_id, model_id)`.
+    ///
+    /// The naive reading — "everything before the first `/` is the provider" —
+    /// is wrong for aggregators, whose model ids are *themselves*
+    /// `vendor/model`: `deepseek/deepseek-chat`, `qwen/qwen3-coder`,
+    /// `mistralai/mistral-large`. Worse, several of those vendor names are
+    /// also Wingman provider ids, so "is the prefix a known provider" does not
+    /// separate the two cases either — `deepseek/deepseek-chat` reads as both.
+    ///
+    /// What actually distinguishes them is whether that provider is usable:
+    /// talking to a provider requires a `[providers.<id>]` section (see
+    /// `build_provider`). So the prefix is treated as a provider only when one
+    /// is configured; otherwise the whole spec is a model id belonging to the
+    /// default provider. `openrouter/deepseek/deepseek-chat` remains the
+    /// explicit spelling, and wins when a repo configures both.
+    ///
+    /// Returns `None` only when there is nothing to resolve against: a bare
+    /// model name and no `default_provider`.
+    pub fn resolve_model_spec(&self, spec: &str) -> Option<(String, String)> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return None;
+        }
+        match spec.split_once('/') {
+            Some((prefix, rest)) if self.providers.contains_key(prefix) && !rest.is_empty() => {
+                Some((prefix.to_string(), rest.to_string()))
+            }
+            Some((prefix, rest)) => match &self.default_provider {
+                // An aggregator id, or a provider the user has not configured:
+                // hand the whole thing to the default provider as a model.
+                Some(default) => Some((default.clone(), spec.to_string())),
+                // Nothing to default to. Keep the old split so the failure
+                // downstream still names the provider the user actually typed
+                // ("no [providers.deepseek] section") rather than a vaguer one.
+                None if !rest.is_empty() => Some((prefix.to_string(), rest.to_string())),
+                None => None,
+            },
+            None => self
+                .default_provider
+                .clone()
+                .map(|provider| (provider, spec.to_string())),
+        }
+    }
+
     /// Effective per-tool output line budget: the `[tools]` project override
     /// when set to a non-zero value, else the global `[tokens]` default.
     pub fn effective_tool_output_max_lines(&self) -> u32 {
@@ -796,6 +932,22 @@ impl Config {
             }
         }
         if let Some(s) = self.pilot.daemon.webhook_secret.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
+        // The API bearer token and push URL take the same indirection so
+        // neither has to sit in plaintext config.
+        if let Some(s) = self.serve.token.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
+        if let Some(s) = self.serve.push.url.as_mut() {
             if let Some(name) = strip_env_placeholder(s) {
                 if let Ok(val) = std::env::var(name) {
                     *s = val;
@@ -2548,6 +2700,93 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    /// A config with only OpenRouter configured — the shape that made
+    /// `default_model = "deepseek/deepseek-chat"` fail with "no
+    /// [providers.deepseek] section".
+    fn openrouter_only() -> Config {
+        toml::from_str(
+            r#"
+            default_provider = "openrouter"
+
+            [providers.openrouter]
+            model = "deepseek/deepseek-chat"
+        "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_aggregator_model_id_is_not_mistaken_for_a_provider() {
+        let cfg = openrouter_only();
+        // `deepseek` is a real Wingman provider id, but it is not configured
+        // here, so this is an OpenRouter model — the whole string.
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("openrouter".into(), "deepseek/deepseek-chat".into()))
+        );
+        assert_eq!(
+            cfg.resolve_model_spec("qwen/qwen3-coder"),
+            Some(("openrouter".into(), "qwen/qwen3-coder".into()))
+        );
+    }
+
+    #[test]
+    fn a_configured_provider_prefix_still_wins() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "openrouter"
+
+            [providers.openrouter]
+            model = "x"
+
+            [providers.deepseek]
+            model = "deepseek-chat"
+        "#,
+        )
+        .unwrap();
+        // Configured directly, so the prefix means the provider.
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("deepseek".into(), "deepseek-chat".into()))
+        );
+        // And the explicit spelling still reaches the aggregator.
+        assert_eq!(
+            cfg.resolve_model_spec("openrouter/deepseek/deepseek-chat"),
+            Some(("openrouter".into(), "deepseek/deepseek-chat".into()))
+        );
+    }
+
+    #[test]
+    fn a_bare_model_name_uses_the_default_provider() {
+        let cfg = openrouter_only();
+        assert_eq!(
+            cfg.resolve_model_spec("gpt-4.1"),
+            Some(("openrouter".into(), "gpt-4.1".into()))
+        );
+    }
+
+    #[test]
+    fn without_a_default_provider_the_prefix_is_still_read_as_one() {
+        // Nothing to fall back to, so keep the old split: the error the user
+        // then sees names the provider they actually typed.
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("deepseek".into(), "deepseek-chat".into()))
+        );
+        assert_eq!(cfg.resolve_model_spec("gpt-4.1"), None);
+        assert_eq!(cfg.resolve_model_spec(""), None);
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_produce_an_empty_model() {
+        let cfg = openrouter_only();
+        assert_eq!(
+            cfg.resolve_model_spec("openrouter/"),
+            Some(("openrouter".into(), "openrouter/".into()))
+        );
     }
 
     #[test]

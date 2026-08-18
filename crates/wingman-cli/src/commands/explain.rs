@@ -39,6 +39,9 @@ pub async fn run(base: Option<String>, staged: bool) -> Result<ExitCode> {
         json: false,
         mode_override: None,
         model_override,
+        // Not a resumable conversation: this command runs one framed prompt.
+        session_id: None,
+        resume: None,
     };
     crate::commands::headless::run(cfg, opts).await
 }

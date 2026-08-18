@@ -342,6 +342,27 @@ fn connected_provider_ids(active: &str) -> Vec<String> {
     ids
 }
 
+/// Split a `/model` argument into `(provider, model)` using the same rule the
+/// CLI uses: a `/` only separates a provider when that provider is configured,
+/// so `/model deepseek/deepseek-chat` on an OpenRouter setup selects the
+/// aggregator's model rather than looking for a `[providers.deepseek]` section
+/// that isn't there. Falls back to a plain split when config can't be read, so
+/// the command still works on a broken config.
+fn split_model_arg(arg: &str) -> Option<(String, String)> {
+    let global = wingman_config::global_config_path().ok();
+    let project_file = std::env::current_dir()
+        .ok()
+        .map(|cwd| wingman_config::ProjectPaths::discover(&cwd).config_file)
+        .filter(|p| p.exists());
+    if let Ok(cfg) = wingman_config::Config::load(global.as_deref(), project_file.as_deref()) {
+        if let Some(pair) = cfg.resolve_model_spec(arg) {
+            return Some(pair);
+        }
+    }
+    arg.split_once('/')
+        .map(|(p, m)| (p.to_string(), m.to_string()))
+}
+
 /// Apply a permission-mode selection to the status line. Validates and
 /// normalises `raw` via [`wingman_config::PermissionMode`]; on an unknown
 /// value it surfaces an error and leaves the current mode unchanged. Shared
@@ -869,9 +890,9 @@ async fn idle_step(
                                     return Ok(IdleAction::PumpModal);
                                 }
                             }
-                            Cmd::Model(Some(arg)) => match arg.split_once('/') {
+                            Cmd::Model(Some(arg)) => match split_model_arg(&arg) {
                                 Some((provider_id, model_id)) => {
-                                    swap_model(ui, agent, builder, provider_id, model_id);
+                                    swap_model(ui, agent, builder, &provider_id, &model_id);
                                 }
                                 None => {
                                     ui.transcript.push(TranscriptItem::Error(

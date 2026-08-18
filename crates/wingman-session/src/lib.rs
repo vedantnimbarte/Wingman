@@ -22,6 +22,30 @@ pub enum SessionError {
     Io(#[from] std::io::Error),
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
+    #[error(
+        "'{0}' is not a valid session id (letters, digits, '.', '-' and '_' only, 1-128 chars)"
+    )]
+    BadId(String),
+}
+
+/// A session id names a file, so it must not be able to name a *path*.
+/// Rejecting the separators outright is cheaper to reason about than
+/// canonicalising afterwards, and costs nothing legitimate: ids are minted
+/// as timestamps.
+pub fn is_valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+}
+
+/// Mint a session id in the same timestamp form [`SessionLog::create`] uses,
+/// so ids from every entry point sort together and read alike.
+pub fn new_session_id() -> String {
+    Utc::now().format("%Y%m%dT%H%M%S%3fZ").to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,8 +131,38 @@ impl SessionLog {
         Ok(Self { path, file })
     }
 
+    /// Open the session named `id` under `sessions_dir`, appending if it
+    /// already exists. This is how a conversation continues across processes:
+    /// `--print --session-id <id>` writes into the same log the previous turn
+    /// wrote, so `--resume` can rebuild the history.
+    ///
+    /// `id` is validated rather than trusted. It arrives from a command-line
+    /// flag and, with the HTTP API, from a request — a `..` in it would place
+    /// the log outside the project.
+    pub async fn open_named(sessions_dir: &Path, id: &str) -> Result<Self, SessionError> {
+        if !is_valid_session_id(id) {
+            return Err(SessionError::BadId(id.to_string()));
+        }
+        tokio::fs::create_dir_all(sessions_dir).await?;
+        let path = sessions_dir.join(format!("{id}.jsonl"));
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
+        Ok(Self { path, file })
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The session id: the log's filename without `.jsonl`.
+    pub fn id(&self) -> String {
+        self.path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
     }
 
     pub async fn write(&mut self, record: SessionRecord) -> Result<(), SessionError> {
@@ -209,6 +263,15 @@ pub fn list_sessions(sessions_dir: &Path) -> Vec<PathBuf> {
     // Sort descending so the newest session comes first.
     paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
     paths
+}
+
+/// Path of the session named `id` under `sessions_dir`, if it exists.
+pub fn session_path(sessions_dir: &Path, id: &str) -> Option<PathBuf> {
+    if !is_valid_session_id(id) {
+        return None;
+    }
+    let path = sessions_dir.join(format!("{id}.jsonl"));
+    path.is_file().then_some(path)
 }
 
 /// Load all records from a session JSONL file.
