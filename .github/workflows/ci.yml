@@ -184,6 +184,11 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses bans sources
+          # The action defaults `arguments` to `--all-features`, which
+          # overrides `[graph] all-features = false` in deny.toml and drags the
+          # optional `chrome` feature's GPL dependency back into the check.
+          # Override it so CI checks the same graph the release binary ships.
+          arguments: --workspace
 
   # Line coverage via cargo-llvm-cov. Informational: emits an lcov artifact and
   # a summary, does not fail the build on a coverage threshold.
