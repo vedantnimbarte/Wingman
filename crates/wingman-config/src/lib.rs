@@ -768,6 +768,51 @@ impl Default for McpServerConfig {
 }
 
 impl Config {
+    /// Split a model spec such as `anthropic/claude-opus-4-7` into
+    /// `(provider_id, model_id)`.
+    ///
+    /// The naive reading — "everything before the first `/` is the provider" —
+    /// is wrong for aggregators, whose model ids are *themselves*
+    /// `vendor/model`: `deepseek/deepseek-chat`, `qwen/qwen3-coder`,
+    /// `mistralai/mistral-large`. Worse, several of those vendor names are
+    /// also Wingman provider ids, so "is the prefix a known provider" does not
+    /// separate the two cases either — `deepseek/deepseek-chat` reads as both.
+    ///
+    /// What actually distinguishes them is whether that provider is usable:
+    /// talking to a provider requires a `[providers.<id>]` section (see
+    /// `build_provider`). So the prefix is treated as a provider only when one
+    /// is configured; otherwise the whole spec is a model id belonging to the
+    /// default provider. `openrouter/deepseek/deepseek-chat` remains the
+    /// explicit spelling, and wins when a repo configures both.
+    ///
+    /// Returns `None` only when there is nothing to resolve against: a bare
+    /// model name and no `default_provider`.
+    pub fn resolve_model_spec(&self, spec: &str) -> Option<(String, String)> {
+        let spec = spec.trim();
+        if spec.is_empty() {
+            return None;
+        }
+        match spec.split_once('/') {
+            Some((prefix, rest)) if self.providers.contains_key(prefix) && !rest.is_empty() => {
+                Some((prefix.to_string(), rest.to_string()))
+            }
+            Some((prefix, rest)) => match &self.default_provider {
+                // An aggregator id, or a provider the user has not configured:
+                // hand the whole thing to the default provider as a model.
+                Some(default) => Some((default.clone(), spec.to_string())),
+                // Nothing to default to. Keep the old split so the failure
+                // downstream still names the provider the user actually typed
+                // ("no [providers.deepseek] section") rather than a vaguer one.
+                None if !rest.is_empty() => Some((prefix.to_string(), rest.to_string())),
+                None => None,
+            },
+            None => self
+                .default_provider
+                .clone()
+                .map(|provider| (provider, spec.to_string())),
+        }
+    }
+
     /// Effective per-tool output line budget: the `[tools]` project override
     /// when set to a non-zero value, else the global `[tokens]` default.
     pub fn effective_tool_output_max_lines(&self) -> u32 {
@@ -2655,6 +2700,93 @@ mod tests {
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    /// A config with only OpenRouter configured — the shape that made
+    /// `default_model = "deepseek/deepseek-chat"` fail with "no
+    /// [providers.deepseek] section".
+    fn openrouter_only() -> Config {
+        toml::from_str(
+            r#"
+            default_provider = "openrouter"
+
+            [providers.openrouter]
+            model = "deepseek/deepseek-chat"
+        "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn an_aggregator_model_id_is_not_mistaken_for_a_provider() {
+        let cfg = openrouter_only();
+        // `deepseek` is a real Wingman provider id, but it is not configured
+        // here, so this is an OpenRouter model — the whole string.
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("openrouter".into(), "deepseek/deepseek-chat".into()))
+        );
+        assert_eq!(
+            cfg.resolve_model_spec("qwen/qwen3-coder"),
+            Some(("openrouter".into(), "qwen/qwen3-coder".into()))
+        );
+    }
+
+    #[test]
+    fn a_configured_provider_prefix_still_wins() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "openrouter"
+
+            [providers.openrouter]
+            model = "x"
+
+            [providers.deepseek]
+            model = "deepseek-chat"
+        "#,
+        )
+        .unwrap();
+        // Configured directly, so the prefix means the provider.
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("deepseek".into(), "deepseek-chat".into()))
+        );
+        // And the explicit spelling still reaches the aggregator.
+        assert_eq!(
+            cfg.resolve_model_spec("openrouter/deepseek/deepseek-chat"),
+            Some(("openrouter".into(), "deepseek/deepseek-chat".into()))
+        );
+    }
+
+    #[test]
+    fn a_bare_model_name_uses_the_default_provider() {
+        let cfg = openrouter_only();
+        assert_eq!(
+            cfg.resolve_model_spec("gpt-4.1"),
+            Some(("openrouter".into(), "gpt-4.1".into()))
+        );
+    }
+
+    #[test]
+    fn without_a_default_provider_the_prefix_is_still_read_as_one() {
+        // Nothing to fall back to, so keep the old split: the error the user
+        // then sees names the provider they actually typed.
+        let cfg = Config::default();
+        assert_eq!(
+            cfg.resolve_model_spec("deepseek/deepseek-chat"),
+            Some(("deepseek".into(), "deepseek-chat".into()))
+        );
+        assert_eq!(cfg.resolve_model_spec("gpt-4.1"), None);
+        assert_eq!(cfg.resolve_model_spec(""), None);
+    }
+
+    #[test]
+    fn a_trailing_slash_does_not_produce_an_empty_model() {
+        let cfg = openrouter_only();
+        assert_eq!(
+            cfg.resolve_model_spec("openrouter/"),
+            Some(("openrouter".into(), "openrouter/".into()))
+        );
     }
 
     #[test]
