@@ -20,6 +20,7 @@ number of tested-but-uncalled modules; see
 | MSRV honesty (L1) | Declared floor set to 1.88; gate re-enabled | — |
 | LSP code-actions (T1.1) | `lsp_code_action`; client applies `workspace/applyEdit` | a language server |
 | Wingman-as-MCP-server (T1.2) | `wingman mcp-serve` (tools + memory resources) | — |
+| HTTP/SSE API | `wingman serve` (pilot control, streaming turns, CLI passthrough) + `--remote` | — |
 | Git-native auto-commit (T1.3) | `[git].auto_commit` | a git repo |
 | Local-first preset (T3.7) | `wingman router preset local` + `local` class | a local model |
 | Explain-and-teach (T3.8) | `wingman explain` | a provider |

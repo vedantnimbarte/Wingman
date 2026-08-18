@@ -1,12 +1,17 @@
 # Embedding Wingman (Agent SDK)
 
 Wingman is not just a CLI — its core is a library you can embed to build your own
-agent, and it speaks MCP so you can drive it from any language. Two surfaces:
+agent, and it speaks two wire protocols so you can drive it from any language.
+Three surfaces:
 
 1. **Rust library** — depend on `wingman-core` (+ `wingman-providers`,
    `wingman-tools`) and drive the agent loop directly.
-2. **Language-agnostic wire protocol** — run `wingman mcp-serve` and talk to it
-   over MCP (JSON-RPC/stdio) from any language.
+2. **MCP over stdio** — run `wingman mcp-serve` and talk to it over MCP
+   (JSON-RPC/stdio) from any language, on the same machine.
+3. **HTTP/SSE over the network** — run `wingman serve` and drive it from
+   another machine, a phone, or CI: streaming turns, pilot control, and the
+   rest of the CLI, behind a bearer token and a permission ceiling. See
+   [HTTP-API.md](HTTP-API.md).
 
 ## 1. Rust library
 

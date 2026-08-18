@@ -100,6 +100,49 @@ impl IndexStore {
         })
     }
 
+    /// Open an existing index for maintenance — deleting chunks, counting
+    /// them — adopting whatever embedder the file was built with instead of
+    /// asserting one.
+    ///
+    /// [`IndexStore::open`] requires the caller's embedder id and dim so a
+    /// mismatched index is caught before it can return nonsense distances.
+    /// That is right for anything that embeds, and pure cost for anything
+    /// that does not: constructing the real embedder loads an ONNX model,
+    /// which is a long wait to delete some rows. Returns `Ok(None)` when the
+    /// file does not exist or has no embedder recorded yet — nothing to
+    /// maintain.
+    ///
+    /// The returned store must not be used to *write* embeddings: its `dim`
+    /// is whatever the file says, which may not match the caller's embedder.
+    pub fn open_for_maintenance(db_path: &Path) -> Result<Option<Self>> {
+        if !db_path.exists() {
+            return Ok(None);
+        }
+        let conn = Connection::open(db_path)?;
+        Self::init_schema(&conn)?;
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'embedder_id'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let dim: Option<i64> = conn
+            .query_row("SELECT value FROM meta WHERE key = 'dim'", [], |r| {
+                r.get::<_, String>(0).map(|s| s.parse::<i64>().unwrap_or(0))
+            })
+            .optional()?;
+        let (Some(id), Some(dim)) = (id, dim) else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            db: Mutex::new(conn),
+            path: db_path.to_path_buf(),
+            embedder_id: id,
+            dim: dim.max(0) as usize,
+        }))
+    }
+
     fn init_schema(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (
@@ -465,6 +508,43 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn maintenance_open_adopts_the_recorded_embedder_and_can_forget() {
+        let path = tmp_db();
+        {
+            let store = IndexStore::open(&path, "test-embedder", 4).unwrap();
+            let chunk = Chunk {
+                path: "session:abc".into(),
+                start_line: 1,
+                end_line: 2,
+                content: "a conversation about tokens".into(),
+                symbol: None,
+            };
+            store
+                .replace_file("session:abc", "h", &[chunk], &[vec![1.0, 0.0, 0.0, 0.0]])
+                .unwrap();
+            assert_eq!(store.chunk_count().unwrap(), 1);
+        }
+
+        // No embedder id or dim supplied: they come from the file. This is
+        // what lets a delete skip loading an embedding model.
+        let store = IndexStore::open_for_maintenance(&path).unwrap().unwrap();
+        assert_eq!(store.embedder_id(), "test-embedder");
+        assert_eq!(store.dim(), 4);
+        store.forget("session:abc").unwrap();
+        assert_eq!(store.chunk_count().unwrap(), 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn maintenance_open_of_a_missing_index_is_not_an_error() {
+        let missing = tmp_db();
+        assert!(IndexStore::open_for_maintenance(&missing)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

@@ -214,6 +214,29 @@ use a spend cap and read the PR. Details in
 
 ---
 
+## Remote control
+
+`wingman serve` puts an HTTP/SSE API in front of an allowlist of repos, so you
+can drive Wingman from another machine, a phone, a Shortcut, or CI without a
+terminal on the box doing the work.
+
+```bash
+wingman serve --init-token       # mint a token into the OS keyring, printed once
+wingman serve                    # bind [serve].addr, serve the allowlisted repos
+
+wingman --remote http://box:8787 --print "why is the index stale?"
+wingman --remote http://box:8787 pilot watch
+```
+
+Pilot runs are steerable (approve, veto, abort, retry), turns stream back over
+SSE, and the rest of the CLI is reachable. A request can never obtain more
+authority than `[serve].max_permission_mode`, and a stolen token reaches only
+the repos you listed. **Wingman does not terminate TLS** — put it behind
+Tailscale, a WireGuard subnet, an SSH tunnel, or a TLS proxy. Full surface in
+[docs/HTTP-API.md](docs/HTTP-API.md).
+
+---
+
 ## Known limits
 
 Pre-1.0. The parts worth knowing before you lean on them:
@@ -232,6 +255,10 @@ Pre-1.0. The parts worth knowing before you lean on them:
   [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md).
 - **Skill "outcome scoring" is a phrase heuristic** over your replies, not a
   learned signal. Treat the numbers as a rough tally.
+- **The HTTP API has no TLS and one token.** It is a plaintext listener meant
+  to sit behind a tunnel or a reverse proxy, with a single shared secret and no
+  per-token scopes. At the default `auto-edit` ceiling, whoever holds that
+  token can make the agent edit files in the repos you allowlisted.
 - **Team memory and Slack intake need your infrastructure** — they speak simple
   HTTP contracts, you supply the endpoint.
 - **The `vm` sandbox tier is fail-closed**: pilot refuses vm-tier tasks rather
@@ -258,7 +285,8 @@ scope.
 | [LSP.md](docs/LSP.md) | Code intelligence and verification receipts |
 | [LEARNING-LOOP.md](docs/LEARNING-LOOP.md) | Memories, skills, session recall |
 | [EXTENDING.md](docs/EXTENDING.md) | Hooks, slash commands, custom tools |
-| [SDK.md](docs/SDK.md) | Embed `wingman-core`, or drive it over MCP |
+| [HTTP-API.md](docs/HTTP-API.md) | The `wingman serve` API and `--remote` |
+| [SDK.md](docs/SDK.md) | Embed `wingman-core`, or drive it over MCP or HTTP |
 | [INDEX.md](docs/INDEX.md) | Navigation guide for all docs |
 
 ---
