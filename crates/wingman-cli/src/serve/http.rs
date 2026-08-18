@@ -277,39 +277,46 @@ impl<'a> Sse<'a> {
     }
 }
 
+/// Parse a complete raw request from a string. Test-only: the live path
+/// reads from a socket, and this shares its parsing so a test cannot pass
+/// against a second implementation.
+#[cfg(test)]
+pub fn parse_for_test(raw: &str) -> Request {
+    let buf = raw.as_bytes().to_vec();
+    let (body_start, len) = wingman_autonomous::webhook::header_boundary_and_len(&buf).unwrap();
+    let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
+    let body = buf[body_start..(body_start + len).min(buf.len())].to_vec();
+    let mut lines = head.lines();
+    let request_line = lines.next().unwrap();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap();
+    let target = parts.next().unwrap();
+    let (p, q) = match target.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (target, ""),
+    };
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
+        }
+    }
+    Request {
+        method: method.to_ascii_uppercase(),
+        path: percent_decode(p),
+        segments: split_segments(p),
+        query: parse_query(q),
+        headers,
+        body,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn parse(raw: &str) -> Request {
-        // Exercise the same parsing path as `read_request` without a socket.
-        let buf = raw.as_bytes().to_vec();
-        let (body_start, len) = wingman_autonomous::webhook::header_boundary_and_len(&buf).unwrap();
-        let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
-        let body = buf[body_start..(body_start + len).min(buf.len())].to_vec();
-        let mut lines = head.lines();
-        let request_line = lines.next().unwrap();
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next().unwrap();
-        let target = parts.next().unwrap();
-        let (p, q) = match target.split_once('?') {
-            Some((p, q)) => (p, q),
-            None => (target, ""),
-        };
-        let mut headers = HashMap::new();
-        for line in lines {
-            if let Some((k, v)) = line.split_once(':') {
-                headers.insert(k.trim().to_ascii_lowercase(), v.trim().to_string());
-            }
-        }
-        Request {
-            method: method.to_ascii_uppercase(),
-            path: percent_decode(p),
-            segments: split_segments(p),
-            query: parse_query(q),
-            headers,
-            body,
-        }
+        parse_for_test(raw)
     }
 
     #[test]

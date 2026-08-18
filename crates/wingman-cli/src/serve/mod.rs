@@ -17,6 +17,8 @@
 //! 3. **The ceiling is not negotiable.** `[serve].max_permission_mode` bounds
 //!    every request; a request may ask for less and never for more.
 
+mod admin;
+mod argv;
 pub mod auth;
 mod child;
 mod http;
@@ -24,6 +26,7 @@ mod pilot;
 pub mod projects;
 mod routes;
 mod sessions;
+mod table;
 
 use std::process::ExitCode;
 use std::sync::Arc;

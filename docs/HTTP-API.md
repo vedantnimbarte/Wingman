@@ -193,34 +193,51 @@ session returns `409` while the first is in flight.
 
 ### Reads and admin (table-driven)
 
-Each of these runs the named subcommand in the project root and returns its JSON
-when it has a `--json` mode, else `{"stdout":"…","stderr":"…","exit":n}`.
+Each runs the named subcommand in the project root. Output that parses as JSON
+is returned as JSON; anything else comes back as
+`{"stdout":"...","stderr":"...","exit":n}`, which is honest about being text.
 
 | Path | Subcommand |
 |---|---|
-| `GET /v1/projects/{p}/cost?compare=bool` | `cost --json [--compare]` |
-| `GET /v1/projects/{p}/context` | `context` |
+| `GET /v1/projects/{p}/cost?compare` | `cost --json [--compare]` |
+| `GET /v1/projects/{p}/context` | `context --json` |
 | `GET /v1/projects/{p}/knows` | `knows` |
 | `GET /v1/projects/{p}/doctor` | `doctor` |
-| `GET /v1/projects/{p}/diff?annotate=bool` | `diff` |
-| `GET /v1/projects/{p}/router/stats` | `router stats` |
+| `GET /v1/projects/{p}/attest` | `attest` |
+| `GET /v1/projects/{p}/diff?file=` | `diff [file]` |
+| `GET /v1/projects/{p}/explain?base=&staged` | `explain [--local base] [--staged]` |
+| `GET /v1/projects/{p}/review?pr=&base=` | `review [pr] [--local base]` |
+| `GET /v1/projects/{p}/router/stats?all` | `router stats [--all]` |
 | `GET /v1/projects/{p}/index/status` | `indexd --status` |
-| `POST /v1/projects/{p}/index/reindex` | `indexd` (one-shot reindex) |
-| `GET /v1/projects/{p}/memory` | `memory list` |
-| `POST /v1/projects/{p}/memory` | `memory` write |
-| `GET /v1/projects/{p}/checkpoints` | `checkpoint --list` |
-| `POST /v1/projects/{p}/checkpoints` | `checkpoint <label>` |
-| `POST /v1/projects/{p}/rewind` | `rewind <steps>` |
-| `GET /v1/projects/{p}/review?pr=n` | `review` |
-| `GET /v1/skills` · `POST /v1/skills/{name}/toggle` | `skill list` / `skill` |
-| `GET /v1/mcp` | configured MCP servers plus live tool counts |
-| `GET /v1/providers` | providers, credential presence (never the secret), default model |
-| `GET /v1/config` · `PATCH /v1/config` | merged config; patch writes the **global** file only |
-| `GET /v1/trust` · `POST /v1/trust` | project-config trust decisions |
-| `GET /v1/schedule` · `POST /v1/schedule/run` | scheduled prompts |
+| `POST /v1/projects/{p}/index/reindex` | `indexd` |
+| `GET /v1/projects/{p}/memory` | `memory review` |
+| `POST /v1/projects/{p}/memory/sync?ref=` | `memory sync [ref]` |
+| `GET /v1/projects/{p}/trust` / `POST .../trust` | `trust show` / `trust add` |
+| `POST /v1/projects/{p}/checkpoints?label=` | `checkpoint [--label]` |
+| `POST /v1/projects/{p}/rewind?steps=` | `rewind [steps]` |
+| `POST /v1/projects/{p}/schedule/run?all` | `schedule [--all]` |
+| `GET /v1/projects/{p}/config` | `config show --json` |
+| `GET /v1/config` / `PATCH /v1/config` | the server's merged config; patch writes the **global** file |
 
-`PATCH /v1/config` refuses to write `[serve]` itself. Locking yourself out of the
-server, or letting the server widen its own authority, is not a feature.
+Every table route is project-scoped, including the config-adjacent ones: the
+merged view depends on which repo you are in. Query parameters are an allowlist
+*per route* — a key a route does not declare is ignored, never appended as an
+extra flag, and values are separate argv entries rather than text spliced into
+a command line.
+
+`GET /v1/config` redacts credentials (`api_key`, tokens, signing secrets,
+webhook URLs): a config read must not become credential exfiltration for whoever
+holds the API token. `PATCH /v1/config` merges into the global file only, never
+a project's `.wingman/config.toml` — that is the untrusted layer, and an API that
+could write it would be a way to smuggle executable keys into a repo. It refuses
+`[serve]` outright, because a server that can rewrite its own token, ceiling, or
+allowlist has no ceiling. Patches are validated by round-tripping through the
+real config parser before anything is written.
+
+There is no `/v1/skills`, `/v1/mcp`, or `/v1/providers`: no CLI command backs a
+listing for those today, and faking one would report something the tool cannot
+actually tell you. `GET .../knows` and `GET .../doctor` cover the same ground.
+
 
 ### Passthrough
 

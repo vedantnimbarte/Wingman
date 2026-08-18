@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{auth, pilot, projects, sessions, ServeState};
+use super::{admin, auth, pilot, projects, sessions, table, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -49,6 +49,8 @@ async fn dispatch(
             http::write_json(sock, 200, &json!({ "projects": list })).await
         }
         ("GET", ["v1", "schema"]) => http::write_json(sock, 200, &schema(state)).await,
+        ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
+        ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
 
         // Everything below operates on one repo. Resolve it once here so no
         // handler can forget the allowlist check.
@@ -93,7 +95,14 @@ async fn project_route(
             sessions::turn(state, project, Some(id), req, sock).await
         }
         ("POST", ["turns"]) => sessions::turn(state, project, None, req, sock).await,
-        _ => http::write_err(sock, 404, "no such route (see GET /v1/schema)").await,
+
+        ("POST", ["exec"]) => admin::exec(state, project, req, sock).await,
+
+        // The long tail: everything else the CLI can do, as table data.
+        _ => match table::find(&req.method, rest) {
+            Some(route) => table::run(state, project, route, req, sock).await,
+            None => http::write_err(sock, 404, "no such route (see GET /v1/schema)").await,
+        },
     }
 }
 
@@ -154,6 +163,8 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
     });
     if let Some(routes) = doc["routes"].as_array_mut() {
         routes.extend(sessions::schema());
+        routes.extend(table::schema());
+        routes.extend(admin::schema());
     }
     doc
 }
