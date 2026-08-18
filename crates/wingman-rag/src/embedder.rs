@@ -2,9 +2,12 @@
 //!
 //! All embedders speak the same async trait. [`FastembedEmbedder`] (gated by
 //! the `embeddings` feature) is the real one; [`HashEmbedder`] is a tiny
-//! deterministic fallback used in tests and as a no-deps option.
+//! deterministic fallback used in tests and as a no-deps option;
+//! [`LazyEmbedder`] wraps either so a process that never searches never pays
+//! to build one.
 
 use async_trait::async_trait;
+use std::sync::Arc;
 
 use crate::Result;
 
@@ -16,6 +19,136 @@ pub trait Embedder: Send + Sync {
     fn dim(&self) -> usize;
     /// Embed a batch. Output length matches input length.
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+}
+
+// ---------------------------------------------------------------------------
+// Lazy wrapper — defers model construction until something actually embeds.
+// ---------------------------------------------------------------------------
+
+/// An embedder that reports its id and dimensionality immediately but does not
+/// construct the underlying model until something actually embeds.
+///
+/// Opening an index needs only [`Embedder::id`] and [`Embedder::dim`] — two
+/// constants — yet obtaining them meant constructing a real embedder, and for
+/// the fastembed backend that is a ~120 MB ONNX model read off disk. Every
+/// `wingman --print`, every pilot worker, and every HTTP turn paid it at
+/// startup, including the great majority that never call `semantic_search`.
+///
+/// A failed construction is not cached, so a transient failure (cold model
+/// cache, no network) is retried on the next call rather than poisoning the
+/// process. It also stops a failure from silently degrading a whole session to
+/// [`HashEmbedder`]: previously that swapped in a 64-dim embedder, stamped the
+/// on-disk index with it, and left every later run to detect the mismatch and
+/// rebuild. Now the index is stamped with the real model's identity up front
+/// and the error surfaces when embedding is attempted.
+pub struct LazyEmbedder {
+    id: String,
+    dim: usize,
+    cell: tokio::sync::OnceCell<Arc<dyn Embedder>>,
+    build: Arc<dyn Fn() -> Result<Arc<dyn Embedder>> + Send + Sync>,
+}
+
+impl LazyEmbedder {
+    /// `id` and `dim` must match what `build` produces — they are what the
+    /// index gets stamped with before the model exists.
+    pub fn new(
+        id: impl Into<String>,
+        dim: usize,
+        build: impl Fn() -> Result<Arc<dyn Embedder>> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            dim,
+            cell: tokio::sync::OnceCell::new(),
+            build: Arc::new(build),
+        }
+    }
+
+    /// Whether the underlying model has been constructed yet. The point of
+    /// this type is that it stays false on a run that never searches.
+    pub fn is_loaded(&self) -> bool {
+        self.cell.initialized()
+    }
+}
+
+#[async_trait]
+impl Embedder for LazyEmbedder {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+    async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let inner = self
+            .cell
+            .get_or_try_init(|| {
+                let build = self.build.clone();
+                async move {
+                    // Construction is blocking CPU and file I/O — keep it off
+                    // the async runtime's worker threads.
+                    tokio::task::spawn_blocking(move || build())
+                        .await
+                        .map_err(|e| crate::RagError::Embedder(format!("embedder init: {e}")))?
+                }
+            })
+            .await?;
+        inner.embed(texts).await
+    }
+}
+
+#[cfg(test)]
+mod lazy_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Reporting id/dim must not construct anything — that is the entire
+    /// point: opening an index asks only those two questions.
+    #[tokio::test]
+    async fn metadata_does_not_build_the_model() {
+        let builds = Arc::new(AtomicUsize::new(0));
+        let counter = builds.clone();
+        let lazy = LazyEmbedder::new("bge-small-en-v1.5", 384, move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Ok(Arc::new(HashEmbedder::new(384)) as Arc<dyn Embedder>)
+        });
+
+        assert_eq!(lazy.id(), "bge-small-en-v1.5");
+        assert_eq!(lazy.dim(), 384);
+        assert!(!lazy.is_loaded());
+        assert_eq!(builds.load(Ordering::SeqCst), 0);
+
+        let out = lazy.embed(&["hello".to_string()]).await.unwrap();
+        assert_eq!(out.len(), 1);
+        assert!(lazy.is_loaded());
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+
+        // Built once, not per call.
+        lazy.embed(&["again".to_string()]).await.unwrap();
+        assert_eq!(builds.load(Ordering::SeqCst), 1);
+    }
+
+    /// A failed build is not cached: a cold model cache with no network
+    /// should not disable search for the life of the process.
+    #[tokio::test]
+    async fn a_failed_build_is_retried_not_remembered() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = attempts.clone();
+        let lazy = LazyEmbedder::new("test", 8, move || {
+            let n = counter.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Err(crate::RagError::Embedder("no network".into()))
+            } else {
+                Ok(Arc::new(HashEmbedder::new(8)) as Arc<dyn Embedder>)
+            }
+        });
+
+        assert!(lazy.embed(&["x".to_string()]).await.is_err());
+        assert!(!lazy.is_loaded());
+        // Second attempt succeeds, so the first failure was not sticky.
+        assert!(lazy.embed(&["x".to_string()]).await.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
 }
 
 // ---------------------------------------------------------------------------
