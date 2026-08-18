@@ -223,6 +223,25 @@ pub enum Command {
     #[command(name = "acp")]
     #[command(display_order = 30)]
     Acp,
+    /// Serve the HTTP/SSE API so you can drive Wingman from another machine,
+    /// a phone, or CI. One daemon over an allowlist of repos; see
+    /// `docs/HTTP-API.md`.
+    #[command(display_order = 30)]
+    Serve {
+        /// Bind address, overriding `[serve].addr` (e.g. `0.0.0.0:8787`).
+        #[arg(long, value_name = "ADDR")]
+        addr: Option<String>,
+        /// Generate an API token into the OS keyring, print it once, and exit.
+        #[arg(long)]
+        init_token: bool,
+        /// Print the resolved projects and permission ceiling, then exit.
+        #[arg(long)]
+        list: bool,
+        /// Required to run with `[serve].max_permission_mode = "yolo"`, which
+        /// lets any request run arbitrary shell commands on this machine.
+        #[arg(long)]
+        allow_yolo: bool,
+    },
     /// Distill durable facts from a past session into a pending-review file
     /// (`.wingman/pending-memories.md`). Uses the fast model when configured.
     #[command(display_order = 25)]
@@ -849,6 +868,23 @@ pub async fn run() -> Result<ExitCode> {
                 .and_then(|m| m.parse().ok())
                 .unwrap_or(cfg.permission_mode);
             commands::acp_serve::run(cfg, mode).await
+        }
+        Some(Command::Serve {
+            addr,
+            init_token,
+            list,
+            allow_yolo,
+        }) => {
+            crate::serve::run(
+                load_config()?,
+                crate::serve::ServeOptions {
+                    addr,
+                    init_token,
+                    list,
+                    allow_yolo,
+                },
+            )
+            .await
         }
         Some(Command::Trust { action }) => commands::trust::run(action).await,
         Some(Command::Golden { action }) => match action {

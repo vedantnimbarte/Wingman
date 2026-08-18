@@ -259,6 +259,97 @@ pub struct Config {
     /// Self-improvement loop (memory, skills).
     #[serde(default)]
     pub learn: LearnConfig,
+
+    /// HTTP/SSE API (`wingman serve`). Global-config only — deliberately
+    /// absent from `PROJECT_SAFE_KEYS`, so a cloned repo's `.wingman/
+    /// config.toml` can never set the token, widen the project allowlist,
+    /// or raise the permission ceiling. See `docs/HTTP-API.md`.
+    #[serde(default)]
+    pub serve: ServeConfig,
+}
+
+/// Settings for the HTTP API daemon. See `docs/HTTP-API.md`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServeConfig {
+    /// Bind address. Binding anything other than loopback requires a token
+    /// of at least [`MIN_REMOTE_TOKEN_LEN`] characters.
+    pub addr: String,
+    /// Bearer token every request must present. Supports `${ENV_VAR}`
+    /// indirection, or the literal `"keyring"` to read the entry written by
+    /// `wingman serve --init-token`.
+    pub token: Option<String>,
+    /// Ceiling on the permission mode any request may obtain. A request may
+    /// ask for less; it can never obtain more. `yolo` additionally requires
+    /// `--allow-yolo` on the command line — remote arbitrary shell should
+    /// take a deliberate act at launch, not a config line someone forgot.
+    pub max_permission_mode: PermissionMode,
+    /// Concurrent agent turns across all projects. Further turns queue.
+    pub max_concurrent_turns: usize,
+    /// Wall clock for a single turn or exec, in seconds.
+    pub request_timeout_secs: u64,
+    /// The repos this server will serve. Nothing outside this list is
+    /// reachable, so a stolen token cannot point the agent at an arbitrary
+    /// directory.
+    pub projects: Vec<ServeProject>,
+    /// Outbound push so a phone need not poll.
+    pub push: ServePushConfig,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            addr: "127.0.0.1:8787".into(),
+            token: None,
+            // Edit-capable but not shell-unrestricted: the useful default for
+            // driving real work remotely without handing out a shell.
+            max_permission_mode: PermissionMode::AutoEdit,
+            max_concurrent_turns: 2,
+            request_timeout_secs: 1800,
+            projects: Vec::new(),
+            push: ServePushConfig::default(),
+        }
+    }
+}
+
+/// Minimum token length accepted when binding a non-loopback address.
+pub const MIN_REMOTE_TOKEN_LEN: usize = 32;
+
+/// One repo the API may operate on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServeProject {
+    /// URL-safe identifier used in paths (`/v1/projects/<id>/…`). Defaults
+    /// to the directory name when omitted.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Absolute path to the repository root.
+    pub root: PathBuf,
+}
+
+impl ServeProject {
+    /// Effective id: the explicit one, else the directory name.
+    pub fn effective_id(&self) -> String {
+        match &self.id {
+            Some(id) => id.clone(),
+            None => self
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "project".into()),
+        }
+    }
+}
+
+/// Outbound push: the server POSTs to `url` on subscribed events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServePushConfig {
+    /// Target URL. Slack incoming-webhook shape, or any POST endpoint.
+    /// Supports `${ENV_VAR}` indirection.
+    pub url: Option<String>,
+    /// Event kinds to push. Empty means every kind the server emits.
+    pub events: Vec<String>,
 }
 
 /// Settings for the memory / skills loop.
@@ -796,6 +887,22 @@ impl Config {
             }
         }
         if let Some(s) = self.pilot.daemon.webhook_secret.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
+        // The API bearer token and push URL take the same indirection so
+        // neither has to sit in plaintext config.
+        if let Some(s) = self.serve.token.as_mut() {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
+        if let Some(s) = self.serve.push.url.as_mut() {
             if let Some(name) = strip_env_placeholder(s) {
                 if let Ok(val) = std::env::var(name) {
                     *s = val;
