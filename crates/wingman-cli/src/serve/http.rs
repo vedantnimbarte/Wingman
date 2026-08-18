@@ -27,26 +27,29 @@ const MAX_REQUEST_BYTES: usize = 1024 * 1024;
 /// How long a client has to finish sending its request before we give up.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-// Phase 1 ships the transport; the streaming and body-parsing helpers below
-// are consumed by the pilot (phase 2) and turn (phase 3) routes. Marked
-// rather than deleted so the transport lands reviewable in one piece.
 /// Interval between SSE `:keepalive` comments. Proxies and phone radios drop
 /// idle connections; a comment line is the cheapest way to stay alive and is
 /// ignored by every conforming EventSource client.
-#[allow(dead_code)]
 pub const SSE_KEEPALIVE: Duration = Duration::from_secs(15);
 
 /// One parsed request.
 #[derive(Debug, Clone)]
 pub struct Request {
     pub method: String,
-    /// Percent-decoded path, without the query string.
+    /// Percent-decoded path, for logging. **Not** for routing — use
+    /// [`Request::segments`], which decodes after splitting.
     pub path: String,
-    #[allow(dead_code)]
+    /// Path segments, split on `/` first and percent-decoded after.
+    ///
+    /// The order matters. Decoding the whole path first would let `%2F`
+    /// become a separator, so `runs/..%2F..` would arrive as two extra
+    /// segments and slip past a handler's validation of the segment it
+    /// thought it was reading. Split first, and an encoded slash stays inside
+    /// its segment, where the handler's own check sees it.
+    segments: Vec<String>,
     pub query: HashMap<String, String>,
     /// Header names lowercased.
     pub headers: HashMap<String, String>,
-    #[allow(dead_code)]
     pub body: Vec<u8>,
 }
 
@@ -55,10 +58,9 @@ impl Request {
         self.headers.get(&name.to_ascii_lowercase()).map(|s| &**s)
     }
 
-    /// Path split on `/`, empty segments dropped: `/v1/projects/x` → `["v1",
-    /// "projects", "x"]`.
+    /// Path segments: `/v1/projects/x` → `["v1", "projects", "x"]`.
     pub fn segments(&self) -> Vec<&str> {
-        self.path.split('/').filter(|s| !s.is_empty()).collect()
+        self.segments.iter().map(String::as_str).collect()
     }
 
     #[allow(dead_code)]
@@ -76,14 +78,12 @@ impl Request {
         }
     }
 
-    #[allow(dead_code)]
     pub fn query_usize(&self, key: &str) -> Option<usize> {
         self.query.get(key)?.parse().ok()
     }
 
     /// Parse the body as JSON. An empty body deserialises as `null`, so a
     /// route whose body is entirely optional can use a type that accepts it.
-    #[allow(dead_code)]
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, String> {
         let raw = if self.body.is_empty() {
             "null"
@@ -152,10 +152,21 @@ pub async fn read_request(sock: &mut TcpStream) -> std::io::Result<Option<Reques
     Ok(Some(Request {
         method: method.to_ascii_uppercase(),
         path: percent_decode(raw_path),
+        segments: split_segments(raw_path),
         query: parse_query(raw_query.unwrap_or("")),
         headers,
         body,
     }))
+}
+
+/// Split on `/` first, then percent-decode each segment — see
+/// [`Request::segments`] for why that order is the security-relevant part.
+fn split_segments(raw_path: &str) -> Vec<String> {
+    raw_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(percent_decode)
+        .collect()
 }
 
 fn parse_query(raw: &str) -> HashMap<String, String> {
@@ -189,7 +200,6 @@ pub async fn write_err(sock: &mut TcpStream, status: u16, msg: &str) -> std::io:
 }
 
 /// Write a `text/plain` response.
-#[allow(dead_code)]
 pub async fn write_text(sock: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
     write_raw(sock, status, "text/plain; charset=utf-8", body.as_bytes()).await
 }
@@ -232,12 +242,10 @@ fn reason(status: u16) -> &'static str {
 
 /// An open `text/event-stream`. Construct with [`Sse::start`], then push
 /// events until the client goes away (any write error means it did).
-#[allow(dead_code)]
 pub struct Sse<'a> {
     sock: &'a mut TcpStream,
 }
 
-#[allow(dead_code)]
 impl<'a> Sse<'a> {
     /// Send the SSE headers. `X-Accel-Buffering` stops nginx from holding
     /// events back, which otherwise makes a live stream look frozen.
@@ -297,6 +305,7 @@ mod tests {
         Request {
             method: method.to_ascii_uppercase(),
             path: percent_decode(p),
+            segments: split_segments(p),
             query: parse_query(q),
             headers,
             body,
@@ -317,6 +326,19 @@ mod tests {
         assert_eq!(req.query_usize("tail"), Some(20));
         assert_eq!(req.header("authorization"), Some("Bearer tok"));
         assert_eq!(req.body.len(), 13);
+    }
+
+    #[test]
+    fn an_encoded_slash_stays_inside_its_segment() {
+        // Decoding before splitting would yield ["v1","x","..",".."] and let
+        // a traversal attempt masquerade as extra path structure.
+        let req = parse(
+            "GET /v1/x/..%2F.. HTTP/1.1
+Content-Length: 0
+
+",
+        );
+        assert_eq!(req.segments(), vec!["v1", "x", "../.."]);
     }
 
     #[test]

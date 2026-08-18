@@ -72,7 +72,6 @@ fn resolve_one(entry: &ServeProject) -> Result<Project> {
 }
 
 /// Look up a project by id, or by a path that resolves to a configured root.
-#[allow(dead_code)] // phase 2: pilot routes resolve the project per request
 pub fn find<'a>(projects: &'a [Project], key: &str) -> Option<&'a Project> {
     if let Some(p) = projects.iter().find(|p| p.id == key) {
         return Some(p);

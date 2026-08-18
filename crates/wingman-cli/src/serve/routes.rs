@@ -11,7 +11,8 @@ use serde_json::json;
 use tokio::net::TcpStream;
 
 use super::http::{self, Request};
-use super::{auth, projects, ServeState};
+use super::projects::Project;
+use super::{auth, pilot, projects, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -19,10 +20,14 @@ pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Res
         return Ok(()); // unparseable or hung up; nothing useful to say back
     };
 
+    // One line per request at debug. Never the headers: the token lives
+    // there, and a log that leaks the credential is worse than no log.
+    tracing::debug!(target: "serve", "{} {}", req.method, req.path);
+
     // Health is unauthenticated on purpose: a load balancer, a phone
     // shortcut, or a `curl` sanity check should be able to ask "is it up"
     // without holding the token. It reports nothing but liveness.
-    if req.path == "/v1/health" {
+    if req.segments().as_slice() == ["v1", "health"] {
         return health(&state, &mut sock).await;
     }
 
@@ -44,6 +49,41 @@ async fn dispatch(
             http::write_json(sock, 200, &json!({ "projects": list })).await
         }
         ("GET", ["v1", "schema"]) => http::write_json(sock, 200, &schema(state)).await,
+
+        // Everything below operates on one repo. Resolve it once here so no
+        // handler can forget the allowlist check.
+        (_, ["v1", "projects", p, rest @ ..]) => match projects::find(&state.projects, p) {
+            Some(project) => project_route(state, req, project, rest, sock).await,
+            None => http::write_err(sock, 404, "unknown project").await,
+        },
+
+        _ => http::write_err(sock, 404, "no such route (see GET /v1/schema)").await,
+    }
+}
+
+/// Routes scoped to a resolved project.
+async fn project_route(
+    state: &Arc<ServeState>,
+    req: &Request,
+    project: &Project,
+    rest: &[&str],
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    match (req.method.as_str(), rest) {
+        ("GET", ["pilot", "runs"]) => pilot::list_runs(project, sock).await,
+        ("POST", ["pilot", "runs"]) => pilot::start_run(state, project, req, sock).await,
+        ("GET", ["pilot", "runs", run]) => pilot::get_run(project, run, sock).await,
+        ("GET", ["pilot", "runs", run, "events"]) => {
+            pilot::get_events(project, run, req, sock).await
+        }
+        ("GET", ["pilot", "runs", run, "stream"]) => pilot::stream(project, run, req, sock).await,
+        ("GET", ["pilot", "runs", run, "dashboard"]) => {
+            pilot::get_dashboard(project, run, req, sock).await
+        }
+        ("POST", ["pilot", "runs", run, action]) => {
+            pilot::control(project, run, action, req, sock).await
+        }
+        ("POST", ["pilot", "goals"]) => pilot::add_goal(state, project, req, sock).await,
         _ => http::write_err(sock, 404, "no such route (see GET /v1/schema)").await,
     }
 }
@@ -75,6 +115,32 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
               "returns": "this document" },
             { "method": "GET", "path": "/v1/projects", "auth": true,
               "returns": "allowlisted projects with branch and index state" },
+
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs", "auth": true,
+              "returns": "run summaries, most recent first" },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs", "auth": true,
+              "body": { "goal": "string", "yes": "bool", "plan_only": "bool",
+                        "model": "string?", "tier": "string?", "max_usd": "number?" },
+              "returns": "{run_id} — started detached" },
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}", "auth": true,
+              "returns": "full RunState snapshot" },
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/events", "auth": true,
+              "params": { "tail": "how many recent events (default 50, max 1000)" } },
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/stream", "auth": true,
+              "params": { "tail": "replay depth before live events (default 20)" },
+              "returns": "text/event-stream; closes with an 'end' event" },
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/dashboard", "auth": true,
+              "params": { "width": "columns (default 100)" },
+              "returns": "text/plain ASCII dashboard" },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/approve", "auth": true },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/veto", "auth": true },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/abort", "auth": true,
+              "body": { "task": "string? — omit to abort the whole run" } },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/retry", "auth": true,
+              "body": { "task": "string — required" } },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/goals", "auth": true,
+              "body": { "text": "string", "author": "string?" },
+              "returns": "queues an intake file for the discovery daemon" },
         ],
     })
 }
@@ -93,9 +159,14 @@ mod tests {
     /// rather than calling the handler directly, so a mistake in the wiring
     /// shows up here instead of at runtime.
     async fn round_trip(token: Option<&str>, request: &str) -> String {
+        round_trip_for(Vec::new(), token, request).await
+    }
+
+    /// As above, with an allowlist so project-scoped routes resolve.
+    async fn round_trip_for(projects: Vec<Project>, token: Option<&str>, request: &str) -> String {
         let state = Arc::new(ServeState {
             cfg: Config::default(),
-            projects: Vec::new(),
+            projects,
             token: token.map(str::to_string),
             ceiling: PermissionMode::AutoEdit,
             started: Instant::now(),
@@ -149,6 +220,210 @@ mod tests {
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
         assert!(resp.contains("\"projects\""), "{resp}");
+    }
+
+    /// Seed a project containing one pilot run in `status`, with one task.
+    /// Returns the temp dir (keep it alive), the allowlist, and the run dir.
+    fn seed_run(
+        status: &str,
+        task_status: &str,
+    ) -> (tempfile::TempDir, Vec<Project>, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let run_id = "2026-08-18-1042-abc123";
+        let run_dir = root.join(".wingman").join("autonomous").join(run_id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let state = json!({
+            "run_id": run_id,
+            "goal": "add SSE keepalives",
+            "base_commit": "deadbeef",
+            "integration_branch": "wingman/auto/x",
+            "status": status,
+            "tasks": [{
+                "id": "t1",
+                "role": "developer",
+                "title": "write the keepalive",
+                "status": task_status,
+            }],
+        });
+        std::fs::write(
+            run_dir.join("state.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("tasks.jsonl"),
+            "{\"ev\":\"run.start\",\"t\":\"2026-08-18T10:42:00Z\",\"run_id\":\"2026-08-18-1042-abc123\",\"goal\":\"add SSE keepalives\",\"base_commit\":\"deadbeef\",\"integration_branch\":\"wingman/auto/x\"}\n",
+        )
+        .unwrap();
+        let projects = vec![Project {
+            id: "repo".into(),
+            root,
+        }];
+        (dir, projects, run_dir)
+    }
+
+    fn get(path: &str) -> String {
+        format!("GET {path} HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n")
+    }
+
+    fn post(path: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn lists_runs_for_a_known_project() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(projects, None, &get("/v1/projects/repo/pilot/runs")).await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains("2026-08-18-1042-abc123"), "{resp}");
+        assert!(resp.contains("add SSE keepalives"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn an_unlisted_project_is_404_even_with_a_valid_token() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(projects, None, &get("/v1/projects/other/pilot/runs")).await;
+        assert!(resp.starts_with("HTTP/1.1 404"), "{resp}");
+        assert!(resp.contains("unknown project"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn a_traversing_run_id_is_rejected_before_touching_disk() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp =
+            round_trip_for(projects, None, &get("/v1/projects/repo/pilot/runs/..%2F..")).await;
+        assert!(resp.starts_with("HTTP/1.1 400"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn approving_a_run_that_is_not_gated_is_409() {
+        let (_tmp, projects, run_dir) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/approve",
+                "",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 409"), "{resp}");
+        // Nothing was written: a rejected command must not reach the run.
+        assert!(!run_dir.join("control.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn approving_a_gated_run_writes_the_control_command() {
+        let (_tmp, projects, run_dir) = seed_run("awaiting_approval", "pending");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/approve",
+                "",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 202"), "{resp}");
+        let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+        assert_eq!(control.trim(), "{\"cmd\":\"approve\"}");
+    }
+
+    #[tokio::test]
+    async fn retry_rejects_unknown_and_non_failed_tasks() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let unknown = round_trip_for(
+            projects.clone(),
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/retry",
+                "{\"task\":\"nope\"}",
+            ),
+        )
+        .await;
+        assert!(unknown.starts_with("HTTP/1.1 404"), "{unknown}");
+
+        let running = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/retry",
+                "{\"task\":\"t1\"}",
+            ),
+        )
+        .await;
+        assert!(running.starts_with("HTTP/1.1 409"), "{running}");
+    }
+
+    #[tokio::test]
+    async fn retry_accepts_a_failed_task() {
+        let (_tmp, projects, run_dir) = seed_run("running", "failed");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/retry",
+                "{\"task\":\"t1\"}",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 202"), "{resp}");
+        let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+        assert!(control.contains("retry_task"), "{control}");
+        assert!(control.contains("t1"), "{control}");
+    }
+
+    #[tokio::test]
+    async fn aborting_a_finished_run_is_409() {
+        let (_tmp, projects, _) = seed_run("done", "done");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/abort",
+                "",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 409"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn dashboard_renders_as_plain_text() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &get("/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/dashboard?width=80"),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains("text/plain"), "{resp}");
+        assert!(resp.contains("write the keepalive"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn a_goal_is_queued_as_an_intake_file() {
+        let (tmp, projects, _) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/goals",
+                "{\"text\":\"fix the flaky test\",\"author\":\"me\"}",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 202"), "{resp}");
+        let intake = tmp.path().join(".wingman").join("intake");
+        let written: Vec<_> = std::fs::read_dir(&intake).unwrap().flatten().collect();
+        assert_eq!(written.len(), 1);
+        let body = std::fs::read_to_string(written[0].path()).unwrap();
+        assert!(body.contains("fix the flaky test"), "{body}");
     }
 
     #[tokio::test]

@@ -19,6 +19,7 @@
 
 pub mod auth;
 mod http;
+mod pilot;
 pub mod projects;
 mod routes;
 
@@ -48,7 +49,7 @@ pub struct ServeOptions {
 
 /// Everything a request handler needs. Shared behind an `Arc` across
 /// connections.
-#[allow(dead_code)] // cfg/turns are read by the turn routes (phase 3)
+#[allow(dead_code)] // `turns` is read by the turn routes (phase 3)
 pub struct ServeState {
     pub cfg: Config,
     pub projects: Vec<Project>,
