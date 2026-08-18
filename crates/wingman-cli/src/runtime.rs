@@ -17,7 +17,9 @@ use wingman_providers::{
     AnthropicProvider, ChatGptProvider, CohereProvider, GeminiProvider, OpenAiCompatProvider,
     OpenAiVariant, WatsonxCredential, WatsonxProvider,
 };
-use wingman_rag::{Embedder, HashEmbedder, IndexStore, Indexer};
+#[cfg(not(feature = "embeddings"))]
+use wingman_rag::HashEmbedder;
+use wingman_rag::{Embedder, IndexStore, Indexer};
 use wingman_skills::Skill;
 use wingman_tools::{ToolCtx, ToolRegistry};
 
@@ -702,13 +704,23 @@ fn pick_embedder() -> Arc<dyn Embedder> {
 fn build_embedder() -> Arc<dyn Embedder> {
     #[cfg(feature = "embeddings")]
     {
-        match wingman_rag::FastembedEmbedder::new(Some(model_cache_dir())) {
-            Ok(e) => return Arc::new(e),
-            Err(err) => {
-                tracing::warn!("fastembed init failed, falling back to hash embedder: {err}");
-            }
-        }
+        // Deferred, not skipped. Opening the index needs only the id and dim,
+        // which are fixed properties of the model — so constructing it here
+        // meant reading ~120 MB of ONNX off disk on every run, including the
+        // many that never call `semantic_search`. The model is now built on
+        // the first embed, and the failure path is honest: an init error
+        // surfaces as a failed search rather than silently swapping in the
+        // 64-dim hash embedder and stamping the on-disk index with it.
+        Arc::new(wingman_rag::LazyEmbedder::new(
+            "bge-small-en-v1.5",
+            384,
+            || {
+                wingman_rag::FastembedEmbedder::new(Some(model_cache_dir()))
+                    .map(|e| Arc::new(e) as Arc<dyn Embedder>)
+            },
+        ))
     }
+    #[cfg(not(feature = "embeddings"))]
     Arc::new(HashEmbedder::default())
 }
 

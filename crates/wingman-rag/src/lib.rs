@@ -19,7 +19,7 @@ mod watcher;
 pub use chunker::{Chunk, Chunker};
 #[cfg(feature = "embeddings")]
 pub use embedder::FastembedEmbedder;
-pub use embedder::{Embedder, HashEmbedder};
+pub use embedder::{Embedder, HashEmbedder, LazyEmbedder};
 pub use indexer::{IndexStats, Indexer};
 pub use store::{IndexStore, ScoredChunk};
 pub use watcher::{spawn_background_indexer, WatcherHandle};
