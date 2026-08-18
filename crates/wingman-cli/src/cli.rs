@@ -33,6 +33,17 @@ pub struct Cli {
     #[arg(long)]
     pub json: bool,
 
+    /// Send this command to a `wingman serve` daemon instead of running it
+    /// locally: `--remote http://box:8787`. Works with `--print`,
+    /// `pilot watch`, and any read subcommand.
+    #[arg(long, value_name = "URL", global = true, env = "WINGMAN_REMOTE")]
+    pub remote: Option<String>,
+
+    /// Which project the remote server should operate on. Only needed when
+    /// the server serves more than one.
+    #[arg(long, value_name = "ID", global = true, env = "WINGMAN_PROJECT")]
+    pub project: Option<String>,
+
     /// Continue a past session: replay its transcript as history, then run
     /// `--print`'s prompt in it and append to the same log. Takes a session
     /// id as shown by `wingman session list`.
@@ -747,6 +758,62 @@ pub enum ConfigAction {
     Paths,
 }
 
+/// Dispatch an invocation to a remote `wingman serve`.
+async fn run_remote(cli: &Cli, base: &str) -> Result<ExitCode> {
+    let remote = crate::remote::Remote::connect(base, cli.project.as_deref()).await?;
+
+    if let Some(prompt) = cli.print.clone() {
+        return remote.print(&prompt, cli.json, cli.mode.as_deref()).await;
+    }
+
+    // `pilot watch` is the other surface worth a bespoke path: it redraws the
+    // server's dashboard rather than returning once.
+    if let Some(Command::Pilot {
+        action: PilotAction::Watch { run_id, .. },
+    }) = &cli.command
+    {
+        return remote.watch(run_id.as_deref()).await;
+    }
+
+    // Everything else: forward the argv as typed. A subcommand added to the
+    // CLI tomorrow works remotely with no change here.
+    let args: Vec<String> = std::env::args()
+        .skip(1)
+        .filter(|a| !is_remote_flag(a))
+        .collect();
+    if args.is_empty() {
+        anyhow::bail!(
+            "--remote needs something to run: a subcommand, or --print \"<prompt>\".\n\
+             The interactive TUI cannot be remoted — it needs permission prompts \
+             this transport does not carry."
+        );
+    }
+    remote.exec(&args).await
+}
+
+/// Drop the client-side-only flags before forwarding an argv to the server.
+/// `--remote`/`--project` take a value, so their values are dropped too; the
+/// filter is applied to the flattened arg list, which is why the value forms
+/// (`--remote=x`) and the split forms are both handled.
+fn is_remote_flag(arg: &str) -> bool {
+    // Values follow their flag; a bare value is filtered by the caller only
+    // when it directly follows one of these, which `std::env::args` preserves.
+    thread_local! {
+        static SKIP_NEXT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    SKIP_NEXT.with(|skip| {
+        if skip.get() {
+            skip.set(false);
+            return true;
+        }
+        if arg == "--remote" || arg == "--project" {
+            skip.set(true);
+            return true;
+        }
+        arg.starts_with("--remote=") || arg.starts_with("--project=")
+    })
+}
+
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     // Suppress INFO logs during TUI mode (no verbose flag) so stderr output
@@ -754,6 +821,13 @@ pub async fn run() -> Result<ExitCode> {
     let is_tui = cli.command.is_none() && cli.print.is_none() && cli.batch.is_none();
     let quiet_for_logging = cli.quiet || (is_tui && cli.verbose == 0);
     logging::install_tracing(cli.verbose, quiet_for_logging);
+
+    // `--remote` reroutes the whole invocation to a server. Done before any
+    // local config or provider resolution: the point is that this machine
+    // need not be set up at all.
+    if let Some(base) = cli.remote.clone() {
+        return run_remote(&cli, &base).await;
+    }
 
     if cli.worker_mode {
         let cfg = load_config()?;

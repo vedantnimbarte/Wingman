@@ -105,6 +105,17 @@ pub fn contains(root: &Path, candidate: &Path) -> bool {
     resolved.starts_with(root)
 }
 
+/// Display form of a root path.
+///
+/// `canonicalize` on Windows returns a `\?\C:\...` verbatim path. That is
+/// the right thing to compare against internally, but showing it to a client
+/// is noise, and a user pasting it back into a shell gets a path most tools
+/// mishandle.
+pub fn display_root(root: &Path) -> String {
+    let s = root.to_string_lossy();
+    s.strip_prefix(r"\?\").unwrap_or(&s).to_string()
+}
+
 /// JSON view of a project for `GET /v1/projects`.
 pub fn describe(project: &Project) -> Value {
     let wingman_dir = project.root.join(".wingman");
@@ -116,7 +127,7 @@ pub fn describe(project: &Project) -> Value {
         .map(|d| d.as_secs());
     json!({
         "id": project.id,
-        "root": project.root.to_string_lossy(),
+        "root": display_root(&project.root),
         "branch": current_branch(&project.root),
         "indexd_running": wingman_dir.join("indexd.pid").exists(),
         "index_age_secs": index_age_secs,

@@ -134,6 +134,9 @@ file = true
 | `WINGMAN_<PROVIDER>_API_KEY`        | Sets `providers.<provider>.api_key`.                                |
 | `WINGMAN_<PROVIDER>_BASE_URL`       | Sets `providers.<provider>.base_url`.                               |
 | `WINGMAN_<PROVIDER>_MODEL`          | Sets `providers.<provider>.model`.                                  |
+| `WINGMAN_REMOTE`                    | Default `--remote` server URL for this shell.                       |
+| `WINGMAN_SERVE_TOKEN`               | Bearer token `--remote` presents (else the OS keyring entry).       |
+| `WINGMAN_PROJECT`                   | Default `--project` id for `--remote`.                              |
 
 Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
 is resolved against the environment at load time.

@@ -11,8 +11,8 @@ wingman serve --addr 127.0.0.1:8787
 wingman serve --list               # show resolved projects + effective ceiling, then exit
 ```
 
-Status: **spec.** Implementation lands in phases — see
-[HTTP-API-PLAN.md](HTTP-API-PLAN.md) for which phase ships what.
+Status: **shipped.** The build order and the reasoning behind each decision are
+in [HTTP-API-PLAN.md](HTTP-API-PLAN.md).
 
 ---
 
@@ -146,7 +146,7 @@ that root and are rejected if they escape it.
 | `GET` | `/v1/health` | `{"ok":true,"version":"0.1.0","uptime_secs":n}`. Unauthenticated. |
 | `GET` | `/v1/schema` | Route table: paths, params, backing subcommand. |
 | `GET` | `/v1/projects` | Allowlisted projects: `id`, `root`, git branch, whether `indexd` is live, index age. |
-| `GET` | `/v1/events` | SSE firehose across all projects: pilot run events, turn events, push-worthy transitions. |
+| `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`). Same detector outbound push uses, so the stream and a webhook cannot disagree. |
 
 ### Pilot — read
 
@@ -282,7 +282,12 @@ a phone never has to poll:
 
 `text` is Slack-incoming-webhook compatible, so an existing webhook URL works
 unchanged. Delivery is best-effort with one retry; a dead endpoint logs and never
-blocks a run.
+blocks a run. A daemon that has just started primes quietly — it records the
+runs it finds without announcing last week's results.
+
+Subscribable events are the run transitions above. Turn-level events
+(`verify.failed` and friends) are not pushed: a turn already streams its events
+to whoever asked for it, and a notification per verification would be noise.
 
 ---
 

@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, pilot, projects, sessions, table, ServeState};
+use super::{admin, auth, pilot, projects, push, sessions, table, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -50,6 +50,7 @@ async fn dispatch(
         }
         ("GET", ["v1", "schema"]) => http::write_json(sock, 200, &schema(state)).await,
         ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
+        ("GET", ["v1", "events"]) => events(state, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
 
         // Everything below operates on one repo. Resolve it once here so no
@@ -119,6 +120,31 @@ async fn health(state: &Arc<ServeState>, sock: &mut TcpStream) -> std::io::Resul
     .await
 }
 
+/// `GET /v1/events` — SSE firehose of run transitions across every project.
+///
+/// Same detector outbound push uses, so what a client sees on the stream and
+/// what lands in a webhook cannot disagree.
+async fn events(state: &Arc<ServeState>, sock: &mut TcpStream) -> std::io::Result<()> {
+    let mut seen = push::Seen::default();
+    // Prime quietly: a client connecting now wants what happens next, not a
+    // replay of every run on disk.
+    let _ = push::poll(&state.projects, &mut seen, false);
+
+    let mut sse = http::Sse::start(sock).await?;
+    let mut last_write = std::time::Instant::now();
+    loop {
+        for t in push::poll(&state.projects, &mut seen, true) {
+            sse.send(t.event, &t.to_json()).await?;
+            last_write = std::time::Instant::now();
+        }
+        if last_write.elapsed() >= http::SSE_KEEPALIVE {
+            sse.keepalive().await?;
+            last_write = std::time::Instant::now();
+        }
+        tokio::time::sleep(push::POLL).await;
+    }
+}
+
 /// The machine-readable route list. Generated from what dispatch actually
 /// serves, so a client can discover the surface instead of pinning to a doc
 /// that drifts.
@@ -133,6 +159,8 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
               "returns": "this document" },
             { "method": "GET", "path": "/v1/projects", "auth": true,
               "returns": "allowlisted projects with branch and index state" },
+            { "method": "GET", "path": "/v1/events", "auth": true,
+              "returns": "text/event-stream of run transitions across every project" },
 
             { "method": "GET", "path": "/v1/projects/{project}/pilot/runs", "auth": true,
               "returns": "run summaries, most recent first" },

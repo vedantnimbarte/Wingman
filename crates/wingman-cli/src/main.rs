@@ -12,6 +12,7 @@ mod login;
 mod mcp_adapter;
 mod mcp_registry;
 mod oauth;
+mod remote;
 mod runtime;
 mod serve;
 mod shutdown;

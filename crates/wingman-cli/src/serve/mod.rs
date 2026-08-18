@@ -24,6 +24,7 @@ mod child;
 mod http;
 mod pilot;
 pub mod projects;
+mod push;
 mod routes;
 mod sessions;
 mod table;
@@ -119,7 +120,7 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
         );
         println!("projects:");
         for p in &projects {
-            println!("  {:<16} {}", p.id, p.root.display());
+            println!("  {:<16} {}", p.id, projects::display_root(&p.root));
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -132,6 +133,12 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
         ceiling,
         started: Instant::now(),
     });
+
+    // Outbound push runs alongside the listener when configured, so a phone
+    // learns a run finished without holding a connection open.
+    if state.cfg.serve.push.url.is_some() {
+        tokio::spawn(push::watcher(Arc::clone(&state)));
+    }
 
     let listener = TcpListener::bind(bind)
         .await
@@ -146,7 +153,7 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
         }
     );
     for p in &state.projects {
-        eprintln!("  {:<16} {}", p.id, p.root.display());
+        eprintln!("  {:<16} {}", p.id, projects::display_root(&p.root));
     }
 
     loop {
