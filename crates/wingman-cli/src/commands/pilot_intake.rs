@@ -179,7 +179,7 @@ pub async fn slack(addr: String) -> Result<ExitCode> {
             // body would fail verification for the wrong reason.
             loop {
                 if let Some((body_start, len)) =
-                    wingman_autonomous::webhook::header_boundary_and_len(&buf)
+                    wingman_autonomous::httpsig::header_boundary_and_len(&buf)
                 {
                     if buf.len() >= body_start.saturating_add(len) {
                         break;
@@ -237,7 +237,7 @@ fn header_value(headers: &str, name: &str) -> String {
 /// Returns `(status_line, body)`. Split out from the socket loop so the
 /// security-relevant decisions are testable without binding a port.
 fn handle_slack_request(dir: &Path, secret: &str, raw: &[u8], now: i64) -> (&'static str, String) {
-    let Some((body_start, len)) = wingman_autonomous::webhook::header_boundary_and_len(raw) else {
+    let Some((body_start, len)) = wingman_autonomous::httpsig::header_boundary_and_len(raw) else {
         return ("400 Bad Request", String::new());
     };
     let head = String::from_utf8_lossy(&raw[..body_start]);
@@ -335,7 +335,7 @@ mod tests {
         base.extend_from_slice(body.as_bytes());
         format!(
             "v0={}",
-            wingman_autonomous::webhook::to_hex(&wingman_autonomous::webhook::hmac_sha256(
+            wingman_autonomous::httpsig::to_hex(&wingman_autonomous::httpsig::hmac_sha256(
                 secret.as_bytes(),
                 &base
             ))

@@ -21,6 +21,7 @@ pub mod eval;
 pub mod feedback;
 pub mod grounding;
 pub mod handoff;
+pub mod httpsig;
 pub mod intake;
 pub mod ipc;
 pub mod knowledge;
@@ -45,7 +46,6 @@ pub mod severity;
 pub mod skillpack;
 pub mod store;
 pub mod tools;
-pub mod webhook;
 pub mod worker;
 pub mod worktree;
 
