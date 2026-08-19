@@ -16,6 +16,60 @@ This builds on existing pieces:
 
 ---
 
+## Implementation status (Session 6 — as of 2026-08-19)
+
+> **Session 6 update (2026-08-19):** shipped in
+> [#140](https://github.com/vedantnimbarte/Wingman/pull/140) and
+> [#142](https://github.com/vedantnimbarte/Wingman/pull/142). This session
+> closed the last two *pilot* items that were logic-without-a-caller, and
+> corrected two rows below that had been claiming more than the code did.
+>
+> - **E10 / J4 (mid-run steering) — done, issue closed.** `wingman pilot tell
+>   "<msg>" [run] [--task T]` and `pilot ask "<msg>" [--wait SECS]` are real
+>   subcommands. They route through `control.jsonl` like every other
+>   cross-process control, because the CLI is a different process from the one
+>   hosting the orchestrator: new `ControlCommand::Tell`, watchdog takes a
+>   snapshot to resolve task → agent, then `MessageAgent` per target. New
+>   `ManagerCommand::Note` rather than reusing `Pivot`, because Pivot's framing
+>   tells the model the task changed and makes it redo work when a human only
+>   added a constraint. `ask` gets a real reply: the worker mirrors its next
+>   message back as `WorkerMessage::Answer`, which lands in the run log as a
+>   `worker_msg:` event, and the CLI tails it.
+>
+>   The "needs an `AgentLoop` injection hook first" blocker recorded against
+>   #35 turned out to be **stale** — `commands/worker.rs` already queues
+>   pivot/clarify into `ipc_injections`, and the `IpcInjector` `LearningHook`
+>   splices them into the next turn via `before_turn`. What was missing was
+>   only the way to reach it.
+>
+> - **J3 — the inbound webhook receiver is gone**, and the row below said it
+>   was wired. It never had a caller, and two surfaces overtook it: file-drop
+>   intake (`[pilot.daemon].intake_dir`) and `wingman serve`. It also had no
+>   timestamp/replay window. Deleted in #140 with the design note (including
+>   that gap) kept in `docs/AUTONOMOUS-MODE.md`; its live HMAC/framing helpers
+>   moved to `httpsig.rs`. `[pilot.daemon].webhook_secret` went with it.
+>
+> - **#31 closed as stale.** The daemon's other four discovery sources
+>   (`ci_failures`, `dependabot`, `todos`, `coverage_gaps`) are implemented and
+>   listed in `IMPLEMENTED_SOURCES`; the issue predated them.
+>
+> **Outside this plan's scope but landed in the same PR:** Windows `run_shell`
+> containment via a Job Object, and the ACP client-side wiring
+> (`session/request_permission`, `fs/read_text_file`). See
+> `docs/ROADMAP-STATUS.md`.
+>
+> **478 tests** green in `wingman-autonomous` (the drop from 514 is the ~14
+> tests over the deleted receiver); **943** across the workspace. `cargo fmt`,
+> `cargo clippy --workspace --all-targets -D warnings`, and the full suite are
+> clean, and CI is green on Linux, macOS, and Windows.
+>
+> **Still deferred, and all of it needs something external:** a Docker daemon
+> (J11 container/vm tiers), Slack/email accounts
+> ([#32](https://github.com/vedantnimbarte/Wingman/issues/32)), a live provider
+> key for the auto-dispatch validation
+> ([#34](https://github.com/vedantnimbarte/Wingman/issues/34)), and the
+> provider-matrix smoke test.
+
 ## Implementation status (Session 5 — as of 2026-06-02)
 
 > **Session 5 update (2026-06-02):** closed three logic-only **deferred**
@@ -181,7 +235,7 @@ Items are tagged with the git commit that landed them.
 | Phase 7 — TUI dashboard                           | ✅ | `3a15c71` | Renderer + `pilot status`/`pilot watch` CLIs via mtime polling. **Deferred:** deep wingman-tui integration (Ctrl+A, slash commands, in-app top-bar) — see M4 polish |
 | Phase 8 — Cross-provider validation + polish      | ✅ | `ade3984`, `5584db6` | Cost-cap (assign-time + budget watchdog), provider gate, retry watchdog, README provider-support table, end-to-end pipeline wired, e2e stub-provider test. **Deferred:** live 9-provider validation (needs user API keys) |
 
-### M2 (copilot tier) — E1/E2/E3/E5/E12/E13 shipped; E4/E6/E7/E8/E11 wired (sessions 2–3); E9/E10 remain (logic-complete)
+### M2 (copilot tier) — E1–E8 and E10–E13 wired; E9 partial (speculative pre-spawn remains)
 
 | Item | Status | Commit | Notes |
 | ---- | :----: | ------ | ----- |
@@ -194,19 +248,19 @@ Items are tagged with the git commit that landed them.
 | E7 — Per-task reviewer                  | ✅ **wired** | `review.rs` | Logic + **live**: `pipeline::run_reviewer_pass` runs a reviewer agent per Done task (gated by the `per_task_reviewer` capability, on for copilot+); a Rework verdict feeds the E8 gate. **Deferred:** spawn it *during* the run on each Review transition (currently post-run) |
 | E8 — PR-side automation                 | ✅ **wired** | `automerge.rs` | Logic + **live**: `pipeline.rs` calls `decide_auto_merge` after PR open and issues `gh pr merge --squash --auto` when it passes (`decide_and_maybe_merge`); **session 3** plumbs real **CI status** via `gh pr checks --json state` (`query_ci_status`) into the gate. Per-task-review + critic signals already feed it. **Deferred:** `wingman review` inline PR comments |
 | E9 — Speculative dispatch + adaptive concurrency | ✅ partial | `concurrency.rs`: `recommended_concurrency` scales the cap from rate-limit/CPU/burn signals. **Deferred:** speculative pre-spawn of the next task |
-| E10 — Manager↔worker IPC                | ✅ logic | `ipc.rs`: `ManagerCommand` (pivot/cancel/clarify) + `WorkerMessage` (question/ack/blocked) NDJSON encode/parse. **Deferred:** wiring the stdin pipe in `child_process.rs` (old `message_agent` actor stub from `2b18bbe` remains) |
+| E10 — Manager↔worker IPC                | ✅ **wired** | `ipc.rs`: `ManagerCommand` (pivot/cancel/clarify/**note**) + `WorkerMessage` (question/ack/blocked/**answer**). Transport wired in #30 (piped stdin, per-worker channel, `message_agent` delivery). **Session 6** added the operator surface: `ControlCommand::Tell` → watchdog resolves task → agent → `MessageAgent`, exposed as `pilot tell` / `pilot ask`, with the reply coming back as a `worker_msg:` event. **Deferred:** none |
 | E11 — Mandatory checkpoint hygiene      | ✅ **wired** | `checkpoint.rs` | Logic + **live**: `pipeline.rs` reads the event log and reports per-task hygiene violations in `PipelineOutcome.checkpoint_violations` (advisory). **Deferred:** make it a hard Review gate + worker-prompt mandate |
 | E12 — `--watch` mode                    | ✅ **wired** | `3a15c71` | `wingman pilot watch <id>` ships; **session 3** wired `--watch` into `pilot run` (`run_with_watch`) for an in-terminal compact tail of the in-process run via a `select!` loop |
 | E13 — Role lineup                       | ✅ | `33e4ab9` | All 6 roles shipped with default prompts (developer/designer/tester/reviewer/refactorer/merge-fixer) |
 
-### M3 (autopilot tier) — all J-items logic-complete (session 2); live I/O + orchestrator wiring deferred
+### M3 (autopilot tier) — wired except J7/J13 (dropped) and the parts needing a Docker daemon or a live account
 
 | Item | Status | Notes |
 | ---- | :----: | ----- |
 | J1 — Goal refinement + challenge        | ✅ **wired** | `refine.rs`: parse clarify/challenge/restatement/alternatives; `decide` → Proceed / NotifyWindow / AskUser by confidence + `challenge_threshold`. **Live (session 3):** `pilot run` runs the refinement agent before E2 (gated by the `goal_refinement` capability, autopilot default); `refine_goal`/`ask_user_refinement` render the negotiation and feed the (possibly restated) goal into the run |
 | J2 — Daemon mode                        | ✅ **wired** | `daemon.rs` logic + `run_cycle`/`run_n_cycles` + **live `wingman pilot daemon` CLI command** (real poll loop: `run_cycle` on the configured interval, logs decisions, queues accepted candidates to `.wingman/daemon-queue.jsonl`; `--cycles N` for one-shot). Functions fully given a GitHub token. **Deferred:** auto-dispatching accepted goals into nested runs |
-| J3 — Multi-channel intake               | ✅ **wired** | `intake.rs` normalization + `scan_inbox` (file-drop, fs-tested) + **`webhook.rs` inbound HTTP receiver** (dependency-free `TcpListener`; `handle_connection`/`serve` loopback-tested) + outbound `notify::send_webhook`. **Deferred:** Slack/email *transports* (thin transforms over `normalize`, need live accounts) |
-| J4 — Mid-run interjection               | ❌ not started | A logic-only `interject.rs` was written and then removed (never had a caller). Design retained in `docs/AUTONOMOUS-MODE.md`; tracked in #35, which needs the `AgentLoop` injection hook first. |
+| J3 — Multi-channel intake               | ✅ **wired** | `intake.rs` normalization + `scan_inbox` (file-drop, fs-tested) + outbound `notify::send_webhook`. Inbound is `wingman serve` (authenticated HTTP API) or the file drop — a gateway writes into `[pilot.daemon].intake_dir` and the daemon consumes it. **Session 6:** the never-called `webhook.rs` receiver was **deleted** (#129); this row used to claim it as wired. **Deferred:** Slack/email *transports* ([#32](https://github.com/vedantnimbarte/Wingman/issues/32) — need live accounts) |
+| J4 — Mid-run interjection               | ✅ **wired** | **Session 6:** `pilot tell` / `pilot ask` ship as subcommands (see E10). The `interject.rs` design is superseded — it routed its own parser at the IPC layer; these route through the control file like every other cross-process command. The injection point was the per-turn `LearningHook`, not the new `AgentLoop` API #35 assumed. |
 | J5 — Proactive status reporting         | ✅ **wired** | `reporting.rs`: per-run start/mid(>50% est.)/complete/failure + daily standup + weekly summary renderers. **Live (session 3):** `pilot run` pushes a completion/failure report at run end, routed by severity through `[pilot.notifications]` (`report_run_outcome` → `notify::route`) to the terminal or the `.wingman/pilot-digest.jsonl` digest. **Deferred:** daemon-scheduled standup/weekly cron + Slack/email transports |
 | J6 — Real verification (run/screenshot/http) | ✅ partial | Added `Acceptance::Run` + `Acceptance::Assert` (screenshot text-contains) variants; sync runner executes both. **Deferred:** real browser/screenshot capture + async `http` runner |
 | J7 — Tool synthesis                     | ❌ not started | A logic-only `toolsynth.rs` was written and then removed (never had a caller; it wrote scaffolds and a registry line, not a live tool). Design retained in `docs/AUTONOMOUS-MODE.md`. |
@@ -218,7 +272,7 @@ Items are tagged with the git commit that landed them.
 | J13 — Real-time watcher hooks           | ❌ not started | A logic-only `watcher.rs` was written and then removed (never had a caller; also shipped a `#!/bin/sh` git hook that could not run on Windows). Design retained in `docs/AUTONOMOUS-MODE.md`. |
 | J15 — Hard escalation triggers          | ✅ **wired** | `escalation.rs`: `check_runtime` already covered the numeric triggers (net-negative tests, cost ×0.8/×1.0, 3 consecutive failures, R1 irreversible). **Session 4** added the static detectors — `dangerous_path_triggers` (dangerous_paths hit the goal never mentions, via `goal_mentions_path`), `secret_triggers` (reuses `security::scan_secrets`), `license_header_triggers`, `force_push_trigger` (`is_pilot_namespace` guard) — plus `EscalationTrigger::blocks_auto_merge`. **Live:** `pipeline::detect_escalation_triggers` runs the plan+diff checks on the PR path and feeds `dangerous_paths_touched` + a blocking-trigger veto into the E8 auto-merge gate; surfaced in `PipelineOutcome.escalation_triggers`. **Deferred:** wiring `check_runtime` (needs test-count + prior-run-outcome telemetry) and force-push detection into the live git path; folding static triggers into the blocked-run escalation packet (R3) |
 
-### R-series (production hardening) — ❌ Not started
+### R-series (production hardening) — R1/R3/R5/R6 wired; R2 has its poller; R4 logic-only
 
 | Item | Folds into | Status | Notes |
 | ---- | :--------: | :----: | ----- |
@@ -231,35 +285,46 @@ Items are tagged with the git commit that landed them.
 
 ### Cumulative metrics
 
-- Commits ahead of `main`: 12 (33e4ab9, 1466e63, 2b18bbe, d7143f9,
-  86a659d, 3a15c71, ade3984, 5584db6, 1a686fd, 0bfd84d, aa7b335,
-  2fc9e63)
-- Tests: 91 in `wingman-autonomous` + 10 in `wingman-config` = 101
-- Workspace `cargo check`: clean
-- Clippy in `wingman-autonomous`: zero warnings
-- Lines added to `crates/wingman-autonomous/`: ~10,000
+As of session 6 (2026-08-19). The session-1 numbers this section used to carry
+were four sessions stale.
+
+- All of this is merged to `main`; the branch-ahead count it tracked is gone.
+- Tests: **478** in `wingman-autonomous`, **943** across the workspace.
+  478 is *down* from 514 on purpose — deleting the never-called webhook
+  receiver took ~14 tests over unreachable code with it, which is the point of
+  [#129](https://github.com/vedantnimbarte/Wingman/issues/129): the count now
+  tracks the live surface.
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
+  and `cargo test --workspace` clean; CI green on Linux, macOS, and Windows.
+- `crates/wingman-autonomous/`: ~11,000 lines.
+
+**What the numbers still don't cover.** Pilot is unit- and CI-tested, not
+end-to-end CI-tested: no canned goal runs against a live provider in CI (R4),
+so every "wired" above means "reachable and unit-tested", not "observed working
+against a real model". That gap is item 2 in the priorities below.
 
 ### Next-session priorities (suggested order)
 
-1. **R2 post-merge feedback loop** — the plan flags this as the
-   highest-leverage R-item. Without it, any E6 cross-run learning is
-   theater because the loop never sees what happened post-merge.
-2. **M2 E7 per-task reviewer** — directly cashes in on E3's acceptance
-   gating; makes human PR review a rubber stamp.
-3. **M2 E6 cross-run learning** (depends on R2) — adaptive routing +
-   per-role lessons + planner priming from past runs.
-4. **M2 E4 conflict avoidance** — runtime scheduler + merge-fixer
-   auto-spawn; static critique already half-solves it.
-5. **R6 security pass** — gates auto-merge; required before any
-   non-trivial E8 work.
-6. **J15 escalation triggers + R1 enforcement** — small, foundational,
-   makes J2 daemon mode safer to ship later.
-7. **J10 critic agent** — independent verification layer on a
-   different model family.
-8. **Then the rest of M3 J-series** — daemon (J2), intake (J3, J4,
-   J5), verification (J6), sandboxing (J11), knowledge (J8), critic
-   (J10), tool synthesis (J7), skill packs (J12).
-9. **R3, R4, R5** alongside whichever M2/M3 work surfaces them.
+> Rewritten in session 6. The original list is satisfied — every item on it is
+> wired — so this is what is actually left, hardest-first.
+
+1. **J11 container/vm tiers against a real Docker daemon.** `select_tier`,
+   `container_run_argv`, and the host-degrade path are tested, but nothing has
+   run in a container. The `vm` tier is fail-closed (pilot refuses vm-tier
+   tasks) and stays that way until it isn't a stub.
+2. **R4's canned-goal runner + CI gate.** `summarize`/`compare` exist; nothing
+   runs the goals or fails a build on regression. Without it, "pilot is
+   user-validated, not CI-validated" stays true.
+3. **E7 reviewer during the run** (it is post-run today) and **E11 as a hard
+   Review gate** (advisory today).
+4. **E4 rebase-as-you-go + merge-fixer auto-spawn.** Write-set serialisation
+   lands; the recovery half doesn't.
+5. **J8 knowledge-keeper.** `Hotspots` and `decisions.jsonl` are written and
+   read, but nothing regenerates them post-merge.
+6. **J12 pack fetcher/installer.** Parsing and semver resolution are done; the
+   git/local fetch is not.
+7. **E9 speculative pre-spawn** and **E5.5 per-turn check gate** — both want
+   telemetry that only real runs produce.
 
 ### Deferred items requiring user input
 
@@ -268,9 +333,17 @@ Items are tagged with the git commit that landed them.
   OpenAI / ChatGPT / Gemini / OpenRouter / LiteLLM / LM Studio /
   vLLM / Ollama and running the canned `--version-only` plan needs
   user credentials.
-- **GitHub webhook secret for R2**: post-merge feedback loop needs
-  either a polling token (cheap) or a webhook endpoint (cheaper to
-  operate; needs a deployment target).
+- **GitHub token for R2**: the post-merge feedback poller (`pilot feedback`)
+  shells to `gh` and needs auth. The webhook alternative is no longer on the
+  table — that receiver was deleted in session 6; use `wingman serve` if an
+  endpoint is ever wanted.
+- **Slack / email accounts** for the J3 transports and R5 senders
+  ([#32](https://github.com/vedantnimbarte/Wingman/issues/32)).
+- **A provider key + throwaway repo** to validate `[pilot.daemon].auto_dispatch`
+  before it is recommended ([#34](https://github.com/vedantnimbarte/Wingman/issues/34)).
+  `pilot daemon --dry-run` covers the trust config safely; the nested run that
+  opens a real PR has never executed.
+- **A Docker daemon** for the J11 container tier.
 
 ---
 

@@ -9,9 +9,14 @@ live end-to-end run needs that infrastructure.
 **Read "implemented and tested" as exactly that, and not as "wired into a
 default run."** Several entries are opt-in (a cargo feature, a config switch)
 or are logic cores whose production call site is still pending. Where that is
-true it is called out in the row. `wingman-autonomous` in particular carries a
-number of tested-but-uncalled modules; see
-[#105](https://github.com/vedantnimbarte/Wingman/issues/105).
+true it is called out in the row.
+
+The tested-but-uncalled modules `wingman-autonomous` used to carry are gone:
+[#105](https://github.com/vedantnimbarte/Wingman/issues/105) and
+[#129](https://github.com/vedantnimbarte/Wingman/issues/129) are closed, the
+four parked modules and the never-called webhook receiver were deleted, and the
+crate's test count dropped from 514 to 478 as a result. That drop is the
+feature — the number now tracks code that runs.
 
 ## Shipped
 
@@ -21,6 +26,8 @@ number of tested-but-uncalled modules; see
 | LSP code-actions (T1.1) | `lsp_code_action`; client applies `workspace/applyEdit` | a language server |
 | Wingman-as-MCP-server (T1.2) | `wingman mcp-serve` (tools + memory resources) | — |
 | HTTP/SSE API | `wingman serve` (pilot control, streaming turns, CLI passthrough) + `--remote` | — |
+| **Agent Client Protocol** | `wingman acp` over stdio: turn loop, plus `session/request_permission` (the editor can decline a single tool call) and `fs/read_text_file` (reads come from the unsaved buffer). Both are an *additional* gate — containment is checked before the client is asked, so a client can narrow what the agent touches, never widen it. **`fs/write_text_file` is not wired** ([#127](https://github.com/vedantnimbarte/Wingman/issues/127)): routing writes through the client takes them out of the dispatch path that writes `/undo` checkpoints and the audit log. | an ACP client (Zed, JetBrains, Neovim, Emacs) |
+| **Mid-run pilot steering** | `pilot tell "<msg>"` injects into a live worker's next turn; `pilot ask` waits for its reply. Routed through the run's `control.jsonl` like every other cross-process control. | a running pilot session |
 | Git-native auto-commit (T1.3) | `[git].auto_commit` | a git repo |
 | Local-first preset (T3.7) | `wingman router preset local` + `local` class | a local model |
 | Explain-and-teach (T3.8) | `wingman explain` | a provider |
@@ -29,6 +36,7 @@ number of tested-but-uncalled modules; see
 | Agent SDK (T2.5) | `docs/SDK.md`; embed core or drive over MCP | — |
 | Audit trail (T3.9) | `[audit].enabled` JSONL compliance log | — |
 | **reqwest 0.13 unify (L2)** | All first-party crates on reqwest 0.13 + ring; only `hf-hub` (embeddings) keeps a transitive 0.12 | — |
+| **Windows shell containment** | `run_shell` children go into a Job Object: no orphaned trees on timeout, no clipboard or cross-process handle access, capped process count. **It does not scope the filesystem** — `Availability::scopes_filesystem()` is false there, so `shell_sandbox = "required"` still refuses on Windows rather than accept a weaker guarantee, and `wingman doctor` prints what the mechanism misses ([#124](https://github.com/vedantnimbarte/Wingman/issues/124)). | — |
 | **Browser verification (T2.4)** | `wingman-browser` crate + `BrowserGate` (`[verify].browser`); screenshot diff vs baseline. **Not in the default build, and the gate fails open when no browser is present.** | a Chrome binary + `--features browser` |
 | **Server-backed team memory (T3.9)** | `[team].endpoint` + `wingman memory push` / `pull` (non-clobbering merge) | a team memory HTTP endpoint |
 | **Pilot Slack/email intake (L4)** | `wingman pilot intake slack\|email` → intake files | Slack app / mail delivery |
@@ -52,3 +60,19 @@ number of tested-but-uncalled modules; see
 - **Editor bridge** — complete TypeScript extension (thin MCP client). Ships via
   the VS Code Marketplace on its own npm toolchain, separate from the Rust
   release pipeline; `npm install && npm run build` in `editors/vscode`.
+- **ACP** — the turn loop, permission requests, and buffer reads are covered by
+  unit tests including a fake client that declines a call and one that serves a
+  buffer, plus a stdio smoke test of `initialize` / `session/new`. What has not
+  happened is a session driven by a real editor against a real provider.
+
+## Known-incomplete, tracked
+
+These are shipped-but-partial, and the issue says which half is missing rather
+than the row implying it is done.
+
+| Item | What is missing | Issue |
+|---|---|---|
+| Windows shell containment | filesystem scoping; needs AppContainer or a restricted primary token, either of which means owning `CreateProcessW` instead of spawning through `tokio::process` | [#124](https://github.com/vedantnimbarte/Wingman/issues/124) |
+| ACP file writes | `fs/write_text_file`; the `/undo` checkpoint and audit-log writes have to move with it | [#127](https://github.com/vedantnimbarte/Wingman/issues/127) |
+| Slack/email transports | live accounts to test against | [#32](https://github.com/vedantnimbarte/Wingman/issues/32) |
+| Daemon `auto_dispatch` | a live provider run that opens a real PR from an issue; `pilot daemon --dry-run` covers the trust config safely in the meantime | [#34](https://github.com/vedantnimbarte/Wingman/issues/34) |
