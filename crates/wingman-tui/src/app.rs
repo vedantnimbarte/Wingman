@@ -843,12 +843,12 @@ async fn idle_step(
                                 if ui.status.mode == "plan" {
                                     (ctx.plan_approver)();
                                     ui.transcript.push(TranscriptItem::System(
-                                        "plan approved — writes inside the project and shell                                          are now permitted for this session (`/mode plan` again                                          to revoke)"
+                                        "plan approved — writes inside the project and shell are now permitted for this session (`/mode plan` again to revoke)"
                                             .to_string(),
                                     ));
                                 } else {
                                     ui.transcript.push(TranscriptItem::System(format!(
-                                        "/approve applies in plan mode (currently {});                                          run `/mode plan` first",
+                                        "/approve applies in plan mode (currently {}); run `/mode plan` first",
                                         ui.status.mode
                                     )));
                                 }

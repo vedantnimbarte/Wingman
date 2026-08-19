@@ -113,7 +113,7 @@ impl Tool for RunShell {
         // accepting it here would silently weaken an opt-in.
         if policy == "required" && !crate::sandbox::availability().scopes_filesystem() {
             return ToolOutcome::err(format!(
-                "refusing to run: [tools].shell_sandbox is `required` but no filesystem-scoping sandbox is available on this machine ({}). Install bubblewrap (Linux), use macOS, or set `shell_sandbox =                  \"auto\"` to accept weaker containment.",
+                "refusing to run: [tools].shell_sandbox is `required` but no filesystem-scoping sandbox is available on this machine ({}). Install bubblewrap (Linux), use macOS, or set `shell_sandbox = \"auto\"` to accept weaker containment.",
                 crate::sandbox::availability().label()
             ));
         }

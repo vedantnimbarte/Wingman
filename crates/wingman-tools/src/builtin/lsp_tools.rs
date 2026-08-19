@@ -463,7 +463,7 @@ impl Tool for LspRename {
         let pres = capture_edit_pre_images(ctx, &edit);
         match wingman_lsp::edit::apply_workspace_edit(&edit, &write_authorizer(ctx)).await {
             Ok(applied) if !applied.refused.is_empty() => ToolOutcome::err(format!(
-                "refused: the rename would write outside the project (or where this \n                 mode forbids): {}",
+                "refused: the rename would write outside the project (or where this mode forbids): {}",
                 applied
                     .refused
                     .iter()
@@ -674,7 +674,7 @@ async fn apply_code_action(
         match wingman_lsp::edit::apply_workspace_edit(edit, &write_authorizer(ctx)).await {
             Ok(applied) if !applied.refused.is_empty() => {
                 return ToolOutcome::err(format!(
-                    "refused `{title}`: it would write outside the project (or where \n                     this mode forbids): {}",
+                    "refused `{title}`: it would write outside the project (or where this mode forbids): {}",
                     applied
                         .refused
                         .iter()
@@ -713,7 +713,7 @@ async fn apply_code_action(
             // edit-shaped commands a code action legitimately needs.
             if !is_allowed_lsp_command(&name) {
                 return ToolOutcome::err(format!(
-                    "refused `{title}`: the server asked to run the command `{name}`, \n                     which is not on the allowlist of edit-only commands"
+                    "refused `{title}`: the server asked to run the command `{name}`, which is not on the allowlist of edit-only commands"
                 ));
             }
             if let Err(e) = client.execute_command(&name, arguments).await {

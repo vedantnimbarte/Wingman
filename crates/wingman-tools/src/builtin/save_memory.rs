@@ -111,7 +111,7 @@ impl Tool for SaveMemory {
         let effective = scope.unwrap_or_else(|| mtype.default_scope());
         if effective == MemoryScope::Global && !self.allow_global {
             return ToolOutcome::err(
-                "refusing to write a GLOBAL memory: global memories are injected into                  every future session in every project. Save it with                  `scope: \"project\"` instead, or the user can enable                  `[learn].allow_global_memory_writes` if they want cross-project                  memories written automatically.",
+                "refusing to write a GLOBAL memory: global memories are injected into every future session in every project. Save it with `scope: \"project\"` instead, or the user can enable `[learn].allow_global_memory_writes` if they want cross-project memories written automatically.",
             );
         }
         let draft = MemoryDraft {
