@@ -599,6 +599,67 @@ async fn control_watchdog(run_dir: PathBuf, orch: mpsc::Sender<OrchestratorComma
                 // Approve/Veto gate plan execution, which happens before the
                 // orchestrator exists; the run process handles those itself.
                 ControlCommand::Approve | ControlCommand::Veto => continue,
+                ControlCommand::Tell {
+                    task,
+                    message,
+                    reply,
+                } => {
+                    // Resolve which live worker(s) should hear it. The control
+                    // file only knows task ids; the orchestrator knows which
+                    // agent holds which task, so ask it for a snapshot first.
+                    let (snap_tx, snap_rx) = oneshot::channel();
+                    if orch
+                        .send(OrchestratorCommand::Snapshot { reply: snap_tx })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let Ok(state) = snap_rx.await else { return };
+                    let targets: Vec<String> = state
+                        .agents
+                        .iter()
+                        .filter(|a| match (&task, &a.current_task) {
+                            (Some(want), Some(have)) => want == have,
+                            // No task named: everyone actually working hears it.
+                            (None, Some(_)) => true,
+                            _ => false,
+                        })
+                        .map(|a| a.id.clone())
+                        .collect();
+                    if targets.is_empty() {
+                        tracing::warn!(
+                            target: "pilot::control",
+                            task = ?task,
+                            "tell/ask had no live worker to deliver to"
+                        );
+                        continue;
+                    }
+                    let body = crate::ipc::encode_command(&crate::ipc::ManagerCommand::Note {
+                        text: message.clone(),
+                        reply,
+                    });
+                    let mut failed = false;
+                    for agent_id in targets {
+                        let (reply_tx, _) = oneshot::channel();
+                        if orch
+                            .send(OrchestratorCommand::MessageAgent {
+                                agent_id,
+                                body: body.clone(),
+                                reply: reply_tx,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            failed = true;
+                            break;
+                        }
+                    }
+                    if failed {
+                        return;
+                    }
+                    continue;
+                }
             };
             if sent.is_err() {
                 return;
@@ -2810,6 +2871,170 @@ mod tests {
             }
             other => panic!("expected BadTransition, got {other:?}"),
         }
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// #35 — a `tell` written to the control file by a *separate process*
+    /// reaches the live worker's stdin channel. This is the whole point of
+    /// `pilot tell`: the CLI never touches the orchestrator directly.
+    #[tokio::test]
+    async fn tell_control_command_reaches_the_live_worker() {
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        let run_dir = crate::run_dir(dir.path(), "test-run");
+        let store = RunStore::create(
+            run_dir.clone(),
+            "test-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+
+        let received: Arc<Mutex<Vec<crate::ipc::ManagerCommand>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_spawner = received.clone();
+        let hold: WorkerSpawner = Arc::new(move |ctx: SpawnContext| {
+            let received = received_for_spawner.clone();
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = store
+                        .append(Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        })
+                        .await;
+                }
+                let rx = ctx.cmd_rx.lock().await.take();
+                if let Some(mut rx) = rx {
+                    // Bounded: a worker that is never messaged must still
+                    // finish, or the test hangs waiting for it.
+                    if let Ok(Some(cmd)) =
+                        tokio::time::timeout(Duration::from_secs(5), rx.recv()).await
+                    {
+                        received.lock().await.push(cmd);
+                    }
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        });
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), hold);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+        // The watchdog truncates the control file when it starts; write after
+        // that so the command isn't cleared before it is read.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        crate::control::append(
+            &run_dir,
+            &crate::control::ControlCommand::Tell {
+                task: Some("t1".into()),
+                message: "also update the changelog".into(),
+                reply: false,
+            },
+        )
+        .unwrap();
+
+        for _ in 0..200 {
+            if !received.lock().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            received.lock().await.clone(),
+            vec![crate::ipc::ManagerCommand::Note {
+                text: "also update the changelog".into(),
+                reply: false,
+            }]
+        );
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// A `tell` naming a task nobody is working on must not be broadcast to
+    /// whoever happens to be running — it goes nowhere.
+    #[tokio::test]
+    async fn tell_for_an_unheld_task_reaches_nobody() {
+        use std::time::Duration;
+        let dir = tempdir().unwrap();
+        let run_dir = crate::run_dir(dir.path(), "test-run");
+        let store = RunStore::create(
+            run_dir.clone(),
+            "test-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+
+        let received: Arc<Mutex<Vec<crate::ipc::ManagerCommand>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let received_for_spawner = received.clone();
+        let hold: WorkerSpawner = Arc::new(move |ctx: SpawnContext| {
+            let received = received_for_spawner.clone();
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    let _ = store
+                        .append(Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        })
+                        .await;
+                }
+                let rx = ctx.cmd_rx.lock().await.take();
+                if let Some(mut rx) = rx {
+                    // Bounded so the never-messaged worker still finishes.
+                    if let Ok(Some(cmd)) =
+                        tokio::time::timeout(Duration::from_secs(3), rx.recv()).await
+                    {
+                        received.lock().await.push(cmd);
+                    }
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        });
+
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), hold);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_for_in_progress(&handle, "t1").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        crate::control::append(
+            &run_dir,
+            &crate::control::ControlCommand::Tell {
+                task: Some("nope".into()),
+                message: "hello?".into(),
+                reply: true,
+            },
+        )
+        .unwrap();
+
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            received.lock().await.is_empty(),
+            "a tell for an unassigned task must not be delivered to another worker"
+        );
         handle.shutdown().await;
         let _ = join.await;
     }

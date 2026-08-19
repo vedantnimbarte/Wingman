@@ -912,6 +912,14 @@ fn describe_cmd(cmd: &ControlCommand) -> String {
         ControlCommand::RetryTask { id } => format!("retry sent for {id}"),
         ControlCommand::Approve => "approved".into(),
         ControlCommand::Veto => "vetoed".into(),
+        ControlCommand::Tell { task, reply, .. } => {
+            let who = task.as_deref().unwrap_or("every working agent");
+            if *reply {
+                format!("question sent to {who}")
+            } else {
+                format!("message sent to {who}")
+            }
+        }
     }
 }
 

@@ -249,6 +249,18 @@ impl AgentLoop {
         }
     }
 
+    /// Swap the tool dispatcher after construction.
+    ///
+    /// For front ends that need to sit between the agent and its tools: the
+    /// ACP server wraps the registry so an editor can approve or decline
+    /// individual calls and serve file reads from its own unsaved buffers.
+    /// Building the agent and then decorating it beats threading a decorator
+    /// through every `build_*` signature for one caller.
+    pub fn with_dispatcher(mut self, tools: Arc<dyn ToolDispatcher>) -> Self {
+        self.tools = tools;
+        self
+    }
+
     /// Construct an `AgentLoop` with pre-loaded conversation history, useful
     /// for resuming a previous session via session records.
     pub fn with_history(

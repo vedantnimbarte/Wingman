@@ -32,6 +32,14 @@ similar = "2"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 urlencoding = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
 [features]
 default = ["treesitter"]
 treesitter = ["dep:wingman-ts", "wingman-ts/treesitter"]

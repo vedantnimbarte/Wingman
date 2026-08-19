@@ -108,6 +108,91 @@ pub async fn control_retry(run_id: Option<String>, task: String) -> Result<ExitC
     )
 }
 
+/// `pilot tell [run] [--task T] <message>` — inject a message into a live
+/// worker's next turn.
+pub async fn control_tell(
+    run_id: Option<String>,
+    task: Option<String>,
+    message: String,
+) -> Result<ExitCode> {
+    send_control(
+        run_id,
+        wingman_autonomous::control::ControlCommand::Tell {
+            task,
+            message,
+            reply: false,
+        },
+    )
+}
+
+/// `pilot ask [run] [--task T] <question>` — same delivery as `tell`, then
+/// wait for the worker to answer.
+///
+/// The answer comes back the way every other worker→manager message does: as
+/// a `worker_msg:` entry in the run's event log. Polling that beats opening a
+/// second channel back to a CLI process that may not even be running by then.
+pub async fn control_ask(
+    run_id: Option<String>,
+    task: Option<String>,
+    message: String,
+    wait_secs: u64,
+) -> Result<ExitCode> {
+    let pick = pick_run(run_id)?;
+    // Count what is already there, so a stale answer from an earlier `ask`
+    // isn't mistaken for this one's.
+    let before = answer_count(&pick.dir);
+    let cmd = wingman_autonomous::control::ControlCommand::Tell {
+        task,
+        message,
+        reply: true,
+    };
+    wingman_autonomous::control::append(&pick.dir, &cmd)
+        .with_context(|| format!("writing control command to run {}", pick.run_id))?;
+    eprintln!("[pilot] {} -> {}", cmd.encode(), pick.run_id);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_secs);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let answers = answers(&pick.dir);
+        if answers.len() > before {
+            for a in &answers[before..] {
+                println!("{a}");
+            }
+            return Ok(ExitCode::SUCCESS);
+        }
+    }
+    eprintln!(
+        "[pilot] no answer within {wait_secs}s — the question was delivered; \
+         the reply will show up in `wingman pilot watch {}`",
+        pick.run_id
+    );
+    Ok(ExitCode::from(1))
+}
+
+/// Every `WorkerMessage::Answer` recorded in this run so far, oldest first.
+fn answers(run_dir: &std::path::Path) -> Vec<String> {
+    let Ok(events) = wingman_autonomous::dashboard::tail_events(run_dir, 5_000) else {
+        return Vec::new();
+    };
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            wingman_autonomous::model::Event::TaskTool { tool, .. } => {
+                let line = tool.strip_prefix("worker_msg:")?;
+                match wingman_autonomous::ipc::parse_message(line) {
+                    Ok(Some(wingman_autonomous::ipc::WorkerMessage::Answer { text })) => Some(text),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn answer_count(run_dir: &std::path::Path) -> usize {
+    answers(run_dir).len()
+}
+
 /// `pilot approve [run]` — release a plan-approval gate.
 pub async fn control_approve(run_id: Option<String>) -> Result<ExitCode> {
     send_control(run_id, wingman_autonomous::control::ControlCommand::Approve)
@@ -2177,5 +2262,60 @@ mod tests {
             !wait_for_approval(dir.path(), 0).await,
             "a hard gate must fail closed when the window elapses"
         );
+    }
+}
+
+#[cfg(test)]
+mod ask_tests {
+    use super::answers;
+
+    /// `pilot ask` finds its reply by reading the run's own event log — the
+    /// same `worker_msg:` events every other worker message lands in. If the
+    /// filter widened to all worker messages, an `ack` or a `question` would
+    /// be printed as though it were the answer.
+    #[test]
+    fn only_answer_messages_are_picked_out_of_the_event_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path();
+        let mut body = String::new();
+        // Build the line with serde rather than by hand: the tool field holds
+        // nested JSON, and hand-escaping it is how this test lies to itself.
+        let ev = |tool: &str| {
+            serde_json::json!({
+                "ev": "task.tool",
+                "t": "2026-01-01T00:00:00Z",
+                "id": "t1",
+                "agent": "a1",
+                "tool": tool,
+                "ok": true,
+            })
+            .to_string()
+        };
+        // An ordinary tool call, a non-answer worker message, then two answers.
+        body.push_str(&ev("read_file"));
+        body.push('\n');
+        body.push_str(&ev(r#"worker_msg:{"msg":"ack","command":"note"}"#));
+        body.push('\n');
+        body.push_str(&ev(
+            r#"worker_msg:{"msg":"answer","text":"because v2 changed the shape"}"#,
+        ));
+        body.push('\n');
+        body.push_str(&ev(r#"worker_msg:{"msg":"answer","text":"second one"}"#));
+        body.push('\n');
+        std::fs::write(run.join("tasks.jsonl"), body).unwrap();
+
+        assert_eq!(
+            answers(run),
+            vec![
+                "because v2 changed the shape".to_string(),
+                "second one".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_events_yields_no_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(answers(dir.path()).is_empty());
     }
 }

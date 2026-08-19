@@ -1,7 +1,7 @@
 //! Minimal HTTP/1.1 + SSE transport for [`crate::serve`].
 //!
 //! No web framework: an accept loop on `tokio::net::TcpListener`, a request
-//! parser that reuses [`wingman_autonomous::webhook::header_boundary_and_len`]
+//! parser that reuses [`wingman_autonomous::httpsig::header_boundary_and_len`]
 //! (already load-bearing for the Slack intake listener), and helpers that
 //! write responses straight to the socket.
 //!
@@ -104,7 +104,7 @@ pub async fn read_request(sock: &mut TcpStream) -> std::io::Result<Option<Reques
     // split across TCP segments must not be truncated, and a body short-read
     // would surface as a bogus parse error rather than the real cause.
     loop {
-        if let Some((body_start, len)) = wingman_autonomous::webhook::header_boundary_and_len(&buf)
+        if let Some((body_start, len)) = wingman_autonomous::httpsig::header_boundary_and_len(&buf)
         {
             if buf.len() >= body_start.saturating_add(len) {
                 break;
@@ -122,7 +122,7 @@ pub async fn read_request(sock: &mut TcpStream) -> std::io::Result<Option<Reques
         buf.extend_from_slice(&chunk[..n.min(room)]);
     }
 
-    let Some((body_start, len)) = wingman_autonomous::webhook::header_boundary_and_len(&buf) else {
+    let Some((body_start, len)) = wingman_autonomous::httpsig::header_boundary_and_len(&buf) else {
         return Ok(None);
     };
     let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
@@ -289,7 +289,7 @@ impl<'a> Sse<'a> {
 #[cfg(test)]
 pub fn parse_for_test(raw: &str) -> Request {
     let buf = raw.as_bytes().to_vec();
-    let (body_start, len) = wingman_autonomous::webhook::header_boundary_and_len(&buf).unwrap();
+    let (body_start, len) = wingman_autonomous::httpsig::header_boundary_and_len(&buf).unwrap();
     let head = String::from_utf8_lossy(&buf[..body_start]).to_string();
     let body = buf[body_start..(body_start + len).min(buf.len())].to_vec();
     let mut lines = head.lines();

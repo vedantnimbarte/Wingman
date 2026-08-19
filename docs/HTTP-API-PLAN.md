@@ -13,7 +13,7 @@ driven rather than tested.
 
 | Decision | Chosen | Rationale |
 |---|---|---|
-| Transport | HTTP/1.1 on `tokio::net::TcpListener`, SSE for streams | Zero new deps. `wingman-autonomous::webhook` already has the request parser and `pilot intake slack` already runs this exact shape async. |
+| Transport | HTTP/1.1 on `tokio::net::TcpListener`, SSE for streams | Zero new deps. `wingman-autonomous::httpsig` already has the request parser and `pilot intake slack` already runs this exact shape async. |
 | Where the code lives | `crates/wingman-cli/src/serve/` | The routes need `runtime::`, `commands::`, and the binary path. A separate crate could not depend on `wingman-cli` without inverting the dependency graph. |
 | Turn execution | Child process `wingman --print --json` per turn | `runtime::build_*` and every CLI command resolve the project from `std::env::current_dir()`, which is process-wide — concurrent turns in different repos would race it. Pilot already spawns workers exactly this way, the NDJSON event stream maps onto SSE line-for-line, and a panicking turn cannot take the daemon down. |
 | Pilot read/control | In-process filesystem access | `dashboard::list_runs / load_state / tail_events` and `control::append` are pure functions over explicit paths. Nothing to spawn. |

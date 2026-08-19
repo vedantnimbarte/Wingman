@@ -210,8 +210,8 @@ pub fn slack_signature_valid(
     basestring.push(b':');
     basestring.extend_from_slice(raw_body);
 
-    let expected = crate::webhook::hmac_sha256(signing_secret.as_bytes(), &basestring);
-    let expected_hex = crate::webhook::to_hex(&expected);
+    let expected = crate::httpsig::hmac_sha256(signing_secret.as_bytes(), &basestring);
+    let expected_hex = crate::httpsig::to_hex(&expected);
 
     // Constant-time compare — a byte-by-byte early exit leaks the signature.
     use subtle::ConstantTimeEq;
@@ -237,7 +237,7 @@ mod tests {
         base.extend_from_slice(body);
         format!(
             "v0={}",
-            crate::webhook::to_hex(&crate::webhook::hmac_sha256(secret.as_bytes(), &base))
+            crate::httpsig::to_hex(&crate::httpsig::hmac_sha256(secret.as_bytes(), &base))
         )
     }
 

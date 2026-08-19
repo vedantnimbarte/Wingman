@@ -184,15 +184,23 @@ blocks reads of `~/.ssh`, `~/.aws`, `~/.gnupg`. Set it with
 
 | value      | behaviour                                                        |
 | ---------- | ---------------------------------------------------------------- |
-| `auto`     | default — confine when available, otherwise run unconfined and warn |
-| `required` | refuse to run shell at all when no mechanism is available          |
+| `auto`     | default — confine as far as the platform allows, warn about the rest |
+| `required` | refuse to run shell unless the filesystem is scoped                |
 | `off`      | never wrap                                                        |
 
-`wingman doctor` reports which mechanism is active, so it is a claim you can
-check rather than take on trust. Two honest limits: there is **no Windows
-mechanism wired up yet** (use `required` if that matters to you), and this
-confines the filesystem, not the network — a sandboxed command can still
-`curl`. The shell denylist remains a convenience, not a boundary.
+**Windows is the weaker platform, deliberately.** There is no `bwrap`
+equivalent, so `auto` runs the command inside a Job Object: the process tree
+cannot outlive its timeout, cannot read the clipboard or touch handles owned by
+processes outside the job, and cannot fork-bomb. It still reaches the whole
+filesystem. Because `required` means *credential directories are out of reach*,
+it keeps refusing on Windows rather than accepting the weaker guarantee — path
+scoping there needs AppContainer or a restricted primary token
+([#124](https://github.com/vedantnimbarte/Wingman/issues/124)).
+
+`wingman doctor` reports which mechanism is active and what it does not cover,
+so it is a claim you can check rather than take on trust. The other honest
+limit: this confines the filesystem, not the network — a sandboxed command can
+still `curl`. The shell denylist remains a convenience, not a boundary.
 
 `yolo` is per-session only — never persisted to config.
 

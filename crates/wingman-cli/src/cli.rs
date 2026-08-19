@@ -539,6 +539,38 @@ pub enum PilotAction {
         /// Run id; defaults to the most recently updated.
         run_id: Option<String>,
     },
+    /// Say something to a live run's worker(s) without stopping them.
+    ///
+    /// The message is injected into the next turn of whichever worker is
+    /// holding the task, so it lands mid-flight: "also update the changelog",
+    /// "the API changed, use v2". Without `--task`, every worker currently
+    /// holding a task hears it.
+    Tell {
+        /// What to say.
+        message: String,
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        /// Address just this task's worker.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+    },
+    /// Ask a live run's worker a question and wait for its reply.
+    ///
+    /// Same delivery as `pilot tell`, but the worker answers in its next
+    /// message and that answer is printed here.
+    Ask {
+        /// The question.
+        message: String,
+        /// Run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        /// Address just this task's worker.
+        #[arg(long, value_name = "TASK")]
+        task: Option<String>,
+        /// Seconds to wait for the answer before giving up. The message is
+        /// still delivered either way.
+        #[arg(long, value_name = "SECS", default_value_t = 120)]
+        wait: u64,
+    },
     /// Approve a run waiting at the plan-approval gate.
     Approve {
         /// Run id; defaults to the most recently updated.
@@ -1088,6 +1120,17 @@ pub async fn run() -> Result<ExitCode> {
             PilotAction::Retry { task, run_id } => {
                 commands::pilot::control_retry(run_id, task).await
             }
+            PilotAction::Tell {
+                message,
+                run_id,
+                task,
+            } => commands::pilot::control_tell(run_id, task, message).await,
+            PilotAction::Ask {
+                message,
+                run_id,
+                task,
+                wait,
+            } => commands::pilot::control_ask(run_id, task, message, wait).await,
             PilotAction::Approve { run_id } => commands::pilot::control_approve(run_id).await,
             PilotAction::Veto { run_id } => commands::pilot::control_veto(run_id).await,
             PilotAction::Intake { channel } => match channel {

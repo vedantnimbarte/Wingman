@@ -241,10 +241,13 @@ Tailscale, a WireGuard subnet, an SSH tunnel, or a TLS proxy. Full surface in
 
 Pre-1.0. The parts worth knowing before you lean on them:
 
-- **Shell containment is platform-dependent.** Real via `bwrap` on Linux and
-  `sandbox-exec` on macOS; **nothing on Windows yet** — `shell_sandbox = "auto"`
-  runs unconfined and warns, `"required"` refuses to run shell at all. `wingman
-  doctor` reports which you have.
+- **Shell containment is platform-dependent.** Filesystem scoping is real via
+  `bwrap` on Linux and `sandbox-exec` on macOS. **Windows gets less:** a Job
+  Object (no orphaned processes, no clipboard or cross-process handle access,
+  capped process count) but *no filesystem scoping* — a shell command there can
+  still read credentials outside the project, so `shell_sandbox = "required"`
+  still refuses to run rather than pretend otherwise. `wingman doctor` reports
+  exactly which you have.
 - **Pilot mode is user-validated, not CI-validated** end-to-end. CI runs the
   unit suite.
 - **Browser verification fails open, and is local-only.** Needs

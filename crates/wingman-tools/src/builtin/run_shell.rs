@@ -31,7 +31,20 @@ fn warn_unconfined_once() {
     WARNED.call_once(|| {
         tracing::warn!(
             target: "wingman::sandbox",
-            "shell commands run unconfined: no sandbox mechanism found.              Install bubblewrap (Linux) for filesystem containment, or set              [tools].shell_sandbox = \"required\" to refuse instead."
+            "shell commands run unconfined: no sandbox mechanism found. Install bubblewrap (Linux) for filesystem containment, or set [tools].shell_sandbox = \"required\" to refuse instead."
+        );
+    });
+}
+
+/// Windows only: the Job Object contains the process but not its file
+/// access, so say once that the filesystem half of the guarantee is missing.
+#[cfg(windows)]
+fn warn_no_path_scoping_once() {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "wingman::sandbox",
+            "shell commands run in a Job Object (no orphans, no clipboard or cross-process handles, capped process count) but their filesystem access is NOT confined — a command can still read credentials outside the project. See issue #124."
         );
     });
 }
@@ -94,9 +107,13 @@ impl Tool for RunShell {
             crate::sandbox::wrap(&args.command, &ctx.project_root, &std::env::temp_dir())
         };
 
-        if policy == "required" && sandboxed.is_none() {
+        // `required` means "the filesystem is confined", so it gates on
+        // `scopes_filesystem` rather than on any mechanism being present:
+        // the Windows Job Object is real containment but not *that* one, and
+        // accepting it here would silently weaken an opt-in.
+        if policy == "required" && !crate::sandbox::availability().scopes_filesystem() {
             return ToolOutcome::err(format!(
-                "refusing to run: [tools].shell_sandbox is `required` but no sandbox                  mechanism is available on this machine ({}). Install bubblewrap                  (Linux), use macOS, or set `shell_sandbox = \"auto\"` to accept                  unconfined execution.",
+                "refusing to run: [tools].shell_sandbox is `required` but no filesystem-scoping sandbox is available on this machine ({}). Install bubblewrap (Linux), use macOS, or set `shell_sandbox =                  \"auto\"` to accept weaker containment.",
                 crate::sandbox::availability().label()
             ));
         }
@@ -137,10 +154,9 @@ impl Tool for RunShell {
             }
         }
 
-        let output = match tokio::time::timeout(timeout, cmd.output()).await {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => return ToolOutcome::err(format!("spawn failed: {e}")),
-            Err(_) => return ToolOutcome::err(format!("timed out after {}s", timeout.as_secs())),
+        let output = match run_captured(cmd, timeout, policy).await {
+            Ok(o) => o,
+            Err(e) => return ToolOutcome::err(e),
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -169,6 +185,63 @@ impl Tool for RunShell {
             ToolOutcome::ok(body)
         } else {
             ToolOutcome::err(body)
+        }
+    }
+}
+
+/// Spawn, capture, and time out — with whatever post-spawn containment the
+/// platform offers.
+///
+/// On Windows the child goes into a Job Object (see
+/// [`crate::sandbox::windows_job`]); the guard is held for the life of the
+/// command, so a timeout drops it and the whole tree dies instead of being
+/// orphaned. Everywhere else this is `cmd.output()` with a timeout, exactly
+/// as before — the confinement there is already in the argv.
+async fn run_captured(
+    #[allow(unused_mut)] mut cmd: Command,
+    timeout: Duration,
+    #[allow(unused_variables)] policy: &str,
+) -> Result<std::process::Output, String> {
+    #[cfg(windows)]
+    {
+        use std::process::Stdio;
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
+        // Assign before the command has had a chance to do much. `None` means
+        // the child already exited, which is nothing to contain.
+        let _job = child.id().and_then(|pid| {
+            match crate::sandbox::windows_job::confine(pid) {
+                Ok(g) => {
+                    if policy != "off" {
+                        warn_no_path_scoping_once();
+                    }
+                    Some(g)
+                }
+                Err(e) => {
+                    // Containment failed; the command still runs, but say so
+                    // rather than implying a guarantee that isn't there.
+                    tracing::warn!(
+                        target: "wingman::sandbox",
+                        error = %e,
+                        "Job Object containment failed; shell command runs unconfined"
+                    );
+                    None
+                }
+            }
+        });
+        match tokio::time::timeout(timeout, child.wait_with_output()).await {
+            Ok(Ok(o)) => Ok(o),
+            Ok(Err(e)) => Err(format!("spawn failed: {e}")),
+            // Dropping `_job` here kills the tree.
+            Err(_) => Err(format!("timed out after {}s", timeout.as_secs())),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        match tokio::time::timeout(timeout, cmd.output()).await {
+            Ok(Ok(o)) => Ok(o),
+            Ok(Err(e)) => Err(format!("spawn failed: {e}")),
+            Err(_) => Err(format!("timed out after {}s", timeout.as_secs())),
         }
     }
 }

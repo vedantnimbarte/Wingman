@@ -31,7 +31,7 @@ else is a declarative table of `(method, path) -> wingman <subcommand>`, so the
 long tail of the CLI is reachable without forty hand-written handlers.
 
 No web framework: HTTP/1.1 on `tokio::net::TcpListener`, reusing the request
-parser already in `wingman-autonomous::webhook`. The dependency budget for the
+parser already in `wingman-autonomous::httpsig`. The dependency budget for the
 whole feature is zero new crates.
 
 ---
