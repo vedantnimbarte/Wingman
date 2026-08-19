@@ -87,7 +87,7 @@ impl Tool for PresentPlan {
             out.push_str(
                 "
 ---
-Awaiting approval. Writes and shell are denied until the user                  runs `/approve`. Do not attempt edits yet — stop here and let them read                  the plan.
+Awaiting approval. Writes and shell are denied until the user runs `/approve`. Do not attempt edits yet — stop here and let them read the plan.
 ",
             );
         }
