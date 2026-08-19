@@ -394,7 +394,26 @@ pilot abort [RUN] --task T   # abort just task T's worker
 pilot retry T [RUN]          # re-queue a failed/blocked task
 pilot approve [RUN]          # release a plan-approval gate
 pilot veto [RUN]             # reject a pending plan
+pilot tell "MSG" [RUN]       # say something to the live worker(s)
+pilot ask  "MSG" [RUN]       # ...and wait for the answer
 ```
+
+**Talking to a running worker.** `pilot tell` injects a message into the next
+turn of whichever worker holds the task, without stopping it — "also update the
+changelog", "the API changed, use v2". Add `--task T` to address one worker;
+without it, every worker currently holding a task hears it. The message is
+framed to the model as coming from the human running the task, and explicitly
+*not* as a pivot, so it folds the instruction into the work it has left instead
+of re-orienting and redoing what is already correct.
+
+`pilot ask` delivers the same way but asks the worker to answer in its next
+message. The reply comes back as a `worker_msg:` event in the run log — the
+same channel every other worker→manager message uses — and the CLI tails it and
+prints it, up to `--wait` seconds (default 120). On timeout it says so: the
+question was still delivered, and the answer will appear in `pilot watch`.
+
+Both land at a turn boundary, not mid-tool-call: the worker applies the
+injection before its next request to the model.
 
 `RUN` defaults to the most recently updated run. In a pinch you can write the
 file by hand: `echo '{"cmd":"abort_run"}' >> <run-dir>/control.jsonl`.
@@ -459,7 +478,7 @@ The feature is complete when:
 
 ## Removed designs (kept for the record)
 
-Four modules in `wingman-autonomous` were written as logic-only cores, never
+Five pieces of `wingman-autonomous` were written as logic-only cores, never
 acquired a production caller, and were deleted in the #129 cleanup. Their
 tests inflated the crate's test count without covering any live path. The
 designs are recorded here so the intent is not lost; none of this is shipped
@@ -479,12 +498,20 @@ behaviour today.
   registry line — never a live, callable tool — which is the gap any revival
   has to close first.
 - **`interject.rs` (J4 — mid-run interjection).** Parsed `tell <run> <msg>` /
-  `ask <run> <msg>` into a `Dispatch` over the E10 IPC channel: `tell` became a
-  `ManagerCommand::Pivot`, `ask` a query. It was never reachable because the
-  agent loop has no hook to inject a user turn into a running stream. That hook
-  is the actual blocker, and is tracked in
-  [#35](https://github.com/vedantnimbarte/Wingman/issues/35) — rebuild the
-  parser there once the injection API exists.
+  `ask <run> <msg>` into a `Dispatch` over the E10 IPC channel. **Superseded:**
+  `pilot tell` / `pilot ask` now ship as real subcommands (see "Controlling a
+  live run"), routing through the control file rather than a parser of their
+  own, and the injection point turned out to be the per-turn `LearningHook`
+  rather than a new agent-loop API.
+- **`webhook.rs`'s receiver (J3 — inbound `POST /goals`).** A dependency-free
+  HTTP/1.1 endpoint that HMAC-authenticated a body and normalised it into a
+  `Goal`. Two surfaces overtook it: file-drop intake (`[pilot.daemon].intake_dir`
+  — a Slack/email gateway writes a file, wingman consumes it) and `wingman serve`,
+  which is an authenticated HTTP API already. It also had **no timestamp/replay
+  window**, so a captured signed request replayed forever — anything reviving an
+  inbound receiver must add one, as the Slack intake path did. Its framing and
+  HMAC primitives survive in `httpsig.rs`, where both live listeners use them,
+  and `[pilot.daemon].webhook_secret` was dropped with it.
 - **`voice.rs` (J14 — voice intake).** Turned an STT transcript into an intake
   `Goal` and shelled out to `whisper.cpp`. **Removed as a product decision, not
   a deferral: voice is out of scope for Wingman.** The `Channel::Voice` intake

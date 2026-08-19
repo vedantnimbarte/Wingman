@@ -38,6 +38,17 @@ pub enum ControlCommand {
     Approve,
     /// Reject the pending plan; the run aborts before execution.
     Veto,
+    /// Say something to a live worker mid-task: `pilot tell` / `pilot ask`.
+    /// With no `task`, every worker currently holding a task hears it.
+    /// `reply: true` asks the worker to answer, which it does as a
+    /// `worker_msg:` event the asking process tails.
+    Tell {
+        #[serde(default)]
+        task: Option<String>,
+        message: String,
+        #[serde(default)]
+        reply: bool,
+    },
 }
 
 impl ControlCommand {

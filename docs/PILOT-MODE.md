@@ -38,8 +38,9 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > daemon ingests them with per-author trust — no in-process listener needed.
 > **Notification** delivery is wired via `[pilot.notifications.webhooks]`
 > (channel → URL; Slack incoming-webhook shape; terminal fallback). **Mid-run
-> steering** works — `pivot`/`clarify` IPC inject into the worker's next
-> turn. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
+> steering** works — `pilot tell` / `pilot ask` (and the `pivot`/`clarify` IPC
+> underneath) inject into the worker's next turn, and `ask` waits for the
+> worker's reply. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
 > opens real PRs autonomously; validate its trust config safely with
 > `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
 > before enabling it. Genuinely still open: the **`vm` sandbox tier** (real

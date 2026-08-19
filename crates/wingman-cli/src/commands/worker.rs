@@ -116,6 +116,9 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     // them into the next turn's system prompt.
     let ipc_injections: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    // Set when the operator asked a question (`pilot ask`): the next
+    // assistant message is echoed back up the pipe as the answer.
+    let answer_pending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
@@ -143,6 +146,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         // tokio's io-std feature). Exits on EOF when the parent drops stdin.
         let cancel = cancel.clone();
         let injections = ipc_injections.clone();
+        let answer_pending = answer_pending.clone();
         std::thread::spawn(move || {
             use std::io::BufRead;
             use wingman_autonomous::ipc::ManagerCommand;
@@ -169,6 +173,24 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
                             .unwrap()
                             .push(format!("## Manager clarification\n\n{answer}"));
                     }
+                    Ok(ManagerCommand::Note { text, reply }) => {
+                        eprintln!("[worker] IPC operator note injected (reply: {reply})");
+                        // Deliberately not Pivot's wording: an operator adding
+                        // a constraint has not changed what the task is, and
+                        // telling the model it pivoted makes it redo work.
+                        let framing = if reply {
+                            "## Question from the human running this task\n\nAnswer it in your next message, briefly, then carry on with the task."
+                        } else {
+                            "## Message from the human running this task\n\nFold this into the work you have left; it does not mean the task changed."
+                        };
+                        injections
+                            .lock()
+                            .unwrap()
+                            .push(format!("{framing}\n\n{text}"));
+                        if reply {
+                            answer_pending.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
                     Err(_) => {}
                 }
             }
@@ -194,11 +216,36 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     stdout.flush().ok();
 
     let mut stream = agent.run(user_prompt);
+    // Accumulates the assistant text of the message that answers an operator
+    // question; flushed as a `WorkerMessage::Answer` when that message ends.
+    let mut answer_buf = String::new();
     while let Some(event) = stream.next().await {
         let line = serde_json::to_string(&event)
             .unwrap_or_else(|_| "{\"type\":\"serialize_error\"}".into());
         writeln!(stdout, "{line}").ok();
         stdout.flush().ok();
+        // `pilot ask`: mirror the reply back up the pipe so the asking process
+        // has something to print. The message is over when the model stops
+        // talking and does something else (a tool call, or the turn ending).
+        if answer_pending.load(std::sync::atomic::Ordering::SeqCst) {
+            match &event {
+                AgentEvent::TextDelta { text } => answer_buf.push_str(text),
+                AgentEvent::ToolStart { .. } | AgentEvent::Stop { .. }
+                    if !answer_buf.trim().is_empty() =>
+                {
+                    let msg = wingman_autonomous::ipc::encode_message(
+                        &wingman_autonomous::ipc::WorkerMessage::Answer {
+                            text: answer_buf.trim().to_string(),
+                        },
+                    );
+                    writeln!(stdout, "{msg}").ok();
+                    stdout.flush().ok();
+                    answer_buf.clear();
+                    answer_pending.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                _ => {}
+            }
+        }
         // E10 — honor a manager cancel between turns: emit a Blocked message
         // so the parent records why, then stop.
         if cancel.load(std::sync::atomic::Ordering::SeqCst) {

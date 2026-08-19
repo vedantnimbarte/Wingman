@@ -70,6 +70,8 @@ wingman [OPTIONS] [COMMAND]
 | `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
+| `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |
+| `pilot ask "<msg>" [run-id]` | Same, but wait for the worker's reply and print it (`--wait <secs>`, default 120). |
 | `pilot intake slack\|email` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion). |
 
 Running `wingman` with no subcommand launches the TUI against the resolved

@@ -24,6 +24,16 @@ pub enum ManagerCommand {
     Cancel { reason: String },
     /// Answer a question the worker raised, unblocking it.
     Clarify { answer: String },
+    /// A message from the human operating the run: extra guidance, a
+    /// correction, or a question. Unlike [`ManagerCommand::Pivot`] it does not
+    /// claim the task changed, so the worker folds it in without re-orienting.
+    /// With `reply: true` the worker answers on the way past
+    /// ([`WorkerMessage::Answer`]) so `pilot ask` has something to print.
+    Note {
+        text: String,
+        #[serde(default)]
+        reply: bool,
+    },
 }
 
 /// A message a worker pushes up to the manager (in addition to the normal
@@ -38,6 +48,10 @@ pub enum WorkerMessage {
     Ack { command: String },
     /// The worker is pausing, waiting for a clarify.
     Blocked { on: String },
+    /// What the worker said in the turn right after a
+    /// [`ManagerCommand::Note`] with `reply: true` — the reply half of
+    /// `pilot ask`.
+    Answer { text: String },
 }
 
 /// Encode a command as a single NDJSON line (no trailing newline; the
@@ -104,6 +118,34 @@ mod tests {
             answer: "use anyhow".into(),
         };
         assert_eq!(parse_command(&encode_command(&cmd)).unwrap(), cmd);
+    }
+
+    #[test]
+    fn note_roundtrips_and_defaults_to_no_reply() {
+        let cmd = ManagerCommand::Note {
+            text: "prefer anyhow over thiserror here".into(),
+            reply: false,
+        };
+        let line = encode_command(&cmd);
+        assert!(line.contains(r#""cmd":"note""#));
+        assert_eq!(parse_command(&line).unwrap(), cmd);
+        // An operator hand-writing the line shouldn't have to spell `reply`.
+        assert_eq!(
+            parse_command(r#"{"cmd":"note","text":"hi"}"#).unwrap(),
+            ManagerCommand::Note {
+                text: "hi".into(),
+                reply: false
+            }
+        );
+    }
+
+    #[test]
+    fn answer_message_roundtrips() {
+        let msg = WorkerMessage::Answer {
+            text: "because the schema migration landed first".into(),
+        };
+        let line = encode_message(&msg);
+        assert_eq!(parse_message(&line).unwrap(), Some(msg));
     }
 
     #[test]
