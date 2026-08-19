@@ -14,28 +14,164 @@
 //!   - `session/prompt`     — run one turn, streaming `session/update`
 //!   - `session/cancel`     — notification; abandon the in-flight turn
 //!
-//! and sends `session/update` notifications to the client as the turn streams.
+//! and calls back into the client for:
 //!
-//! Scope, stated plainly: this covers the turn loop — the part an editor needs
-//! to show streaming output and tool activity. `session/request_permission`
-//! and the client-side `fs/*` methods are not used yet; Wingman applies its own
-//! permission model and touches the filesystem directly, which is correct but
-//! means the editor cannot yet approve individual tool calls. Tracked in the
-//! issue this shipped under.
+//!   - `session/request_permission` — let the editor approve or decline a
+//!     single tool call, on top of Wingman's own permission mode
+//!   - `fs/read_text_file`          — read through the editor, so the agent
+//!     sees the buffer the user is looking at rather than a stale file
+//!
+//! Because those are *requests* rather than notifications, the read loop can't
+//! block on a turn: [`run`] pumps stdin in its own task and routes replies back
+//! to whoever is awaiting them by id (`wm-<n>`, so agent-issued ids can never
+//! collide with the client's).
+//!
+//! **The client is an extra gate, not a replacement.** A decline is honoured;
+//! an *approval* buys nothing that Wingman's own permission mode and protected
+//! paths didn't already allow, so a hostile client cannot widen what the agent
+//! may touch. Same for reads: the path is checked against the project
+//! containment rules before the client is asked for it.
+//!
+//! Not yet wired: `fs/write_text_file`. Routing writes through the client would
+//! take them out of the registry's dispatch path, which is where `/undo`
+//! checkpoints and the audit log are written — those have to move with it, so
+//! it is deliberately left for its own change rather than half-done here.
 
 use anyhow::Result;
 use futures::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex};
 use wingman_config::{Config, PermissionMode};
-use wingman_core::{AgentEvent, AgentStop};
+use wingman_core::{AgentEvent, AgentStop, ToolDispatcher, ToolOutcome, ToolSpec};
+use wingman_tools::{Capability, ToolRegistry};
 
 /// Protocol version implemented. Echoed back to the client when it asks for
 /// this one; otherwise we still answer with ours so the client can decide.
 const PROTOCOL_VERSION: u64 = 1;
+
+/// What the client told us it can do, from `initialize`. Everything defaults
+/// off: an absent capability means "don't call me", not "try it and see".
+#[derive(Debug, Default, Clone, Copy)]
+struct ClientCaps {
+    read_text_file: bool,
+}
+
+impl ClientCaps {
+    fn from_initialize(params: &Value) -> Self {
+        let fs = params.pointer("/clientCapabilities/fs");
+        let flag = |k: &str| {
+            fs.and_then(|f| f.get(k))
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        };
+        Self {
+            read_text_file: flag("readTextFile"),
+        }
+    }
+}
+
+/// The client half of the connection: writes messages to it, and awaits the
+/// replies to the requests we send.
+struct Client {
+    stdout: Arc<Mutex<tokio::io::Stdout>>,
+    pending: Mutex<HashMap<String, oneshot::Sender<std::result::Result<Value, String>>>>,
+    next_id: AtomicU64,
+    caps: std::sync::RwLock<ClientCaps>,
+    /// Cleared the first time the client answers `session/request_permission`
+    /// with "method not found", so we ask once and then stop pestering it.
+    permission_supported: AtomicBool,
+}
+
+impl Client {
+    fn new(stdout: Arc<Mutex<tokio::io::Stdout>>) -> Self {
+        Self {
+            stdout,
+            pending: Mutex::new(HashMap::new()),
+            next_id: AtomicU64::new(1),
+            caps: std::sync::RwLock::new(ClientCaps::default()),
+            permission_supported: AtomicBool::new(true),
+        }
+    }
+
+    fn caps(&self) -> ClientCaps {
+        *self.caps.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set_caps(&self, caps: ClientCaps) {
+        *self.caps.write().unwrap_or_else(|e| e.into_inner()) = caps;
+    }
+
+    /// Send a JSON-RPC request and wait for the client's reply.
+    async fn request(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> std::result::Result<Value, ClientError> {
+        let id = format!("wm-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+
+        let msg = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        if write_line(&self.stdout, &msg).await.is_err() {
+            self.pending.lock().await.remove(&id);
+            return Err(ClientError::Transport("stdout closed".into()));
+        }
+        match rx.await {
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => Err(ClientError::Rpc(e)),
+            // The sender is dropped when stdin closes: the editor is gone.
+            Err(_) => Err(ClientError::Transport("client disconnected".into())),
+        }
+    }
+
+    /// Route an incoming reply to whoever is awaiting it. Returns false if the
+    /// id isn't one of ours, so the caller can treat the message as a request.
+    async fn resolve(&self, id: &str, result: std::result::Result<Value, String>) -> bool {
+        match self.pending.lock().await.remove(id) {
+            Some(tx) => {
+                let _ = tx.send(result);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ClientError {
+    /// The client answered, with an error.
+    Rpc(String),
+    /// We never got an answer.
+    Transport(String),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rpc(e) => write!(f, "{e}"),
+            Self::Transport(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// Did the client say it doesn't implement this method? JSON-RPC's
+/// method-not-found is -32601; not every client spells the text the same way,
+/// so match on the code where it's present and the phrase otherwise.
+fn is_method_not_found(e: &ClientError) -> bool {
+    match e {
+        ClientError::Rpc(msg) => {
+            msg.contains("-32601")
+                || msg.to_ascii_lowercase().contains("method not found")
+                || msg.to_ascii_lowercase().contains("not supported")
+        }
+        ClientError::Transport(_) => false,
+    }
+}
 
 pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
     eprintln!(
@@ -43,19 +179,50 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
     );
 
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
-    let mut reader = BufReader::new(tokio::io::stdin());
-    let mut line = String::new();
+    let client = Arc::new(Client::new(stdout.clone()));
+
+    // Pump stdin in its own task. The main loop must stay free to answer the
+    // client while a turn is in flight, because the turn itself makes requests
+    // (permission, file reads) that only the client can answer.
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
+    tokio::spawn(async move {
+        let mut reader = BufReader::new(tokio::io::stdin());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if line_tx.send(line.clone()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
     // One session at a time is enough for an editor pane, and keeps the
     // cancellation story simple: there is exactly one turn to abandon.
     let mut session_id: Option<String> = None;
-    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let (done_tx, mut done_rx) =
+        mpsc::unbounded_channel::<(Value, std::result::Result<&'static str, String>)>();
+    let mut turn_in_flight = false;
 
     loop {
-        line.clear();
-        if reader.read_line(&mut line).await? == 0 {
-            break; // client closed the pipe
-        }
+        let line = tokio::select! {
+            // Finished turn: answer the `session/prompt` that started it.
+            Some((id, outcome)) = done_rx.recv() => {
+                turn_in_flight = false;
+                respond(&stdout, Some(id), outcome.map(|r| json!({ "stopReason": r }))).await?;
+                continue;
+            }
+            line = line_rx.recv() => match line {
+                Some(l) => l,
+                None => break, // client closed the pipe
+            },
+        };
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -71,8 +238,22 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
         let id = msg.get("id").cloned();
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
+        // A message with an id but no method is a reply to something we sent.
+        if method.is_empty() {
+            if let Some(id_str) = id.as_ref().and_then(Value::as_str) {
+                let result = match msg.get("error") {
+                    Some(e) => Err(e.to_string()),
+                    None => Ok(msg.get("result").cloned().unwrap_or(Value::Null)),
+                };
+                if client.resolve(id_str, result).await {
+                    continue;
+                }
+            }
+        }
+
         match method {
             "initialize" => {
+                client.set_caps(ClientCaps::from_initialize(&params));
                 let reply = json!({
                     "protocolVersion": PROTOCOL_VERSION,
                     "agentInfo": {
@@ -125,25 +306,41 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
                     respond(&stdout, id, Err(format!("unknown session '{sid}'"))).await?;
                     continue;
                 }
+                if turn_in_flight {
+                    respond(
+                        &stdout,
+                        id,
+                        Err("a turn is already running in this session".into()),
+                    )
+                    .await?;
+                    continue;
+                }
                 let text = prompt_text(&params);
                 if text.trim().is_empty() {
                     respond(&stdout, id, Err("empty prompt".into())).await?;
                     continue;
                 }
 
-                cancelled.store(false, std::sync::atomic::Ordering::SeqCst);
-                let stop = run_turn(&cfg, mode, &sid, &text, &stdout, &cancelled).await;
-                match stop {
-                    Ok(reason) => {
-                        respond(&stdout, id, Ok(json!({ "stopReason": reason }))).await?;
-                    }
-                    Err(e) => respond(&stdout, id, Err(e)).await?,
-                }
+                cancelled.store(false, Ordering::SeqCst);
+                turn_in_flight = true;
+                let (cfg, stdout_t, cancelled_t, client_t, done_t) = (
+                    cfg.clone(),
+                    stdout.clone(),
+                    cancelled.clone(),
+                    client.clone(),
+                    done_tx.clone(),
+                );
+                let reply_id = id.unwrap_or(Value::Null);
+                tokio::spawn(async move {
+                    let stop =
+                        run_turn(&cfg, mode, &sid, &text, &stdout_t, &cancelled_t, &client_t).await;
+                    let _ = done_t.send((reply_id, stop));
+                });
             }
 
             // Notification: no id, no response.
             "session/cancel" => {
-                cancelled.store(true, std::sync::atomic::Ordering::SeqCst);
+                cancelled.store(true, Ordering::SeqCst);
             }
 
             _ => {
@@ -157,25 +354,36 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
 }
 
 /// Run one turn, streaming `session/update` notifications as it goes.
+#[allow(clippy::too_many_arguments)]
 async fn run_turn(
     cfg: &Config,
     mode: PermissionMode,
     session_id: &str,
     prompt: &str,
     stdout: &Arc<Mutex<tokio::io::Stdout>>,
-    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+    cancelled: &Arc<AtomicBool>,
+    client: &Arc<Client>,
 ) -> std::result::Result<&'static str, String> {
     let selection = crate::runtime::resolve_selection(cfg, None).map_err(|e| e.to_string())?;
-    let (mut agent, _registry) =
+    let (agent, registry) =
         crate::runtime::build_agent_registry_with_fallback(cfg, &selection, mode)
             .await
             .map_err(|e| e.to_string())?;
+
+    // Put the editor between the agent and its tools: it may decline a call,
+    // and it serves file reads from the buffer the user is actually looking at.
+    let gate = Arc::new(EditorGate {
+        inner: registry.clone(),
+        client: client.clone(),
+        session_id: session_id.to_string(),
+    });
+    let mut agent = agent.with_dispatcher(gate);
 
     let mut events = agent.run(prompt.to_string());
     let mut stop = "end_turn";
 
     while let Some(event) = events.next().await {
-        if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+        if cancelled.load(Ordering::SeqCst) {
             return Ok("cancelled");
         }
         match &event {
@@ -257,6 +465,171 @@ async fn run_turn(
     Ok(stop)
 }
 
+/// Sits between the agent loop and the real tool registry for the life of one
+/// ACP turn.
+struct EditorGate {
+    inner: Arc<ToolRegistry>,
+    client: Arc<Client>,
+    session_id: String,
+}
+
+/// What the client said about a tool call.
+enum Permission {
+    Allow,
+    Reject,
+    /// The client can't or won't mediate — Wingman's own permission model
+    /// stands on its own, which is what happened before ACP asked at all.
+    Unmediated,
+}
+
+impl EditorGate {
+    /// Is this call worth interrupting a human for? Reads are not: an editor
+    /// prompting on every `read_file` trains the user to click Allow, which is
+    /// worse than not asking. Anything that writes, shells out, or reaches the
+    /// network is.
+    fn needs_permission(&self, name: &str) -> bool {
+        match self.inner.capability_of(name) {
+            Some(cap) => {
+                cap.contains(Capability::WRITE)
+                    || cap.contains(Capability::SHELL)
+                    || cap.contains(Capability::NETWORK)
+            }
+            // Unknown tool: the registry will reject it anyway, so don't ask.
+            None => false,
+        }
+    }
+
+    async fn ask_permission(&self, name: &str, args: &Value) -> Permission {
+        if !self.client.permission_supported.load(Ordering::Relaxed) {
+            return Permission::Unmediated;
+        }
+        let params = json!({
+            "sessionId": self.session_id,
+            "toolCall": {
+                "toolCallId": format!("{name}-{}", self.client.next_id.load(Ordering::Relaxed)),
+                "title": name,
+                "kind": "other",
+                "status": "pending",
+                "rawInput": args,
+            },
+            "options": [
+                { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+            ],
+        });
+        match self
+            .client
+            .request("session/request_permission", params)
+            .await
+        {
+            Ok(v) => decide(&v),
+            Err(e) => {
+                if is_method_not_found(&e) {
+                    // Ask once, then stop: a client that doesn't implement this
+                    // shouldn't pay a round-trip per tool call.
+                    self.client
+                        .permission_supported
+                        .store(false, Ordering::Relaxed);
+                } else {
+                    tracing::warn!(
+                        target: "wingman::acp",
+                        tool = %name,
+                        "permission request failed ({e}); falling back to Wingman's own permission mode"
+                    );
+                }
+                Permission::Unmediated
+            }
+        }
+    }
+
+    /// Serve `read_file` out of the editor's buffer instead of the disk.
+    ///
+    /// `None` means "not applicable, use the real tool" — for a summary read
+    /// (tree-sitter outline), a path the permission mode won't allow reading
+    /// anyway, or a client that couldn't produce the content.
+    async fn read_via_client(&self, args: &Value) -> Option<ToolOutcome> {
+        if !self.client.caps().read_text_file {
+            return None;
+        }
+        // `summary: true` returns a tree-sitter outline, and notebooks get
+        // rendered — both are the local tool's job, not a raw buffer read.
+        if args.get("summary").and_then(Value::as_bool) == Some(true) {
+            return None;
+        }
+        let raw = args.get("path").and_then(Value::as_str)?;
+        let path = self.inner.ctx().resolve(raw);
+        if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+            return None;
+        }
+        // Check containment *before* asking. The editor is an additional gate,
+        // never a way around the project boundary.
+        if !self.inner.ctx().allows_read(&path) {
+            return None; // let the real tool produce its own denial message
+        }
+        let mut params = json!({
+            "sessionId": self.session_id,
+            "path": path.display().to_string(),
+        });
+        if let Some(line) = args.get("offset").and_then(Value::as_u64) {
+            params["line"] = json!(line);
+        }
+        if let Some(limit) = args.get("limit").and_then(Value::as_u64) {
+            params["limit"] = json!(limit);
+        }
+        match self.client.request("fs/read_text_file", params).await {
+            Ok(v) => v
+                .get("content")
+                .and_then(Value::as_str)
+                .map(|c| ToolOutcome::ok(c.to_string())),
+            Err(e) => {
+                tracing::debug!(
+                    target: "wingman::acp",
+                    "fs/read_text_file failed ({e}); reading from disk instead"
+                );
+                None
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolDispatcher for EditorGate {
+    fn specs(&self) -> Vec<ToolSpec> {
+        self.inner.specs()
+    }
+
+    async fn dispatch(&self, name: &str, args: Value) -> ToolOutcome {
+        if self.needs_permission(name) {
+            match self.ask_permission(name, &args).await {
+                Permission::Reject => {
+                    return ToolOutcome::err(format!("{name} was declined in the editor"));
+                }
+                Permission::Allow | Permission::Unmediated => {}
+            }
+        }
+        if name == "read_file" {
+            if let Some(outcome) = self.read_via_client(&args).await {
+                return outcome;
+            }
+        }
+        self.inner.dispatch(name, args).await
+    }
+}
+
+/// Read a `session/request_permission` result. Anything that isn't an explicit
+/// selection of an allow-shaped option counts as a refusal — a cancelled
+/// prompt must not run the tool.
+fn decide(result: &Value) -> Permission {
+    let outcome = result.get("outcome").unwrap_or(result);
+    match outcome.get("outcome").and_then(Value::as_str) {
+        Some("selected") => match outcome.get("optionId").and_then(Value::as_str) {
+            Some(id) if id.starts_with("allow") => Permission::Allow,
+            _ => Permission::Reject,
+        },
+        _ => Permission::Reject,
+    }
+}
+
 /// Flatten ACP's ContentBlock array into the plain text the agent loop takes.
 /// Non-text blocks are skipped rather than rendered as placeholders: an editor
 /// that sends an image to an agent advertising `image: false` is better served
@@ -284,8 +657,8 @@ fn new_session_id() -> String {
     // pid + millis alone collides when two sessions start in the same
     // millisecond, which a client reconnecting immediately will do. The
     // counter makes it unique regardless of clock resolution.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
     format!(
         "wingman-{}-{}-{n}",
         std::process::id(),
@@ -382,5 +755,186 @@ mod tests {
     #[test]
     fn session_ids_are_unique_per_call() {
         assert_ne!(new_session_id(), new_session_id());
+    }
+
+    #[test]
+    fn client_caps_default_to_off() {
+        // No `clientCapabilities` at all: we must not start calling `fs/*`.
+        let caps = ClientCaps::from_initialize(&json!({}));
+        assert!(!caps.read_text_file);
+        let caps = ClientCaps::from_initialize(&json!({ "clientCapabilities": { "fs": {} } }));
+        assert!(!caps.read_text_file);
+    }
+
+    #[test]
+    fn client_caps_read_the_fs_flags() {
+        let caps = ClientCaps::from_initialize(&json!({
+            "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": true } }
+        }));
+        assert!(caps.read_text_file);
+    }
+
+    #[test]
+    fn only_an_allow_selection_permits_the_call() {
+        assert!(matches!(
+            decide(&json!({ "outcome": { "outcome": "selected", "optionId": "allow" } })),
+            Permission::Allow
+        ));
+        assert!(matches!(
+            decide(&json!({ "outcome": { "outcome": "selected", "optionId": "allow_always" } })),
+            Permission::Allow
+        ));
+        assert!(matches!(
+            decide(&json!({ "outcome": { "outcome": "selected", "optionId": "reject" } })),
+            Permission::Reject
+        ));
+        // A cancelled prompt is a refusal, not a shrug.
+        assert!(matches!(
+            decide(&json!({ "outcome": { "outcome": "cancelled" } })),
+            Permission::Reject
+        ));
+        // Garbage from a broken client must not read as approval.
+        assert!(matches!(decide(&json!({})), Permission::Reject));
+        assert!(matches!(
+            decide(&json!({ "outcome": null })),
+            Permission::Reject
+        ));
+    }
+
+    #[test]
+    fn method_not_found_is_recognised_however_it_is_spelled() {
+        assert!(is_method_not_found(&ClientError::Rpc(
+            "{\"code\":-32601,\"message\":\"x\"}".into()
+        )));
+        assert!(is_method_not_found(&ClientError::Rpc(
+            "Method not found".into()
+        )));
+        assert!(!is_method_not_found(&ClientError::Rpc(
+            "user is away".into()
+        )));
+        // A dead pipe is not the client declining to implement something.
+        assert!(!is_method_not_found(&ClientError::Transport(
+            "client disconnected".into()
+        )));
+    }
+
+    /// Stand in for an editor: answer whatever request the gate sends with a
+    /// canned reply. Returns once it has answered `n` requests.
+    fn fake_client(client: Arc<Client>, replies: Vec<std::result::Result<Value, String>>) {
+        tokio::spawn(async move {
+            for (i, reply) in replies.into_iter().enumerate() {
+                let id = format!("wm-{}", i + 1);
+                loop {
+                    if client.resolve(&id, reply.clone()).await {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                }
+            }
+        });
+    }
+
+    fn gate_over(dir: &std::path::Path, client: Arc<Client>) -> EditorGate {
+        let ctx = wingman_tools::ToolCtx::new(
+            wingman_config::PermissionMode::AutoEdit,
+            dir.to_path_buf(),
+            dir.to_path_buf(),
+        );
+        EditorGate {
+            inner: Arc::new(ToolRegistry::new(ctx).with_builtins()),
+            client,
+            session_id: "s1".into(),
+        }
+    }
+
+    /// The acceptance criterion for the permission half: a decline in the
+    /// editor must stop the call, not merely annotate it.
+    #[tokio::test]
+    async fn a_declined_tool_call_does_not_run() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("should-not-exist.txt");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        fake_client(
+            client.clone(),
+            vec![Ok(
+                json!({ "outcome": { "outcome": "selected", "optionId": "reject" } }),
+            )],
+        );
+
+        let gate = gate_over(dir.path(), client);
+        let out = gate
+            .dispatch(
+                "write_file",
+                json!({ "path": "should-not-exist.txt", "content": "nope" }),
+            )
+            .await;
+
+        assert!(out.is_error, "a declined call must report as an error");
+        assert!(out.content.contains("declined"), "got: {}", out.content);
+        assert!(!target.exists(), "the file was written despite the decline");
+    }
+
+    /// Reads are not worth a prompt — if `read_file` asked for permission, the
+    /// fake client above would never answer and this would hang.
+    #[tokio::test]
+    async fn reads_are_not_gated_but_do_come_from_the_editor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "on disk").expect("write");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        client.set_caps(ClientCaps {
+            read_text_file: true,
+        });
+        fake_client(
+            client.clone(),
+            vec![Ok(json!({ "content": "unsaved buffer" }))],
+        );
+
+        let gate = gate_over(dir.path(), client);
+        let out = gate.dispatch("read_file", json!({ "path": "a.txt" })).await;
+        assert!(!out.is_error, "got: {}", out.content);
+        assert_eq!(
+            out.content, "unsaved buffer",
+            "the editor's buffer should win over the file on disk"
+        );
+    }
+
+    /// A client that says nothing about `fs` must not be called for reads —
+    /// the disk is the fallback, and it has to still work.
+    #[tokio::test]
+    async fn without_the_fs_capability_reads_come_from_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "on disk").expect("write");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+
+        let gate = gate_over(dir.path(), client);
+        let out = gate.dispatch("read_file", json!({ "path": "a.txt" })).await;
+        assert_eq!(out.content, "on disk");
+    }
+
+    #[tokio::test]
+    async fn replies_route_to_the_waiting_request() {
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+
+        // Nothing is waiting on this id yet.
+        assert!(!client.resolve("wm-999", Ok(json!({}))).await);
+
+        let c = client.clone();
+        let waiter = tokio::spawn(async move { c.request("fs/read_text_file", json!({})).await });
+        // Give the request a moment to register itself, then answer it.
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            if client
+                .resolve("wm-1", Ok(json!({ "content": "hello" })))
+                .await
+            {
+                break;
+            }
+        }
+        let got = waiter.await.expect("task").expect("reply");
+        assert_eq!(got.get("content").and_then(Value::as_str), Some("hello"));
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use crate::{Tool, ToolCtx};
+use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde_json::Value;
 use wingman_config::HooksConfig;
@@ -175,6 +175,15 @@ impl ToolRegistry {
             .collect();
         names.sort();
         names
+    }
+
+    /// What a registered tool is allowed to touch, by name.
+    ///
+    /// Front ends use this to decide which calls are worth interrupting a
+    /// human for: a `read_file` is not the same ask as a `run_shell`.
+    pub fn capability_of(&self, name: &str) -> Option<Capability> {
+        let guard = self.tools.read().unwrap_or_else(|e| e.into_inner());
+        guard.get(name).map(|t| t.capabilities())
     }
 
     pub fn ctx(&self) -> &ToolCtx {
