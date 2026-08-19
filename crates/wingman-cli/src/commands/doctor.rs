@@ -49,22 +49,32 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     {
         let avail = wingman_tools::sandbox::availability();
         let policy = cfg.tools.shell_sandbox.as_str();
-        match (policy, avail.is_some()) {
-            ("off", _) => emit(Status::Warn(
+        // Three states, not two: a mechanism that scopes the filesystem, one
+        // that contains the process but not its file access (Windows), and
+        // none. Reporting the middle one as "confined to the project" would
+        // be the overclaim this whole section exists to avoid.
+        match (policy, avail.is_some(), avail.scopes_filesystem()) {
+            ("off", _, _) => emit(Status::Warn(
                 "disabled ([tools].shell_sandbox = \"off\") — run_shell is unconfined".into(),
             )),
-            (_, true) => emit(Status::Ok(format!(
+            (_, _, true) => emit(Status::Ok(format!(
                 "{} — run_shell writes are confined to the project",
                 avail.label()
             ))),
-            ("required", false) => emit(Status::Bad(
-                "[tools].shell_sandbox = \"required\" but no mechanism is available; \
-                 run_shell will refuse to run"
+            ("required", true, false) => emit(Status::Bad(format!(
+                "[tools].shell_sandbox = \"required\" needs filesystem scoping; this machine has {} (process containment only), so run_shell will refuse to run",
+                avail.label()
+            ))),
+            (_, true, false) => emit(Status::Warn(format!(
+                "{} — no orphaned processes, no clipboard or cross-process handle access, capped process count. Filesystem access is NOT confined: a shell command can still read credentials outside the project (issue #124)",
+                avail.label()
+            ))),
+            ("required", false, _) => emit(Status::Bad(
+                "[tools].shell_sandbox = \"required\" but no mechanism is available; run_shell will refuse to run"
                     .into(),
             )),
-            (_, false) => emit(Status::Warn(
-                "no sandbox available — run_shell is unconfined. \
-                 Install bubblewrap (Linux) for filesystem containment"
+            (_, false, _) => emit(Status::Warn(
+                "no sandbox available — run_shell is unconfined. Install bubblewrap (Linux) for filesystem containment"
                     .into(),
             )),
         }

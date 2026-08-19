@@ -55,7 +55,8 @@ Wingman different; this is everything else it does.
   (read / write / shell / network) and the registry refuses anything the
   active mode doesn't grant. A few paths — `.git/`, `.wingman/config.toml`,
   `.wingman/skills/` — are never writable, in any mode. `run_shell` is
-  additionally confined by the OS where possible (`bwrap` / `sandbox-exec`);
+  additionally confined by the OS where possible (`bwrap` / `sandbox-exec`,
+  Job Object on Windows — which contains the process but not its file access);
   see [CONFIGURATION.md](CONFIGURATION.md#permission-modes).
 - **Untrusted project config.** A cloned repo's `.wingman/config.toml` may
   pick a model and tune the UI, but not run commands: `[hooks]`, `[mcp]`,
@@ -183,6 +184,14 @@ Wingman different; this is everything else it does.
   turns Slack events or delivered `.eml` files into pilot requests.
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
+- **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,
+  JetBrains, Neovim, and Emacs can drive Wingman as their agent — one protocol
+  instead of a plugin per editor. The editor can decline an individual tool
+  call (`session/request_permission`) and serve file reads from its unsaved
+  buffers (`fs/read_text_file`); both sit *on top of* Wingman’s own permission
+  mode rather than replacing it, so a client can narrow what the agent may do
+  but never widen it. Writes still go to disk through Wingman
+  ([#127](https://github.com/vedantnimbarte/Wingman/issues/127)).
 - **Hybrid semantic search.** The index fuses dense vector similarity with BM25
   keyword scoring (reciprocal-rank fusion), so exact identifier/error-string
   matches surface alongside semantic ones.

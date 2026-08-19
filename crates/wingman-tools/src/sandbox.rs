@@ -14,7 +14,8 @@
 //! |----------|----------------------------|---------------------------------|
 //! | Linux    | `bwrap` (bubblewrap)       | read-only `/`, writable project |
 //! | macOS    | `sandbox-exec` (Seatbelt)  | read-only `/`, writable project |
-//! | Windows  | —                          | nothing; see [`Availability`]   |
+//! | Windows  | Job Object                 | no orphans, no clipboard/handle |
+//! |          |                            | theft, process + memory caps    |
 //!
 //! Deliberately integrating rather than building: both mechanisms are mature,
 //! already present on most developer machines, and need no privileges.
@@ -23,8 +24,20 @@
 //! network egress — a sandboxed command can still `curl`. Filesystem
 //! containment is what stops credential theft from `~/.ssh` and `~/.aws`,
 //! which is the concrete failure this addresses; egress control is a separate
-//! problem tracked separately. It also cannot help on Windows today, and says
-//! so rather than pretending.
+//! problem tracked separately.
+//!
+//! **Windows is the weak one, and says so.** A Job Object contains what a Job
+//! Object contains: the process tree can't outlive its timeout, can't read the
+//! clipboard, can't reach handles outside the job, and can't fork-bomb. It does
+//! **not** scope the filesystem — `type %USERPROFILE%\.ssh\id_rsa` still
+//! succeeds, where `bwrap`/Seatbelt refuse it. Path scoping on Windows needs
+//! AppContainer or a restricted primary token, and both require Wingman to own
+//! `CreateProcessW` (custom pipe plumbing) rather than spawning through
+//! `tokio::process`. Tracked in
+//! <https://github.com/vedantnimbarte/Wingman/issues/124>. Because the
+//! guarantee is weaker, [`Availability::scopes_filesystem`] is what
+//! `shell_sandbox = "required"` gates on — `required` on Windows still
+//! refuses, so nobody's opt-in is silently downgraded.
 
 use std::path::Path;
 
@@ -35,8 +48,10 @@ pub enum Availability {
     Bubblewrap,
     /// `sandbox-exec` found (macOS).
     SeatBelt,
-    /// Nothing usable. On Linux install `bubblewrap`; on Windows there is no
-    /// equivalent wired up yet, so `required` mode refuses to run.
+    /// Windows Job Object: lifetime, UI, and resource containment, but no
+    /// filesystem scoping. See the module docs.
+    JobObject,
+    /// Nothing usable. On Linux install `bubblewrap`.
     None,
 }
 
@@ -45,12 +60,22 @@ impl Availability {
         match self {
             Self::Bubblewrap => "bubblewrap (bwrap)",
             Self::SeatBelt => "macOS sandbox-exec",
+            Self::JobObject => "Windows Job Object",
             Self::None => "none",
         }
     }
 
     pub fn is_some(self) -> bool {
         !matches!(self, Self::None)
+    }
+
+    /// Does this mechanism confine which paths the command may touch?
+    ///
+    /// False for the Windows Job Object, which contains the process but not
+    /// its filesystem access. `shell_sandbox = "required"` gates on this, so
+    /// "required" keeps meaning "credential directories are out of reach".
+    pub fn scopes_filesystem(self) -> bool {
+        matches!(self, Self::Bubblewrap | Self::SeatBelt)
     }
 }
 
@@ -66,6 +91,11 @@ fn detect() -> Availability {
     }
     if cfg!(target_os = "macos") && which("sandbox-exec") {
         return Availability::SeatBelt;
+    }
+    if cfg!(windows) {
+        // Job Objects are a kernel primitive — always present, nothing to
+        // probe for and nothing to install.
+        return Availability::JobObject;
     }
     Availability::None
 }
@@ -92,11 +122,13 @@ fn which(program: &str) -> bool {
 ///
 /// Returns `None` when no mechanism is available, so the caller can decide
 /// whether to refuse (`required`) or proceed unconfined (`auto`).
+/// The Windows Job Object is not an argv wrapper — it is applied to the child
+/// after spawn by [`windows_job::confine`] — so this returns `None` there.
 pub fn wrap(command: &str, project_root: &Path, tmp: &Path) -> Option<Vec<String>> {
     match availability() {
         Availability::Bubblewrap => Some(bwrap_argv(command, project_root, tmp)),
         Availability::SeatBelt => Some(seatbelt_argv(command, project_root, tmp)),
-        Availability::None => None,
+        Availability::JobObject | Availability::None => None,
     }
 }
 
@@ -161,6 +193,9 @@ fn seatbelt_argv(command: &str, project_root: &Path, tmp: &Path) -> Vec<String> 
     ]
 }
 
+#[cfg(windows)]
+pub mod windows_job;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,5 +243,25 @@ mod tests {
     #[test]
     fn availability_is_cached_and_consistent() {
         assert_eq!(availability(), availability());
+    }
+
+    #[test]
+    fn only_the_unix_mechanisms_claim_filesystem_scoping() {
+        assert!(Availability::Bubblewrap.scopes_filesystem());
+        assert!(Availability::SeatBelt.scopes_filesystem());
+        // The Windows Job Object contains the process, not its file access —
+        // `required` must keep refusing there rather than silently accepting
+        // a weaker guarantee.
+        assert!(!Availability::JobObject.scopes_filesystem());
+        assert!(Availability::JobObject.is_some());
+        assert!(!Availability::None.scopes_filesystem());
+    }
+
+    #[test]
+    fn the_job_object_is_not_an_argv_wrapper() {
+        // `wrap` returning Some would make run_shell try to exec it.
+        if availability() == Availability::JobObject {
+            assert!(wrap("echo hi", Path::new("."), Path::new(".")).is_none());
+        }
     }
 }
