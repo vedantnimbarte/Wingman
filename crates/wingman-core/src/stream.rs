@@ -10,6 +10,13 @@ pub enum StreamEvent {
     /// A fully-assembled tool-use block. Providers buffer partial JSON until
     /// the call is complete, then emit a single event.
     ToolUse { block: ContentBlock },
+    /// A streamed chunk of the model's reasoning. Rendered live like text but
+    /// kept separate from it, because reasoning is not the answer.
+    ThinkingDelta { text: String },
+    /// A completed reasoning block, carrying the provider's integrity
+    /// signature. Emitted once the block closes; the agent appends it to the
+    /// assistant message so it survives into the next request unchanged.
+    Thinking { block: ContentBlock },
     /// Cumulative usage so far this turn. Providers may emit this multiple
     /// times (e.g. once at start with input tokens, once at end with output).
     Usage { usage: Usage },

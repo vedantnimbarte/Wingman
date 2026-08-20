@@ -14,6 +14,9 @@ pub struct CompletionRequest {
     pub max_tokens: u32,
     pub temperature: Option<f32>,
     pub cache_breakpoints: Vec<CacheBreakpoint>,
+    /// How hard the model should think before answering. Providers that have
+    /// no reasoning control ignore it; see [`ReasoningEffort`].
+    pub reasoning: ReasoningEffort,
 }
 
 impl CompletionRequest {
@@ -26,7 +29,74 @@ impl CompletionRequest {
             max_tokens: 4096,
             temperature: None,
             cache_breakpoints: Vec::new(),
+            reasoning: ReasoningEffort::Off,
         }
+    }
+}
+
+/// How much reasoning to ask a thinking-capable model for.
+///
+/// One portable knob rather than each provider's native parameter, because the
+/// native parameters are not the same shape: Anthropic takes a token budget,
+/// OpenAI takes a named effort level, Gemini takes a budget with -1 meaning
+/// "decide for me". Each adapter maps these three levels onto its own control
+/// and providers with no reasoning support drop it.
+///
+/// `Off` is the default so that adding this field changed no existing
+/// behaviour and no existing bill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[default]
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl ReasoningEffort {
+    pub fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// The OpenAI `reasoning_effort` spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Thinking-token budget for providers that take one (Anthropic, Gemini).
+    ///
+    /// `None` for `Off`. The ladder is deliberately coarse — these are the
+    /// round numbers the vendors themselves use in their examples, and a
+    /// finer scale would imply a precision the parameter does not have.
+    pub fn budget_tokens(self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::Low => Some(4_096),
+            Self::Medium => Some(16_384),
+            Self::High => Some(32_768),
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" | "" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" | "max" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReasoningEffort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -48,6 +118,10 @@ pub struct ProviderCapabilities {
     pub tools: bool,
     pub vision: bool,
     pub cache_kind: CacheKind,
+    /// Provider exposes a reasoning/thinking control. False here means a
+    /// configured `reasoning` level is silently dropped for this backend,
+    /// which `wingman doctor` reports rather than leaving you to wonder.
+    pub reasoning: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

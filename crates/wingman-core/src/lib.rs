@@ -25,6 +25,7 @@ pub use message::{ContentBlock, Message, Role};
 pub use pricing::{price_for, Price};
 pub use provider::{
     complete_text, CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities,
+    ReasoningEffort,
 };
 pub use stream::{ProviderEventStream, StopReason, StreamEvent};
 pub use tokens::{

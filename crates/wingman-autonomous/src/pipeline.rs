@@ -958,6 +958,10 @@ async fn complete_text(
         // The reviewer pass reuses this system prompt once per task; caching
         // it lets calls 2..N read it back instead of re-sending it each time.
         cache_breakpoints: vec![CacheBreakpoint::AfterSystem],
+        // These are structured-output helper calls (review verdict, task plan),
+        // not the agent loop. Reasoning would add cost and latency for output
+        // that has to parse as JSON either way.
+        reasoning: wingman_core::ReasoningEffort::Off,
     };
     let mut stream = provider
         .complete(req)
@@ -1560,6 +1564,7 @@ mod tests {
                 tools: true,
                 vision: false,
                 cache_kind: wingman_core::CacheKind::None,
+                reasoning: false,
             }
         }
         async fn complete(
@@ -2409,6 +2414,7 @@ mod tests {
                 tools: false,
                 vision: false,
                 cache_kind: wingman_core::CacheKind::None,
+                reasoning: false,
             }
         }
         async fn complete(
@@ -2757,6 +2763,7 @@ mod tests {
             max_tokens: 4096,
             temperature: None,
             cache_breakpoints: vec![],
+            reasoning: Default::default(),
         };
         let s = parse_state_from_request(&req);
         assert!(s.iter().any(|(id, st)| id == "t1" && st == "Done"));

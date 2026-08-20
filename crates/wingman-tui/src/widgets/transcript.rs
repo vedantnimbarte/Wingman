@@ -11,8 +11,19 @@ use ratatui::{
 pub enum TranscriptItem {
     UserPrompt(String),
     AssistantText(String),
-    ToolCall { name: String, summary: String },
-    ToolResult { ok: bool, summary: String },
+    /// Model reasoning. Rendered in full while it is the newest item (it is
+    /// the live "what is it doing"), then collapsed to one line once the
+    /// answer starts — reasoning is usually far longer than the answer and
+    /// would otherwise bury it.
+    Thinking(String),
+    ToolCall {
+        name: String,
+        summary: String,
+    },
+    ToolResult {
+        ok: bool,
+        summary: String,
+    },
     System(String),
     Error(String),
 }
@@ -88,6 +99,7 @@ fn item_text(it: &TranscriptItem) -> String {
     match it {
         TranscriptItem::UserPrompt(s) => s.clone(),
         TranscriptItem::AssistantText(s) => s.clone(),
+        TranscriptItem::Thinking(s) => s.clone(),
         TranscriptItem::ToolCall { name, summary } => format!("{name} {summary}"),
         TranscriptItem::ToolResult { summary, .. } => summary.clone(),
         TranscriptItem::System(s) => s.clone(),
@@ -106,6 +118,14 @@ impl Transcript {
             s.push_str(text);
         } else {
             self.items.push(TranscriptItem::AssistantText(text.into()));
+        }
+    }
+
+    pub fn append_thinking(&mut self, text: &str) {
+        if let Some(TranscriptItem::Thinking(s)) = self.items.last_mut() {
+            s.push_str(text);
+        } else {
+            self.items.push(TranscriptItem::Thinking(text.into()));
         }
     }
 
@@ -134,7 +154,9 @@ impl<'a> Widget for TranscriptView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let th = theme::current();
         let mut lines: Vec<Line> = Vec::new();
-        for item in &self.transcript.items {
+        let last_idx = self.transcript.items.len().saturating_sub(1);
+        for (idx, item) in self.transcript.items.iter().enumerate() {
+            let is_last = idx == last_idx;
             match item {
                 TranscriptItem::UserPrompt(p) => {
                     lines.push(Line::from(vec![
@@ -150,6 +172,10 @@ impl<'a> Widget for TranscriptView<'a> {
                 }
                 TranscriptItem::AssistantText(s) => {
                     lines.extend(render_assistant_text(s, th.code_block));
+                    lines.push(Line::from(""));
+                }
+                TranscriptItem::Thinking(s) => {
+                    lines.extend(render_thinking(s, is_last));
                     lines.push(Line::from(""));
                 }
                 TranscriptItem::ToolCall { name, summary } => {
@@ -200,6 +226,44 @@ impl<'a> Widget for TranscriptView<'a> {
             .scroll((self.transcript.scroll, 0))
             .render(area, buf);
     }
+}
+
+/// Dim, italic, and marked `✻`. Expanded only while it is the newest item;
+/// after that just a header with the line count, so a long chain of thought
+/// does not push the answer off screen.
+fn render_thinking(s: &str, expanded: bool) -> Vec<Line<'static>> {
+    let style = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC);
+    let body: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+    let header = if expanded || body.len() <= 1 {
+        "✻ thinking".to_string()
+    } else {
+        format!("✻ thinking ({} lines)", body.len())
+    };
+    let mut lines = vec![Line::from(Span::styled(header, style))];
+    if expanded {
+        lines.extend(
+            body.into_iter()
+                .map(|l| Line::from(Span::styled(format!("  {l}"), style))),
+        );
+    } else if let Some(first) = body.first() {
+        lines.push(Line::from(Span::styled(
+            format!("  {}", truncate_chars(first, 100)),
+            style,
+        )));
+    }
+    lines
+}
+
+/// Cut to `max` characters on a char boundary, appending an ellipsis.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
 }
 
 fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {

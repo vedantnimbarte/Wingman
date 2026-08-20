@@ -40,6 +40,19 @@ Wingman different; this is everything else it does.
   `read_session`), each gated by the active permission mode.
 - **Live model swap.** Change provider/model mid-session with `/model
   <provider>/<id>` from inside the TUI — no restart, history preserved.
+- **Portable reasoning control.** One `reasoning = off|low|medium|high` level
+  (`--reasoning`, `WINGMAN_REASONING`, or `/reasoning` live in the TUI) maps
+  onto Anthropic's thinking budget, OpenAI's `reasoning_effort`, and Gemini's
+  `thinkingConfig`. Reasoning streams to the UI dimmed and collapses to one
+  line once the answer starts; on Anthropic it round-trips through history
+  with its signature intact so multi-turn tool use keeps working. Off by
+  default — thinking tokens bill at the output rate. Backends without a
+  reasoning control ignore it, and `wingman doctor` names them.
+- **Concurrent reads.** When a turn's tool calls are all pure reads
+  (`read_file`, `grep`, `lsp_references`, …) they dispatch together instead of
+  one at a time. A batch containing an edit or a shell command stays
+  sequential, because those calls have to see the tree the previous one left
+  behind. Results always come back in the order the model asked for them.
 - **Token-aware pipeline.** Per-tool output budgets with head/tail
   truncation, history token estimation, and a compaction trigger
   (`compact_at_tokens`) so long sessions stay inside the active model's

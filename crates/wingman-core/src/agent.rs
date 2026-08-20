@@ -10,8 +10,8 @@
 
 use crate::{
     tokens::{CompactPlan, Compactor, ToolOutputBudget},
-    CacheBreakpoint, CompletionRequest, ContentBlock, Message, Provider, Role, StopReason,
-    StreamEvent, ToolSpec, Usage,
+    CacheBreakpoint, CompletionRequest, ContentBlock, Message, Provider, ReasoningEffort, Role,
+    StopReason, StreamEvent, ToolSpec, Usage,
 };
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
@@ -103,6 +103,9 @@ impl ToolOutcome {
 pub enum AgentEvent {
     /// Streaming text from the assistant.
     TextDelta { text: String },
+    /// Streaming reasoning from the assistant. Separate from `TextDelta` so a
+    /// UI can fold it away — it is the model's working-out, not its answer.
+    ThinkingDelta { text: String },
     /// A tool call about to execute.
     ToolStart {
         id: String,
@@ -173,6 +176,18 @@ pub struct AgentConfig {
     /// Tool names that count as "mutating" for gate purposes. A successful
     /// call to any of these arms the gate for the rest of the user turn.
     pub mutating_tools: Vec<String>,
+    /// How hard the model should think before answering. `Off` by default;
+    /// providers with no reasoning control ignore it.
+    pub reasoning: ReasoningEffort,
+    /// Tool names safe to dispatch concurrently. When *every* call in a turn's
+    /// batch is on this list they run together; any other name and the whole
+    /// batch falls back to sequential dispatch.
+    ///
+    /// Allowlist rather than "everything that isn't mutating": `ask_user` and
+    /// `present_plan` mutate nothing but must not race, and MCP tools are
+    /// deliberately absent because a stdio server that mishandles concurrent
+    /// requests is a bug we cannot reproduce from here.
+    pub parallel_safe_tools: Vec<String>,
 }
 
 impl std::fmt::Debug for AgentConfig {
@@ -190,7 +205,9 @@ impl std::fmt::Debug for AgentConfig {
             .field("learning", &self.learning.as_ref().map(|_| "<hook>"))
             .field("gate", &self.gate.as_ref().map(|g| g.label()))
             .field("gate_max_retries", &self.gate_max_retries)
+            .field("reasoning", &self.reasoning)
             .field("mutating_tools", &self.mutating_tools)
+            .field("parallel_safe_tools", &self.parallel_safe_tools)
             .finish()
     }
 }
@@ -210,6 +227,7 @@ impl Default for AgentConfig {
             learning: None,
             gate: None,
             gate_max_retries: 2,
+            reasoning: ReasoningEffort::Off,
             // Any tool that can change the working tree belongs here, or the
             // turn ends unverified. `lsp_rename` / `lsp_code_action` write via
             // the language server's WorkspaceEdit, which is exactly the kind of
@@ -222,6 +240,26 @@ impl Default for AgentConfig {
                 "run_shell".into(),
                 "lsp_rename".into(),
                 "lsp_code_action".into(),
+            ],
+            // Pure reads with no shared mutable state between them. The model
+            // routinely emits four of these in one batch; serialising them is
+            // wall-clock spent for nothing.
+            parallel_safe_tools: vec![
+                "read_file".into(),
+                "grep".into(),
+                "glob".into(),
+                "list_dir".into(),
+                "outline".into(),
+                "find_symbol".into(),
+                "who_calls".into(),
+                "semantic_search".into(),
+                "lsp_definition".into(),
+                "lsp_references".into(),
+                "lsp_hover".into(),
+                "lsp_diagnostics".into(),
+                "recall_memory".into(),
+                "recall_session".into(),
+                "read_session".into(),
             ],
         }
     }
@@ -338,6 +376,21 @@ impl AgentLoop {
         self.config.max_tokens
     }
 
+    pub fn set_reasoning(&mut self, r: ReasoningEffort) {
+        self.config.reasoning = r;
+    }
+
+    pub fn get_reasoning(&self) -> ReasoningEffort {
+        self.config.reasoning
+    }
+
+    /// Whether the active provider has any reasoning control. False means a
+    /// configured level is dropped on the way out, so callers can say so
+    /// instead of letting the user think it took effect.
+    pub fn provider_supports_reasoning(&self) -> bool {
+        self.provider.capabilities().reasoning
+    }
+
     pub fn get_model(&self) -> &str {
         &self.config.model
     }
@@ -404,6 +457,7 @@ impl AgentLoop {
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
                     cache_breakpoints,
+                    reasoning: config.reasoning,
                 };
 
                 let mut event_stream = match provider.complete(req).await {
@@ -432,6 +486,22 @@ impl AgentLoop {
                         StreamEvent::TextDelta { text } => {
                             current_text.push_str(&text);
                             yield AgentEvent::TextDelta { text };
+                        }
+                        StreamEvent::ThinkingDelta { text } => {
+                            yield AgentEvent::ThinkingDelta { text };
+                        }
+                        StreamEvent::Thinking { block } => {
+                            // Reasoning precedes the answer, so anything already
+                            // buffered as text belongs after it. In practice
+                            // `current_text` is empty here; flushing anyway keeps
+                            // block order faithful if a provider interleaves.
+                            if !current_text.is_empty() {
+                                assistant_blocks.push(ContentBlock::text(std::mem::take(&mut current_text)));
+                            }
+                            // Pushed verbatim, signature intact: Anthropic
+                            // rejects the next tool-use request if this block
+                            // comes back altered or missing.
+                            assistant_blocks.push(block);
                         }
                         StreamEvent::ToolUse { block } => {
                             // Flush any pending text into its own block.
@@ -535,14 +605,46 @@ impl AgentLoop {
                 }
 
                 // Dispatch tools and append their results as a user-role message.
-                let mut results: Vec<ContentBlock> = Vec::with_capacity(tool_calls.len());
-                for (id, name, input) in tool_calls {
-                    // Always dispatch fresh. A per-turn result cache was removed
-                    // because a cached read (`read_file`, `run_shell`) goes stale
-                    // the moment a later tool mutates the workspace — which
-                    // silently fed the model old output and defeated the
-                    // post-edit verification loop.
-                    let outcome = tools.dispatch(&name, input).await;
+                //
+                // A batch of pure reads (the model routinely emits four
+                // `read_file`s at once) runs concurrently; anything else runs
+                // one at a time, because an edit or a shell command must see
+                // the workspace the call before it left behind.
+                //
+                // Eligibility checks *both* lists: requiring absence from
+                // `mutating_tools` means adding a name to `parallel_safe_tools`
+                // by mistake cannot silently race a write.
+                let count = tool_calls.len();
+                let concurrency = if tool_calls.iter().all(|(_, name, _)| {
+                    config.parallel_safe_tools.iter().any(|t| t == name)
+                        && !config.mutating_tools.iter().any(|t| t == name)
+                }) {
+                    count.max(1)
+                } else {
+                    1
+                };
+
+                // `buffered` preserves input order, so results reach the UI and
+                // the history in the order the model asked for them regardless
+                // of which finished first.
+                let mut dispatched = futures::stream::iter(tool_calls)
+                    .map(|(id, name, input)| {
+                        let tools = tools.clone();
+                        async move {
+                            // Always dispatch fresh. A per-turn result cache was
+                            // removed because a cached read (`read_file`,
+                            // `run_shell`) goes stale the moment a later tool
+                            // mutates the workspace — which silently fed the
+                            // model old output and defeated the post-edit
+                            // verification loop.
+                            let outcome = tools.dispatch(&name, input).await;
+                            (id, name, outcome)
+                        }
+                    })
+                    .buffered(concurrency);
+
+                let mut results: Vec<ContentBlock> = Vec::with_capacity(count);
+                while let Some((id, name, outcome)) = dispatched.next().await {
                     if !outcome.is_error && config.mutating_tools.iter().any(|t| t == &name) {
                         mutated = true;
                     }
@@ -560,6 +662,7 @@ impl AgentLoop {
                         is_error: outcome.is_error,
                     });
                 }
+                drop(dispatched);
                 history.push(Message::tool_results(results));
 
                 if turn + 1 == config.max_turns {
@@ -609,6 +712,7 @@ mod tests {
                 tools: true,
                 vision: false,
                 cache_kind: crate::CacheKind::None,
+                reasoning: false,
             }
         }
         async fn complete(&self, _req: CompletionRequest) -> crate::Result<ProviderEventStream> {
@@ -651,6 +755,7 @@ mod tests {
                 tools: true,
                 vision: false,
                 cache_kind: crate::CacheKind::Explicit,
+                reasoning: false,
             }
         }
         async fn complete(&self, req: CompletionRequest) -> crate::Result<ProviderEventStream> {
@@ -942,5 +1047,395 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, AgentEvent::Verification { .. })));
+    }
+}
+
+/// Concurrency behaviour of tool dispatch: a batch of declared-safe reads runs
+/// together, anything else stays serialised, and either way results come back
+/// in the order the model asked for them.
+#[cfg(test)]
+mod dispatch_concurrency_tests {
+    use super::*;
+    use crate::{ProviderCapabilities, ProviderEventStream};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Dispatcher that tracks how many calls are in flight at once and holds
+    /// each call open long enough for an overlap to be observable.
+    struct ConcurrencyProbe {
+        in_flight: AtomicUsize,
+        peak: AtomicUsize,
+        /// Per-tool delay, so a test can make a later call finish first.
+        delay_ms: fn(&str) -> u64,
+    }
+
+    impl ConcurrencyProbe {
+        fn new(delay_ms: fn(&str) -> u64) -> Arc<Self> {
+            Arc::new(Self {
+                in_flight: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                delay_ms,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ToolDispatcher for ConcurrencyProbe {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn dispatch(&self, name: &str, _args: serde_json::Value) -> ToolOutcome {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis((self.delay_ms)(name))).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            ToolOutcome::ok(name)
+        }
+    }
+
+    struct Replay(Mutex<VecDeque<Vec<StreamEvent>>>);
+
+    #[async_trait]
+    impl Provider for Replay {
+        fn id(&self) -> &str {
+            "replay"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                cache_kind: crate::CacheKind::None,
+                reasoning: false,
+            }
+        }
+        async fn complete(&self, _req: CompletionRequest) -> crate::Result<ProviderEventStream> {
+            let events = self.0.lock().unwrap().pop_front().expect("over-called");
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    /// One assistant turn that calls each of `names`, then a turn that ends.
+    fn batch(names: &[&str]) -> Vec<Vec<StreamEvent>> {
+        let mut first: Vec<StreamEvent> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| StreamEvent::ToolUse {
+                block: ContentBlock::ToolUse {
+                    id: format!("t{i}"),
+                    name: (*n).into(),
+                    input: serde_json::json!({}),
+                },
+            })
+            .collect();
+        first.push(StreamEvent::Stop {
+            reason: StopReason::ToolUse,
+        });
+        vec![
+            first,
+            vec![StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            }],
+        ]
+    }
+
+    /// Drive one user turn and hand back the tool-result ids in arrival order.
+    async fn run(names: &[&str], probe: Arc<ConcurrencyProbe>) -> Vec<String> {
+        let provider = Arc::new(Replay(Mutex::new(batch(names).into())));
+        let mut agent = AgentLoop::new(
+            provider,
+            probe,
+            AgentConfig {
+                model: "m".into(),
+                ..Default::default()
+            },
+        );
+        let mut ids = Vec::new();
+        let mut stream = agent.run("go".into());
+        while let Some(ev) = stream.next().await {
+            if let AgentEvent::ToolResult { id, .. } = ev {
+                ids.push(id);
+            }
+        }
+        ids
+    }
+
+    const SLOW: fn(&str) -> u64 = |_| 40;
+
+    #[tokio::test]
+    async fn read_batch_dispatches_concurrently() {
+        let probe = ConcurrencyProbe::new(SLOW);
+        let ids = run(&["read_file", "grep", "lsp_hover"], probe.clone()).await;
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            probe.peak.load(Ordering::SeqCst),
+            3,
+            "all three reads should have been in flight together"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_with_a_mutating_call_stays_sequential() {
+        let probe = ConcurrencyProbe::new(SLOW);
+        // One write among the reads is enough to serialise the whole batch:
+        // the reads after it must observe the tree it left behind.
+        let ids = run(&["read_file", "write_file", "grep"], probe.clone()).await;
+        assert_eq!(ids.len(), 3);
+        assert_eq!(
+            probe.peak.load(Ordering::SeqCst),
+            1,
+            "a mutating call must not run alongside anything"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_is_not_assumed_safe() {
+        let probe = ConcurrencyProbe::new(SLOW);
+        // MCP tools land here: absent from the allowlist, so no concurrency.
+        let ids = run(&["read_file", "mcp__srv__query"], probe.clone()).await;
+        assert_eq!(ids.len(), 2);
+        assert_eq!(probe.peak.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn parallel_results_keep_model_order() {
+        // `grep` finishes long after the two calls that bracket it, so an
+        // implementation yielding on completion order would scramble these.
+        let probe = ConcurrencyProbe::new(|n| if n == "grep" { 60 } else { 5 });
+        let ids = run(&["grep", "read_file", "lsp_hover"], probe.clone()).await;
+        assert_eq!(ids, vec!["t0", "t1", "t2"]);
+        assert_eq!(probe.peak.load(Ordering::SeqCst), 3);
+    }
+}
+
+/// Reasoning blocks have to survive the loop untouched: Anthropic verifies the
+/// signature against the text on the next tool-use request, so a block that is
+/// dropped, reordered, or re-serialised breaks the following turn.
+#[cfg(test)]
+mod reasoning_tests {
+    use super::*;
+    use crate::{ProviderCapabilities, ProviderEventStream};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct Recorder {
+        seen: Arc<Mutex<Vec<CompletionRequest>>>,
+        responses: Mutex<VecDeque<Vec<StreamEvent>>>,
+    }
+
+    #[async_trait]
+    impl Provider for Recorder {
+        fn id(&self) -> &str {
+            "recorder"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                cache_kind: crate::CacheKind::Explicit,
+                reasoning: true,
+            }
+        }
+        async fn complete(&self, req: CompletionRequest) -> crate::Result<ProviderEventStream> {
+            self.seen.lock().unwrap().push(req);
+            let events = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("over-called");
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    struct Echo;
+    #[async_trait]
+    impl ToolDispatcher for Echo {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn dispatch(&self, _n: &str, _a: serde_json::Value) -> ToolOutcome {
+            ToolOutcome::ok("done")
+        }
+    }
+
+    fn signed(text: &str, sig: &str) -> ContentBlock {
+        ContentBlock::Thinking {
+            text: text.into(),
+            signature: Some(sig.into()),
+            redacted: false,
+        }
+    }
+
+    /// Turn one: think, then call a tool. Turn two: end.
+    fn thinking_then_tool() -> Vec<Vec<StreamEvent>> {
+        vec![
+            vec![
+                StreamEvent::ThinkingDelta {
+                    text: "let me check".into(),
+                },
+                StreamEvent::Thinking {
+                    block: signed("let me check", "sig-1"),
+                },
+                StreamEvent::ToolUse {
+                    block: ContentBlock::ToolUse {
+                        id: "t0".into(),
+                        name: "read_file".into(),
+                        input: serde_json::json!({}),
+                    },
+                },
+                StreamEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ],
+            vec![
+                StreamEvent::TextDelta {
+                    text: "the answer".into(),
+                },
+                StreamEvent::Stop {
+                    reason: StopReason::EndTurn,
+                },
+            ],
+        ]
+    }
+
+    async fn drive(cfg: AgentConfig) -> (Vec<CompletionRequest>, Vec<AgentEvent>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = Arc::new(Recorder {
+            seen: seen.clone(),
+            responses: Mutex::new(thinking_then_tool().into()),
+        });
+        let mut agent = AgentLoop::new(provider, Arc::new(Echo), cfg);
+        let mut events = Vec::new();
+        let mut stream = agent.run("go".into());
+        while let Some(e) = stream.next().await {
+            events.push(e);
+        }
+        let reqs = seen.lock().unwrap().clone();
+        (reqs, events)
+    }
+
+    fn cfg(reasoning: ReasoningEffort) -> AgentConfig {
+        AgentConfig {
+            model: "m".into(),
+            reasoning,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn configured_level_reaches_the_provider() {
+        let (reqs, _) = drive(cfg(ReasoningEffort::High)).await;
+        assert!(reqs.iter().all(|r| r.reasoning == ReasoningEffort::High));
+    }
+
+    #[tokio::test]
+    async fn off_by_default() {
+        assert_eq!(AgentConfig::default().reasoning, ReasoningEffort::Off);
+    }
+
+    #[tokio::test]
+    async fn thinking_is_echoed_back_verbatim_on_the_next_request() {
+        let (reqs, _) = drive(cfg(ReasoningEffort::Medium)).await;
+        // Second request carries the assistant turn that did the thinking.
+        let assistant = reqs[1]
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .expect("assistant turn missing from history");
+        let thinking: Vec<_> = assistant
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Thinking {
+                    text, signature, ..
+                } => Some((text.clone(), signature.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            thinking,
+            vec![("let me check".to_string(), Some("sig-1".to_string()))],
+            "thinking block must survive with its signature intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_precedes_the_tool_call_it_led_to() {
+        let (reqs, _) = drive(cfg(ReasoningEffort::Medium)).await;
+        let assistant = reqs[1]
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Assistant)
+            .unwrap();
+        let think_at = assistant.content.iter().position(|b| b.is_thinking());
+        let tool_at = assistant
+            .content
+            .iter()
+            .position(|b| matches!(b, ContentBlock::ToolUse { .. }));
+        assert!(
+            think_at < tool_at,
+            "block order must match what the model emitted: {:?}",
+            assistant.content
+        );
+    }
+
+    #[tokio::test]
+    async fn thinking_deltas_surface_separately_from_answer_text() {
+        let (_, events) = drive(cfg(ReasoningEffort::Low)).await;
+        let thinking: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ThinkingDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        let text: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["let me check"]);
+        assert_eq!(text, vec!["the answer"]);
+    }
+
+    #[test]
+    fn reasoning_levels_parse_and_round_trip() {
+        for (s, want) in [
+            ("off", ReasoningEffort::Off),
+            ("", ReasoningEffort::Off),
+            ("LOW", ReasoningEffort::Low),
+            (" medium ", ReasoningEffort::Medium),
+            ("high", ReasoningEffort::High),
+        ] {
+            assert_eq!(ReasoningEffort::parse(s), Some(want), "parsing {s:?}");
+        }
+        assert_eq!(ReasoningEffort::parse("sometimes"), None);
+        // Every on-level must yield a budget, or the Anthropic path silently
+        // sends no `thinking` block.
+        for r in [
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+        ] {
+            assert!(r.is_on() && r.budget_tokens().is_some(), "{r}");
+        }
+        assert!(ReasoningEffort::Off.budget_tokens().is_none());
+    }
+
+    #[test]
+    fn thinking_counts_toward_context() {
+        // Reasoning is re-sent every turn, so compaction has to see it.
+        let with = vec![Message::assistant(vec![signed(&"x".repeat(400), "s")])];
+        let without = vec![Message::assistant(vec![ContentBlock::text("")])];
+        assert!(
+            crate::tokens::estimate_history_tokens(&with, None)
+                > crate::tokens::estimate_history_tokens(&without, None)
+        );
     }
 }

@@ -100,3 +100,15 @@ mapper functions in `runtime.rs` + `login.rs`.
   `WATSONX_API_KEY` + `WATSONX_PROJECT_ID` and the adapter exchanges
   the API key for an IAM token internally (cached for ~1h). Pass
   `WATSONX_ACCESS_TOKEN` instead if you've already minted one.
+
+**Reasoning support.** The portable `reasoning` level
+(see [CONFIGURATION.md](CONFIGURATION.md#reasoning)) maps onto a native
+parameter only where one exists:
+
+| Backend | Native control | Notes |
+| --- | --- | --- |
+| Anthropic | `thinking.budget_tokens` | Thinking blocks are signed and round-trip through history verbatim. `max_tokens` is raised above the budget and `temperature` is dropped, both required by the API. |
+| OpenAI | `reasoning_effort` | Sent only to reasoning-family models (`o*`, `gpt-5*`); `gpt-4.1` and friends reject the parameter, so it is omitted there. Reasoning is not echoed back — the server keeps it. |
+| Gemini | `generationConfig.thinkingConfig` | `includeThoughts` is set so thoughts stream; `thoughtsTokenCount` is already folded into output tokens for costing. |
+| OpenAI-compat servers | `reasoning_content` / `reasoning` deltas | Streamed reasoning is picked up from either spelling (DeepSeek, vLLM, LM Studio, OpenRouter). Whether the server honours `reasoning_effort` is up to that server. |
+| Cohere, watsonx, ChatGPT (OAuth) | — | No reasoning control; a configured level is ignored and `wingman doctor` says so. |

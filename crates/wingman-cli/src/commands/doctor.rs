@@ -111,6 +111,33 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
         }
     }
 
+    // 2b. Reasoning. Only interesting when it is switched on: the failure
+    // mode worth catching is a level that is configured but silently dropped
+    // because the active backend has no reasoning control.
+    {
+        let level = cfg.reasoning.trim();
+        if !matches!(level, "" | "off" | "none" | "false") {
+            section("reasoning");
+            let provider = cfg.default_provider.as_deref().unwrap_or("");
+            // Named rather than probed: `capabilities()` needs a constructed
+            // provider, and doctor deliberately does not build one.
+            const HAS_REASONING: &[&str] = &["anthropic", "openai", "gemini", "openrouter"];
+            if provider.is_empty() {
+                emit(Status::Warn(format!(
+                    "reasoning = \"{level}\" but no default_provider is set"
+                )));
+            } else if HAS_REASONING.contains(&provider) {
+                emit(Status::Ok(format!(
+                    "reasoning = \"{level}\" — {provider} supports it (thinking tokens bill at the output rate)"
+                )));
+            } else {
+                emit(Status::Warn(format!(
+                    "reasoning = \"{level}\" but {provider} has no reasoning control, so it is ignored"
+                )));
+            }
+        }
+    }
+
     // 3. Local model servers.
     section("local model servers");
     for (name, url) in [

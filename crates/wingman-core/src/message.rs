@@ -34,11 +34,44 @@ pub enum ContentBlock {
         /// MIME type: "image/jpeg", "image/png", "image/gif", "image/webp"
         media_type: String,
     },
+    /// A reasoning block emitted by a thinking-capable model.
+    ///
+    /// These are **not** decoration. Anthropic rejects a tool-use turn whose
+    /// preceding assistant message dropped its thinking blocks, so the loop has
+    /// to carry them through history verbatim — `signature` is the provider's
+    /// integrity tag over `text` and must survive the round trip byte-for-byte.
+    ///
+    /// `redacted` marks a block whose text the provider encrypted; it carries
+    /// no readable content but still has to be echoed back.
+    Thinking {
+        text: String,
+        /// Provider integrity tag. Absent for providers that don't sign
+        /// (Gemini) and for summary-only reasoning (OpenAI).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        redacted: bool,
+    },
 }
 
 impl ContentBlock {
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text { text: s.into() }
+    }
+
+    pub fn thinking(text: impl Into<String>, signature: Option<String>) -> Self {
+        Self::Thinking {
+            text: text.into(),
+            signature,
+            redacted: false,
+        }
+    }
+
+    /// True for blocks the model produced as reasoning rather than as its
+    /// answer. Used by anything that renders or summarises a message and
+    /// should not treat reasoning as visible output.
+    pub fn is_thinking(&self) -> bool {
+        matches!(self, Self::Thinking { .. })
     }
 }
 

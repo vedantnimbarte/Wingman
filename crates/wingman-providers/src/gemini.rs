@@ -210,6 +210,7 @@ impl Provider for GeminiProvider {
             tools: true,
             vision: true,
             cache_kind: CacheKind::Cached,
+            reasoning: true,
         }
     }
 
@@ -341,7 +342,14 @@ impl Provider for GeminiProvider {
                     for part in parts {
                         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                             if !text.is_empty() {
-                                yield StreamEvent::TextDelta { text: text.to_string() };
+                                // A thought part is an ordinary text part
+                                // flagged `thought: true` — the only thing
+                                // separating reasoning from the answer here.
+                                if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                    yield StreamEvent::ThinkingDelta { text: text.to_string() };
+                                } else {
+                                    yield StreamEvent::TextDelta { text: text.to_string() };
+                                }
                             }
                         }
                         if let Some(fc) = part.get("functionCall") {
@@ -399,6 +407,14 @@ fn build_request_body(req: &CompletionRequest, cached: Option<&str>) -> Value {
             "maxOutputTokens": req.max_tokens,
         },
     });
+    if let Some(budget) = req.reasoning.budget_tokens() {
+        // `includeThoughts` is what makes the thought parts visible; without
+        // it the model still thinks and still bills, it just won't show you.
+        body["generationConfig"]["thinkingConfig"] = json!({
+            "thinkingBudget": budget,
+            "includeThoughts": true,
+        });
+    }
     if let Some(t) = req.temperature {
         body["generationConfig"]["temperature"] = json!(t);
     }
@@ -513,6 +529,8 @@ fn encode_contents(messages: &[Message]) -> Value {
                 ContentBlock::ToolUse { name, input, .. } => json!({
                     "functionCall": { "name": name, "args": input }
                 }),
+                // Gemini neither signs thoughts nor requires them back.
+                ContentBlock::Thinking { .. } => json!({}),
                 ContentBlock::ToolResult { .. } => json!({}),
                 ContentBlock::Image { data, media_type } => json!({
                     "inline_data": {
@@ -521,7 +539,14 @@ fn encode_contents(messages: &[Message]) -> Value {
                     }
                 }),
             })
+            // Blocks with no Gemini equivalent map to `{}`; an empty part in a
+            // `parts` array is a 400, so drop them here rather than at each
+            // arm. A message left with no parts at all is dropped below.
+            .filter(|p| p.as_object().is_some_and(|o| !o.is_empty()))
             .collect();
+        if parts.is_empty() {
+            continue;
+        }
         out.push(json!({ "role": role, "parts": parts }));
     }
     Value::Array(out)
@@ -530,6 +555,60 @@ fn encode_contents(messages: &[Message]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wingman_core::ReasoningEffort;
+
+    #[test]
+    fn reasoning_sets_thinking_config_with_visible_thoughts() {
+        let mut req = CompletionRequest::new("gemini-2.5-pro");
+        req.reasoning = ReasoningEffort::Medium;
+        let body = build_request_body(&req, None);
+        let tc = &body["generationConfig"]["thinkingConfig"];
+        assert_eq!(
+            tc["thinkingBudget"],
+            json!(ReasoningEffort::Medium.budget_tokens().unwrap())
+        );
+        // Without this the model still thinks and still bills, it just does
+        // not show the thoughts.
+        assert_eq!(tc["includeThoughts"], json!(true));
+    }
+
+    #[test]
+    fn no_thinking_config_when_reasoning_is_off() {
+        let req = CompletionRequest::new("gemini-2.5-pro");
+        let body = build_request_body(&req, None);
+        assert!(body["generationConfig"].get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn thinking_blocks_do_not_become_empty_parts() {
+        // An empty object in `parts` is a 400, so a thinking-only assistant
+        // message must be dropped rather than sent as `parts: [{}]`.
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![ContentBlock::thinking("hmm", None)],
+        }];
+        let contents = encode_contents(&msgs);
+        let arr = contents.as_array().unwrap();
+        assert!(
+            arr.is_empty(),
+            "thinking-only message should be dropped: {contents}"
+        );
+    }
+
+    #[test]
+    fn thinking_alongside_text_keeps_the_text_part() {
+        let msgs = vec![Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::thinking("hmm", None),
+                ContentBlock::text("answer"),
+            ],
+        }];
+        let contents = encode_contents(&msgs);
+        let parts = contents[0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "answer");
+    }
 
     #[test]
     fn system_prompt_becomes_system_instruction() {
