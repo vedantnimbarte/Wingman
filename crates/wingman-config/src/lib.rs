@@ -205,6 +205,19 @@ pub struct Config {
     pub default_model: Option<String>,
     pub permission_mode: PermissionMode,
 
+    /// How hard the model should think before answering:
+    /// `"off"` | `"low"` | `"medium"` | `"high"`.
+    ///
+    /// One portable level rather than each vendor's native parameter — it maps
+    /// onto Anthropic's thinking budget, OpenAI's `reasoning_effort`, and
+    /// Gemini's `thinkingConfig`. Backends with no reasoning control ignore it;
+    /// `wingman doctor` says which those are.
+    ///
+    /// Defaults to `"off"`: reasoning costs output tokens, so turning it on is
+    /// your call, not ours.
+    #[serde(default = "default_reasoning")]
+    pub reasoning: String,
+
     /// Per-provider configuration, keyed by stable provider id
     /// (e.g. "anthropic", "openai", "gemini", "ollama", "openrouter").
     pub providers: BTreeMap<String, ProviderConfig>,
@@ -509,6 +522,10 @@ pub struct ProviderConfig {
     /// Free-form extras passed through to provider impls.
     #[serde(flatten)]
     pub extra: BTreeMap<String, toml::Value>,
+}
+
+fn default_reasoning() -> String {
+    "off".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -868,6 +885,7 @@ impl Config {
     ///   - `WINGMAN_MODEL`            -> `default_model`
     ///   - `WINGMAN_PROVIDER`         -> `default_provider`
     ///   - `WINGMAN_PERMISSION_MODE`  -> `permission_mode`
+    ///   - `WINGMAN_REASONING`        -> `reasoning`
     ///   - `WINGMAN_LOG`              -> `logging.filter`
     ///   - `WINGMAN_<PROVIDER>_API_KEY`  -> providers[<provider>].api_key
     ///   - `WINGMAN_<PROVIDER>_BASE_URL` -> providers[<provider>].base_url
@@ -888,6 +906,22 @@ impl Config {
                         value: v.clone(),
                         reason: e,
                     })?;
+                }
+                "WINGMAN_REASONING" => {
+                    // Validated here rather than at the request boundary so a
+                    // typo is a startup error, not a silently-ignored setting
+                    // that leaves you wondering why nothing got smarter.
+                    if !matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "off" | "none" | "false" | "low" | "medium" | "med" | "high" | "max"
+                    ) {
+                        return Err(ConfigError::BadEnv {
+                            name: k.clone(),
+                            value: v.clone(),
+                            reason: "expected one of: off, low, medium, high".into(),
+                        });
+                    }
+                    self.reasoning = v;
                 }
                 "WINGMAN_LOG" => self.logging.filter = v,
                 _ => {
@@ -2473,6 +2507,35 @@ mod tests {
         let remote = &cfg.mcp["remote"];
         assert!(!remote.trusted, "trusted defaults to false");
         assert_eq!(remote.headers["Authorization"], "Bearer abc");
+    }
+
+    #[test]
+    fn reasoning_defaults_to_off_and_parses_from_toml() {
+        let cfg = Config::default();
+        assert_eq!(cfg.reasoning, "");
+        let parsed: Config = toml::from_str("reasoning = \"high\"").unwrap();
+        assert_eq!(parsed.reasoning, "high");
+        // Omitted in TOML falls back to the documented default rather than an
+        // empty string that only happens to parse as "off".
+        let omitted: Config = toml::from_str("").unwrap();
+        assert_eq!(omitted.reasoning, "off");
+    }
+
+    #[test]
+    fn reasoning_env_var_applies_and_rejects_nonsense() {
+        let mut cfg = Config::default();
+        cfg.apply_env(vec![(
+            "WINGMAN_REASONING".to_string(),
+            "medium".to_string(),
+        )])
+        .unwrap();
+        assert_eq!(cfg.reasoning, "medium");
+
+        // A typo must fail loudly: silently ignoring it leaves the user
+        // thinking reasoning is on when it never was.
+        let mut cfg = Config::default();
+        let err = cfg.apply_env(vec![("WINGMAN_REASONING".to_string(), "hihg".to_string())]);
+        assert!(err.is_err(), "typo should be rejected");
     }
 
     #[test]

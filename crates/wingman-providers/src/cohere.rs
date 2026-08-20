@@ -69,6 +69,7 @@ impl Provider for CohereProvider {
             // Command-A and Command-R-Plus 08-2024 support image inputs in
             // the same `image_url` shape OpenAI uses.
             vision: true,
+            reasoning: false,
             cache_kind: CacheKind::Automatic,
         }
     }
@@ -333,6 +334,10 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
     for b in &m.content {
         match b {
             ContentBlock::Text { text: t } => text.push_str(t),
+            // No reasoning control on this backend; a configured level is
+            // dropped (`capabilities().reasoning` is false so callers can see
+            // that), and any reasoning in history has nowhere to go.
+            ContentBlock::Thinking { .. } => {}
             ContentBlock::ToolUse { id, name, input } => {
                 tool_calls.push(json!({
                     "id": id,

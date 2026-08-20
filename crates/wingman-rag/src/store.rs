@@ -487,12 +487,10 @@ fn f32_slice_to_bytes(v: &[f32]) -> Vec<u8> {
 }
 
 fn bytes_to_f32_vec(b: &[u8]) -> Vec<f32> {
-    let mut out = Vec::with_capacity(b.len() / 4);
-    for chunk in b.chunks_exact(4) {
-        let arr: [u8; 4] = chunk.try_into().unwrap();
-        out.push(f32::from_le_bytes(arr));
-    }
-    out
+    // `as_chunks` yields `&[[u8; 4]]` directly, so the per-chunk
+    // `try_into().unwrap()` this used to need is gone with it.
+    let (chunks, _remainder) = b.as_chunks::<4>();
+    chunks.iter().copied().map(f32::from_le_bytes).collect()
 }
 
 #[cfg(test)]

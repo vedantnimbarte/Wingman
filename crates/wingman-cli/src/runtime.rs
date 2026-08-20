@@ -1674,6 +1674,10 @@ pub async fn build_agent_registry_learn(
             .map(|l| l.hook.clone() as Arc<dyn wingman_core::LearningHook>),
         gate: build_turn_gate(cfg, &paths.root),
         gate_max_retries: cfg.verify.max_retries as usize,
+        // Validated on the env path and by clap on the flag path; an
+        // unparseable value in a hand-edited config falls back to `Off`
+        // rather than refusing to start.
+        reasoning: wingman_core::ReasoningEffort::parse(&cfg.reasoning).unwrap_or_default(),
         ..Default::default()
     };
     let agent = AgentLoop::new(provider, registry.clone(), agent_cfg);

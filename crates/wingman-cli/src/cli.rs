@@ -21,6 +21,17 @@ pub struct Cli {
     #[arg(long, value_name = "MODEL", global = true, env = "WINGMAN_MODEL")]
     pub model: Option<String>,
 
+    /// How hard the model should think before answering: off | low | medium |
+    /// high. Maps onto each provider's own reasoning control; backends that
+    /// have none ignore it (`wingman doctor` says which).
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        global = true,
+        value_parser = ["off", "low", "medium", "high"],
+    )]
+    pub reasoning: Option<String>,
+
     /// Print a single response and exit (non-interactive).
     #[arg(long, value_name = "PROMPT")]
     pub print: Option<String>,
@@ -846,8 +857,19 @@ fn is_remote_flag(arg: &str) -> bool {
     })
 }
 
+/// `--reasoning` applied at config-load time.
+///
+/// Set once from the parsed flag before anything loads config. The alternative
+/// is threading an override through the ~20 `load_config()` call sites and the
+/// per-command options struct each one owns, to deliver a value that is the
+/// same for the whole process anyway.
+static REASONING_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    if let Some(r) = cli.reasoning.clone() {
+        let _ = REASONING_OVERRIDE.set(r);
+    }
     // Suppress INFO logs during TUI mode (no verbose flag) so stderr output
     // doesn't bleed into the alternate-screen buffer and corrupt the display.
     let is_tui = cli.command.is_none() && cli.print.is_none() && cli.batch.is_none();
@@ -1491,7 +1513,13 @@ fn load_config() -> Result<Config> {
     } else {
         None
     };
-    Ok(Config::load(Some(&global), project_file.as_deref())?)
+    let mut cfg = Config::load(Some(&global), project_file.as_deref())?;
+    // CLI beats config and env, per the documented layering. Clap already
+    // restricted this to the four valid levels.
+    if let Some(r) = REASONING_OVERRIDE.get() {
+        cfg.reasoning = r.clone();
+    }
+    Ok(cfg)
 }
 
 /// Run the ChatGPT OAuth PKCE flow and store the resulting tokens in the

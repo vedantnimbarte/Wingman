@@ -93,6 +93,12 @@ pub fn estimate_history_tokens(history: &[Message], system: Option<&str>) -> u32
                     // base64 data length / 4 chars-per-token (same heuristic as text)
                     total = total.saturating_add(estimate_tokens(data));
                 }
+                // Reasoning is re-sent verbatim on every subsequent turn, so
+                // it occupies context exactly like text does and has to be
+                // counted or compaction triggers late.
+                ContentBlock::Thinking { text, .. } => {
+                    total = total.saturating_add(estimate_tokens(text));
+                }
             }
         }
     }
@@ -236,6 +242,10 @@ fn synthesize_recap(messages: &[Message]) -> String {
                     }
                     summary.push_str(&format!("image ({media_type})"));
                 }
+                // Reasoning is working-out, not conclusion. The recap keeps
+                // what the assistant *did*; folding paraphrased thinking into
+                // it would put unsigned text where a signed block used to be.
+                ContentBlock::Thinking { .. } => {}
             }
         }
         if summary.is_empty() {

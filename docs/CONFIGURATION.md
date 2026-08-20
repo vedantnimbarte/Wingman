@@ -19,6 +19,7 @@ project file does **not** wipe out the global values for that section.
 ```toml
 default_provider = "anthropic"
 permission_mode = "read-only"
+reasoning = "off"              # off | low | medium | high
 
 [tokens]
 compact_at_tokens = 120000
@@ -130,6 +131,7 @@ file = true
 | `WINGMAN_MODEL`                     | Overrides `default_model`. Same syntax as `--model`.                |
 | `WINGMAN_PROVIDER`                  | Overrides `default_provider`.                                       |
 | `WINGMAN_PERMISSION_MODE`           | `read-only` \| `auto-edit` \| `yolo`.                               |
+| `WINGMAN_REASONING`                 | `off` \| `low` \| `medium` \| `high`. Rejects anything else.        |
 | `WINGMAN_LOG`                       | `tracing-subscriber` env-filter directive.                          |
 | `WINGMAN_<PROVIDER>_API_KEY`        | Sets `providers.<provider>.api_key`.                                |
 | `WINGMAN_<PROVIDER>_BASE_URL`       | Sets `providers.<provider>.base_url`.                               |
@@ -140,6 +142,40 @@ file = true
 
 Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
 is resolved against the environment at load time.
+
+## Reasoning
+
+`reasoning` sets how hard the model thinks before answering — one portable
+level rather than each vendor's own parameter:
+
+| Level | Anthropic `thinking.budget_tokens` | OpenAI `reasoning_effort` | Gemini `thinkingBudget` |
+| --- | --- | --- | --- |
+| `off` (default) | not sent | not sent | not sent |
+| `low` | 4096 | `low` | 4096 |
+| `medium` | 16384 | `medium` | 16384 |
+| `high` | 32768 | `high` | 32768 |
+
+Backends with no reasoning control (Cohere, watsonx, ChatGPT-OAuth) ignore the
+setting; `wingman doctor` says so rather than leaving you to guess. On OpenAI
+the parameter is sent only to reasoning-family models — `gpt-4.1` rejects it
+outright, so it is omitted there even when the level is set.
+
+Layered like everything else: config file → `WINGMAN_REASONING` → `--reasoning`.
+In the TUI, `/reasoning [level]` changes it live and reports the current value
+with no argument.
+
+Two things worth knowing before turning it on:
+
+- **Thinking tokens bill at the output rate.** `off` is the default for that
+  reason — enabling it is a cost decision.
+- **On Anthropic, `max_tokens` is raised automatically** to sit above the
+  thinking budget plus room for a reply, and `temperature` is dropped, because
+  extended thinking requires default sampling.
+
+Reasoning is streamed to the UI as it arrives (dimmed, collapsing to one line
+once the answer begins) and, on Anthropic, carried back through history with
+its signature intact so multi-turn tool use keeps working. In `--print` mode it
+goes to stderr, so redirecting stdout still captures only the answer.
 
 ## Permission modes
 

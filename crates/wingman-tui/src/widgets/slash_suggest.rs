@@ -28,6 +28,10 @@ pub const CATALOG: &[Command] = &[
         description: "summarize old history into a recap to free context",
     },
     Command {
+        name: "/reasoning",
+        description: "how hard the model thinks · off | low | medium | high",
+    },
+    Command {
         name: "/undo",
         description: "revert the agent's last file edit(s) · /undo [n]",
     },

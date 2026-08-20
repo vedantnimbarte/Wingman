@@ -12,6 +12,7 @@ wingman [OPTIONS] [COMMAND]
 | ------------------------ | --------------------------------------------------------------------------- |
 | `--mode <MODE>`          | `read-only` \| `auto-edit` \| `yolo`.                                       |
 | `--model <MODEL>`        | Model id, optionally prefixed: `anthropic/claude-opus-4-7`. Env: `WINGMAN_MODEL`. |
+| `--reasoning <LEVEL>`    | `off` \| `low` \| `medium` \| `high`. Maps onto each provider's own reasoning control. Env: `WINGMAN_REASONING`. |
 | `--print <PROMPT>`       | Run a single prompt and exit (non-interactive).                              |
 | `--batch <FILE>`         | Run a JSONL file of prompts non-interactively. Pairs with `--json`.          |
 | `--json`                 | Emit newline-delimited JSON events instead of text. Use with `--print`/`--batch`. |

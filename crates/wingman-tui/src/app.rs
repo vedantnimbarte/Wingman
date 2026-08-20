@@ -187,6 +187,7 @@ enum Cmd {
     Help,
     Mode(Option<String>),
     Model(Option<String>),
+    Reasoning(Option<String>),
     Login,
     Logout(Option<String>),
     Add(String),
@@ -231,6 +232,11 @@ fn parse_slash(line: &str) -> Cmd {
         // writes and shell for the rest of the session.
         "/approve" | "/approve-plan" => Cmd::ApprovePlan,
         "/help" | "/?" => Cmd::Help,
+        "/reasoning" | "/think" => Cmd::Reasoning(if arg.is_empty() {
+            None
+        } else {
+            Some(arg.to_string())
+        }),
         "/mode" => Cmd::Mode(if arg.is_empty() {
             None
         } else {
@@ -872,6 +878,32 @@ async fn idle_step(
                                     "no provider — run /login first".into(),
                                 )),
                             },
+                            Cmd::Reasoning(arg) => match agent.as_mut() {
+                                Some(a) => {
+                                    let msg = match arg {
+                                        None => format!("reasoning: {}", a.get_reasoning()),
+                                        Some(v) => match wingman_core::ReasoningEffort::parse(&v) {
+                                            Some(r) => {
+                                                a.set_reasoning(r);
+                                                if r.is_on() && !a.provider_supports_reasoning() {
+                                                    format!(
+                                                        "reasoning: {r} — but this provider has no reasoning control, so it will be ignored"
+                                                    )
+                                                } else {
+                                                    format!("reasoning: {r}")
+                                                }
+                                            }
+                                            None => {
+                                                "usage: /reasoning [off|low|medium|high]".into()
+                                            }
+                                        },
+                                    };
+                                    ui.transcript.push(TranscriptItem::System(msg));
+                                }
+                                None => ui.transcript.push(TranscriptItem::Error(
+                                    "no provider — run /login first".into(),
+                                )),
+                            },
                             Cmd::Mode(None) => {
                                 ui.modal =
                                     ActiveModal::ModePicker(ModePicker::new(&ui.status.mode));
@@ -1496,6 +1528,7 @@ async fn run_turn(
 fn apply_event(event: &AgentEvent, transcript: &mut Transcript, status: &mut StatusLine) {
     match event {
         AgentEvent::TextDelta { text } => transcript.append_assistant_text(text),
+        AgentEvent::ThinkingDelta { text } => transcript.append_thinking(text),
         AgentEvent::ToolStart { name, input, .. } => {
             let summary = compact_args(input);
             transcript.push(TranscriptItem::ToolCall {
@@ -1812,6 +1845,9 @@ fn export_transcript(
                 TranscriptItem::AssistantText(s) => {
                     serde_json::json!({"role": "assistant", "content": s})
                 }
+                TranscriptItem::Thinking(s) => {
+                    serde_json::json!({"role": "thinking", "content": s})
+                }
                 TranscriptItem::ToolCall { name, summary } => {
                     serde_json::json!({"role": "tool_call", "name": name, "summary": summary})
                 }
@@ -1832,6 +1868,13 @@ fn export_transcript(
                 }
                 TranscriptItem::AssistantText(s) => {
                     md.push_str(&format!("{s}\n\n"));
+                }
+                // Collapsed in the export too — it is context for the answer,
+                // not the answer.
+                TranscriptItem::Thinking(s) => {
+                    md.push_str(&format!(
+                        "<details><summary>thinking</summary>\n\n{s}\n\n</details>\n\n"
+                    ));
                 }
                 TranscriptItem::ToolCall { name, summary } => {
                     md.push_str(&format!("> `{name}` {summary}\n"));

@@ -417,6 +417,7 @@ impl Provider for OpenAiCompatProvider {
                     | Variant::Vertex
             ),
             cache_kind: CacheKind::Automatic,
+            reasoning: true,
         }
     }
 
@@ -584,6 +585,18 @@ impl Provider for OpenAiCompatProvider {
                 let Some(choice0) = chunk.get("choices").and_then(|c| c.get(0)) else { continue };
                 let delta = choice0.get("delta").cloned().unwrap_or(Value::Null);
 
+                // `reasoning_content` (DeepSeek, vLLM, LM Studio) and
+                // `reasoning` (OpenRouter) are the two spellings in the wild
+                // for streamed reasoning on an otherwise OpenAI-shaped API.
+                if let Some(t) = delta
+                    .get("reasoning_content")
+                    .or_else(|| delta.get("reasoning"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !t.is_empty() {
+                        yield StreamEvent::ThinkingDelta { text: t.to_string() };
+                    }
+                }
                 if let Some(text) = delta.get("content").and_then(|v| v.as_str()) {
                     if !text.is_empty() {
                         yield StreamEvent::TextDelta { text: text.to_string() };
@@ -681,6 +694,9 @@ fn build_request_body(req: &CompletionRequest) -> Value {
     // `temperature`. Emitting the legacy fields makes every such model 400.
     if is_reasoning_model(&req.model) {
         body["max_completion_tokens"] = json!(req.max_tokens);
+        if req.reasoning.is_on() {
+            body["reasoning_effort"] = json!(req.reasoning.as_str());
+        }
     } else {
         body["max_tokens"] = json!(req.max_tokens);
         if let Some(t) = req.temperature {
@@ -782,6 +798,10 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
                     }
                 }));
             }
+            // Chat Completions has no slot for reasoning on the way back in —
+            // the server keeps it. Folding it into `content` would feed the
+            // model its own scratchpad as if it had said it out loud.
+            ContentBlock::Thinking { .. } => {}
         }
     }
 
@@ -809,6 +829,7 @@ fn encode_message(m: &Message, out: &mut Vec<Value>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wingman_core::ReasoningEffort;
 
     #[test]
     fn variants_have_distinct_ids_and_defaults() {
@@ -1050,6 +1071,50 @@ mod tests {
         assert_eq!(u.input_tokens, 200);
         assert_eq!(u.cache_read_input_tokens, 800);
         assert_eq!(u.output_tokens, 50);
+    }
+
+    #[test]
+    fn reasoning_effort_is_sent_for_reasoning_models() {
+        let mut req = CompletionRequest::new("o3-mini");
+        req.reasoning = ReasoningEffort::High;
+        let body = build_request_body(&req);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_effort_is_omitted_when_off() {
+        let mut req = CompletionRequest::new("o3-mini");
+        req.reasoning = ReasoningEffort::Off;
+        let body = build_request_body(&req);
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_is_not_sent_to_a_non_reasoning_model() {
+        // gpt-4.1 rejects the parameter outright, so asking for reasoning must
+        // not turn every request into a 400.
+        let mut req = CompletionRequest::new("gpt-4.1");
+        req.reasoning = ReasoningEffort::High;
+        let body = build_request_body(&req);
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn thinking_blocks_are_not_echoed_back() {
+        // Chat Completions has no inbound slot for reasoning; sending it as
+        // `content` would feed the model its own scratchpad as dialogue.
+        let m = Message {
+            role: Role::Assistant,
+            content: vec![
+                ContentBlock::thinking("private working out", None),
+                ContentBlock::text("the answer"),
+            ],
+        };
+        let mut out = Vec::new();
+        encode_message(&m, &mut out);
+        let joined = serde_json::to_string(&out).unwrap();
+        assert!(!joined.contains("private working out"), "{joined}");
+        assert!(joined.contains("the answer"));
     }
 
     #[test]

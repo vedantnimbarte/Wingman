@@ -57,6 +57,7 @@ impl Provider for ChatGptProvider {
             streaming: true,
             tools: true,
             vision: false,
+            reasoning: false,
             cache_kind: CacheKind::None,
         }
     }
@@ -334,6 +335,9 @@ fn encode_input(messages: &[Message]) -> Value {
                         ContentBlock::Text { text } => {
                             text_parts.push(json!({"type": "input_text", "text": text}));
                         }
+                        // Responses API keeps reasoning server-side; there is
+                        // no field to send it back on.
+                        ContentBlock::Thinking { .. } => {}
                         ContentBlock::ToolResult {
                             tool_use_id,
                             content,

@@ -201,7 +201,9 @@ impl SessionLog {
                             })
                             .await?;
                         }
-                        ContentBlock::ToolUse { .. } => { /* should not appear from user */ }
+                        ContentBlock::ToolUse { .. } | ContentBlock::Thinking { .. } => {
+                            /* should not appear from user */
+                        }
                         ContentBlock::Image { media_type, .. } => {
                             // Record image attachments as a brief note in the session log.
                             self.write(SessionRecord::User {

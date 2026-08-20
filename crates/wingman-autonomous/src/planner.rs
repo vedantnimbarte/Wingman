@@ -104,6 +104,11 @@ impl<'p> PlannerLlm for ProviderLlm<'p> {
             // system prompt, so caching it lets the second call read it back
             // instead of re-billing the full prompt.
             cache_breakpoints: vec![CacheBreakpoint::AfterSystem],
+
+            // These are structured-output helper calls (review verdict, task plan),
+            // not the agent loop. Reasoning would add cost and latency for output
+            // that has to parse as JSON either way.
+            reasoning: wingman_core::ReasoningEffort::Off,
         };
         let mut stream = self.provider.complete(req).await?;
         let mut out = String::new();

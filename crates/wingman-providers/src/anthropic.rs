@@ -64,6 +64,7 @@ impl Provider for AnthropicProvider {
             tools: true,
             vision: true,
             cache_kind: CacheKind::Explicit,
+            reasoning: true,
         }
     }
 
@@ -143,13 +144,18 @@ impl Provider for AnthropicProvider {
             partial_input: String,
             tool_id: String,
             tool_name: String,
+            signature: String,
         }
-        #[derive(Default)]
+        #[derive(Default, PartialEq)]
         enum BlockKind {
             #[default]
             Unknown,
             Text,
             ToolUse,
+            Thinking,
+            /// Provider-encrypted reasoning: no readable text, but it still
+            /// has to be echoed back or the next request is rejected.
+            RedactedThinking,
         }
         let mut blocks: std::collections::HashMap<u32, BlockState> =
             std::collections::HashMap::new();
@@ -190,6 +196,13 @@ impl Provider for AnthropicProvider {
                                 state.tool_id = cb.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                 state.tool_name = cb.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             }
+                            "thinking" => state.kind = BlockKind::Thinking,
+                            "redacted_thinking" => {
+                                state.kind = BlockKind::RedactedThinking;
+                                // The whole payload arrives up front on `data`
+                                // rather than as deltas.
+                                state.text = cb.get("data").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                            }
                             _ => {}
                         }
                         blocks.insert(idx, state);
@@ -211,6 +224,20 @@ impl Provider for AnthropicProvider {
                                         state.partial_input.push_str(t);
                                     }
                                 }
+                                "thinking_delta" => {
+                                    if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
+                                        state.text.push_str(t);
+                                        yield StreamEvent::ThinkingDelta { text: t.to_string() };
+                                    }
+                                }
+                                "signature_delta" => {
+                                    // Integrity tag over the thinking text.
+                                    // Arrives at the end of the block and must
+                                    // be returned verbatim next turn.
+                                    if let Some(t) = delta.get("signature").and_then(|v| v.as_str()) {
+                                        state.signature.push_str(t);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -218,7 +245,16 @@ impl Provider for AnthropicProvider {
                     "content_block_stop" => {
                         let idx = data.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                         if let Some(state) = blocks.remove(&idx) {
-                            if matches!(state.kind, BlockKind::ToolUse) {
+                            if matches!(state.kind, BlockKind::Thinking | BlockKind::RedactedThinking) {
+                                let redacted = state.kind == BlockKind::RedactedThinking;
+                                yield StreamEvent::Thinking {
+                                    block: ContentBlock::Thinking {
+                                        text: state.text,
+                                        signature: (!state.signature.is_empty()).then_some(state.signature),
+                                        redacted,
+                                    },
+                                };
+                            } else if matches!(state.kind, BlockKind::ToolUse) {
                                 let input: Value = if state.partial_input.is_empty() {
                                     Value::Object(Default::default())
                                 } else {
@@ -267,6 +303,10 @@ impl Provider for AnthropicProvider {
     }
 }
 
+/// Headroom reserved for the visible reply on top of the thinking budget, so
+/// enabling reasoning can never leave the model unable to finish a sentence.
+const MIN_REPLY_TOKENS: u32 = 4_096;
+
 fn map_stop_reason(s: &str) -> StopReason {
     match s {
         "end_turn" => StopReason::EndTurn,
@@ -303,7 +343,18 @@ fn build_request_body(req: &CompletionRequest) -> Value {
         "stream": true,
     });
 
-    if let Some(temp) = req.temperature {
+    if let Some(budget) = req.reasoning.budget_tokens() {
+        // `max_tokens` has to cover the thinking budget plus room for a reply,
+        // or the model spends the whole allowance reasoning and gets cut off
+        // mid-answer. Raise it rather than silently truncating.
+        let floor = budget.saturating_add(MIN_REPLY_TOKENS);
+        if body["max_tokens"].as_u64().unwrap_or(0) < floor as u64 {
+            body["max_tokens"] = json!(floor);
+        }
+        body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+        // Extended thinking requires the default sampling settings; sending
+        // `temperature` alongside it is rejected outright.
+    } else if let Some(temp) = req.temperature {
         body["temperature"] = json!(temp);
     }
 
@@ -412,6 +463,23 @@ fn encode_block(b: &ContentBlock) -> Value {
                 "data": data,
             },
         }),
+        // Round-tripped verbatim. Anthropic verifies `signature` against
+        // `text`, so neither may be reformatted, trimmed, or dropped.
+        ContentBlock::Thinking {
+            text,
+            signature,
+            redacted,
+        } => {
+            if *redacted {
+                json!({ "type": "redacted_thinking", "data": text })
+            } else {
+                let mut v = json!({ "type": "thinking", "thinking": text });
+                if let Some(sig) = signature {
+                    v["signature"] = json!(sig);
+                }
+                v
+            }
+        }
     }
 }
 
@@ -428,7 +496,85 @@ struct ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wingman_core::ContentBlock;
+    use wingman_core::{ContentBlock, ReasoningEffort};
+
+    #[test]
+    fn reasoning_off_sends_no_thinking_and_keeps_temperature() {
+        let mut req = CompletionRequest::new("claude-opus-4-7");
+        req.temperature = Some(0.3);
+        let body = build_request_body(&req);
+        assert!(body.get("thinking").is_none());
+        assert!(body["temperature"].as_f64().is_some_and(|t| t > 0.0));
+    }
+
+    #[test]
+    fn reasoning_enables_thinking_and_drops_temperature() {
+        let mut req = CompletionRequest::new("claude-opus-4-7");
+        req.reasoning = ReasoningEffort::High;
+        // Extended thinking rejects a custom temperature, so it must not be
+        // sent even though the caller set one.
+        req.temperature = Some(0.3);
+        let body = build_request_body(&req);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            body["thinking"]["budget_tokens"],
+            serde_json::json!(ReasoningEffort::High.budget_tokens().unwrap())
+        );
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted when thinking is on"
+        );
+    }
+
+    #[test]
+    fn max_tokens_is_raised_above_the_thinking_budget() {
+        let mut req = CompletionRequest::new("claude-opus-4-7");
+        req.reasoning = ReasoningEffort::High;
+        req.max_tokens = 1024; // less than the budget — would truncate the reply
+        let body = build_request_body(&req);
+        let budget = ReasoningEffort::High.budget_tokens().unwrap() as u64;
+        assert!(
+            body["max_tokens"].as_u64().unwrap() >= budget + MIN_REPLY_TOKENS as u64,
+            "max_tokens must leave room for a reply after the thinking budget"
+        );
+    }
+
+    #[test]
+    fn max_tokens_is_left_alone_when_already_generous() {
+        let mut req = CompletionRequest::new("claude-opus-4-7");
+        req.reasoning = ReasoningEffort::Low;
+        req.max_tokens = 200_000;
+        let body = build_request_body(&req);
+        assert_eq!(body["max_tokens"], serde_json::json!(200_000));
+    }
+
+    #[test]
+    fn thinking_blocks_round_trip_with_their_signature() {
+        // Anthropic verifies `signature` against `thinking`, so both have to
+        // come back byte-for-byte or the next tool-use turn is rejected.
+        let block = ContentBlock::Thinking {
+            text: "step one".into(),
+            signature: Some("sig-abc".into()),
+            redacted: false,
+        };
+        let v = encode_block(&block);
+        assert_eq!(v["type"], "thinking");
+        assert_eq!(v["thinking"], "step one");
+        assert_eq!(v["signature"], "sig-abc");
+    }
+
+    #[test]
+    fn redacted_thinking_round_trips_as_opaque_data() {
+        let block = ContentBlock::Thinking {
+            text: "ENCRYPTED".into(),
+            signature: None,
+            redacted: true,
+        };
+        let v = encode_block(&block);
+        assert_eq!(v["type"], "redacted_thinking");
+        assert_eq!(v["data"], "ENCRYPTED");
+        assert!(v.get("thinking").is_none());
+    }
 
     #[test]
     fn request_body_includes_cache_control_on_system() {

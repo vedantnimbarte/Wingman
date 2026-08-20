@@ -180,6 +180,12 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
                     write!(stdout, "{text}").ok();
                     stdout.flush().ok();
                 }
+                // stderr, not stdout: `wingman --print … > out.txt` must still
+                // capture the answer and nothing else.
+                AgentEvent::ThinkingDelta { text } => {
+                    write!(stderr, "{text}").ok();
+                    stderr.flush().ok();
+                }
                 AgentEvent::ToolStart { name, .. } => {
                     writeln!(stderr, "\n[tool] {name}…").ok();
                 }

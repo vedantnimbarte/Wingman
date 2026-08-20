@@ -49,7 +49,12 @@ exits non-zero. Bounded correction, not loop-until-green.
 
 **3. No provider lock-in — and it will price the alternative for you.**
 One `Message` contract over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
-OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama. `wingman cost --compare`
+OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama. That contract covers
+reasoning too: one `--reasoning off|low|medium|high` maps onto Anthropic's
+thinking budget, OpenAI's `reasoning_effort`, and Gemini's `thinkingConfig`,
+so switching provider doesn't mean relearning a parameter — and `wingman
+doctor` tells you when a backend has no reasoning control rather than letting
+the setting look like it took. `wingman cost --compare`
 reprices your actual token volume against a spread of models, showing what the
 same work would have cost elsewhere. Only a provider-agnostic agent can show
 you that number. See [docs/PROVIDERS.md](docs/PROVIDERS.md).
@@ -132,12 +137,16 @@ wingman --model openai/gpt-4.1
 
 # Loosen the permission model for this session
 wingman --mode auto-edit
+
+# Think harder before answering (off by default — thinking tokens cost)
+wingman --reasoning high
 ```
 
 Useful TUI commands: `/model` swaps the active model live, `/mode` changes the
-permission mode, `/mcp` manages MCP servers, `/memory` lists saved facts,
-`/recall <query>` searches past sessions, `/find <query>` searches the
-transcript. Full list in [docs/CLI.md](docs/CLI.md).
+permission mode, `/reasoning` sets how hard the model thinks, `/mcp` manages
+MCP servers, `/memory` lists saved facts, `/recall <query>` searches past
+sessions, `/find <query>` searches the transcript. Full list in
+[docs/CLI.md](docs/CLI.md).
 
 Tell it things like "remember that I prefer pnpm over npm" and it will call
 `save_memory`; the next session sees it in the system prompt.

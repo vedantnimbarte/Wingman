@@ -35,6 +35,7 @@ impl Provider for ScriptedProvider {
             tools: true,
             vision: false,
             cache_kind: wingman_core::CacheKind::None,
+            reasoning: false,
         }
     }
     async fn complete(&self, _req: CompletionRequest) -> wingman_core::Result<ProviderEventStream> {
