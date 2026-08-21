@@ -1218,6 +1218,8 @@ mod tests {
             failed: 0,
             blocked: 0,
             review: 0,
+            in_progress: 1,
+            not_started: 0,
             usd: 1.0,
             subrows: subs,
         });
