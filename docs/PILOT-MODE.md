@@ -57,7 +57,16 @@ worker_model          = "anthropic/claude-haiku-4-5"  # workers
 max_concurrent_agents = 4
 max_usd               = 10.0
 task_timeout_secs     = 1800
+worker_max_turns      = 60                            # model turns per worker
 ```
+
+`worker_max_turns` is deliberately far above the interactive default. A chat
+turn answers a question; a worker has to read the code, edit it, run a build,
+read the errors, fix them, re-run, and only then report. Running out of turns
+is the one failure that looks like success from the outside — the process
+exits 0 having quietly abandoned the job — so the budget is generous and
+`task_timeout_secs` plus `max_usd` are the real ceilings, both of which fail
+loudly.
 
 ## Quick start
 

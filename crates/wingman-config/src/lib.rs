@@ -179,6 +179,14 @@ fn default_true() -> bool {
 
 /// Default pilot token ceiling. Generous enough not to interrupt real
 /// work, small enough to bound a runaway loop on an unpriced model.
+/// Turns a worker gets. Sized off observed runs: a one-file change with a
+/// `cargo check` loop spent 16 and was not finished. Generous rather than
+/// tight — `task_timeout_secs` and `max_usd` are the real ceilings, and both
+/// fail loudly, whereas running out of turns fails silently.
+fn default_worker_max_turns() -> usize {
+    60
+}
+
 fn default_max_total_tokens() -> u64 {
     20_000_000
 }
@@ -2030,6 +2038,17 @@ pub struct PilotConfig {
     #[serde(default = "default_max_total_tokens")]
     pub max_total_tokens: u64,
     pub task_timeout_secs: u64,
+    /// How many model turns a worker gets before the agent loop stops.
+    ///
+    /// Separate from the interactive default because the jobs are not alike:
+    /// a chat turn answers a question, a pilot worker has to read the code,
+    /// edit it, run a build, read the errors, fix them, re-run, and only then
+    /// report. Inheriting the interactive budget of 16 meant workers ran out
+    /// mid-task and exited cleanly without ever calling `task_complete` — the
+    /// supervisor then threw the work away as failed and the retry ladder
+    /// spent the whole run rediscovering the same wall.
+    #[serde(default = "default_worker_max_turns")]
+    pub worker_max_turns: usize,
     /// Shell command run between worker turns as a sanity gate (E5).
     /// Empty disables the per-turn check.
     pub turn_gate_cmd: String,
@@ -2060,6 +2079,7 @@ impl Default for PilotConfig {
             max_usd: 10.0,
             max_total_tokens: default_max_total_tokens(),
             task_timeout_secs: 1800,
+            worker_max_turns: default_worker_max_turns(),
             turn_gate_cmd: "cargo check --workspace".into(),
             approval: PilotApprovalConfig::default(),
             pr: PilotPrConfig::default(),
