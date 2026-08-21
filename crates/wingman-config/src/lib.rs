@@ -187,6 +187,12 @@ fn default_worker_max_turns() -> usize {
     60
 }
 
+/// Manager decisions per run. Generous because each one now represents real
+/// scheduling work rather than a poll.
+fn default_max_manager_ticks() -> usize {
+    200
+}
+
 fn default_max_total_tokens() -> u64 {
     20_000_000
 }
@@ -2049,6 +2055,13 @@ pub struct PilotConfig {
     /// spent the whole run rediscovering the same wall.
     #[serde(default = "default_worker_max_turns")]
     pub worker_max_turns: usize,
+    /// Scheduling decisions the manager may make before the run is declared
+    /// stuck. Only decisions count: ticks where work is in flight and nothing
+    /// needs deciding are free, so this bounds manager *activity* rather than
+    /// elapsed time. Was hardcoded to 64, which a single long task could
+    /// exhaust just by being watched.
+    #[serde(default = "default_max_manager_ticks")]
+    pub max_manager_ticks: usize,
     /// Shell command run between worker turns as a sanity gate (E5).
     /// Empty disables the per-turn check.
     pub turn_gate_cmd: String,
@@ -2080,6 +2093,7 @@ impl Default for PilotConfig {
             max_total_tokens: default_max_total_tokens(),
             task_timeout_secs: 1800,
             worker_max_turns: default_worker_max_turns(),
+            max_manager_ticks: default_max_manager_ticks(),
             turn_gate_cmd: "cargo check --workspace".into(),
             approval: PilotApprovalConfig::default(),
             pr: PilotPrConfig::default(),
