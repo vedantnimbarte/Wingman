@@ -260,7 +260,10 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let detached_child = std::env::var_os("WINGMAN_DETACHED_CHILD").is_some();
     if opts.detached && !detached_child {
         let project = ProjectPaths::discover(&std::env::current_dir()?);
-        let run_id = new_run_id();
+        // Honour a caller-supplied id here too, not just in the child below:
+        // a caller that pre-minted one (`wingman board dispatch`) has already
+        // recorded it, and minting a fresh one here would orphan that record.
+        let run_id = resolve_run_id();
         let run_path = run_dir(&project.root, &run_id);
         return spawn_detached(&run_id, &run_path).map(|()| ExitCode::SUCCESS);
     }
@@ -333,10 +336,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let base_commit = resolve_base_commit(&project.root, opts.base.as_deref())?;
     // A detached child inherits the run id its parent minted (so the id it
     // prints and the log path it writes to line up with the child's run).
-    let run_id = std::env::var("WINGMAN_RUN_ID")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(new_run_id);
+    let run_id = resolve_run_id();
     let integration = integration_branch(&run_id);
     let run_path = run_dir(&project.root, &run_id);
 
@@ -1031,6 +1031,21 @@ fn spawn_detached(run_id: &str, run_path: &std::path::Path) -> Result<()> {
     println!("[pilot] watch:  wingman pilot watch {run_id}");
     println!("[pilot] stop:   wingman pilot abort {run_id}");
     Ok(())
+}
+
+/// The run id for this invocation: `WINGMAN_RUN_ID` when a caller supplied
+/// one, else a fresh one.
+///
+/// Two callers set it. A detached parent passes its id to the child it
+/// re-execs, so both halves agree on the log path. And `wingman board
+/// dispatch` pre-mints an id so it can record the dispatch before the process
+/// starts -- which only works if *every* entry point honours the variable,
+/// including the detached parent.
+fn resolve_run_id() -> String {
+    std::env::var("WINGMAN_RUN_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(new_run_id)
 }
 
 /// Generate a run id of the form `YYYY-MM-DD-HHMM-<rand6>`.
