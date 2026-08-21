@@ -1,0 +1,22 @@
+[package]
+name = "wingman-board"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistent, multi-project kanban board over wingman pilot runs."
+
+[dependencies]
+wingman-autonomous = { workspace = true }
+wingman-config = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { version = "0.4", features = ["serde"] }
+rusqlite = { version = "0.31", features = ["bundled"] }
+rand = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
