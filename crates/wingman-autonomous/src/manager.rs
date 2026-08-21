@@ -166,6 +166,11 @@ pub async fn run_tick(
 /// terminal (Done or Failed). Each tick gets a freshly-rendered state
 /// block so the model sees the latest picture.
 ///
+/// How long to wait before re-checking when there is nothing to decide.
+/// Short enough that a finished worker is picked up promptly, long enough
+/// that watching costs nothing.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// `max_ticks` is a safety belt — if the manager is looping fruitlessly
 /// we bail out rather than burn budget forever. Real cost limits come
 /// from [`crate::orchestrator::OrchestratorConfig`].
@@ -182,12 +187,21 @@ pub async fn drive_to_completion(
     // prior tick (so the manager already had a full turn to break it — e.g.
     // by adding a task or finalizing a review) and still cannot progress.
     let mut prev_fingerprint: Option<String> = None;
-    for tick in 0..max_ticks {
+    let mut tick = 0usize;
+    while tick < max_ticks {
         let state = handle.snapshot().await?;
         if state.tasks.iter().all(|t| t.status.is_terminal()) {
             tracing::info!(target: "pilot::manager", tick, "all tasks terminal — exiting drive loop");
             return Ok(usage);
         }
+        // Waiting on a worker is not a decision. Don't spend a tick, or an
+        // LLM call, to be told "waiting" — just look again shortly.
+        if is_idle(&state) {
+            prev_fingerprint = Some(state_fingerprint(&state));
+            tokio::time::sleep(IDLE_POLL).await;
+            continue;
+        }
+        tick += 1;
         // Fail fast on a wedged graph instead of spinning fruitlessly (and
         // burning LLM budget) until `max_ticks`. A cycle or a dep on a
         // failed/blocked/missing task leaves tasks that can never become
@@ -228,6 +242,42 @@ pub fn run_is_done(state: &RunState) -> bool {
 
 /// A compact, order-stable fingerprint of the run's task statuses. Used by
 /// the drive loop to tell whether a tick changed anything.
+/// True when the manager has nothing to decide right now: work is in flight
+/// and no task is waiting on a scheduling decision.
+///
+/// The drive loop asks the model what to do on every tick, and on a tick like
+/// this the model can only answer "waiting" — a full round-trip to be told
+/// what the task statuses already say. That is fine when tasks are quick and
+/// ruinous when they are not: a task that takes twenty minutes burns the
+/// entire tick budget being watched, and the run dies with
+/// `exceeded max_ticks` while its worker is still making progress.
+///
+/// Deliberately conservative. Anything that might need a decision — a review
+/// to finalize, an assignable task, a failure to triage — is not idle.
+fn is_idle(state: &RunState) -> bool {
+    use TaskStatus::*;
+    let mut work_in_flight = false;
+    for t in &state.tasks {
+        match t.status {
+            InProgress => work_in_flight = true,
+            // Needs finalize_task, assign_task, or a retry decision.
+            Review | Todo | Failed => return false,
+            // Assignable the moment its deps are done.
+            Pending => {
+                let ready = t
+                    .deps
+                    .iter()
+                    .all(|d| state.task(d).map(|x| x.status == Done).unwrap_or(false));
+                if ready {
+                    return false;
+                }
+            }
+            Done | Blocked => {}
+        }
+    }
+    work_in_flight
+}
+
 fn state_fingerprint(state: &RunState) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(state.tasks.len() * 12);
@@ -387,5 +437,69 @@ mod tests {
         assert_ne!(state_fingerprint(&a), state_fingerprint(&b));
         let c = state(vec![task("t1", TaskStatus::Pending, &[])]);
         assert_eq!(state_fingerprint(&a), state_fingerprint(&c));
+    }
+
+    #[test]
+    fn idle_only_when_work_is_in_flight_and_nothing_needs_deciding() {
+        use crate::model::{Role, Task};
+        fn st(tasks: Vec<Task>) -> RunState {
+            let mut s = RunState::new("r", "g", "b", "br");
+            s.tasks = tasks;
+            s
+        }
+        fn t(id: &str, status: TaskStatus) -> Task {
+            let mut t = Task::new(id, Role::Developer, id);
+            t.status = status;
+            t
+        }
+
+        // A worker is running and nothing else needs a decision: idle.
+        assert!(is_idle(&st(vec![
+            t("a", TaskStatus::InProgress),
+            t("b", TaskStatus::Done),
+        ])));
+
+        // Each of these needs the manager, so none of them is idle.
+        for waiting in [TaskStatus::Review, TaskStatus::Todo, TaskStatus::Failed] {
+            assert!(
+                !is_idle(&st(vec![t("a", TaskStatus::InProgress), t("b", waiting)])),
+                "{waiting:?} needs a scheduling decision"
+            );
+        }
+
+        // Pending with deps met is assignable -> not idle.
+        let mut ready = t("b", TaskStatus::Pending);
+        ready.deps = vec!["a".into()];
+        assert!(!is_idle(&st(vec![t("a", TaskStatus::Done), ready])));
+
+        // Pending still blocked on a running dep -> idle.
+        let mut blocked = t("b", TaskStatus::Pending);
+        blocked.deps = vec!["a".into()];
+        assert!(is_idle(&st(vec![t("a", TaskStatus::InProgress), blocked])));
+
+        // Nothing running at all is not idle -- the loop must think, not wait.
+        assert!(!is_idle(&st(vec![t("a", TaskStatus::Done)])));
+        assert!(!is_idle(&st(vec![])));
+    }
+
+    /// Regression for run 2026-08-21-2005-nkocjd: t1 took ~20 minutes, the
+    /// manager burned all 64 ticks watching it, and the run died with
+    /// `exceeded max_ticks` while its worker was still making progress --
+    /// after that worker had in fact succeeded.
+    #[test]
+    fn watching_a_long_task_costs_no_ticks() {
+        use crate::model::{Role, Task};
+        let mut s = RunState::new("r", "g", "b", "br");
+        let mut running = Task::new("t1", Role::Developer, "slow");
+        running.status = TaskStatus::InProgress;
+        let mut waiting = Task::new("t2", Role::Tester, "after");
+        waiting.status = TaskStatus::Pending;
+        waiting.deps = vec!["t1".into()];
+        s.tasks = vec![running, waiting];
+
+        assert!(
+            is_idle(&s),
+            "one task running, one blocked behind it: the manager has nothing to decide"
+        );
     }
 }

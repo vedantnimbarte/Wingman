@@ -568,7 +568,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         command_runner: Box::new(wingman_autonomous::pr::SystemCommandRunner),
         no_pr: opts.no_pr,
         orchestrator_cfg: orch_cfg,
-        max_ticks: 64,
+        max_ticks: pilot.max_manager_ticks,
         tier: pilot.tier,
         worker_model: pilot
             .worker_model

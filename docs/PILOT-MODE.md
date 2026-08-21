@@ -58,6 +58,7 @@ max_concurrent_agents = 4
 max_usd               = 10.0
 task_timeout_secs     = 1800
 worker_max_turns      = 60                            # model turns per worker
+max_manager_ticks     = 200                           # scheduling decisions per run
 ```
 
 `worker_max_turns` is deliberately far above the interactive default. A chat
@@ -67,6 +68,11 @@ is the one failure that looks like success from the outside — the process
 exits 0 having quietly abandoned the job — so the budget is generous and
 `task_timeout_secs` plus `max_usd` are the real ceilings, both of which fail
 loudly.
+
+`max_manager_ticks` bounds manager *activity*, not elapsed time: ticks where
+work is in flight and nothing needs deciding are free. Before that was true,
+one slow task could exhaust the budget just by being watched, and the run
+died while its worker was still making progress.
 
 ## Quick start
 
