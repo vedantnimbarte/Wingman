@@ -172,6 +172,8 @@ pub struct Rollup {
     pub failed: usize,
     pub blocked: usize,
     pub review: usize,
+    pub in_progress: usize,  // tasks a worker is actively holding
+    pub not_started: usize,  // pending or todo
     pub usd: f64,
     pub subrows: Vec<SubRow>,
 }
@@ -221,18 +223,23 @@ no coupling to `scheduler.rs`.
 
 ### 4.3 `column_of` — normative
 
+Task counts decide the column. `RunStatus` is consulted only for the two
+things task counts cannot express: whether the run is over, and whether it is
+parked on a human.
+
 ```rust
-pub fn column_of(dispatch: Option<&Rollup>) -> Column {
-    let Some(r) = dispatch else { return Column::Backlog };
+pub fn column_of(rollup: Option<&Rollup>) -> Column {
+    let Some(r) = rollup else { return Column::Backlog };
     match r.status {
-        RunStatus::Planning | RunStatus::AwaitingApproval => Column::Planned,
-        RunStatus::Done | RunStatus::Failed | RunStatus::Aborted => Column::Done,
-        RunStatus::Running | RunStatus::Merging => {
-            // Every task that can still move is parked in review.
-            let settled = r.done + r.review + r.failed;
-            if r.review > 0 && settled >= r.total { Column::Review } else { Column::InProgress }
-        }
+        RunStatus::Done | RunStatus::Failed | RunStatus::Aborted => return Column::Done,
+        RunStatus::AwaitingApproval => return Column::Planned,
+        RunStatus::Planning | RunStatus::Running | RunStatus::Merging => {}
     }
+    if r.total == 0 { return Column::Planned }            // no plan yet
+    if r.not_started == r.total { return Column::Planned } // nothing has moved
+    let settled = r.done + r.review + r.failed;
+    if r.review > 0 && settled >= r.total { return Column::Review }
+    Column::InProgress
 }
 ```
 
@@ -241,12 +248,23 @@ Rules this encodes, stated plainly:
 - A card with no dispatch, or whose newest dispatch's run directory has been
   deleted, is **Backlog**. Deleting a run un-dispatches its card; it does not
   orphan it.
-- A card whose newest run is terminal is **Done** regardless of how it ended.
+- A card whose run is terminal is **Done** regardless of how it ended.
   Re-running is an explicit `board dispatch`, which creates a *new* dispatch
   row and moves the card back to Planned.
-- `blocked` never affects the column. A wholly blocked run still reads
-  In Progress, with `x n blocked` on the card — that is accurate, and a
-  Blocked column would hide the other six working tasks.
+- **Planned** means the plan has not started moving, not that `RunStatus` says
+  `Planning`. A run with tasks in flight is In Progress whatever its status
+  field claims.
+- `blocked` never decides the column, and a blocked task counts as *started*.
+  A wholly blocked run has begun and is stuck — In Progress with an
+  `x n blocked` badge. A Blocked column would hide the other six tasks still
+  working.
+
+> **Why task-driven.** The first version read `RunStatus` first. Pilot emitted
+> no `run.status` when execution began, so a live run reported `Planning` for
+> its whole life and every card froze in Planned. Pilot emits it now, but a
+> derivation one missing event away from useless is the wrong derivation: the
+> tasks are always present, and they are what the user is actually asking
+> about.
 
 ### 4.4 Badges
 
@@ -288,6 +306,12 @@ already resolved by `pick_run`. Ambiguous prefixes error with the candidates.
 `board dispatch` resolves the card's project root, verifies it exists, then
 spawns the current executable (`std::env::current_exe()`) with
 `pilot run <goal> --detached` and `current_dir(project_root)`.
+
+**Every stdio handle is `null`, and the board waits on the launcher alone.**
+Capturing them looks harmless — the board never reads stdout — but
+`Command::output()` waits for the pipes to reach EOF rather than for the
+launcher to exit, and the detached grandchild holds them for the whole run.
+With no pipes there is nothing that can outlive the launcher.
 
 The run id is **minted by the board and passed in via `WINGMAN_RUN_ID`**, not
 parsed out of the child's stdout: `pilot run` already honours that variable —
