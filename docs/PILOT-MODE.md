@@ -171,3 +171,22 @@ used, but quality depends on the local model's tool-use training.
 refuses to start when the planner provider is `unsupported` (no current
 backends are; the tier exists for future providers that can't emit
 tool calls at all).
+
+---
+
+## The board
+
+`wingman board` is a persistent, multi-project kanban board over pilot runs.
+Where `pilot watch` shows one run closely, the board shows every goal across
+every repo you've run pilot in — and its cards outlive the runs, so a backlog
+survives what a run forgets.
+
+```bash
+wingman board                       # the TUI
+wingman board add "<title>"         # a card in Backlog
+wingman board dispatch <card>       # starts a pilot run for it
+```
+
+Columns are derived from the same `state.json` this document describes, so the
+board and `pilot watch` cannot disagree. Press `o` on a card to hand off to
+`pilot watch` for its newest run. See [BOARD.md](BOARD.md).
