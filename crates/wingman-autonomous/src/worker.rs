@@ -201,6 +201,11 @@ pub async fn run_worker(
     let parse_loop = async {
         let mut outcome: Option<TaskOutcome> = None;
         let mut acceptance: Vec<crate::acceptance::AcceptanceResult> = Vec::new();
+        // Why the worker's agent loop stopped. It is already on the wire as
+        // an `AgentEvent`; the supervisor used to forward it and forget it,
+        // which is how "ran out of turns" and "finished and said nothing"
+        // became the same unhelpful message.
+        let mut stop: Option<wingman_core::AgentStop> = None;
         while let Some(line) = reader.next_line().await? {
             let line = line.trim();
             if line.is_empty() {
@@ -229,6 +234,9 @@ pub async fn run_worker(
             }
             match parse_line(line) {
                 WorkerLine::AgentEvent(ev) => {
+                    if let wingman_core::AgentEvent::Stop { reason } = &ev {
+                        stop = Some(*reason);
+                    }
                     let mut guard = store.lock().await;
                     forward_agent_event(
                         &mut guard,
@@ -276,12 +284,13 @@ pub async fn run_worker(
             (
                 Option<TaskOutcome>,
                 Vec<crate::acceptance::AcceptanceResult>,
+                Option<wingman_core::AgentStop>,
             ),
             WorkerError,
-        >((outcome, acceptance))
+        >((outcome, acceptance, stop))
     };
 
-    let (outcome, acceptance) = match timeout(spec.timeout, parse_loop).await {
+    let (outcome, acceptance, stop) = match timeout(spec.timeout, parse_loop).await {
         Ok(Ok(r)) => r,
         Ok(Err(e)) => {
             // The stream died mid-run. Say so in the run log: this used to
@@ -365,7 +374,11 @@ pub async fn run_worker(
                 verified,
             )
         } else {
-            (outcome, acceptance)
+            // Not green. Keep `verified` rather than the empty vector we came
+            // in with: those results are the only record of which check
+            // failed, and dropping them left the failure summary with nothing
+            // to say.
+            (outcome, verified)
         }
     } else {
         (outcome, acceptance)
@@ -397,7 +410,7 @@ pub async fn run_worker(
     let recorded_outcome = match (&outcome, final_status) {
         (Some(o), _) => Some(o.clone()),
         (None, TaskStatus::Failed) => Some(TaskOutcome {
-            summary: failure_summary(&acceptance, &spec.task.acceptance, exit_code),
+            summary: failure_summary(&acceptance, &spec.task.acceptance, exit_code, stop),
             files_changed: Vec::new(),
         }),
         (None, _) => None,
@@ -509,10 +522,27 @@ pub fn failure_summary(
     results: &[crate::acceptance::AcceptanceResult],
     declared: &[crate::model::Acceptance],
     exit_code: Option<i32>,
+    stop: Option<wingman_core::AgentStop>,
 ) -> String {
     let exit = exit_code.map_or_else(|| "abnormally".to_string(), |c| format!("with code {c}"));
+
+    // Running out of turns is the one stop reason that looks like success
+    // from the outside: the process exits 0 having quietly abandoned the job
+    // mid-edit. Name it, because the fix is a config knob rather than a
+    // retry — and a retry is what the ladder will otherwise do, four times.
+    if matches!(stop, Some(wingman_core::AgentStop::MaxTurns)) {
+        return if results.is_empty() {
+            "worker ran out of turns before finishing (raise [pilot] worker_max_turns)".to_string()
+        } else {
+            format!(
+                "worker ran out of turns before finishing (raise [pilot] worker_max_turns);                  acceptance at that point: {}",
+                crate::acceptance::summarize(results)
+            )
+        };
+    }
+
     if !results.is_empty() {
-        // The worker ran its checks and told us how they went.
+        // The checks ran and told us how they went.
         format!(
             "acceptance checks failed: {}",
             crate::acceptance::summarize(results)
@@ -1088,7 +1118,7 @@ mod tests {
         ];
 
         // Declared, never run: name that, not a check failure.
-        let s = failure_summary(&[], &declared, Some(0));
+        let s = failure_summary(&[], &declared, Some(0), None);
         assert_eq!(
             s,
             "worker exited with code 0 without running its 2 declared acceptance check(s)"
@@ -1101,15 +1131,38 @@ mod tests {
             ok: false,
             output: "no match".into(),
         }];
-        let s = failure_summary(&results, &declared, Some(1));
+        let s = failure_summary(&results, &declared, Some(1), None);
         assert!(s.starts_with("acceptance checks failed:"), "{s}");
         assert!(s.contains("grep version_only"), "carries the detail: {s}");
 
         // Nothing declared at all: the plain case.
         assert_eq!(
-            failure_summary(&[], &[], None),
+            failure_summary(&[], &[], None, None),
             "worker exited abnormally without reporting completion"
         );
+    }
+
+    /// Observed on runs 2026-08-21-1729 and -1920: workers stopped at exactly
+    /// the interactive 16-turn default, exited 0, and the record could only
+    /// say "without reporting completion" -- which reads as a model failure
+    /// and sends the retry ladder round again. Four times, on the second run.
+    #[test]
+    fn running_out_of_turns_says_so() {
+        use wingman_core::AgentStop;
+        let declared = [crate::model::Acceptance::Shell {
+            cmd: "cargo check".into(),
+        }];
+
+        let s = failure_summary(&[], &declared, Some(0), Some(AgentStop::MaxTurns));
+        assert!(s.contains("ran out of turns"), "{s}");
+        assert!(
+            s.contains("worker_max_turns"),
+            "must name the knob that fixes it: {s}"
+        );
+
+        // A different stop reason keeps the ordinary wording.
+        let s = failure_summary(&[], &declared, Some(0), Some(AgentStop::EndTurn));
+        assert!(s.contains("without running its 1 declared"), "{s}");
     }
 
     #[test]

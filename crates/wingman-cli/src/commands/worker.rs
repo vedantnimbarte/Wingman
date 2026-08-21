@@ -129,6 +129,11 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             ..Default::default()
         },
         gate,
+        // Not the interactive default: a worker has to read, edit, build,
+        // read errors, fix, re-build and only then report. Sixteen turns ran
+        // out mid-task and the worker exited cleanly without calling
+        // `task_complete`, which the supervisor could only read as failure.
+        max_turns: cfg.pilot.worker_max_turns,
         learning: Some(std::sync::Arc::new(IpcInjector {
             pending: ipc_injections.clone(),
         })),
