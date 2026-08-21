@@ -26,8 +26,9 @@ use eventsource_stream::Eventsource;
 use futures::stream::StreamExt;
 use serde_json::{json, Value};
 use wingman_core::{
-    CacheKind, CompletionRequest, ContentBlock, Message, Provider, ProviderCapabilities,
-    ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec, Usage, WingmanError,
+    CacheBreakpoint, CacheKind, CompletionRequest, ContentBlock, Message, Provider,
+    ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, ToolSpec,
+    Usage, WingmanError,
 };
 
 /// Which downstream we're talking to. Picks a default base URL and the
@@ -682,6 +683,12 @@ fn build_request_body(req: &CompletionRequest) -> Value {
     for m in &req.messages {
         encode_message(m, &mut messages);
     }
+    // OpenAI-family models cache on stable prefix ordering by themselves, so
+    // markers are noise there. An Anthropic model behind this wire format
+    // caches only where it is told to.
+    if wants_explicit_cache(&req.model) {
+        apply_cache_breakpoints(&mut messages, req);
+    }
 
     let mut body = json!({
         "model": req.model,
@@ -707,6 +714,116 @@ fn build_request_body(req: &CompletionRequest) -> Value {
         body["tools"] = encode_tools(&req.tools);
     }
     body
+}
+
+/// True when the model behind this OpenAI-compatible endpoint is an Anthropic
+/// one, which caches only where an explicit `cache_control` breakpoint is
+/// placed.
+///
+/// OpenAI-family models cache automatically on stable prefix ordering, which
+/// is why this adapter emitted no markers at all. That silently costs real
+/// money the moment an Anthropic model is fronted by an OpenAI-shaped API:
+/// a pilot run through OpenRouter re-sent 310k tokens of unchanged prefix
+/// across 20 turns and paid full price for every one of them.
+///
+/// ponytail: name-based, like `is_reasoning_model` above. A local server
+/// hosting something it calls `claude-whatever` that does not understand
+/// `cache_control` would get an unknown field; every gateway we target
+/// forwards or ignores it. Upgrade to a per-variant capability flag if that
+/// ever bites.
+fn wants_explicit_cache(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    m.starts_with("anthropic/") || m.contains("claude")
+}
+
+/// Translate the caller's [`CacheBreakpoint`]s into `cache_control` markers.
+///
+/// The agent loop already decides where the breakpoints belong — after the
+/// system prompt, after the tools, and a moving one on the newest message so
+/// the whole conversation prefix is a cache read next turn. `anthropic.rs`
+/// honours them; this adapter used to drop them on the floor, which is
+/// correct for OpenAI (automatic prefix caching) and expensive the moment an
+/// Anthropic model sits behind an OpenAI-shaped gateway.
+///
+/// `AfterSystem` and `AfterTools` both land on the system message here: this
+/// wire format carries tools in a sibling field with nowhere to hang a
+/// marker, and Anthropic caches the prefix up to the breakpoint either way.
+///
+/// Tool-result messages carry a plain string body the endpoint requires stay
+/// a string, so a marker aimed at one walks back to the newest message it can
+/// legally attach to.
+fn apply_cache_breakpoints(messages: &mut [Value], req: &CompletionRequest) {
+    let wants_system = req.cache_breakpoints.iter().any(|b| {
+        matches!(
+            b,
+            CacheBreakpoint::AfterSystem | CacheBreakpoint::AfterTools
+        )
+    });
+
+    if wants_system && req.system.is_some() {
+        if let Some(sys) = messages.first_mut() {
+            mark(sys);
+        }
+    }
+
+    // `AfterMessage(n)` indexes the caller's `messages`, but encoding can
+    // expand one message into several (tool results split out), so resolve
+    // the highest requested index by counting forward through the encoding.
+    let highest = req
+        .cache_breakpoints
+        .iter()
+        .filter_map(|b| match b {
+            CacheBreakpoint::AfterMessage(n) => Some(*n),
+            _ => None,
+        })
+        .max();
+    let Some(n) = highest else { return };
+    let Some(n) = n.checked_add(1) else { return };
+
+    let system_offset = usize::from(req.system.is_some());
+    let mut encoded = 0usize;
+    let mut end = system_offset;
+    for m in req.messages.iter().take(n) {
+        let mut probe: Vec<Value> = Vec::new();
+        encode_message(m, &mut probe);
+        encoded += probe.len();
+        end = system_offset + encoded;
+    }
+    let end = end.min(messages.len());
+
+    for msg in messages[system_offset..end].iter_mut().rev() {
+        if msg.get("role").and_then(Value::as_str) == Some("tool") {
+            continue;
+        }
+        if mark(msg) {
+            return;
+        }
+    }
+}
+
+/// Attach an ephemeral cache marker to a message's content, promoting a bare
+/// string to the array-of-parts shape a marker needs. Returns whether it
+/// landed.
+fn mark(msg: &mut Value) -> bool {
+    match msg.get_mut("content") {
+        Some(Value::Array(parts)) => match parts.last_mut() {
+            Some(last) if last.is_object() => {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+                true
+            }
+            _ => false,
+        },
+        Some(Value::String(text)) => {
+            let text = text.clone();
+            msg["content"] = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// True for OpenAI reasoning-style model ids that need `max_completion_tokens`
@@ -1162,5 +1279,111 @@ mod tests {
         assert_eq!(body["max_tokens"], json!(req.max_tokens));
         assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["temperature"], json!(0.2_f32));
+    }
+
+    /// Build a request the way the agent loop does: system + tools cached,
+    /// and a moving breakpoint on the newest message.
+    fn cached_req(model: &str, messages: Vec<Message>) -> CompletionRequest {
+        let mut req = CompletionRequest::new(model);
+        req.system = Some("you are a worker".into());
+        req.cache_breakpoints = vec![
+            CacheBreakpoint::AfterSystem,
+            CacheBreakpoint::AfterTools,
+            CacheBreakpoint::AfterMessage(messages.len().saturating_sub(1)),
+        ];
+        req.messages = messages;
+        req
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::Text { text: text.into() }],
+        }
+    }
+
+    #[test]
+    fn anthropic_models_honour_the_callers_cache_breakpoints() {
+        // Regression: this adapter dropped `cache_breakpoints` on the floor.
+        // Right for OpenAI (automatic prefix caching), expensive the moment an
+        // Anthropic model sits behind an OpenAI-shaped gateway -- a pilot run
+        // through OpenRouter re-sent 310k tokens of unchanged prefix across 20
+        // turns and paid full price for every one.
+        let req = cached_req("anthropic/claude-sonnet-5", vec![user("do the thing")]);
+        let body = build_request_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(
+            msgs[0]["content"][0]["cache_control"]["type"], "ephemeral",
+            "system prompt is the largest stable block"
+        );
+        assert_eq!(
+            msgs.last().unwrap()["content"][0]["cache_control"]["type"],
+            "ephemeral",
+            "moving breakpoint on the newest message"
+        );
+    }
+
+    #[test]
+    fn openai_models_get_no_cache_markers() {
+        // OpenAI caches on stable prefix ordering by itself; markers would be
+        // noise at best and a 400 at worst.
+        let req = cached_req("gpt-4o", vec![user("do the thing")]);
+        let body = build_request_body(&req);
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(
+            !serde_json::to_string(&body)
+                .unwrap()
+                .contains("cache_control"),
+            "no markers for an OpenAI-family model"
+        );
+    }
+
+    #[test]
+    fn no_breakpoints_requested_means_no_markers() {
+        // Honouring the caller cuts both ways: asked for nothing, emit nothing.
+        let mut req = CompletionRequest::new("anthropic/claude-sonnet-5");
+        req.system = Some("sys".into());
+        req.messages = vec![user("hi")];
+        let body = build_request_body(&req);
+        assert!(!serde_json::to_string(&body)
+            .unwrap()
+            .contains("cache_control"));
+    }
+
+    #[test]
+    fn cache_breakpoint_skips_tool_result_messages() {
+        // Tool results are role="tool" with a plain string body the endpoint
+        // requires stay a string; the marker must walk back past them.
+        let messages = vec![
+            user("go"),
+            Message {
+                role: Role::User,
+                content: vec![ContentBlock::ToolResult {
+                    tool_use_id: "call_1".into(),
+                    content: "result text".into(),
+                    is_error: false,
+                }],
+            },
+        ];
+        let req = cached_req("anthropic/claude-sonnet-5", messages);
+        let body = build_request_body(&req);
+        let msgs = body["messages"].as_array().unwrap();
+
+        let tool_msg = msgs.iter().find(|m| m["role"] == "tool").unwrap();
+        assert!(
+            tool_msg["content"].is_string(),
+            "tool result body must stay a string"
+        );
+        let user_msg = msgs.iter().find(|m| m["role"] == "user").unwrap();
+        assert_eq!(user_msg["content"][0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn wants_explicit_cache_matches_anthropic_ids() {
+        assert!(wants_explicit_cache("anthropic/claude-sonnet-5"));
+        assert!(wants_explicit_cache("claude-opus-5"));
+        assert!(!wants_explicit_cache("gpt-4o"));
+        assert!(!wants_explicit_cache("meta-llama/llama-3-70b"));
     }
 }
