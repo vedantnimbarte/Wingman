@@ -22,7 +22,7 @@ use thiserror::Error;
 use wingman_core::Provider;
 
 use crate::manager::{build_manager, build_manager_registry, drive_to_completion, run_succeeded};
-use crate::model::TaskStatus;
+use crate::model::{Event, RunStatus, TaskStatus};
 use crate::orchestrator::{self, OrchestratorConfig, WorkerSpawner};
 use crate::pr::{self, CommandRunner, PrOutcome};
 use crate::store::RunStore;
@@ -135,7 +135,7 @@ const REVIEWER_REWORK_GATE: crate::severity::Severity = crate::severity::Severit
 /// and resumed runs (RunStore::load on existing dir). The orchestrator
 /// + manager don't care which.
 pub async fn run_to_completion(
-    store: RunStore,
+    mut store: RunStore,
     inputs: PipelineInputs,
 ) -> Result<PipelineOutcome, PipelineError> {
     let state_at_start = store.state().clone();
@@ -145,6 +145,18 @@ pub async fn run_to_completion(
     // Captured before the cfg is moved into the orchestrator — J15's runtime
     // cost trigger needs the cap at run end.
     let max_usd = inputs.orchestrator_cfg.max_usd;
+
+    // Planning and the approval gate are both behind us by the time the
+    // pipeline is entered, so this is where the run starts executing. Without
+    // this the run sat at `Planning` for its whole life: nothing emitted
+    // `Running`, so `pilot watch`'s header and anything else keying off
+    // `RunStatus` reported a run as still planning while its workers ran.
+    store
+        .append(Event::RunStatusEv {
+            t: RunStore::now(),
+            status: RunStatus::Running,
+        })
+        .await?;
 
     // Keep a handle to the provider for the post-run critic (J10) pass and
     // the E7 inline reviewer — `build_manager` consumes the original Arc.
@@ -221,7 +233,27 @@ pub async fn run_to_completion(
     let registry = build_manager_registry(handle.clone(), cwd, project_root.clone());
     let mut agent = build_manager(inputs.provider, inputs.manager_model, registry, None);
 
-    let manager_usage = drive_to_completion(&mut agent, &handle, inputs.max_ticks).await?;
+    let manager_usage = match drive_to_completion(&mut agent, &handle, inputs.max_ticks).await {
+        Ok(usage) => usage,
+        Err(e) => {
+            // A run that cannot make progress (dependency deadlock, tick
+            // budget exhausted) is over. Say so, or it stays `Running`
+            // forever and every consumer reads a dead run as a live one.
+            // Shut the orchestrator down first so it is not still writing
+            // when we reopen the store.
+            handle.shutdown().await;
+            let _ = join.await;
+            if let Ok(mut s) = RunStore::load(&crate::run_dir(&project_root, &run_id)).await {
+                let _ = s
+                    .append(Event::RunStatusEv {
+                        t: RunStore::now(),
+                        status: RunStatus::Failed,
+                    })
+                    .await;
+            }
+            return Err(e.into());
+        }
+    };
 
     // Manager exited. Grab the final state and decide whether to merge.
     let final_state = handle.snapshot().await?;
