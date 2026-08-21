@@ -397,18 +397,7 @@ pub async fn run_worker(
     let recorded_outcome = match (&outcome, final_status) {
         (Some(o), _) => Some(o.clone()),
         (None, TaskStatus::Failed) => Some(TaskOutcome {
-            summary: if spec.task.acceptance.is_empty() {
-                format!(
-                    "worker exited {} without reporting completion",
-                    exit_code
-                        .map_or_else(|| "abnormally".to_string(), |c| format!("with code {c}")),
-                )
-            } else {
-                format!(
-                    "acceptance checks failed: {}",
-                    crate::acceptance::summarize(&acceptance)
-                )
-            },
+            summary: failure_summary(&acceptance, &spec.task.acceptance, exit_code),
             files_changed: Vec::new(),
         }),
         (None, _) => None,
@@ -509,6 +498,35 @@ fn should_reverify(
     declared: &[crate::model::Acceptance],
 ) -> bool {
     !outcome_present && process_ok && !declared.is_empty()
+}
+
+/// Explain a failure the worker never explained itself.
+///
+/// Three distinct situations, which used to collapse into two and produce
+/// "acceptance checks failed: no acceptance checks defined" — a sentence that
+/// contradicts itself and points away from the real failure.
+pub fn failure_summary(
+    results: &[crate::acceptance::AcceptanceResult],
+    declared: &[crate::model::Acceptance],
+    exit_code: Option<i32>,
+) -> String {
+    let exit = exit_code.map_or_else(|| "abnormally".to_string(), |c| format!("with code {c}"));
+    if !results.is_empty() {
+        // The worker ran its checks and told us how they went.
+        format!(
+            "acceptance checks failed: {}",
+            crate::acceptance::summarize(results)
+        )
+    } else if !declared.is_empty() {
+        // Checks were declared but nothing came back: the worker stopped
+        // before it got to them.
+        format!(
+            "worker exited {exit} without running its {} declared acceptance check(s)",
+            declared.len()
+        )
+    } else {
+        format!("worker exited {exit} without reporting completion")
+    }
 }
 
 /// E3 status-gate function. Pure so the green/red transition is unit-testable.
@@ -1048,6 +1066,50 @@ mod tests {
 {log}"
         );
         assert!(log.contains("\"status\":\"failed\""));
+    }
+
+    /// Observed on run 2026-08-21-1920-xoyw4q: t1 declared three acceptance
+    /// checks, the worker stopped before running any of them, and the record
+    /// read "acceptance checks failed: no acceptance checks defined" — which
+    /// contradicts itself and points away from the real failure.
+    #[test]
+    fn failure_summary_separates_unrun_checks_from_failed_ones() {
+        use crate::acceptance::AcceptanceResult;
+        use crate::model::Acceptance;
+
+        let declared = [
+            Acceptance::Shell {
+                cmd: "cargo check".into(),
+            },
+            Acceptance::Grep {
+                pattern: "version_only".into(),
+                path: "src/main.rs".into(),
+            },
+        ];
+
+        // Declared, never run: name that, not a check failure.
+        let s = failure_summary(&[], &declared, Some(0));
+        assert_eq!(
+            s,
+            "worker exited with code 0 without running its 2 declared acceptance check(s)"
+        );
+        assert!(!s.contains("no acceptance checks defined"));
+
+        // Ran and failed: report the verdict.
+        let results = [AcceptanceResult {
+            label: "grep version_only".into(),
+            ok: false,
+            output: "no match".into(),
+        }];
+        let s = failure_summary(&results, &declared, Some(1));
+        assert!(s.starts_with("acceptance checks failed:"), "{s}");
+        assert!(s.contains("grep version_only"), "carries the detail: {s}");
+
+        // Nothing declared at all: the plain case.
+        assert_eq!(
+            failure_summary(&[], &[], None),
+            "worker exited abnormally without reporting completion"
+        );
     }
 
     #[test]
