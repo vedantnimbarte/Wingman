@@ -172,11 +172,24 @@ workspace dependency. Card ids are now 12 lowercase alphanumerics from the same
 generator. One fewer dependency for an id nobody parses.
 
 **Dispatch does not scrape stdout.** The spec had `board dispatch` parse the
-run id out of `pilot run --detached`'s output. It turned out `pilot run`
-already honours `WINGMAN_RUN_ID` — that is how a detached parent hands its id
-to the re-exec'd child — so the board mints the id up front and knows it before
-the process starts. More robust, and it reuses an existing contract instead of
-depending on a print statement's format.
+run id out of `pilot run --detached`'s output. `pilot run` already honours
+`WINGMAN_RUN_ID` — that is how a detached parent hands its id to the re-exec'd
+child — so the board mints the id up front and knows it before the process
+starts. More robust than depending on a print statement's format.
+
+> **This was half-true when first written, and shipped broken.** Only the
+> re-exec'd *child* read `WINGMAN_RUN_ID`; the detached parent minted its own
+> and passed that down. Every board dispatch therefore recorded an id that
+> never existed on disk — the card rendered `missing` and fell back to Backlog,
+> orphaned from the run it had just started.
+>
+> Found the first time a card was dispatched against real pilot, not by the
+> test suite: the board's dispatch tests stop at `plan_dispatch` and never
+> spawn the binary. Fixed by making `resolve_run_id()` the single answer at
+> every entry point, plus a smoke test that runs the real binary and asserts
+> the run directory matches the id it was given. The lesson worth keeping: a
+> contract you assert about another process needs a test that actually starts
+> that process.
 
 **The Phase 4 extraction was smaller than planned.** The plan named `Glyphs`,
 `LogView`, `SevFilter`, `HitAreas`, the confirm modal, the toast and the detail

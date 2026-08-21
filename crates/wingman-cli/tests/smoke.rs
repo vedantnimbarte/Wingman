@@ -283,6 +283,49 @@ fn mcp_serve_answers_initialize() {
 
 /// Minimal, dependency-free scratch-dir helper. Kept in-file so these smoke
 /// tests pull in nothing beyond std. Cleaned up on drop.
+#[test]
+fn detached_pilot_run_honours_a_caller_supplied_run_id() {
+    // Regression: the detached *parent* used to mint its own run id and ignore
+    // `WINGMAN_RUN_ID`, so `wingman board dispatch` -- which pre-mints an id and
+    // records it before spawning -- ended up pointing at a run directory that
+    // never existed. The card showed `missing` and fell back to Backlog.
+    //
+    // The parent creates the run directory and re-execs before any provider
+    // check, so this reproduces with no credentials: the child fails on "no
+    // provider configured", which is fine. What matters is *where* it failed.
+    let s = Scratch::new();
+    std::fs::write(
+        s.dir.join("Cargo.toml"),
+        "[package]
+name=\"x\"
+",
+    )
+    .unwrap();
+
+    let want = "2020-01-01-0000-testid";
+    let out = wingman()
+        .args(["pilot", "run", "a goal", "--detached"])
+        .env("WINGMAN_RUN_ID", want)
+        .current_dir(&s.dir)
+        .output()
+        .expect("pilot run --detached");
+
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed.contains(want),
+        "detached run should report the supplied id, printed: {printed}"
+    );
+
+    let run_dir = s.dir.join(".wingman").join("autonomous").join(want);
+    assert!(
+        run_dir.is_dir(),
+        "run directory should be the supplied id; found: {:?}",
+        std::fs::read_dir(s.dir.join(".wingman").join("autonomous")).map(|d| d
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect::<Vec<_>>())
+    );
+}
+
 struct Scratch {
     dir: PathBuf,
 }
