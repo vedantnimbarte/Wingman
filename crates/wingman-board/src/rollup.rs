@@ -60,6 +60,12 @@ pub struct Rollup {
     pub failed: usize,
     pub blocked: usize,
     pub review: usize,
+    /// Tasks a worker is actively holding.
+    #[serde(default)]
+    pub in_progress: usize,
+    /// Tasks that have not started yet (`pending` or `todo`).
+    #[serde(default)]
+    pub not_started: usize,
     pub usd: f64,
     pub subrows: Vec<SubRow>,
 }
@@ -81,6 +87,8 @@ impl Rollup {
             failed: 0,
             blocked: 0,
             review: 0,
+            in_progress: 0,
+            not_started: 0,
             usd: state.totals.usd,
             subrows: Vec::with_capacity(state.tasks.len()),
         };
@@ -91,7 +99,8 @@ impl Rollup {
                 TaskStatus::Failed => r.failed += 1,
                 TaskStatus::Blocked => r.blocked += 1,
                 TaskStatus::Review => r.review += 1,
-                _ => {}
+                TaskStatus::InProgress => r.in_progress += 1,
+                TaskStatus::Pending | TaskStatus::Todo => r.not_started += 1,
             }
             let agent = t.agent.as_deref().and_then(|id| state.agent(id));
             r.subrows.push(SubRow {

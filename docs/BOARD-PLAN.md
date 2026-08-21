@@ -227,7 +227,7 @@ not address a task, so selection became `Vec<Entry>` per column with
 cursor now anchors to the selected card's id across a reload instead of
 holding a positional index that a background refresh could shift.
 
-**Three bugs found by using it, all fixed:** Windows `canonicalize` returns
+**Three bugs found by building it, all fixed:** Windows `canonicalize` returns
 `\?\`-prefixed paths that leaked into every path we printed (stripped once,
 at the point paths enter the store), and derived `Debug` ignores width
 specifiers so `{:<11?}` silently refused to pad the status column in
@@ -267,3 +267,34 @@ Documented in BOARD.md.
 the write-set conflict check, which is the machinery that makes runs converge.
 If it is ever built, it belongs in the orchestrator with its own gate, not in
 the renderer.
+
+---
+
+## Found by the first live run
+
+Everything above was found by building the board or dispatching against a dead
+provider. Dispatching one card against a real provider — sonnet-5 via
+OpenRouter, 3 planned tasks, $1.15, deadlocked on t1 — found three more that no
+amount of fixture testing would have.
+
+**`board dispatch` blocked for the entire run.** `spawn()` used
+`Command::output()`, which waits for stdout to reach EOF rather than for the
+launcher to exit; the detached grandchild holds the pipes for the life of the
+run. The no-provider case had returned instantly because the child died before
+it could hold anything, which is precisely why the tests passed. Fixed with
+null stdio and a `wait()` on the launcher alone.
+
+**Pilot never emitted `run.status` for `Running` or `Failed`.** Only `Aborted`
+and `AwaitingApproval` were ever emitted, so `state.json` read `planning` while
+workers ran and went on reading `planning` after the run deadlocked and exited.
+Pre-existing — `pilot watch`'s header had been wrong about this all along — and
+invisible until the board mapped status onto a column.
+
+**`column_of` trusted `RunStatus` too much.** Fixing pilot fixed the symptom,
+but a derivation that one missing event can freeze is the wrong derivation.
+Rewritten to lead with task counts, which are always present and are what the
+user is actually asking about.
+
+The general lesson, twice over now: a contract asserted about another process
+needs a test that starts that process. The first instance was the run-id
+handoff (#147); these three are the second.

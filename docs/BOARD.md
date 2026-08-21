@@ -95,10 +95,16 @@ state and the run's roll-up:
 | Column | Condition |
 | --- | --- |
 | Backlog | no live dispatch |
-| Planned | run status `Planning` or `AwaitingApproval` |
-| In Progress | run `Running`/`Merging`, and some task not yet `Review`/`Done` |
-| Review | run `Running`/`Merging`, and every non-failed task is `Review` or `Done` |
+| Planned | no plan yet, waiting at the approval gate, or no task has started |
+| In Progress | at least one task has started, and they are not all settled |
+| Review | every non-failed task is `Review` or `Done`, and at least one is `Review` |
 | Done | run `Done`, `Failed`, or `Aborted` |
+
+Task counts decide the column; the run's own status is consulted only for the
+two things tasks cannot express — whether the run is over, and whether it is
+parked on a human. That ordering matters: pilot used to emit no `run.status`
+when execution began, so a status-first rule froze every card in Planned while
+its workers ran.
 
 `Failed` and `Blocked` are **badges, not columns**. At goal level a run is
 usually mixed — one failed task out of seven should not drag the card into a

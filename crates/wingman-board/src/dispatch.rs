@@ -140,28 +140,44 @@ impl BoardStore {
 
 /// Launch the plan. `pilot run --detached` re-execs itself and returns
 /// immediately, so this waits for the launcher, not for the run.
+///
+/// Every stdio handle is `null`, deliberately. Capturing them with `output()`
+/// looked harmless — the board does not read stdout, it mints the run id
+/// itself — but `output()` waits for the pipes to reach EOF, not for the
+/// launcher to exit, and the detached grandchild keeps them open for as long
+/// as the run lasts. `board dispatch` therefore blocked for the entire run:
+/// minutes, on a command whose whole point is that it returns immediately.
+///
+/// With no pipes there is nothing to outlive the launcher, so `wait()`
+/// returns the moment it exits. The cost is that a launcher failure has no
+/// message beyond its exit code; pilot's own diagnostics go to the run's
+/// `pilot.log`, which is where they belong.
 fn spawn(exe: &Path, plan: &DispatchPlan) -> Result<u32> {
-    let mut cmd = std::process::Command::new(exe);
-    cmd.args(&plan.args)
+    let mut child = std::process::Command::new(exe)
+        .args(&plan.args)
         .current_dir(&plan.project_root)
         .env("WINGMAN_RUN_ID", &plan.run_id)
-        .stdin(std::process::Stdio::null());
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|source| BoardError::Io {
+            path: exe.to_path_buf(),
+            source,
+        })?;
 
-    let out = cmd.output().map_err(|source| BoardError::Io {
+    let pid = child.id();
+    let status = child.wait().map_err(|source| BoardError::Io {
         path: exe.to_path_buf(),
         source,
     })?;
-    if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr);
+    if !status.success() {
         return Err(BoardError::Invalid(format!(
-            "pilot run failed ({}): {}",
-            out.status,
-            err.trim()
+            "pilot run exited {status} without starting a run -- see {}",
+            plan.run_dir.join("pilot.log").display()
         )));
     }
-    // The launcher's own pid is not the run's, but it is what we can observe
-    // without parsing its output; the run id is the identifier that matters.
-    Ok(std::process::id())
+    Ok(pid)
 }
 
 #[cfg(test)]

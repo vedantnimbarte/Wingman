@@ -72,23 +72,43 @@ impl Column {
 }
 
 /// The normative rule. See `docs/BOARD-SPEC.md` §4.3.
+///
+/// Task counts decide the column; `RunStatus` only decides the two things
+/// tasks cannot tell us — whether the run is over, and whether it is parked
+/// at the approval gate.
+///
+/// It used to be the other way round, and that was wrong: pilot emitted no
+/// `run.status` transition when execution began, so a run sat at `Planning`
+/// for its whole life and every card stopped in the Planned column while its
+/// workers were plainly running. Pilot now emits `Running`, but the board
+/// should not have been that easy to break in the first place — the tasks are
+/// the ground truth about what is happening, and they are always present.
 pub fn column_of(rollup: Option<&Rollup>) -> Column {
     let Some(r) = rollup else {
         return Column::Backlog;
     };
     match r.status {
-        RunStatus::Planning | RunStatus::AwaitingApproval => Column::Planned,
-        RunStatus::Done | RunStatus::Failed | RunStatus::Aborted => Column::Done,
-        RunStatus::Running | RunStatus::Merging => {
-            // Everything that can still move has parked in review.
-            let settled = r.done + r.review + r.failed;
-            if r.review > 0 && settled >= r.total {
-                Column::Review
-            } else {
-                Column::InProgress
-            }
-        }
+        // The run is over, however it ended.
+        RunStatus::Done | RunStatus::Failed | RunStatus::Aborted => return Column::Done,
+        // Explicitly parked on a human, whatever the tasks say.
+        RunStatus::AwaitingApproval => return Column::Planned,
+        RunStatus::Planning | RunStatus::Running | RunStatus::Merging => {}
     }
+
+    // No plan yet: nothing has been decomposed.
+    if r.total == 0 {
+        return Column::Planned;
+    }
+    // A plan exists but nothing has moved off the starting line.
+    if r.not_started == r.total {
+        return Column::Planned;
+    }
+    // Everything that can still move has parked in review.
+    let settled = r.done + r.review + r.failed;
+    if r.review > 0 && settled >= r.total {
+        return Column::Review;
+    }
+    Column::InProgress
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,6 +278,11 @@ mod tests {
             failed,
             blocked: 0,
             review,
+            in_progress: 0,
+            // Anything not accounted for by done/review/failed has not
+            // started, which is what a run looks like before its first
+            // assignment.
+            not_started: total.saturating_sub(done + review + failed),
             usd: 0.0,
             subrows: Vec::new(),
         }
@@ -310,9 +335,37 @@ mod tests {
 
     #[test]
     fn blocked_never_changes_the_column() {
+        // Every task blocked: the run has started and is stuck. That is
+        // In Progress with an `x7 blocked` badge -- not a Blocked column, and
+        // not Planned either, because a blocked task is not an unstarted one.
         let mut r = rollup(RunStatus::Running, 0, 0, 0, 7);
         r.blocked = 7;
+        r.not_started = 0;
         assert_eq!(column_of(Some(&r)), Column::InProgress);
+    }
+
+    #[test]
+    fn a_run_that_never_emitted_running_still_advances() {
+        // Regression: pilot emitted no `run.status` when execution began, so
+        // a live run read `Planning` for its whole life and every card stopped
+        // in Planned while its workers ran. Task counts must carry the column
+        // on their own.
+        let mut r = rollup(RunStatus::Planning, 0, 0, 0, 3);
+        r.not_started = 2;
+        r.in_progress = 1;
+        assert_eq!(column_of(Some(&r)), Column::InProgress);
+    }
+
+    #[test]
+    fn a_plan_with_nothing_started_is_planned() {
+        let r = rollup(RunStatus::Running, 0, 0, 0, 3);
+        assert_eq!(column_of(Some(&r)), Column::Planned);
+    }
+
+    #[test]
+    fn a_run_with_no_plan_yet_is_planned() {
+        let r = rollup(RunStatus::Running, 0, 0, 0, 0);
+        assert_eq!(column_of(Some(&r)), Column::Planned);
     }
 
     #[test]
