@@ -327,6 +327,9 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
 
     // Pin the run to the current git HEAD (or the user's --base override).
     let project = ProjectPaths::discover(&std::env::current_dir()?);
+    // Any repo you run pilot in shows up on the board. Best-effort and
+    // deliberately silent — a board problem must never fail a run.
+    crate::commands::board::touch(&project.root);
     let base_commit = resolve_base_commit(&project.root, opts.base.as_deref())?;
     // A detached child inherits the run id its parent minted (so the id it
     // prints and the log path it writes to line up with the child's run).
