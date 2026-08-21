@@ -414,6 +414,20 @@ pub struct CritiqueReport {
     /// will be undetectable. (E3 still ships, but the planner can do
     /// better than empty acceptance.)
     pub missing_acceptance: Vec<String>,
+    /// `(task, pattern, path)` for a `grep` acceptance check that can never
+    /// pass: its path neither exists in the repo nor appears in any task's
+    /// `writes`, so no amount of correct work will satisfy it. The worker
+    /// burns its whole retry ladder discovering this.
+    pub unpassable_acceptance: Vec<(String, String, String)>,
+    /// `(task, pattern, path)` for a `grep` acceptance check whose only
+    /// evidence is a file the same task creates from scratch. It cannot fail
+    /// for any reason except the worker forgetting to type the pattern, so it
+    /// verifies nothing about the behaviour that was actually asked for.
+    ///
+    /// Worth flagging because it is how a plan built on an imagined layout
+    /// hides: inventing `args.rs` and then greping `args.rs` looks like a
+    /// verified task right up until a human reads the diff.
+    pub vacuous_acceptance: Vec<(String, String, String)>,
 }
 
 impl CritiqueReport {
@@ -421,11 +435,18 @@ impl CritiqueReport {
         self.hallucinated_paths.is_empty()
             && self.overlapping_writes.is_empty()
             && self.missing_acceptance.is_empty()
+            && self.unpassable_acceptance.is_empty()
+            && self.vacuous_acceptance.is_empty()
     }
     /// Severity score — lower is better. Used to decide whether the
     /// rewrite pass actually improved things.
     pub fn score(&self) -> usize {
-        self.hallucinated_paths.len() * 3
+        // An unpassable check is the most expensive defect here: it does not
+        // degrade the run, it guarantees the task fails after spending a full
+        // retry ladder. Weighted above a hallucinated path accordingly.
+        self.unpassable_acceptance.len() * 4
+            + self.vacuous_acceptance.len() * 3
+            + self.hallucinated_paths.len() * 3
             + self.overlapping_writes.len() * 2
             + self.missing_acceptance.len()
     }
@@ -436,6 +457,12 @@ impl CritiqueReport {
 pub fn critique_plan(plan: &[PlannedTask], repo_root: &Path) -> CritiqueReport {
     let mut report = CritiqueReport::default();
     let check_paths = !repo_root.as_os_str().is_empty();
+    // Any path the plan says it will create counts as reachable, whichever
+    // task creates it — greping a file your dependency writes is fine.
+    let all_writes: HashSet<&str> = plan
+        .iter()
+        .flat_map(|t| t.writes.iter().map(String::as_str))
+        .collect();
 
     for t in plan {
         // Hallucinated paths: flag writes whose parent directory does
@@ -460,6 +487,35 @@ pub fn critique_plan(plan: &[PlannedTask], repo_root: &Path) -> CritiqueReport {
         }
         if t.acceptance.is_empty() && !matches!(t.role, crate::model::Role::Reviewer) {
             report.missing_acceptance.push(t.id.clone());
+        }
+        // A grep acceptance against a path that neither exists nor is going
+        // to be written cannot pass, however well the worker performs. Left
+        // unchecked it reads as a task failure, so the retry ladder runs to
+        // exhaustion re-attempting work that was never the problem.
+        if check_paths {
+            for a in &t.acceptance {
+                let Acceptance::Grep { path, pattern } = a else {
+                    continue;
+                };
+                if repo_root.join(path).exists() {
+                    continue;
+                }
+                // The file does not exist yet. Who is going to create it?
+                if t.writes.iter().any(|w| w == path) {
+                    // This very task. Then the check proves only that the
+                    // worker wrote the string it was told to write.
+                    report
+                        .vacuous_acceptance
+                        .push((t.id.clone(), pattern.clone(), path.clone()));
+                } else if !all_writes.contains(path.as_str()) {
+                    // Nobody. Unsatisfiable however well the worker performs.
+                    report.unpassable_acceptance.push((
+                        t.id.clone(),
+                        pattern.clone(),
+                        path.clone(),
+                    ));
+                }
+            }
         }
     }
 
@@ -539,6 +595,18 @@ fn render_critique_for_rewrite(report: &CritiqueReport) -> String {
         let _ = writeln!(
             s,
             "- task {id} has no `acceptance` checks; add at least one executable shell or grep check so the orchestrator can verify completion"
+        );
+    }
+    for (id, pattern, path) in &report.vacuous_acceptance {
+        let _ = writeln!(
+            s,
+            "- task {id} greps `{pattern}` in `{path}`, a file the same task creates from scratch — that only proves the worker typed the pattern, and it hides the case where `{path}` is not where this code belongs. Check the facts block for the file that already holds this behaviour and grep that instead; if the new file is genuinely right, verify the behaviour with a shell check as well"
+        );
+    }
+    for (id, pattern, path) in &report.unpassable_acceptance {
+        let _ = writeln!(
+            s,
+            "- task {id} greps `{pattern}` in `{path}`, but that file does not exist and no task declares it in `writes` — this check can never pass. Point it at the file that really holds this code (see the facts block), or add `{path}` to that task's `writes` if the task is genuinely meant to create it"
         );
     }
     s
@@ -920,5 +988,106 @@ mod tests {
         let s = render_plan(&plan);
         assert!(s.contains("--version-only"));
         assert!(s.contains("[developer]"));
+    }
+
+    /// A `PlannedTask` with everything not under test left empty.
+    fn pt(id: &str, role: Role, title: &str) -> PlannedTask {
+        PlannedTask {
+            id: id.into(),
+            role,
+            title: title.into(),
+            goal: String::new(),
+            deps: vec![],
+            writes: vec![],
+            acceptance: vec![],
+            reversibility: Reversibility::default(),
+            reversibility_reason: None,
+        }
+    }
+
+    /// The exact plan sonnet-5 produced for "add a --version-only flag to
+    /// wingman-cli" on 2026-08-21: it invented `args.rs` (this CLI parses
+    /// args in `cli.rs`) and hard-coded that invention into a grep check.
+    /// `args.rs` was in `writes`, so the hallucinated-path check could not
+    /// see it -- the containing directory is real. The run spent $1.15 and a
+    /// full retry ladder before deadlocking.
+    #[test]
+    fn unpassable_grep_is_caught_when_the_file_is_created_by_the_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("crates/wingman-cli/src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("cli.rs"), "pub struct Cli {}").unwrap();
+
+        let mut t = pt("t1", Role::Developer, "Add --version-only flag");
+        t.writes = vec![
+            "crates/wingman-cli/src/args.rs".into(),
+            "crates/wingman-cli/src/main.rs".into(),
+        ];
+        t.acceptance = vec![Acceptance::Grep {
+            pattern: "version_only".into(),
+            path: "crates/wingman-cli/src/args.rs".into(),
+        }];
+
+        let report = critique_plan(std::slice::from_ref(&t), dir.path());
+        assert!(
+            report.hallucinated_paths.is_empty(),
+            "the directory is real, so the existing check stays quiet"
+        );
+        assert_eq!(
+            report.vacuous_acceptance,
+            vec![(
+                "t1".to_string(),
+                "version_only".to_string(),
+                "crates/wingman-cli/src/args.rs".to_string()
+            )],
+            "the task greps a file it creates itself -- proves nothing"
+        );
+        assert!(!report.is_clean(), "must trigger the rewrite pass");
+        assert!(render_critique_for_rewrite(&report).contains("creates from scratch"));
+
+        // Pointed at the file that really holds the code, it is clean.
+        t.acceptance = vec![Acceptance::Grep {
+            pattern: "version_only".into(),
+            path: "crates/wingman-cli/src/cli.rs".into(),
+        }];
+        let report = critique_plan(std::slice::from_ref(&t), dir.path());
+        assert!(report.vacuous_acceptance.is_empty());
+        assert!(report.unpassable_acceptance.is_empty());
+    }
+
+    #[test]
+    fn grep_against_a_file_a_dependency_creates_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+
+        let mut t1 = pt("t1", Role::Developer, "create the module");
+        t1.writes = vec!["src/new_module.rs".into()];
+        t1.acceptance = vec![Acceptance::Shell {
+            cmd: "cargo check".into(),
+        }];
+        let mut t2 = pt("t2", Role::Tester, "test it");
+        t2.deps = vec!["t1".into()];
+        t2.acceptance = vec![Acceptance::Grep {
+            pattern: "fn new_thing".into(),
+            path: "src/new_module.rs".into(),
+        }];
+        let plan = vec![t1, t2];
+        let report = critique_plan(&plan, dir.path());
+        assert!(
+            report.unpassable_acceptance.is_empty(),
+            "a file a dependency writes is reachable, not unpassable"
+        );
+    }
+
+    #[test]
+    fn path_checks_are_skipped_without_a_repo_root() {
+        let mut t = pt("t1", Role::Developer, "x");
+        t.acceptance = vec![Acceptance::Grep {
+            pattern: "p".into(),
+            path: "nowhere/at/all.rs".into(),
+        }];
+        let plan = vec![t];
+        let report = critique_plan(&plan, Path::new(""));
+        assert!(report.unpassable_acceptance.is_empty());
     }
 }

@@ -282,14 +282,54 @@ pub async fn run_worker(
     };
 
     let (outcome, acceptance) = match timeout(spec.timeout, parse_loop).await {
-        Ok(r) => r?,
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            // The stream died mid-run. Say so in the run log: this used to
+            // return without recording anything, leaving the task stuck at
+            // `in_progress` with a dead worker until the manager reassigned
+            // it -- and the next rung was handed "failed without outcome
+            // summary", which is not something anyone can act on.
+            record_failure(
+                store,
+                &spec.task.id,
+                agent_id,
+                format!("worker stream ended abnormally: {e}"),
+            )
+            .await;
+            return Err(e);
+        }
         Err(_) => {
-            supervisor.terminate(Duration::from_secs(2)).await.ok();
+            supervisor
+                .terminate(Duration::from_secs(2).min(spec.timeout))
+                .await
+                .ok();
+            record_failure(
+                store,
+                &spec.task.id,
+                agent_id,
+                format!(
+                    "worker exceeded pilot.task_timeout_secs ({}s) and was terminated",
+                    spec.timeout.as_secs()
+                ),
+            )
+            .await;
             return Err(WorkerError::Timeout(spec.timeout));
         }
     };
 
-    let status = child.wait().await?;
+    let status = match child.wait().await {
+        Ok(s) => s,
+        Err(e) => {
+            record_failure(
+                store,
+                &spec.task.id,
+                agent_id,
+                format!("could not reap the worker process: {e}"),
+            )
+            .await;
+            return Err(e.into());
+        }
+    };
     let exit_code = status.code();
 
     // Salvage a silent-success worker. A worker can do everything right —
@@ -350,6 +390,30 @@ pub async fn run_worker(
         );
     }
 
+    // A worker that fails the E3 gate without calling `task_complete` has no
+    // outcome of its own, and the acceptance verdict -- the one thing that
+    // explains the failure -- was only ever logged. Carry it into the record
+    // so the retry ladder, the dashboard and a human all get told why.
+    let recorded_outcome = match (&outcome, final_status) {
+        (Some(o), _) => Some(o.clone()),
+        (None, TaskStatus::Failed) => Some(TaskOutcome {
+            summary: if spec.task.acceptance.is_empty() {
+                format!(
+                    "worker exited {} without reporting completion",
+                    exit_code
+                        .map_or_else(|| "abnormally".to_string(), |c| format!("with code {c}")),
+                )
+            } else {
+                format!(
+                    "acceptance checks failed: {}",
+                    crate::acceptance::summarize(&acceptance)
+                )
+            },
+            files_changed: Vec::new(),
+        }),
+        (None, _) => None,
+    };
+
     let _ = store
         .lock()
         .await
@@ -357,7 +421,7 @@ pub async fn run_worker(
             t: RunStore::now(),
             id: spec.task.id.clone(),
             status: final_status,
-            outcome: outcome.clone(),
+            outcome: recorded_outcome.clone(),
         })
         .await;
     let _ = store
@@ -381,9 +445,43 @@ pub async fn run_worker(
         task_id: spec.task.id,
         agent_id: agent_id.to_string(),
         status: final_status,
-        outcome,
+        outcome: recorded_outcome,
         exit_code,
     })
+}
+
+/// Record a task failure that carries an explanation.
+///
+/// Every early return in `run_worker` used to leave the run log silent, so a
+/// dead worker looked identical to a worker that had simply not finished yet.
+/// The retry ladder then reported "failed without outcome summary" to the next
+/// rung, which re-ran the same work blind.
+async fn record_failure(
+    store: &tokio::sync::Mutex<RunStore>,
+    task_id: &str,
+    agent_id: &str,
+    summary: String,
+) {
+    tracing::warn!(target: "pilot::worker", task = %task_id, "{summary}");
+    let mut guard = store.lock().await;
+    let _ = guard
+        .append(Event::TaskStatus {
+            t: RunStore::now(),
+            id: task_id.to_string(),
+            status: TaskStatus::Failed,
+            outcome: Some(TaskOutcome {
+                summary,
+                files_changed: Vec::new(),
+            }),
+        })
+        .await;
+    let _ = guard
+        .append(Event::AgentStatus {
+            t: RunStore::now(),
+            agent: agent_id.to_string(),
+            status: AgentStatus::Failed,
+        })
+        .await;
 }
 
 /// One parsed line from the worker's stdout.
@@ -922,5 +1020,55 @@ mod tests {
                 WorkerLine::Unknown => write!(f, "Unknown"),
             }
         }
+    }
+
+    /// A worker that dies without reporting used to leave the run log silent:
+    /// the task sat at `in_progress` with a dead process until the manager
+    /// reassigned it, and the next rung was handed "failed without outcome
+    /// summary". That is what made a $1.15 pilot run undiagnosable.
+    #[tokio::test]
+    async fn record_failure_writes_a_readable_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::create(dir.path(), "r1", "goal", "base", "branch")
+            .await
+            .unwrap();
+        let store = tokio::sync::Mutex::new(store);
+
+        record_failure(&store, "t1", "agent-0001", "worker exceeded 1800s".into()).await;
+
+        let guard = store.lock().await;
+        let task = guard.state().task("t1");
+        // The task does not exist in this bare store, but the event is on
+        // disk either way -- assert on the log, which is the source of truth.
+        assert!(task.is_none());
+        let log = std::fs::read_to_string(guard.log_path()).unwrap();
+        assert!(
+            log.contains("worker exceeded 1800s"),
+            "reason must be recorded:
+{log}"
+        );
+        assert!(log.contains("\"status\":\"failed\""));
+    }
+
+    #[test]
+    fn a_failed_gate_without_an_outcome_still_explains_itself() {
+        use crate::acceptance::AcceptanceResult;
+        // Mirrors the synthesis in `run_worker`: a worker that fails the E3
+        // gate without calling `task_complete` has no outcome of its own, so
+        // the acceptance verdict has to become one.
+        let results = vec![AcceptanceResult {
+            label: "grep version_only in src/args.rs".into(),
+            ok: false,
+            output: "no match".into(),
+        }];
+        let summary = format!(
+            "acceptance checks failed: {}",
+            crate::acceptance::summarize(&results)
+        );
+        assert!(summary.contains("acceptance checks failed"));
+        assert!(
+            !summary.trim_end_matches(':').ends_with("failed"),
+            "the summary must carry the per-check detail, not just a label"
+        );
     }
 }
