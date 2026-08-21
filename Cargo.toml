@@ -64,7 +64,7 @@ clap = { version = "4", features = ["derive", "env"] }
 directories = "5"
 keyring = { version = "3", features = ["windows-native", "apple-native", "linux-native"] }
 
-rand = "0.8"
+rand = "0.10"
 sha2 = "0.10"
 base64 = "0.22"
 urlencoding = "2"
