@@ -4764,6 +4764,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "wingman-board"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "rand 0.8.6",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "wingman-autonomous",
+ "wingman-config",
+]
+
+[[package]]
 name = "wingman-browser"
 version = "0.2.0"
 dependencies = [
@@ -4800,6 +4816,7 @@ dependencies = [
  "tracing-subscriber",
  "urlencoding",
  "wingman-autonomous",
+ "wingman-board",
  "wingman-browser",
  "wingman-config",
  "wingman-core",

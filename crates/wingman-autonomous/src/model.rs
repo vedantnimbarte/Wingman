@@ -284,6 +284,12 @@ pub struct Agent {
     /// USD spent by this worker so far (sum of its `agent.usd` deltas).
     #[serde(default)]
     pub usd: f64,
+    /// Model id the worker last reported spending on, from `agent.usd`.
+    /// `None` for runs recorded before this field existed, and for a worker
+    /// that has not yet completed a priced turn. Last write wins: a worker
+    /// that switches model mid-task reports the most recent one.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,6 +668,7 @@ pub fn apply(state: &mut RunState, event: &Event) {
                         spawned_at: Some(ts.clone()),
                         current_tool: None,
                         usd: 0.0,
+                        model: None,
                     });
                 }
             } else if let Some(a) = state.agent_mut(agent) {
@@ -752,6 +759,7 @@ pub fn apply(state: &mut RunState, event: &Event) {
                     spawned_at: Some(ts.clone()),
                     current_tool: None,
                     usd: 0.0,
+                    model: None,
                 });
             }
         }
@@ -762,6 +770,7 @@ pub fn apply(state: &mut RunState, event: &Event) {
         }
         Event::AgentUsd {
             agent,
+            model,
             input_tokens,
             output_tokens,
             usd,
@@ -772,6 +781,11 @@ pub fn apply(state: &mut RunState, event: &Event) {
             state.totals.tokens_out += output_tokens;
             let current_task = if let Some(a) = state.agent_mut(agent) {
                 a.usd += usd;
+                // An empty model is what a provider that doesn't report one
+                // sends; it must not clobber a name we already have.
+                if !model.is_empty() {
+                    a.model = Some(model.clone());
+                }
                 a.current_task.clone()
             } else {
                 None
@@ -817,4 +831,79 @@ pub fn apply(state: &mut RunState, event: &Event) {
 /// Convenience: index tasks by id (for callers that prefer a map view).
 pub fn tasks_by_id(state: &RunState) -> BTreeMap<&str, &Task> {
     state.tasks.iter().map(|t| (t.id.as_str(), t)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> RunState {
+        RunState::new("r1", "goal", "deadbeef", "wingman/auto/r1")
+    }
+
+    fn usd(agent: &str, model: &str, amount: f64) -> Event {
+        Event::AgentUsd {
+            t: "2026-08-21T10:00:00Z".into(),
+            agent: agent.into(),
+            model: model.into(),
+            input_tokens: 100,
+            output_tokens: 20,
+            usd: amount,
+        }
+    }
+
+    fn spawn(agent: &str) -> Event {
+        Event::AgentSpawn {
+            t: "2026-08-21T10:00:00Z".into(),
+            agent: agent.into(),
+            role: Role::Developer,
+            pid: Some(4242),
+            session_id: Some("sess-1".into()),
+        }
+    }
+
+    #[test]
+    fn agent_usd_projects_model_onto_agent() {
+        let mut s = state();
+        apply(&mut s, &spawn("a1"));
+        apply(&mut s, &usd("a1", "opus-5", 0.25));
+        assert_eq!(s.agent("a1").unwrap().model.as_deref(), Some("opus-5"));
+    }
+
+    #[test]
+    fn agent_without_usd_has_no_model() {
+        let mut s = state();
+        apply(&mut s, &spawn("a1"));
+        assert_eq!(s.agent("a1").unwrap().model, None);
+    }
+
+    #[test]
+    fn empty_model_does_not_clobber() {
+        let mut s = state();
+        apply(&mut s, &spawn("a1"));
+        apply(&mut s, &usd("a1", "opus-5", 0.25));
+        apply(&mut s, &usd("a1", "", 0.10));
+        assert_eq!(s.agent("a1").unwrap().model.as_deref(), Some("opus-5"));
+    }
+
+    #[test]
+    fn last_model_wins() {
+        let mut s = state();
+        apply(&mut s, &spawn("a1"));
+        apply(&mut s, &usd("a1", "opus-5", 0.25));
+        apply(&mut s, &usd("a1", "haiku-4-5", 0.01));
+        assert_eq!(s.agent("a1").unwrap().model.as_deref(), Some("haiku-4-5"));
+    }
+
+    #[test]
+    fn snapshot_without_model_field_deserialises() {
+        // A `state.json` written before `Agent.model` existed.
+        let json = r#"{
+            "id": "a1", "name": "brave_otter", "role": "developer",
+            "status": "idle", "usd": 0.5
+        }"#;
+        let agent: Agent = serde_json::from_str(json).unwrap();
+        assert_eq!(agent.model, None);
+        assert_eq!(agent.usd, 0.5);
+    }
 }

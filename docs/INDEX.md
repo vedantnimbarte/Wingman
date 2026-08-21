@@ -56,6 +56,11 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Read this if: You're using pilot mode, contributing to it, or interested in the roadmap.
   - See also: **Pilot mode** in [PILOT-MODE.md](PILOT-MODE.md) for the shipped command surface.
 
+- **[BOARD.md](BOARD.md)** — `wingman board`: a persistent, multi-project kanban board over pilot runs. Cards are goals that outlive their runs; columns are derived from run state, never stored.
+  - Best for: seeing what is planned, running, in review and done across every repo — with the agent, model, cost and logs behind each task.
+  - Read this if: you want a backlog that survives runs, or you're implementing it.
+  - Spec: [BOARD-SPEC.md](BOARD-SPEC.md). Build order and design record: [BOARD-PLAN.md](BOARD-PLAN.md). Status: **planned**.
+
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
   - Best for: Understanding how Wingman plans to beat Claude Code/Codex on speed, trust, and retention.
   - Read this if: You're prioritizing single-agent features or positioning the product.

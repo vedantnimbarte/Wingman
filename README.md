@@ -223,6 +223,27 @@ use a spend cap and read the PR. Details in
 
 ---
 
+## The board
+
+`wingman board` is a kanban board over pilot runs — persistent, and across
+every repo you've run pilot in. Cards are goals you author; they outlive the
+runs that execute them, so a backlog survives what pilot forgets.
+
+```bash
+wingman board                            # the TUI
+wingman board add "fix the LSP restart storm"
+wingman board dispatch a3f1              # starts a pilot run for that card
+wingman board list --json                # scriptable
+```
+
+Columns — Backlog, Planned, In Progress, Review, Done — are **derived** from
+run state, never stored, so the board can't disagree with `pilot watch`.
+Expand a card to see the planner's tasks underneath it: which agent took each
+one, which model it ran on, what it cost, what it's blocked on, and the
+session id of its transcript. Details in [docs/BOARD.md](docs/BOARD.md).
+
+---
+
 ## Remote control
 
 `wingman serve` puts an HTTP/SSE API in front of an allowlist of repos, so you
@@ -293,6 +314,7 @@ scope.
 | [TOOLS.md](docs/TOOLS.md) | Built-in tool reference |
 | [PROVIDERS.md](docs/PROVIDERS.md) | Supported backends and pilot-mode support |
 | [PILOT-MODE.md](docs/PILOT-MODE.md) | Multi-agent orchestration |
+| [BOARD.md](docs/BOARD.md) | The kanban board over pilot runs |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, crates, data flows |
 | [LSP.md](docs/LSP.md) | Code intelligence and verification receipts |
 | [LEARNING-LOOP.md](docs/LEARNING-LOOP.md) | Memories, skills, session recall |

@@ -396,6 +396,15 @@ pub enum Command {
         #[command(subcommand)]
         action: PilotAction,
     },
+    /// Kanban board over pilot runs: a persistent, multi-project backlog.
+    ///
+    /// Cards are goals you author; they outlive the runs that execute them.
+    /// With no subcommand, opens the board.
+    #[command(display_order = 7)]
+    Board {
+        #[command(subcommand)]
+        action: Option<BoardAction>,
+    },
     /// Deprecated alias for `wingman pilot` — kept through M3, removed at M4.
     #[command(hide = true)]
     Autonomous {
@@ -414,6 +423,92 @@ pub enum Command {
         max_agents: Option<u32>,
         #[arg(long, value_name = "FLOAT")]
         max_usd: Option<f64>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BoardAction {
+    /// Create a card in Backlog.
+    Add {
+        /// Card title.
+        title: String,
+        /// Prompt handed to `pilot run`. Defaults to the title.
+        #[arg(long, value_name = "TEXT")]
+        goal: Option<String>,
+        /// Project id. Defaults to the current directory's project.
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
+        /// Label; repeatable, or comma-separated.
+        #[arg(long, value_name = "LABEL")]
+        label: Vec<String>,
+        /// Free-form notes.
+        #[arg(long, value_name = "TEXT")]
+        notes: Option<String>,
+    },
+    /// List cards with their derived columns.
+    List {
+        #[arg(long, value_name = "ID")]
+        project: Option<String>,
+        /// backlog | planned | in-progress | review | done
+        #[arg(long, value_name = "COLUMN")]
+        column: Option<String>,
+        #[arg(long, value_name = "LABEL")]
+        label: Option<String>,
+        /// Include archived cards.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one card: goal, notes, dispatch history, and its newest run.
+    Show {
+        /// Card id or unique prefix (at least 4 characters).
+        card: String,
+    },
+    /// Start a pilot run for a card.
+    Dispatch {
+        /// Card id or unique prefix.
+        card: String,
+        /// Dispatch even though a live run already exists.
+        #[arg(long)]
+        again: bool,
+        /// Flags forwarded verbatim to `pilot run`.
+        #[arg(last = true, value_name = "PILOT_FLAGS")]
+        pilot_flags: Vec<String>,
+    },
+    /// Archive a card (reversible; never deletes).
+    Archive {
+        card: String,
+        /// Un-archive instead.
+        #[arg(long)]
+        restore: bool,
+    },
+    /// Permanently delete a card and its dispatch history.
+    Rm {
+        card: String,
+        /// Required when the card has been dispatched.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// List or manage registered projects.
+    Projects {
+        /// Hide a project. Its cards are preserved.
+        #[arg(long, value_name = "ID")]
+        forget: Option<String>,
+        /// Un-hide a forgotten project.
+        #[arg(long, value_name = "ID")]
+        restore: Option<String>,
+        /// Point a project at a new path, for a repo that moved.
+        #[arg(long, num_args = 2, value_names = ["ID", "PATH"])]
+        relocate: Option<Vec<String>>,
+        /// Include hidden projects.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Dump cards and dispatch history — the backup story for a per-machine DB.
+    Export {
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1061,6 +1156,40 @@ pub async fn run() -> Result<ExitCode> {
         },
         Some(Command::Explain { local, staged }) => commands::explain::run(local, staged).await,
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
+        Some(Command::Board { action }) => match action {
+            None => commands::board_tui::run(commands::pilot::resolve_ascii(false)).await,
+            Some(BoardAction::Add {
+                title,
+                goal,
+                project,
+                label,
+                notes,
+            }) => commands::board::add(title, goal, project, label, notes).await,
+            Some(BoardAction::List {
+                project,
+                column,
+                label,
+                all,
+                json,
+            }) => commands::board::list(project, column, label, all, json).await,
+            Some(BoardAction::Show { card }) => commands::board::show(card).await,
+            Some(BoardAction::Dispatch {
+                card,
+                again,
+                pilot_flags,
+            }) => commands::board::dispatch(card, again, pilot_flags).await,
+            Some(BoardAction::Archive { card, restore }) => {
+                commands::board::archive(card, restore).await
+            }
+            Some(BoardAction::Rm { card, yes }) => commands::board::rm(card, yes).await,
+            Some(BoardAction::Projects {
+                forget,
+                restore,
+                relocate,
+                all,
+            }) => commands::board::projects(forget, restore, relocate, all).await,
+            Some(BoardAction::Export { json }) => commands::board::export(json).await,
+        },
         Some(Command::Pilot { action }) => match action {
             PilotAction::Run {
                 goal,

@@ -19,7 +19,7 @@
 //! Terminal raw-mode / alternate-screen setup is torn down on every exit
 //! path (including errors) so the shell is always left clean.
 
-use std::io::{self, Stdout};
+use std::io;
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::SystemTime;
@@ -27,27 +27,20 @@ use std::time::SystemTime;
 use anyhow::Result;
 use chrono::Utc;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event as CtEvent, KeyCode, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEventKind,
+    self, Event as CtEvent, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
-use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph, Sparkline, Wrap};
-use ratatui::{Frame, Terminal};
+use ratatui::Frame;
 
+use super::pilot_ui::{self, Glyphs, Term};
 use wingman_autonomous::control::{self, ControlCommand};
 use wingman_autonomous::dashboard::{
     self, AgentRow, DashboardModel, HeaderInfo, LogRow, LogSeverity, RunSummary, TaskRow,
 };
 use wingman_autonomous::{AgentStatus, RunStatus, TaskStatus};
-
-type Term = Terminal<CrosstermBackend<Stdout>>;
 
 /// Live-watch the pilot runs under `project_root` in a full-screen ratatui
 /// UI, starting on `initial` (or the newest run). When more than one run is
@@ -60,7 +53,7 @@ pub fn run(
     interval_ms: u64,
     ascii: bool,
 ) -> Result<ExitCode> {
-    let mut terminal = setup()?;
+    let mut terminal = pilot_ui::setup()?;
     // Whatever happens in the loop, always restore the terminal.
     let outcome = run_loop(
         &mut terminal,
@@ -69,7 +62,7 @@ pub fn run(
         interval_ms,
         Glyphs { ascii },
     );
-    teardown(&mut terminal)?;
+    pilot_ui::teardown(&mut terminal)?;
     outcome
 }
 
@@ -166,53 +159,6 @@ impl LogView {
             t.push_str("  (paused)");
         }
         t
-    }
-}
-
-/// The glyph set the UI draws with. Unicode by default; the ASCII variant is
-/// a portable fallback for terminals (legacy Windows console, non-UTF-8
-/// locales) that render the fancier glyphs as tofu boxes.
-#[derive(Debug, Clone, Copy)]
-struct Glyphs {
-    ascii: bool,
-}
-
-impl Glyphs {
-    /// One glyph or the other, chosen by mode. Keeps the call sites readable.
-    fn pick(&self, unicode: char, ascii: char) -> char {
-        if self.ascii {
-            ascii
-        } else {
-            unicode
-        }
-    }
-
-    /// Animated progress spinner frame. Unicode rotates a quarter-filled
-    /// disc; ASCII falls back to the classic `|/-\` spinner.
-    fn spinner(&self, frame: u64) -> char {
-        const UNI: [char; 4] = ['◐', '◓', '◑', '◒'];
-        const ASC: [char; 4] = ['|', '/', '-', '\\'];
-        let set = if self.ascii { &ASC } else { &UNI };
-        set[(frame as usize) % set.len()]
-    }
-
-    fn current(&self) -> char {
-        self.pick('▸', '>')
-    }
-    fn tool(&self) -> char {
-        self.pick('▸', '>')
-    }
-    fn writes(&self) -> char {
-        self.pick('✎', 'w')
-    }
-    fn running(&self) -> char {
-        self.pick('▶', '>')
-    }
-    fn failed(&self) -> char {
-        self.pick('✗', 'x')
-    }
-    fn blocked(&self) -> char {
-        self.pick('‼', '!')
     }
 }
 
@@ -1663,25 +1609,6 @@ fn emit_bell() {
     let _ = out.flush();
 }
 
-fn setup() -> Result<Term> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-    Ok(terminal)
-}
-
-fn teardown(terminal: &mut Term) -> Result<()> {
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1796,6 +1723,7 @@ mod tests {
 
     fn render_to_string(ui: &mut WatchUi, w: u16, h: u16) -> String {
         use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| draw(f, ui)).unwrap();
         let buf = term.backend().buffer().clone();

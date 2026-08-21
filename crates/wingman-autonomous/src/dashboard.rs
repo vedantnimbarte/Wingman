@@ -799,6 +799,7 @@ mod tests {
             spawned_at: Some("2026-05-27T14:30:00Z".into()),
             current_tool: Some("edit_file".into()),
             usd: 0.21,
+            model: Some("opus-5".into()),
         });
         s
     }

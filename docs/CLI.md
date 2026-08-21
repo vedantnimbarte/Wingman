@@ -74,9 +74,22 @@ wingman [OPTIONS] [COMMAND]
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |
 | `pilot ask "<msg>" [run-id]` | Same, but wait for the worker's reply and print it (`--wait <secs>`, default 120). |
 | `pilot intake slack\|email` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion). |
+| `board`              | Kanban board over pilot runs: a persistent, multi-project backlog. Cards are goals that outlive their runs; columns are derived from run state. |
+| `board add "<title>"` | Create a Backlog card. `--goal <text>` (the prompt sent to pilot; defaults to the title), `--project <id>`, `--label <l>`, `--notes <text>`. |
+| `board list`         | List cards with derived columns. `--project`, `--column backlog\|planned\|in-progress\|review\|done`, `--label`, `--all`, `--json`. |
+| `board show <card>`  | One card: goal, notes, dispatch history, and the newest run's tasks with agent, model and cost. |
+| `board dispatch <card>` | Start a pilot run for a card. `--again` to dispatch past a live run; `-- <flags>` forwards verbatim to `pilot run`. |
+| `board archive <card>` | Archive a card (`--restore` to undo). Never deletes. |
+| `board rm <card>`    | Permanently delete a card and its dispatch history (`--yes` required once dispatched). The runs are not deleted. |
+| `board projects`     | List registered projects. `--forget <id>` hides one (cards kept), `--restore <id>`, `--relocate <id> <path>`, `--all`. |
+| `board export --json` | Dump cards and dispatch history — the backup story for a per-machine DB. |
 
 Running `wingman` with no subcommand launches the TUI against the resolved
 provider and model.
 
 > `wingman autonomous "<goal>"` is a deprecated alias for `wingman pilot
 > run` — kept through M3, removed at M4.
+
+Card ids accept any unique prefix of at least 4 characters. Projects register
+themselves the first time you run a `pilot` or `board` command in a repo. See
+[BOARD.md](BOARD.md).
