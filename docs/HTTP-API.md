@@ -263,6 +263,7 @@ is returned as JSON; anything else comes back as
 | `POST /v1/projects/{p}/schedule/run?all` | `schedule [--all]` |
 | `GET /v1/projects/{p}/config` | `config show --json` |
 | `GET /v1/config` / `PATCH /v1/config` | the server's merged config; patch writes the **global** file |
+| `GET /v1/config/schema` | JSON Schema derived from the config types, plus defaults, redacted keys, read-only sections, and the file a patch writes to |
 
 Every table route is project-scoped, including the config-adjacent ones: the
 merged view depends on which repo you are in. Query parameters are an allowlist
@@ -278,6 +279,20 @@ could write it would be a way to smuggle executable keys into a repo. It refuses
 `[serve]` outright, because a server that can rewrite its own token, ceiling, or
 allowlist has no ceiling. Patches are validated by round-tripping through the
 real config parser before anything is written.
+
+**A patch is a minimal edit, not a rewrite.** The file is edited as a TOML
+document, so changing one field yields a one-line diff and comments, key order
+and formatting all survive — including the comment sitting above the key whose
+value changed. Earlier builds parsed to a table and re-serialised it, which
+reordered every section and discarded every comment in the file.
+
+`GET /v1/config/schema` exists so a client can build a settings UI without
+hard-coding anything about the config. It returns a JSON Schema derived from
+the `wingman-config` types — every field's type, default, and `///`
+documentation — alongside `defaults`, `redacted_keys`, `readonly_sections`, and
+`writes_to`. The two lists are the same constants the server enforces on read
+and on write, so a client cannot be holding a stale copy of either.
+
 
 There is no `/v1/skills`, `/v1/mcp`, or `/v1/providers`: no CLI command backs a
 listing for those today, and faking one would report something the tool cannot

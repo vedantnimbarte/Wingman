@@ -4,7 +4,7 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phases 0–3 shipped; phases 4–6 planned.** Phases ship in order and
+> **Status: phases 0–4 shipped; phases 5–6 planned.** Phases ship in order and
 > each one is independently useful. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
@@ -375,7 +375,7 @@ both landed correctly in `control.jsonl`. Worth knowing for the next person:
 `trivial | hard | irreversible`, and the 404 that produces looks exactly like a
 missing run.
 
-## Phase 4 — config
+## Phase 4 — config ✅ shipped
 
 The largest phase, and the one with a real dependency question.
 
@@ -405,6 +405,70 @@ UI must enforce, all of them already enforced server-side:
 - Writes hit the **global** file only. The UI must say so, because
   `.wingman/config.toml` in a repo is the untrusted layer and silently not
   writing there would be the worst kind of surprise.
+
+### Found while building it
+
+**`schemars` went in behind a feature, not unconditionally.** Thirteen crates
+depend on `wingman-config`; exactly one needs a schema. `schema = ["dep:schemars"]`
+is off by default, `wingman-cli` turns it on, and `cargo tree -p wingman-config`
+shows no schemars at all. Being precise about what that buys: cargo's feature
+unification means a *workspace* build still compiles schemars once, because the
+CLI asks for it. The gate protects anyone depending on `wingman-config` as a
+library — the SDK story in SDK.md — not this repo's build time.
+
+`schemars` stays an implementation detail: the crate exposes
+`wingman_config::json_schema() -> serde_json::Value`, so `serve` never links
+the schema machinery itself.
+
+**One field could not be described and says so.** `ProviderConfig.extra` is a
+`BTreeMap<String, toml::Value>` whose whole purpose is to carry shapes this
+crate does not know. `toml::Value` has no `JsonSchema` impl and could not gain
+a meaningful one, so it is declared to the schema as arbitrary JSON — which is
+also how a settings UI should present it: a free-form area, not a typed field.
+
+**The route emits more than the schema.** `redacted_keys` and
+`readonly_sections` come from the same constants `redact` and `patch_config`
+enforce, so the panel renders a credential as redacted and `[serve]` as
+read-only without a copy of either list that could rot. `writes_to` carries the
+global config path, because a UI that did not say where a save lands would be
+silently not writing where the user thinks it is.
+
+**`PATCH /v1/config` was destroying the file it edited.** It parsed the config
+to a `toml::Table` and printed it back, so every save reordered all twenty-one
+sections alphabetically, rewrote `projects = [{...}]` as `[[serve.projects]]`,
+and **discarded every comment in the file**. That was pre-existing and largely
+theoretical while `PATCH` was a `curl` route; the panel's Save button makes it a
+click.
+
+Rewritten on `toml_edit`, which was **already in the dependency tree** —
+`toml` 0.8 is built on it — so a format-preserving fix cost zero new crates.
+A one-field save is now a one-line diff, comments survive, and the comment
+sitting above an edited key stays attached to it. Pinned by
+`a_patch_preserves_comments_ordering_and_formatting`, which asserts the output
+is byte-identical to the input except for the value that changed.
+
+**Bare top-level keys needed a home.** `Config` mixes tables with a few loose
+keys (`default_model`, `default_provider`). Listing those as sections gave each
+a page with one control and — having no `properties` — dropped them into the
+JSON escape hatch. They are collected into a synthetic `general` section, whose
+field paths are deliberately *not* prefixed: patching `general.default_model`
+would write a `[general]` table no config has.
+
+**Not every shape can be a form, and pretending otherwise loses data.** Arrays
+of objects (`[[hooks.pre_tool_use]]`) and maps keyed by user-chosen names
+(`[mcp.<name>]`) have no fixed properties to generate inputs from. They are
+edited as JSON, which is honest about what they are; flattening a list of
+objects to one-per-line would silently drop fields on save. Everything else —
+booleans, integers, strings, string lists, and enums with their per-variant
+doc comments as tooltips — gets a real control.
+
+**Known gap:** there is no `/v1/skills`, `/v1/mcp` or `/v1/providers`, and
+HTTP-API.md is deliberate about why — "no CLI command backs a listing for those
+today, and faking one would report something the tool cannot actually tell you."
+So the UI can **configure** MCP servers and providers (they are config keys) but
+cannot show live status for them. `doctor` and `knows` cover some of that
+ground. Closing the gap properly means new CLI commands first, and that is out
+of scope here rather than faked in the UI.
 
 ## Phase 5 — sessions and chat
 

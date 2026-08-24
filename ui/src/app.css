@@ -812,6 +812,129 @@ body {
   margin-top: var(--space);
 }
 
+/* ── Config ─────────────────────────────────────────────────────────────── */
+
+.config {
+  max-width: none;
+}
+
+.config-body {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: calc(var(--space) * 1.5);
+  align-items: start;
+}
+
+.config-nav {
+  position: sticky;
+  top: var(--space);
+  border-right: 1px solid var(--rule);
+  padding-right: 0.5rem;
+}
+
+.config-nav .nav-item {
+  padding-left: 0.5rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+}
+
+.config-fields {
+  min-width: 0;
+  max-width: 46rem;
+}
+
+/* A settings row is label-above-help on the left, control on the right. The
+   help text is the field's own `///` comment, so it is the documentation
+   rather than a paraphrase of it. */
+.config-row {
+  align-items: flex-start;
+  gap: calc(var(--space) * 1.5);
+}
+
+.config-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--mono);
+  font-size: var(--step-0);
+  overflow-wrap: anywhere;
+}
+
+.config-dirty {
+  font-weight: 600;
+}
+
+/* An edited-but-unsaved field is marked structurally, not by colour — hue is
+   reserved for whether something is proven, running, or failed. */
+.config-dirty::after {
+  content: ' •';
+  color: var(--asserted);
+}
+
+.config-help {
+  font-family: var(--sans);
+  font-size: var(--step--1);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.config-default {
+  font-size: var(--step--1);
+}
+
+.config-input {
+  flex: none;
+  width: min(20rem, 45%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: stretch;
+  text-align: left;
+}
+
+.config-input .input,
+.config-input .select {
+  width: 100%;
+}
+
+.config-input input[type='checkbox'] {
+  width: auto;
+  align-self: flex-start;
+}
+
+.config-area {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  resize: vertical;
+}
+
+.config-redacted {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.config-note {
+  font-size: var(--step-0);
+  max-width: 44rem;
+}
+
+/* The save bar sticks to the bottom: with twenty-one sections and a hundred
+   and sixty fields, a button at the end of the page is a button nobody finds. */
+.config-save {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: var(--space);
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+}
+
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
 @media (max-width: 40rem) {
@@ -870,6 +993,29 @@ body {
   }
 
   .detail {
+    width: 100%;
+  }
+
+  /* Section list above the fields rather than beside them. */
+  .config-body {
+    grid-template-columns: 1fr;
+  }
+
+  .config-nav {
+    position: static;
+    display: flex;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 0 0.25rem;
+  }
+
+  .config-row {
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .config-input {
     width: 100%;
   }
 }

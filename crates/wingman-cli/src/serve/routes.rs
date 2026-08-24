@@ -68,6 +68,7 @@ async fn dispatch(
         }
         ("GET", ["v1", "schema"]) => http::write_json(sock, 200, &schema(state)).await,
         ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
+        ("GET", ["v1", "config", "schema"]) => admin::get_config_schema(sock).await,
         ("GET", ["v1", "events"]) => events(state, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
 

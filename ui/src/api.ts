@@ -238,6 +238,41 @@ export type RunState = {
 
 export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
 
+/* ── Config ───────────────────────────────────────────────────────────────
+ *
+ * The schema is derived from the `wingman-config` structs, so the forms in the
+ * panel are generated rather than written. A field added to a Rust struct
+ * appears here with its `///` comment as help text and nobody touches the UI.
+ */
+
+/** A JSON Schema node, as much of it as the form renderer looks at. */
+export type SchemaNode = {
+  type?: string | string[]
+  description?: string
+  default?: unknown
+  format?: string
+  enum?: string[]
+  oneOf?: SchemaNode[]
+  allOf?: SchemaNode[]
+  $ref?: string
+  properties?: Record<string, SchemaNode>
+  additionalProperties?: SchemaNode | boolean
+  items?: SchemaNode
+  title?: string
+}
+
+export type ConfigSchema = {
+  schema: SchemaNode & { definitions?: Record<string, SchemaNode> }
+  /** Every field's fallback, from `Config::default()` — redacted like any read. */
+  defaults: Record<string, unknown>
+  /** Keys whose values are credentials and come back as `<redacted>`. */
+  redacted_keys: string[]
+  /** Sections `PATCH` refuses. Rendered read-only rather than hidden. */
+  readonly_sections: string[]
+  /** The global file a save lands in. Never a repo's `.wingman/config.toml`. */
+  writes_to: string
+}
+
 export const api = {
   health: () => request<Health>('/v1/health'),
   projects: () => request<{ projects: Project[] }>('/v1/projects').then((r) => r.projects),
@@ -271,6 +306,24 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+    }),
+
+  config: () => request<Record<string, unknown>>('/v1/config'),
+  configSchema: () => request<ConfigSchema>('/v1/config/schema'),
+
+  /**
+   * Merge a TOML-shaped object into the **global** config file.
+   *
+   * The server deep-merges tables, so a patch need only carry the leaves that
+   * changed. It validates by round-tripping through the real config parser and
+   * returns the parse error as a `400`, which is the only validation there is —
+   * the panel deliberately does not second-guess it.
+   */
+  patchConfig: (patch: Record<string, unknown>) =>
+    request<unknown>('/v1/config', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
     }),
 
   runs: (project: string) =>

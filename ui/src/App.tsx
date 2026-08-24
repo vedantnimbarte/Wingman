@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api, type Health, type Project } from './api'
 import { Board } from './Board'
 import { Runs } from './Runs'
+import { Config } from './Config'
 import { navigate, segments, useRoute } from './router'
 import { EventsProvider, message, useEvents, useProjects, useSession } from './state'
 import { Failed, Loading, NotYet } from './ui'
@@ -245,12 +246,7 @@ function Section({
         </NotYet>
       )
     case '/config':
-      return (
-        <NotYet title="Config" phase="Phase 4">
-          Every setting, with forms generated from a schema the server emits — so a new config field
-          appears here without anyone hand-writing a form for it.
-        </NotYet>
-      )
+      return <Config />
     case '/insights':
       return (
         <NotYet title="Insights" phase="Phase 6">

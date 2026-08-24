@@ -56,6 +56,12 @@ toml = "0.8"
 thiserror = "1"
 anyhow = "1"
 
+# Optional, behind wingman-config's `schema` feature. Lifts the config
+# structs' doc comments into a JSON Schema for the web panel's settings forms.
+# Only wingman-cli turns it on; the other twelve crates that depend on
+# wingman-config never build it.
+schemars = { version = "0.8", default-features = false, features = ["derive"] }
+
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tracing-appender = "0.2"

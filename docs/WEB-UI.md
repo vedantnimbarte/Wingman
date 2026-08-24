@@ -8,9 +8,9 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phases 0–3 shipped** — the delivery pipeline, the app shell, sign-in,
-the live event stream, the board, and live pilot runs. Config, sessions and
-insights arrive in phases 4–6; the panel names the phase on each section rather than
+Status: **phases 0–4 shipped** — the delivery pipeline, the app shell, sign-in,
+the live event stream, the board, live pilot runs, and the full config surface.
+Sessions and insights arrive in phases 5–6; the panel names the phase on each section rather than
 pretending they are missing by accident. Build order and the reasoning behind
 each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
@@ -237,6 +237,78 @@ A save edits the TOML document in place rather than re-serialising it, so
 changing one field produces a one-line diff. Your comments, key order and
 formatting survive, and a comment sitting above a setting stays attached to it
 when the value changes.
+
+## Config
+
+Every setting Wingman has, as forms **generated from the config types
+themselves**. `GET /v1/config/schema` derives a JSON Schema from the
+`wingman-config` structs, so each field arrives with its `///` comment as help
+text and its real default. Add a field to a Rust struct and it appears in the
+panel, documented, with nobody editing the UI.
+
+Booleans, numbers, strings, string lists and enums each get a proper control —
+an enum's per-variant doc comment becomes its option tooltip. Shapes a form
+cannot express are edited as JSON: arrays of objects like
+`[[hooks.pre_tool_use]]`, and maps keyed by names you choose like
+`[mcp.<name>]`. Flattening those into text inputs would drop fields on save.
+
+### Four rules the panel follows
+
+**Saves land in the global file, never a repo's.** The path is printed above
+the form. A project's `.wingman/config.toml` is the untrusted layer, and an API
+that could write it would be a way to smuggle executable keys into a repo.
+
+**`[serve]` is shown, read-only, with the reason.** `PATCH` refuses it outright
+— a server that can rewrite its own token, ceiling or project allowlist has no
+ceiling. Hiding the section instead would just turn that into a mysterious
+failed save.
+
+**Credentials render as `set · hidden`, not as empty boxes.** Reads come back
+redacted; an empty input would offer to overwrite a real key with nothing.
+Replacing one is a deliberate act behind a **Replace** button, and only a value
+you actually type is ever sent.
+
+**There is no client-side validation.** `PATCH` round-trips the result through
+the real config parser and returns its error, which the panel shows inline. One
+validator, and it is the one that actually has to load the file.
+
+### Saves are a minimal diff
+
+A save edits the TOML document in place rather than re-serialising it, so
+changing one field produces a one-line diff. Your comments, key order and
+formatting survive, and a comment sitting above a setting stays attached to it
+when the value changes.
+
+## Sessions
+
+Transcripts, and holding a conversation with the agent.
+
+A session is not a server object with a timeout — it is the same
+`.wingman/sessions/<id>.jsonl` the TUI writes. One started in the browser shows
+up in `wingman session list` and resumes from a terminal, because the file on
+disk *is* the state. That is what makes "start on the laptop, continue on the
+phone" work with no sync protocol behind it.
+
+Each turn streams as it happens: text, the model's reasoning (folded away by
+default — it is the working-out, not the answer), each tool call with its input
+and output, and the verification gate's verdict. `EventSource` cannot be used
+here, because a turn is a `POST` with a body; the panel reads the stream off
+`fetch` directly.
+
+When a turn finishes the panel re-reads the transcript rather than keeping what
+it assembled while streaming, so a just-finished turn renders identically to
+every older one.
+
+**A second turn on a session already running one is refused.** The child would
+otherwise replay a transcript the first turn is still appending to, and the two
+would interleave into one incoherent history. The panel says so rather than
+showing a bare `409`.
+
+**Deleting reports what happened to the search index.** A finished turn is
+embedded into the global session store for `recall_session`, so removing only
+the JSONL would leave the conversation findable by search — a delete that does
+not delete. The response says whether the index entry went too, and the panel
+repeats it.
 
 ## Scope
 
