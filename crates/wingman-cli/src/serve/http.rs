@@ -191,7 +191,7 @@ fn percent_decode(s: &str) -> String {
 /// Write a JSON response and finish the connection.
 pub async fn write_json(sock: &mut TcpStream, status: u16, body: &Value) -> std::io::Result<()> {
     let text = serde_json::to_string(body).unwrap_or_else(|_| "{}".into());
-    write_raw(sock, status, "application/json", text.as_bytes()).await
+    write_raw(sock, status, "application/json", &[], text.as_bytes()).await
 }
 
 /// Write `{"error": "<msg>"}` with `status`.
@@ -201,20 +201,37 @@ pub async fn write_err(sock: &mut TcpStream, status: u16, msg: &str) -> std::io:
 
 /// Write a `text/plain` response.
 pub async fn write_text(sock: &mut TcpStream, status: u16, body: &str) -> std::io::Result<()> {
-    write_raw(sock, status, "text/plain; charset=utf-8", body.as_bytes()).await
+    write_raw(
+        sock,
+        status,
+        "text/plain; charset=utf-8",
+        &[],
+        body.as_bytes(),
+    )
+    .await
 }
 
-async fn write_raw(
+/// Write a response with an explicit content type and any extra headers.
+///
+/// `extra` exists for the static-asset routes, which need `ETag` and
+/// `Cache-Control`. Every other caller passes `&[]` — keeping one writer means
+/// the half-close below is never duplicated.
+pub async fn write_raw(
     sock: &mut TcpStream,
     status: u16,
     content_type: &str,
+    extra: &[(&str, &str)],
     body: &[u8],
 ) -> std::io::Result<()> {
-    let head = format!(
-        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut head = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n",
         reason(status),
         body.len()
     );
+    for (name, value) in extra {
+        head.push_str(&format!("{name}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
     sock.write_all(head.as_bytes()).await?;
     sock.write_all(body).await?;
     sock.flush().await?;
@@ -232,6 +249,7 @@ fn reason(status: u16) -> &'static str {
         201 => "Created",
         202 => "Accepted",
         204 => "No Content",
+        304 => "Not Modified",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",

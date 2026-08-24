@@ -41,6 +41,11 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Read this if: you want pilot runs steerable from anywhere, or a scriptable surface over the CLI.
   - Build order and design record: [HTTP-API-PLAN.md](HTTP-API-PLAN.md).
 
+- **[WEB-UI.md](WEB-UI.md)** — The web control panel `wingman serve` hosts: a React app embedded in the binary, alongside the TUI rather than replacing it.
+  - Best for: driving the board, runs, and config from a browser or a phone.
+  - Read this if: you're building the panel, or a binary is serving "the web UI was not built".
+  - Build order and design record: [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
+
 - **[TOOLS.md](TOOLS.md)** — Reference for all 20+ built-in tools (file I/O, search, shell, semantic search, memory, skills, session management).
   - Best for: Complete tool signatures, behavior, permission requirements, error handling.
   - Read this if: You want to know what tools are available or how to use a specific tool.
@@ -249,6 +254,8 @@ docs/
 ├── TOOLS.md                 (complete tool reference)
 ├── HTTP-API.md              (the `wingman serve` API surface)
 ├── HTTP-API-PLAN.md         (its build order and design record)
+├── WEB-UI.md                (the browser control panel `serve` hosts)
+├── WEB-UI-PLAN.md           (its build order and design record)
 ├── AUTONOMOUS-MODE.md       (pilot mode design — shipped as `wingman pilot`)
 └── DIFFERENTIATION.md       (single-agent differentiation roadmap)
 

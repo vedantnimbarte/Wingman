@@ -28,6 +28,7 @@ mod push;
 mod routes;
 mod sessions;
 mod table;
+mod ui;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -154,6 +155,14 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
     );
     for p in &state.projects {
         eprintln!("  {:<16} {}", p.id, projects::display_root(&p.root));
+    }
+    // Say which UI is being served. A binary built without `ui/dist/` answers
+    // `/` with a placeholder, and finding that out from the browser rather
+    // than the terminal wastes someone's afternoon.
+    if ui::embedded() {
+        eprintln!("  panel            http://{addr}/");
+    } else {
+        eprintln!("  panel            not built — run `npm run build` in ui/, then rebuild");
     }
 
     loop {

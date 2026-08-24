@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, pilot, projects, push, sessions, table, ServeState};
+use super::{admin, auth, pilot, projects, push, sessions, table, ui, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -29,6 +29,14 @@ pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Res
     // without holding the token. It reports nothing but liveness.
     if req.segments().as_slice() == ["v1", "health"] {
         return health(&state, &mut sock).await;
+    }
+
+    // The web panel's static shell, also unauthenticated — a browser must load
+    // the page before it can present a credential. It is three embedded files
+    // with no project data in them; everything the panel *shows* comes from
+    // `/v1`, which is gated below exactly as before. See `serve::ui`.
+    if ui::is_shell(&req.method, &req.segments()) {
+        return ui::serve(&req, &mut sock).await;
     }
 
     if !auth::authorized(state.token.as_deref(), auth::presented(|n| req.header(n))) {

@@ -1,0 +1,133 @@
+/*
+ * Ledger — the design system's seed. See `docs/WEB-UI-PLAN.md` § Design.
+ *
+ * One rule holds the whole palette together: colour encodes epistemic status
+ * and nothing else. `--proven` is a verification that passed or a task that
+ * finished; `--asserted` is running and unproven; `--failed` is failed or
+ * blocked. None of the three is ever a brand accent, a hover state, or a
+ * chart's decoration.
+ *
+ * Cost deliberately has no colour. It gets typography — tabular figures, right
+ * aligned, and nothing else in the layout is right aligned.
+ *
+ * Phase 0 uses system font stacks. The type pairing is settled in Phase 1,
+ * alongside the real app shell.
+ */
+
+:root {
+  --paper: #fcfcfd;
+  --ink: #16181d;
+  --muted: #5c6370;
+  --rule: #e4e6eb;
+
+  --proven: #0b7a5a;
+  --asserted: #a85f0b;
+  --failed: #b03a2e;
+
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+
+  --step-0: 0.875rem;
+  --step-1: 1rem;
+  --step-2: 1.5rem;
+  --space: 1rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e1014;
+    --ink: #e8eaf0;
+    --muted: #8a909c;
+    --rule: #22262e;
+
+    --proven: #3fb68b;
+    --asserted: #e0a458;
+    --failed: #e0705f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--step-1);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Every figure in the panel: tabular so the ledger column aligns down the page. */
+.figure {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* --- Phase 0 shell. Replaced by the real app shell in Phase 1. --- */
+
+.boot {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: calc(var(--space) * 4) var(--space);
+}
+
+.boot h1 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.25rem;
+}
+
+.boot p {
+  color: var(--muted);
+  font-size: var(--step-0);
+  margin: 0 0 calc(var(--space) * 2);
+}
+
+.boot dl {
+  border-top: 1px solid var(--rule);
+  margin: 0;
+}
+
+.boot div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--space);
+  padding: 0.625rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.boot dt {
+  color: var(--muted);
+  font-size: var(--step-0);
+}
+
+.boot dd {
+  margin: 0;
+  text-align: right;
+}
+
+.status-proven {
+  color: var(--proven);
+}
+.status-failed {
+  color: var(--failed);
+}

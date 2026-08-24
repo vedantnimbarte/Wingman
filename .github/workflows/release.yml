@@ -68,6 +68,19 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The web panel is embedded into the binary by `crates/wingman-cli/
+      # build.rs`, which substitutes a placeholder page when `ui/dist` is
+      # absent so a clone without node still compiles. That fallback is what
+      # makes this step mandatory: without it every released binary would
+      # silently serve "the web UI was not built" and nothing would fail.
+      # `ui_bundle_is_embedded` (run by the `web-ui` CI job) is the assertion;
+      # this is the build that makes it true for the artifact we ship.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - name: Build the web panel
+        working-directory: ui
+        run: npm ci && npm run build
       # taiki-e's action builds the binary natively for the runner's target,
       # archives it, generates a SHA256 checksum, and uploads everything to
       # the release for this tag. `archive` fixes the asset name so

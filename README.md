@@ -320,6 +320,7 @@ scope.
 | [LEARNING-LOOP.md](docs/LEARNING-LOOP.md) | Memories, skills, session recall |
 | [EXTENDING.md](docs/EXTENDING.md) | Hooks, slash commands, custom tools |
 | [HTTP-API.md](docs/HTTP-API.md) | The `wingman serve` API and `--remote` |
+| [WEB-UI.md](docs/WEB-UI.md) | The browser control panel `wingman serve` hosts |
 | [SDK.md](docs/SDK.md) | Embed `wingman-core`, or drive it over MCP or HTTP |
 | [INDEX.md](docs/INDEX.md) | Navigation guide for all docs |
 
