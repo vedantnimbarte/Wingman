@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { api, type Health, type Project } from './api'
+import { Board } from './Board'
 import { navigate, useRoute } from './router'
 import { EventsProvider, message, useEvents, useProjects, useSession } from './state'
 import { Failed, Loading, NotYet } from './ui'
@@ -221,12 +222,12 @@ function Section({
     case '/':
       return <Overview health={health} project={project} />
     case '/board':
-      return (
-        <NotYet title="Board" phase="Phase 2">
-          The kanban board over pilot runs — cards, sub-rows, and dispatch. It will read the same
-          derivation <code>wingman board</code> renders, so the two cannot disagree.
-        </NotYet>
-      )
+      // The board's project ids come from its own registry, which is global.
+      // They coincide with `serve`'s allowlist ids in the common case because
+      // both derive from the directory name, but they are not the same
+      // namespace — so an unmatched id shows the whole board rather than an
+      // empty one.
+      return <Board project={project?.id ?? null} />
     case '/runs':
       return (
         <NotYet title="Runs" phase="Phase 3">

@@ -70,6 +70,103 @@ async function errorText(res: Response): Promise<string> {
   return `${res.status} ${res.statusText}`
 }
 
+/* ── Board ────────────────────────────────────────────────────────────────
+ *
+ * Shapes mirror `serve::board::card_json` and `wingman_board::Rollup`. The
+ * column, the roll-up and the badges are all **derived server-side**, by the
+ * same code `wingman board` renders — so the panel cannot disagree with the
+ * TUI about what state a card is in, and there is no derivation to reimplement
+ * here and keep in sync.
+ */
+
+/** Serialised `wingman_autonomous::TaskStatus`. */
+export type TaskStatus = 'pending' | 'todo' | 'in_progress' | 'review' | 'done' | 'failed' | 'blocked'
+
+/** Serialised `wingman_autonomous::RunStatus`. */
+export type RunStatus =
+  | 'planning'
+  | 'awaiting_approval'
+  | 'running'
+  | 'merging'
+  | 'done'
+  | 'failed'
+  | 'aborted'
+
+/** One planner task under a card. Ephemeral — projected live from the run. */
+export type SubRow = {
+  task_id: string
+  title: string
+  status: TaskStatus
+  role: string
+  agent_name: string | null
+  model: string | null
+  session_id: string | null
+  usd: number
+  attempts: number
+  /** Unmet dependencies — why the scheduler is holding this task. */
+  blocked_by: string[]
+  current_tool: string | null
+  deps: string[]
+  writes: number
+  elapsed_secs: number | null
+  outcome: string | null
+  worktree: string | null
+}
+
+export type Rollup = {
+  status: RunStatus
+  done: number
+  total: number
+  failed: number
+  blocked: number
+  review: number
+  in_progress: number
+  not_started: number
+  usd: number
+  subrows: SubRow[]
+}
+
+/** A card is durable; everything under `rollup` is projected from the run. */
+export type Card = {
+  id: string
+  short: string
+  title: string
+  goal: string
+  notes: string | null
+  labels: string[]
+  archived: boolean
+  created_at: string
+  project: string
+  project_name: string
+  project_missing: boolean
+  column: ColumnId
+  run_id: string | null
+  badges: Badge[]
+  rollup: Rollup | null
+}
+
+export type ColumnId = 'backlog' | 'planned' | 'in-progress' | 'review' | 'done'
+
+/**
+ * A badge carries its kind as well as its text, so the panel can drop the ones
+ * it already renders as structured fields without matching on formatted
+ * strings. `wingman board list --json` emits only the text.
+ */
+export type Badge = {
+  kind: 'progress' | 'cost' | 'failed' | 'blocked' | 'aborted' | 'retry' | 'missing' | 'label' | 'more_labels'
+  text: string
+}
+
+export type BoardProject = { id: string; name: string; root: string; missing: boolean }
+
+export type BoardData = {
+  columns: { id: ColumnId; title: string }[]
+  cards: Card[]
+  projects: BoardProject[]
+}
+
+export type Dispatched = { run_id: string; project: string; pid: number }
+
 export const api = {
   health: () => request<Health>('/v1/health'),
   projects: () => request<{ projects: Project[] }>('/v1/projects').then((r) => r.projects),
@@ -87,4 +184,31 @@ export const api = {
     }),
 
   signOut: () => request<void>('/v1/ui/session', { method: 'DELETE' }),
+
+  board: (project?: string) =>
+    request<BoardData>(`/v1/board${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+
+  addCard: (body: { project: string; title: string; goal?: string; labels?: string[] }) =>
+    request<{ id: string; short: string }>('/v1/board/cards', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  dispatchCard: (id: string, body: { again?: boolean; args?: string[] } = {}) =>
+    request<Dispatched>(`/v1/board/cards/${encodeURIComponent(id)}/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  archiveCard: (id: string, restore = false) =>
+    request<{ id: string; archived: boolean }>(
+      `/v1/board/cards/${encodeURIComponent(id)}/archive`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ restore }),
+      },
+    ),
 }

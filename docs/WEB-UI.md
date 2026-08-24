@@ -8,9 +8,9 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phases 0–1 shipped** — the delivery pipeline, the app shell, sign-in,
-and the live event stream. The board, runs, config, sessions and insights
-arrive in phases 2–6; the panel names the phase on each section rather than
+Status: **phases 0–2 shipped** — the delivery pipeline, the app shell, sign-in,
+the live event stream, and the board. Runs, config, sessions and insights
+arrive in phases 3–6; the panel names the phase on each section rather than
 pretending they are missing by accident. Build order and the reasoning behind
 each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
@@ -120,6 +120,43 @@ cookie substituted for the one it just supplied.
 > headers. With a bearer token the panel would have had to put it in the query
 > string of `/v1/events` — and therefore into every access log. The cookie
 > rides along on its own.
+
+## The board
+
+Five columns, expandable cards, sub-rows, and a task detail panel — the same
+board `wingman board` renders, in a browser.
+
+**Nothing about a card's state is computed in the browser.** The column, the
+roll-up and the badges are derived server-side by `wingman-board`, the same
+code the TUI calls. A second derivation in TypeScript would be the first thing
+to disagree with the terminal on a Friday afternoon.
+
+The board refreshes on the `/v1/events` stream rather than polling: a run
+transition anywhere means some card's derived column may have moved.
+
+Adding a card and dispatching one both work from the panel. Dispatch spawns
+`wingman pilot run --detached` through the same `dispatch_card` the CLI uses —
+including the fix for the bug where `Command::output()` blocked for the entire
+run because the detached grandchild held the pipes.
+
+**A card can only be dispatched into a repo this daemon serves.** The board
+registry is global and remembers every repo pilot has ever run in;
+`[[serve.projects]]` is narrower. Dispatching outside it is a `403` — otherwise
+the API token would start agents with write access in directories the
+allowlist never named.
+
+On first start the daemon registers its allowlisted repos on the board, once,
+so the panel opens onto a board that can actually take a card. It is guarded by
+a stored flag, so projects you deliberately forget stay forgotten.
+
+### There is no drag-and-drop
+
+Not because it is hard in React. Moving a card means forcing a task transition
+past the dependency gates and the write-set conflict check, which is the
+machinery that makes runs converge. If it is ever built it belongs in the
+orchestrator behind its own gate — see
+[BOARD-PLAN.md](BOARD-PLAN.md) § Scope creep toward drag-and-drop. Cards move
+because runs move.
 
 ## Scope
 

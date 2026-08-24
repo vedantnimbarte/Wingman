@@ -4,7 +4,7 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phases 0–1 shipped; phases 2–6 planned.** Phases ship in order and
+> **Status: phases 0–2 shipped; phases 3–6 planned.** Phases ship in order and
 > each one is independently useful. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
@@ -216,7 +216,7 @@ the ledger column, not the typeface — both stacks resolve to faces with real
 tabular figures. Revisit if the panel ever ships somewhere the system stack is
 not a known quantity.
 
-## Phase 2 — the board
+## Phase 2 — the board ✅ shipped
 
 The only phase needing new board plumbing. The board is **global** (spans
 projects, lives in `~/.wingman/board.db`), but `table.rs`'s routes are
@@ -249,6 +249,61 @@ gates and the write-set conflict check, "the machinery that makes runs
 converge… If it is ever built, it belongs in the orchestrator with its own gate,
 not in the renderer." A web renderer is still a renderer. Cards move because
 runs move.
+
+### Found while building it
+
+**The daemon must not use `commands::board::open`.** That helper calls
+`touch_project(cwd)` to auto-register the repo you are standing in. A daemon's
+cwd is wherever it was launched — often `~`, often not a repo at all — so
+reusing it would have put a phantom project in the registry of everyone who
+ever ran `wingman serve` from their home directory. `serve::board::open` calls
+`BoardStore::open_default` and nothing else.
+
+**Dispatch needed an allowlist check that the CLI does not.** The board
+registry is global and accumulates every repo pilot has ever run in;
+`[[serve.projects]]` is deliberately narrower. Without a check, holding the API
+token would let a request start an agent with write access in any directory the
+board happens to remember — turning the allowlist, the one boundary `serve`
+has, into a suggestion. `dispatch_allowed` compares canonicalised roots via
+`projects::find`, and is the one piece of this phase with its own unit tests.
+
+**`import_serve_projects` existed and had never been called.** Written for
+exactly this moment, guarded by a `meta` key so forgetting a project is sticky.
+Without it a `serve`-only user opens the panel onto a board that cannot take a
+card, because registration otherwise happens by running pilot from a terminal —
+the trip the panel exists to avoid.
+
+**Badges had to grow a `kind` on the wire.** `Badge::text()` is what
+`board list --json` emits and it is lossy: `"0/3"` and `"$1.04"` are
+indistinguishable from a label someone typed. The panel renders progress and
+cost as structured fields on the ledger axis, so it has to know which badges it
+has already shown — and filtering by matching formatted strings would break the
+first time a decimal place moved. `/v1/board` emits `{kind, text}`; the CLI's
+`--json` is unchanged. A test asserts every `Badge` variant is named, so a new
+variant cannot silently inherit another's behaviour.
+
+**The two project-id namespaces are not the same.** `[[serve.projects]].id` is
+user-chosen; the board registry slug is generated from the directory name. They
+usually coincide, which is exactly what makes the mismatch dangerous — filtering
+the board on an unresolvable id showed an empty board that read as "no cards"
+rather than "wrong key". The panel now scopes only when the id resolves.
+
+**Registry drift is real, and the panel had to handle it.** The development
+board here carried eleven `wingman-smoke-*` projects whose directories are long
+gone — precisely what BOARD-PLAN.md § Registry drift predicted. Offering them
+as destinations would let someone file a card that can never be dispatched, so
+only projects that still exist on disk are offered.
+
+**`white-space: nowrap` on the ledger figure overflowed the detail panel.**
+Correct for a number that should not wrap mid-column, wrong for a worktree path
+— 855px of content in a 400px panel. Relaxed inside `.detail` only, so the
+board's columns keep their alignment.
+
+**Dispatch is wired but was never fired end to end.** Starting a real run
+spends real money on real API keys, so verification stopped at proving the
+request reaches `plan_dispatch`: `{"args":["--watch"]}` comes back `400` with
+the refusal from the shared validation list. Spawn itself is covered by
+`wingman-board`'s own tests and by `board dispatch` in the CLI.
 
 ## Phase 3 — pilot runs, live
 

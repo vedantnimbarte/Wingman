@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, pilot, projects, push, sessions, table, ui, ServeState};
+use super::{admin, auth, board, pilot, projects, push, sessions, table, ui, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -70,6 +70,10 @@ async fn dispatch(
         ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
         ("GET", ["v1", "events"]) => events(state, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
+
+        // The board is global — one store spanning every project — so it sits
+        // beside `/v1/config` rather than under `/v1/projects/{p}`.
+        (_, ["v1", "board", rest @ ..]) => board::route(state, req, rest, sock).await,
 
         // Everything below operates on one repo. Resolve it once here so no
         // handler can forget the allowlist check.
@@ -219,6 +223,7 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
         ],
     });
     if let Some(routes) = doc["routes"].as_array_mut() {
+        routes.extend(board::schema());
         routes.extend(sessions::schema());
         routes.extend(table::schema());
         routes.extend(admin::schema());

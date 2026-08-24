@@ -391,6 +391,292 @@ body {
   max-width: 44rem;
 }
 
+/* ── Board ──────────────────────────────────────────────────────────────
+ *
+ * Five columns side by side, scrolling horizontally rather than compressing
+ * into slivers — the TUI drops to a grouped list below 100 columns for the
+ * same reason, and a 90px-wide card is not a card.
+ */
+
+.board {
+  padding: calc(var(--space) * 1.5);
+  padding-right: calc(var(--space) * 1.5 + 1px);
+}
+
+.board-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.board-head h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0.25rem 0 0;
+}
+
+.board-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(15rem, 1fr);
+  gap: var(--space);
+  overflow-x: auto;
+  padding-bottom: var(--space);
+}
+
+.column {
+  min-width: 0;
+}
+
+.column-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 0.75rem;
+}
+
+/* Cards are flat, ruled panels rather than floating shadowed tiles: this is a
+   ledger, and the page should read as ruled paper. */
+.card {
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.6rem 0.7rem;
+  margin-bottom: 0.6rem;
+  background: var(--paper);
+}
+
+.card-missing {
+  border-style: dashed;
+}
+
+.card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.card-toggle {
+  flex: none;
+  width: 1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--step-0);
+  cursor: pointer;
+  text-align: left;
+}
+
+.card-toggle:hover {
+  color: var(--ink);
+}
+
+.card-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--step-1);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.card-short {
+  flex: none;
+}
+
+.card-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+  font-size: var(--step-0);
+}
+
+.card-meta > :first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Spend hangs on the right edge of the card, on the same axis as the column
+   total and the board total above it. */
+.card-usd,
+.subrow-usd {
+  flex: none;
+  text-align: right;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+
+.badge {
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  font-size: var(--step--1);
+  color: var(--muted);
+}
+
+.card-note {
+  margin: 0.4rem 0 0;
+  font-size: var(--step--1);
+}
+
+.subrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.2rem 0.25rem;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--step-0);
+  text-align: left;
+  cursor: pointer;
+}
+
+.subrow:hover {
+  background: var(--raised);
+}
+
+.glyph {
+  flex: none;
+  font-family: var(--mono);
+  /* The board's sub-rows are flex and get their spacing from `gap`; the run
+     plan's rows are not, so the glyph needs its own or it collides with the
+     task id. */
+  margin-right: 0.4em;
+}
+
+/* Identifiers keep their case wherever they appear, including inside an
+   eyebrow. A run id or session id is meant to be copied. */
+.identifier {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.subrow-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subrow-agent {
+  flex: none;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+}
+
+.card-tools {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+.card-tools .button {
+  padding: 0.15rem 0.4rem;
+  font-size: var(--step--1);
+}
+
+/* ── Add card ───────────────────────────────────────────────────────────── */
+
+.add-card {
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.75rem;
+  margin-bottom: var(--space);
+  display: grid;
+  gap: 0.6rem;
+  max-width: 44rem;
+}
+
+.add-card label {
+  display: block;
+}
+
+.add-card .eyebrow {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.add-card .input {
+  width: 100%;
+}
+
+.add-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.add-grow {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.add-tools {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* ── Task detail ────────────────────────────────────────────────────────── */
+
+.detail {
+  position: fixed;
+  inset: auto 0 0 auto;
+  top: 0;
+  width: min(26rem, 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space);
+  background: var(--paper);
+  border-left: 1px solid var(--rule);
+}
+
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.detail-head h2 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0.15rem 0 0;
+}
+
+.detail-outcome {
+  margin: var(--space) 0 0.25rem;
+}
+
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
 @media (max-width: 40rem) {
@@ -428,7 +714,27 @@ body {
     border-bottom-color: var(--ink);
   }
 
-  .view {
+  .view,
+  .board {
     padding: var(--space);
+  }
+
+  /* One column at a time on a phone, stacked. Five side-by-side columns on a
+     375px screen is five slivers; the TUI degrades the same way below 100
+     columns, and for the same reason. */
+  .columns {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow-x: visible;
+  }
+
+  /* An empty column is a heading with nothing under it — worth the row on a
+     wide screen where the grid explains it, not on a phone. */
+  .column:not(:has(.card)) {
+    display: none;
+  }
+
+  .detail {
+    width: 100%;
   }
 }

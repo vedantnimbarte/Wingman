@@ -20,6 +20,7 @@
 mod admin;
 mod argv;
 pub mod auth;
+mod board;
 mod child;
 mod http;
 mod pilot;
@@ -134,6 +135,13 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
         ceiling,
         started: Instant::now(),
     });
+
+    // Put the allowlisted repos on the board once, so the panel opens onto a
+    // board that can actually take a card. Without it a `serve`-only user sees
+    // an empty registry and cannot add one, because registration otherwise
+    // happens by running pilot from a terminal — the trip the panel exists to
+    // avoid. Idempotent and best-effort; see `board::import_projects`.
+    board::import_projects(&state);
 
     // Outbound push runs alongside the listener when configured, so a phone
     // learns a run finished without holding a connection open.

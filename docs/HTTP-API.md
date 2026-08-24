@@ -190,6 +190,34 @@ run's process.
 | `POST` | `/v1/projects/{p}/pilot/runs/{run}/retry` | `{"task":"id"}` | Re-queue a failed or blocked task. |
 | `POST` | `/v1/projects/{p}/pilot/goals` | `{"text":"…","author":"…"}` | Write an intake file for the discovery daemon. A body-claimed author never earns trust over the API — trust comes from `[pilot.daemon].trusted_authors` as the daemon matches it, not from a request asserting an identity. |
 
+### Board
+
+The board is **global** — one `~/.wingman/board.db` spanning every project — so
+these routes are not project-scoped. `wingman-board` is called in-process, so
+the column, roll-up and badges are the same derivation `wingman board` renders.
+
+| Method | Path | Effect |
+|---|---|---|
+| `GET` | `/v1/board?project=&archived` | Columns, cards with derived column / roll-up / badges, and the project registry in one response. |
+| `GET` | `/v1/board/projects` | The board's registry, each with whether its directory still exists. |
+| `POST` | `/v1/board/cards` | `{"project":"…","title":"…","goal":"…?","notes":"…?","labels":[]}` → `{id, short}`. |
+| `GET` | `/v1/board/cards/{card}` | One card and its dispatch history. `{card}` is an id or a unique prefix. |
+| `POST` | `/v1/board/cards/{card}/dispatch` | `{"again":bool,"args":[]}` → `{run_id, project, pid}`, spawned detached. |
+| `POST` | `/v1/board/cards/{card}/archive` | `{"restore":bool}` to unarchive instead. |
+| `DELETE` | `/v1/board/cards/{card}` | Forgets the card and its dispatch history. The runs on disk are untouched. |
+
+`badges` carry `{kind, text}` rather than the bare strings
+`board list --json` emits, so a renderer can tell a `progress` badge from a
+label a user typed without parsing formatted text.
+
+**Dispatch is bounded by the allowlist.** The registry can name repos this
+daemon does not serve; dispatching one is a `403`. Without that, the token
+would start an agent with write access in any directory the board remembers.
+
+`args` are forwarded to `pilot run` verbatim and validated by the same list the
+CLI uses — `--worker-mode`, `--detached`, `-d` and `--watch` are refused with a
+`400`.
+
 ### Sessions and turns
 
 Conversations are server-held: the transcript is a normal
