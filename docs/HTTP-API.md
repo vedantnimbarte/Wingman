@@ -97,7 +97,7 @@ TLS and does not pretend to.
 
 ## Authentication
 
-Every route except `GET /v1/health` requires:
+Every route except `GET /v1/health` and the two session routes below requires:
 
 ```
 Authorization: Bearer <token>
@@ -109,6 +109,23 @@ Compared in constant time. A failed auth returns `401` with
 
 There is one token. Per-token ceilings and per-token project scoping are a
 deliberate non-goal for now (see [Non-goals](#non-goals)).
+
+**Browsers use a cookie instead**, because `EventSource` cannot set headers and
+a token in a query string ends up in every access log.
+
+| Method | Path | Effect |
+|---|---|---|
+| `POST` | `/v1/ui/session` | Body `{"token":"…"}`. Verifies it with the same constant-time comparison, then returns `Set-Cookie: wingman_token=…; Path=/; HttpOnly; SameSite=Strict`. A wrong token is `401` and sets nothing. Ungated, because this *is* the authentication. |
+| `DELETE` | `/v1/ui/session` | Clears the cookie. Ungated, so a browser holding a cookie the server no longer accepts can still drop it. |
+
+`GET /v1/health` reports `auth_required` so a client can tell whether any of
+this is needed before asking for a secret that may not exist.
+
+An explicit `Authorization` or `X-Wingman-Token` header wins over the cookie: a
+script that sends a credential means it, and must not have a stale browser
+cookie silently substituted. `Secure` is not set — the panel is served over
+plain HTTP on loopback or a LAN address, where a `Secure` cookie is discarded;
+see [WEB-UI.md](WEB-UI.md) for the full reasoning and what it costs.
 
 ---
 

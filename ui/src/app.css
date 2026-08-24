@@ -1,41 +1,66 @@
 /*
- * Ledger — the design system's seed. See `docs/WEB-UI-PLAN.md` § Design.
+ * Ledger — the panel's design system. Direction and reasoning in
+ * `docs/WEB-UI-PLAN.md` § Design.
  *
- * One rule holds the whole palette together: colour encodes epistemic status
- * and nothing else. `--proven` is a verification that passed or a task that
- * finished; `--asserted` is running and unproven; `--failed` is failed or
- * blocked. None of the three is ever a brand accent, a hover state, or a
- * chart's decoration.
+ * One rule holds the palette together:
  *
- * Cost deliberately has no colour. It gets typography — tabular figures, right
- * aligned, and nothing else in the layout is right aligned.
+ *   Colour encodes epistemic status, and nothing else.
  *
- * Phase 0 uses system font stacks. The type pairing is settled in Phase 1,
- * alongside the real app shell.
+ * `--proven` is a verification that passed or a task that finished.
+ * `--asserted` is running and unproven. `--failed` is failed or blocked. None
+ * of the three is ever a brand accent, a hover state, or a chart decoration.
+ * A scan of the board answers one question — what here is actually true, and
+ * what is merely running — and colour is how it answers.
+ *
+ * Cost deliberately has no colour. It gets typography: tabular figures on the
+ * ledger rule at the right edge, and nothing else in the layout is
+ * right-aligned. That rule runs unbroken through every view; sub-task spend
+ * sums into its card, cards into their column, columns into the header.
+ *
+ * Status is never carried by colour alone — every state also has a glyph, or
+ * three hues that all mean "state" is where a colour-blind reader loses the
+ * board.
  */
 
 :root {
+  color-scheme: light dark;
+
   --paper: #fcfcfd;
+  --raised: #f4f5f8;
   --ink: #16181d;
   --muted: #5c6370;
   --rule: #e4e6eb;
 
-  --proven: #0b7a5a;
+  --proven: #0b7a5a; /* 5.19:1 on --paper */
+  /* 4.76:1. The plan's #b4690e measured 4.12:1, under the 4.5:1 floor for the
+     13px this is set at — status text that fails contrast is status nobody
+     reads. Darkened until it passes, stopping before it turns brown. */
   --asserted: #a85f0b;
-  --failed: #b03a2e;
+  --failed: #b03a2e; /* 5.87:1 */
 
-  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Menlo, Consolas, monospace;
+  /* Phase 1 ships system stacks rather than IBM Plex: the identity here lives
+     in the colour rule and the ledger column, not the typeface, and ~160KB of
+     base64 webfont in a locally served panel is weight the design does not
+     earn. Both stacks resolve to faces with real tabular figures. */
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    sans-serif;
+  --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
 
-  --step-0: 0.875rem;
-  --step-1: 1rem;
-  --step-2: 1.5rem;
+  --step--1: 0.75rem;
+  --step-0: 0.8125rem;
+  --step-1: 0.9375rem;
+  --step-2: 1.25rem;
+  --step-3: 1.75rem;
+
   --space: 1rem;
+  --rail: 12rem;
+  --header: 3.25rem;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --paper: #0e1014;
+    --raised: #171a20;
     --ink: #e8eaf0;
     --muted: #8a909c;
     --rule: #22262e;
@@ -50,6 +75,12 @@
   box-sizing: border-box;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
   background: var(--paper);
@@ -60,15 +91,10 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Every figure in the panel: tabular so the ledger column aligns down the page. */
-.figure {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
 :focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
+  border-radius: 2px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -80,54 +106,329 @@ body {
   }
 }
 
-/* --- Phase 0 shell. Replaced by the real app shell in Phase 1. --- */
+/* ── Type roles ─────────────────────────────────────────────────────────── */
 
-.boot {
-  max-width: 34rem;
-  margin: 0 auto;
-  padding: calc(var(--space) * 4) var(--space);
-}
-
-.boot h1 {
-  font-size: var(--step-2);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.25rem;
-}
-
-.boot p {
-  color: var(--muted);
+/* Every figure in the panel. Tabular so columns of numbers line up down the
+   page — the ledger only reads as a ledger if the digits are on a grid. */
+.figure {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
   font-size: var(--step-0);
-  margin: 0 0 calc(var(--space) * 2);
 }
 
-.boot dl {
-  border-top: 1px solid var(--rule);
-  margin: 0;
+.eyebrow {
+  font-size: var(--step--1);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
-.boot div {
+.muted {
+  color: var(--muted);
+}
+
+/* ── Epistemic status ───────────────────────────────────────────────────── */
+
+.is-proven {
+  color: var(--proven);
+}
+.is-asserted {
+  color: var(--asserted);
+}
+.is-failed {
+  color: var(--failed);
+}
+
+/* Glyph carries the state too, so colour is never the only signal. */
+.dot::before {
+  content: '●';
+  font-size: 0.7em;
+  vertical-align: 0.15em;
+  margin-right: 0.4em;
+}
+.dot.is-asserted::before {
+  content: '◐';
+}
+.dot.is-failed::before {
+  content: '✕';
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  grid-template-rows: var(--header) 1fr;
+  grid-template-areas:
+    'brand header'
+    'nav   main';
+  height: 100%;
+}
+
+.shell-brand {
+  grid-area: brand;
   display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 var(--space);
+  border-bottom: 1px solid var(--rule);
+  border-right: 1px solid var(--rule);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.shell-header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
   justify-content: space-between;
-  align-items: baseline;
   gap: var(--space);
-  padding: 0.625rem 0;
+  padding: 0 var(--space);
   border-bottom: 1px solid var(--rule);
 }
 
-.boot dt {
+.shell-nav {
+  grid-area: nav;
+  border-right: 1px solid var(--rule);
+  padding: var(--space) 0;
+  overflow-y: auto;
+}
+
+.shell-main {
+  grid-area: main;
+  overflow: auto;
+  /* The ledger rule: one continuous vertical line at the right edge of every
+     view, which the figures hang on. Drawn as a background so it runs the full
+     scroll height rather than stopping with the content. */
+  background:
+    linear-gradient(var(--rule), var(--rule)) right / 1px 100% no-repeat;
+}
+
+.view {
+  padding: calc(var(--space) * 1.5);
+  padding-right: calc(var(--space) * 1.5 + 1px);
+  max-width: 68rem;
+}
+
+/* ── Nav ────────────────────────────────────────────────────────────────── */
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: 0.4rem var(--space);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--step-0);
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  color: var(--ink);
+  background: var(--raised);
+}
+
+.nav-item[aria-current='page'] {
+  color: var(--ink);
+  border-left-color: var(--ink);
+  font-weight: 600;
+}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+
+.select,
+.input,
+.button {
+  font: inherit;
+  font-size: var(--step-0);
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+}
+
+.button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--raised);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+.button-quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.button-quiet:hover {
+  color: var(--ink);
+}
+
+/* ── Ledger rows ────────────────────────────────────────────────────────── */
+
+.rows {
+  border-top: 1px solid var(--rule);
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* `nowrap` keeps short figures on the ledger axis rather than wrapping a
+   number mid-column. It is wrong for values that are not figures — a worktree
+   path or a session id has no natural width — so anywhere those appear, the
+   rule is relaxed rather than left to overflow the panel. */
+.row > :last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.detail .row > :last-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ── States ─────────────────────────────────────────────────────────────── */
+
+.state {
+  padding: calc(var(--space) * 2) 0;
+  max-width: 34rem;
+}
+
+.state h2 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.375rem;
+}
+
+.state p {
+  margin: 0 0 0.75rem;
   color: var(--muted);
   font-size: var(--step-0);
 }
 
-.boot dd {
-  margin: 0;
-  text-align: right;
+.state code {
+  font-family: var(--mono);
+  font-size: 0.95em;
+  background: var(--raised);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
 }
 
-.status-proven {
-  color: var(--proven);
+/* ── Sign-in ────────────────────────────────────────────────────────────── */
+
+.signin {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--space);
 }
-.status-failed {
-  color: var(--failed);
+
+.signin form {
+  width: min(24rem, 100%);
+}
+
+.signin h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0 0 0.25rem;
+}
+
+.signin p {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  font-size: var(--step-0);
+}
+
+.signin label {
+  display: block;
+  margin-bottom: 0.375rem;
+}
+
+.signin .input {
+  width: 100%;
+  font-family: var(--mono);
+  margin-bottom: 0.75rem;
+}
+
+/* ── Page heads ─────────────────────────────────────────────────────────── */
+
+.view h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0.25rem 0 0.25rem;
+}
+
+.view > .eyebrow {
+  display: block;
+}
+
+.view-intro {
+  color: var(--muted);
+  font-size: var(--step-0);
+  margin: 0 0 calc(var(--space) * 1.5);
+  max-width: 44rem;
+}
+
+/* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
+
+@media (max-width: 40rem) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--header) auto 1fr;
+    grid-template-areas:
+      'header'
+      'nav'
+      'main';
+  }
+
+  .shell-brand {
+    display: none;
+  }
+
+  .shell-nav {
+    display: flex;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding: 0;
+  }
+
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .nav-item[aria-current='page'] {
+    border-left-color: transparent;
+    border-bottom-color: var(--ink);
+  }
+
+  .view {
+    padding: var(--space);
+  }
 }

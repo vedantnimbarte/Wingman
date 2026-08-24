@@ -8,10 +8,11 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phase 0 shipped** — the delivery pipeline (build, embed, serve,
-deep-link, release). The panel currently renders daemon liveness and nothing
-else. Build order and the reasoning behind each decision are in
-[WEB-UI-PLAN.md](WEB-UI-PLAN.md).
+Status: **phases 0–1 shipped** — the delivery pipeline, the app shell, sign-in,
+and the live event stream. The board, runs, config, sessions and insights
+arrive in phases 2–6; the panel names the phase on each section rather than
+pretending they are missing by accident. Build order and the reasoning behind
+each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
 The terminal board (`wingman board`) is unaffected and stays the default. This
 is a second renderer, not a replacement — see [BOARD.md](BOARD.md).
@@ -79,10 +80,46 @@ fallback stops at `/v1`: an unknown API path stays a JSON `404` rather than
 becoming a `200` with an HTML body, which is the failure mode that makes a
 client's error handling silently wrong.
 
-> **Phase 1 will change how the browser holds the token.** It trades it for an
-> `HttpOnly; SameSite=Strict` cookie via `POST /v1/ui/session`, so the token is
-> never readable by page script. Until then the panel reads nothing but
-> `/v1/health`, which needs no token at all.
+### Signing in
+
+`GET /v1/health` reports `auth_required`. On a loopback daemon with no token it
+is `false` and the panel goes straight to the shell — there is no secret to
+demand. Otherwise the panel asks for the token once and posts it to
+`POST /v1/ui/session`, which verifies it with the same constant-time comparison
+every other route uses and returns it as a cookie:
+
+```
+Set-Cookie: wingman_token=<token>; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000
+```
+
+**`HttpOnly`** is the point: the panel has an npm dependency tree, and a token
+readable by page script is one bad transitive dependency away from leaving the
+machine. **`SameSite=Strict`** stands in for CSRF tokens — no cross-site
+request carries this cookie, and no CORS headers are set, so another origin can
+neither send it nor read the reply.
+
+**`Secure` is deliberately absent.** It would be correct over TLS and wrong
+here: the panel is reached over plain HTTP on loopback or a LAN address — the
+phone-on-the-sofa case it exists for — and a `Secure` cookie on those origins is
+simply discarded. The threat it defends against already sees
+`Authorization: Bearer` on every other request to the same daemon.
+
+The cookie carries the token itself rather than a session id, so there is no
+session table and no expiry bookkeeping. What that costs: a leaked cookie is a
+leaked token, and the only revocation is `wingman serve --init-token` to rotate
+it.
+
+`DELETE /v1/ui/session` signs out and is never gated — a browser holding a
+cookie the server has stopped accepting must still be able to drop it.
+
+An explicit `Authorization` or `X-Wingman-Token` header always wins over the
+cookie, so a script or CI job that sends a credential never has a stale browser
+cookie substituted for the one it just supplied.
+
+> **Why this matters beyond exfiltration:** `EventSource` cannot set request
+> headers. With a bearer token the panel would have had to put it in the query
+> string of `/v1/events` — and therefore into every access log. The cookie
+> rides along on its own.
 
 ## Scope
 

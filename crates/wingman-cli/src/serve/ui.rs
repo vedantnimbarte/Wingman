@@ -17,9 +17,13 @@
 //! rather than becoming a 200 with an HTML body, which is the failure mode
 //! that makes a client's error handling silently wrong.
 
+use std::sync::Arc;
+
+use serde::Deserialize;
 use tokio::net::TcpStream;
 
 use super::http::{self, Request};
+use super::{auth, ServeState};
 
 const INDEX_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui/index.html"));
 const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui/app.js"));
@@ -72,6 +76,70 @@ pub async fn serve(req: &Request, sock: &mut TcpStream) -> std::io::Result<()> {
         content_type,
         &[("ETag", &etag), ("Cache-Control", "no-cache")],
         body,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct SignIn {
+    token: String,
+}
+
+/// `POST /v1/ui/session` — exchange a token for the panel's cookie.
+///
+/// Unauthenticated by necessity: this *is* the authentication. The token is
+/// checked here with the same constant-time comparison every other route uses,
+/// so a wrong token is a `401` at sign-in rather than a cookie that fails on
+/// every subsequent request and looks like a broken panel.
+///
+/// Nothing is stored server-side — see [`auth::cookie`] for what the cookie
+/// holds and what that costs.
+pub async fn sign_in(
+    state: &Arc<ServeState>,
+    req: &Request,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    // No token configured means loopback-only with auth off (`check_bind`
+    // guarantees it). There is nothing to exchange, and saying so lets the
+    // panel skip the sign-in screen instead of demanding a secret that does
+    // not exist.
+    let Some(expected) = state.token.as_deref() else {
+        return http::write_json(sock, 200, &serde_json::json!({ "auth_required": false })).await;
+    };
+
+    let body: SignIn = match req.json() {
+        Ok(b) => b,
+        Err(e) => return http::write_err(sock, 400, &e).await,
+    };
+
+    if !auth::authorized(Some(expected), Some(body.token.trim())) {
+        // Same opaque message as the gate in `routes::handle`: a sign-in form
+        // must not become an oracle that distinguishes "wrong" from "close".
+        return http::write_err(sock, 401, "unauthorized").await;
+    }
+
+    http::write_raw(
+        sock,
+        200,
+        "application/json",
+        &[("Set-Cookie", &auth::cookie(Some(body.token.trim())))],
+        br#"{"auth_required":true}"#,
+    )
+    .await
+}
+
+/// `DELETE /v1/ui/session` — sign out.
+///
+/// Never gated. A browser holding a cookie the server no longer accepts must
+/// still be able to drop it, and refusing to clear a credential because the
+/// credential is invalid is the kind of loop a user cannot escape.
+pub async fn sign_out(sock: &mut TcpStream) -> std::io::Result<()> {
+    http::write_raw(
+        sock,
+        204,
+        "application/json",
+        &[("Set-Cookie", &auth::cookie(None))],
+        &[],
     )
     .await
 }

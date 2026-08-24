@@ -86,7 +86,15 @@ pub fn check_bind(
     Ok(parsed)
 }
 
-/// Extract the presented token from either accepted header.
+/// Name of the cookie the web panel authenticates with. See [`cookie`].
+pub const COOKIE_NAME: &str = "wingman_token";
+
+/// Extract the presented token from any accepted source: the `Authorization`
+/// header, the `X-Wingman-Token` header, or the panel's cookie.
+///
+/// Headers win over the cookie. A script or CI job that sends an explicit
+/// credential means it, and should not have a stale browser cookie silently
+/// substituted for the token it just supplied.
 pub fn presented<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<&'a str> {
     if let Some(v) = header("authorization") {
         // Case-insensitive scheme, per RFC 7235.
@@ -98,7 +106,53 @@ pub fn presented<'a>(header: impl Fn(&str) -> Option<&'a str>) -> Option<&'a str
         }
         return None;
     }
-    header("x-wingman-token").map(str::trim)
+    if let Some(v) = header("x-wingman-token") {
+        return Some(v.trim());
+    }
+    header("cookie").and_then(cookie_value)
+}
+
+/// Pull [`COOKIE_NAME`] out of a `Cookie:` header.
+///
+/// Hand-parsed rather than pulled in as a dependency: the header is a
+/// `; `-separated list of `name=value`, and the panel sets a base64 token with
+/// no quoting or encoding to undo.
+fn cookie_value(header: &str) -> Option<&str> {
+    header.split(';').find_map(|pair| {
+        let (name, value) = pair.split_once('=')?;
+        (name.trim() == COOKIE_NAME).then(|| value.trim())
+    })
+}
+
+/// The `Set-Cookie` value that signs the browser in, or signs it out when
+/// `token` is `None`.
+///
+/// **`HttpOnly`** is the point of the whole exercise: the panel will grow an
+/// npm dependency tree, and a token readable by page script is one bad
+/// transitive dependency away from being exfiltrated. **`SameSite=Strict`** is
+/// what stands in for CSRF tokens — no cross-site request carries this cookie,
+/// and no CORS headers are set, so another origin can neither send it nor read
+/// the reply.
+///
+/// **`Secure` is deliberately absent.** It would be correct over TLS and wrong
+/// here: the panel is reached over plain HTTP on loopback or a LAN address,
+/// which is exactly the phone-on-the-sofa case this exists for, and a `Secure`
+/// cookie on those origins is simply discarded. The threat it defends against
+/// — someone reading the wire — already sees `Authorization: Bearer` on every
+/// other request to the same daemon.
+///
+/// The cookie carries the token itself rather than a session id, so there is
+/// no session table and no expiry bookkeeping. The ceiling that accepts: a
+/// leaked cookie is a leaked token, and the only revocation is
+/// `wingman serve --init-token` to rotate it.
+pub fn cookie(token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!(
+            "{COOKIE_NAME}={t}; Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+            60 * 60 * 24 * 30
+        ),
+        None => format!("{COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"),
+    }
 }
 
 /// Constant-time comparison of the presented token against the configured
@@ -171,6 +225,46 @@ mod tests {
         assert_eq!(presented(custom), Some("abc"));
         let basic = |n: &str| (n == "authorization").then_some("Basic abc");
         assert_eq!(presented(basic), None);
+    }
+
+    #[test]
+    fn the_cookie_is_read_when_no_header_is_present() {
+        let c = |n: &str| (n == "cookie").then_some("theme=dark; wingman_token=abc; x=1");
+        assert_eq!(presented(c), Some("abc"));
+
+        let only = |n: &str| (n == "cookie").then_some("wingman_token=abc");
+        assert_eq!(presented(only), Some("abc"));
+
+        let absent = |n: &str| (n == "cookie").then_some("theme=dark");
+        assert_eq!(presented(absent), None);
+    }
+
+    #[test]
+    fn an_explicit_header_wins_over_a_stale_cookie() {
+        let both = |n: &str| match n {
+            "authorization" => Some("Bearer from-header"),
+            "cookie" => Some("wingman_token=from-cookie"),
+            _ => None,
+        };
+        assert_eq!(presented(both), Some("from-header"));
+    }
+
+    #[test]
+    fn the_cookie_never_loosens_its_flags() {
+        let set = cookie(Some("abc"));
+        assert!(set.contains("wingman_token=abc"));
+        assert!(set.contains("HttpOnly"), "{set}");
+        assert!(set.contains("SameSite=Strict"), "{set}");
+        // `Secure` would be discarded by the browser on the plain-HTTP LAN
+        // origin the panel is served from, silently breaking sign-in.
+        assert!(!set.contains("Secure"), "{set}");
+    }
+
+    #[test]
+    fn signing_out_expires_the_cookie_rather_than_blanking_it() {
+        let cleared = cookie(None);
+        assert!(cleared.contains("Max-Age=0"), "{cleared}");
+        assert!(cleared.contains("HttpOnly"), "{cleared}");
     }
 
     #[test]

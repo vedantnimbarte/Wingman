@@ -4,7 +4,7 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phase 0 shipped; phases 1–6 planned.** Phases ship in order and
+> **Status: phases 0–1 shipped; phases 2–6 planned.** Phases ship in order and
 > each one is independently useful. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
@@ -148,7 +148,7 @@ precisely the kind of silent degradation that ships. `ui_bundle_is_embedded` is
 `#[ignore]`d so `cargo test` stays green without node, and CI runs it with
 `--ignored` after building the bundle.
 
-## Phase 1 — design system and shell
+## Phase 1 — design system and shell ✅ shipped
 
 - Tokens, type scale, and layout from § Design, as CSS custom properties.
 - App shell: project switcher (`GET /v1/projects`), nav, light/dark.
@@ -166,6 +166,55 @@ New routes, all three deliberately outside the auth gate:
 | `POST` | `/v1/ui/session` | It *is* the authentication — it checks the token itself, constant-time, before setting anything. |
 | `DELETE` | `/v1/ui/session` | A browser holding a cookie the server no longer accepts must still be able to drop it. |
 | `GET` | `/v1/health` (extended) | Gained `auth_required`, so the panel can skip its sign-in screen on a loopback server with no token instead of demanding a secret that does not exist. |
+
+New routes, all three deliberately outside the auth gate:
+
+| Method | Path | Why ungated |
+| --- | --- | --- |
+| `POST` | `/v1/ui/session` | It *is* the authentication — it checks the token itself, constant-time, before setting anything. |
+| `DELETE` | `/v1/ui/session` | A browser holding a cookie the server no longer accepts must still be able to drop it. |
+| `GET` | `/v1/health` (extended) | Gained `auth_required`, so the panel can skip its sign-in screen on a loopback server with no token instead of demanding a secret that does not exist. |
+
+### Found while building it
+
+**The cookie decision turned out to be load-bearing for SSE, not just for
+safety.** `EventSource` cannot set request headers. Under the `sessionStorage`
++ `Authorization` alternative, `/v1/events` — the firehose every later phase
+subscribes to — would have needed the token in the query string, and therefore
+in every access log and every browser history entry. The `HttpOnly` cookie
+rides along on its own. This was luck, not foresight: decision 2 was argued
+purely on exfiltration risk.
+
+**The cookie carries the token itself, not a session id.** No session table, no
+expiry bookkeeping, and `HttpOnly` delivers the actual property wanted — page
+script cannot read the credential. The ceiling that accepts: a leaked cookie is
+a leaked token, and the only revocation is rotating it with
+`wingman serve --init-token`.
+
+**`Secure` is deliberately absent from the cookie.** The plan specified it. It
+would be discarded by the browser on the plain-HTTP LAN origin the panel is
+actually reached from — which is the phone-on-the-sofa case the panel exists
+for — so specifying it would have silently broken sign-in everywhere except
+loopback. `SameSite=Strict` carries the CSRF defence; the wire-reading threat
+`Secure` addresses already sees `Authorization: Bearer` on every other request
+to the same daemon.
+
+**`display_root` had never worked.** It stripped `\?\`, but the Windows
+extended-length prefix is `\\?\` — two leading backslashes — so the check never
+matched. Pre-existing, and visible all along in the `wingman serve` startup
+banner and `serve --list`; the panel just put it somewhere it could not be
+ignored. Fixed at the helper, so all three callers got it at once.
+
+**Light `--asserted` failed contrast at the size it is actually used.** 4.12:1
+against `--paper` at 13px, under the 4.5:1 floor. Caught by measuring rather
+than by looking. See § Design.
+
+**IBM Plex was dropped for system stacks.** The plan had it self-hosted and
+inlined as base64 to keep the build at three files. That is ~160KB of font in a
+panel served off localhost, and the design's identity is the colour rule and
+the ledger column, not the typeface — both stacks resolve to faces with real
+tabular figures. Revisit if the panel ever ships somewhere the system stack is
+not a known quantity.
 
 ## Phase 2 — the board
 
