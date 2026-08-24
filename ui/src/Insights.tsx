@@ -10,7 +10,7 @@ import {
 import { money } from './Board'
 import { navigate } from './router'
 import { message } from './state'
-import { Failed, Loading } from './ui'
+import { Empty, Failed, Loading, PageHead } from './ui'
 
 /**
  * Insights — cost, the per-turn context tax, and the long tail of reports.
@@ -38,8 +38,11 @@ export function Insights({ project }: { project: string | null }) {
   }
   return (
     <div className="view">
-      <span className="eyebrow">Insights</span>
-      <h1>What this repo has cost</h1>
+      <PageHead
+        eyebrow="Insights"
+        title="What this repo has cost"
+        intro="Real spend, the same volume repriced against other models, and the tokens every turn pays before you have typed anything."
+      />
       <Cost project={project} />
       <Context project={project} />
       <Reports project={project} />
@@ -74,10 +77,10 @@ function Cost({ project }: { project: string }) {
 
   if (report.rows.length === 0) {
     return (
-      <div className="state">
-        <h2>Nothing spent yet</h2>
-        <p>Cost accrues as you run turns and pilot runs in this repo.</p>
-      </div>
+      <Empty title="Nothing spent yet">
+        Cost accrues as you run turns and pilot runs in this repo. Start a conversation or dispatch
+        a card and this page fills in.
+      </Empty>
     )
   }
 
@@ -99,8 +102,9 @@ function Cost({ project }: { project: string }) {
 
   return (
     <section>
-      <p className="headline figure">{money(report.total_usd)}</p>
-      <p className="view-intro">
+      <span className="eyebrow">Total spend</span>
+      <p className="headline">{money(report.total_usd)}</p>
+      <p className="section-intro">
         {report.total_input_tokens.toLocaleString()} tokens in ·{' '}
         {report.total_output_tokens.toLocaleString()} out, across{' '}
         {report.rows.length === 1 ? '1 model' : `${report.rows.length} models`}.
@@ -125,7 +129,7 @@ function Cost({ project }: { project: string }) {
       {alternatives.length > 0 && (
         <>
           <h2 className="section-head">What the same work would have cost</h2>
-          <p className="view-intro">
+          <p className="section-intro">
             Your real token volume, repriced. Only a provider-agnostic agent can show you this
             number — and it is a price comparison, not a recommendation: a cheaper model that needs
             three attempts is not cheaper.
@@ -157,7 +161,7 @@ function Cost({ project }: { project: string }) {
               ))}
           </div>
           {cheapest !== null && cheapest < report.total_usd && (
-            <p className="view-intro">
+            <p className="section-intro">
               The cheapest option priced here would have been {money(report.total_usd - cheapest)}{' '}
               less for the identical token volume.
             </p>
@@ -195,7 +199,7 @@ function Context({ project }: { project: string }) {
   return (
     <section>
       <h2 className="section-head">The per-turn tax</h2>
-      <p className="view-intro">
+      <p className="section-intro">
         What every turn pays before you type anything. Most agents never tell you this number.
       </p>
 
@@ -303,7 +307,7 @@ function Reports({ project }: { project: string }) {
   return (
     <section>
       <h2 className="section-head">Reports</h2>
-      <p className="view-intro">
+      <p className="section-intro">
         Listed from <code>GET /v1/schema</code>, which is generated from the server's own route
         table — so a report added to the CLI appears here without this page changing.
       </p>
