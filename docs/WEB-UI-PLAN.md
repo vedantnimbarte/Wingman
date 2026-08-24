@@ -596,46 +596,88 @@ what here is actually true, and what is merely running.
 Cost, deliberately, gets **no colour** — it gets typography. Every row carries a
 right-aligned tabular figure, and nothing else in the layout is right-aligned.
 
-**Signature — the ledger column.** A single continuous right-hand rule runs the
-full height of every view. Sub-task spend sums into its card, cards sum into
-their column header, columns sum into the global header, and the number is
-present at every level of nesting, always, never truncated, never behind a
-click. The eye tracks one vertical line from a task's $0.41 to the fleet's
-total. It is the one thing in the panel you would remember, and it is the one
-thing Wingman brags about.
+**Signature — the ledger column.** A single continuous rule runs the full
+height of every view, down the **right edge of the content column** rather than
+the right edge of the window: the line and the figures that hang on it have to
+be the same edge, or it is a border rather than a ledger. Sub-task spend sums
+into its card, cards sum into their column header, columns sum into the page
+head, and the number is present at every level of nesting, always, never
+truncated, never behind a click. The eye tracks one vertical line from a task's
+$0.41 to the fleet's total. It is the one thing in the panel you would remember,
+and it is the one thing Wingman brags about.
 
 **Palette.** Cool neutral paper, not cream; true dark, not near-black with an
 acid accent.
 
 | Token | Light | Dark | Used for |
 | --- | --- | --- | --- |
-| `--paper` | `#FCFCFD` | `#0E1014` | Ground |
-| `--ink` | `#16181D` | `#E8EAF0` | Primary text, all figures |
-| `--muted` | `#5C6370` | `#8A909C` | Labels, metadata |
-| `--rule` | `#E4E6EB` | `#22262E` | Hairlines, the ledger column |
+| `--paper` | `#FBFBFC` | `#0C0E12` | Ground |
+| `--surface` | `#FFFFFF` | `#14171D` | Cards, drawers, the composer |
+| `--raised` | `#F2F3F6` | `#1C2027` | Hover, the current nav item |
+| `--sunken` | `#F6F7F9` | `#0F1217` | Input wells, bar tracks |
+| `--ink` | `#14161B` | `#E9ECF2` | Primary text, figures, primary buttons |
+| `--muted` | `#5F6879` | `#949CAB` | Labels, metadata |
+| `--faint` | `#666E7D` | `#818B9D` | Captions, ids, placeholders |
+| `--rule` | `#E5E7EC` | `#232830` | Hairlines, the ledger column |
+| `--rule-strong` | `#D2D7E0` | `#333A45` | Control borders |
 | `--proven` | `#0B7A5A` | `#3FB68B` | Verification passed, task done |
 | `--asserted` | `#A85F0B` | `#E0A458` | Running, unproven, awaiting approval |
 | `--failed` | `#B03A2E` | `#E0705F` | Failed, blocked, vetoed |
+
+Four surfaces rather than two, because a panel with one background cannot show
+a card sitting on a page or an input sunk into a card, and depth is how a dense
+screen stays legible. There is still **no brand hue**: a primary action is
+solid `--ink`, so the only colours on screen are the three that mean something.
 
 Measured against `--paper`, every status clears WCAG AA for normal text —
 light: 5.19 / 4.76 / 5.87, dark: 7.50 / 8.72 / 6.03. Light `--asserted` was
 `#B4690E` when this palette was first written and measured 4.12:1; it was
 darkened in Phase 1 rather than shipped, because status text nobody can read is
-not status.
+not status. `--faint` went the same way: it was `#8A92A1` and measured 3.03:1
+while carrying run ids and spend captions.
+
+Status pills tint their ground with a **6%** wash mixed from the status hue
+itself, so a pill's fill can never drift from the text it sits behind. 6% is a
+measured ceiling, not a taste call — the tint darkens ground under text that is
+already near the floor, and at 6% the weakest pair (`--asserted` on its own
+wash) still measures 4.51:1. At 10% it was 4.28:1.
 
 `--failed` is brick rather than alarm red: a failed task inside a bounded-retry
 system is information, not an emergency, and the verification gate already
 retries before it gives up.
 
-**Type.** IBM Plex Sans for prose and UI, IBM Plex Mono for every figure, id,
-path and glyph — one superfamily, drawn for machine-readout contexts, with real
-tabular figures so the ledger column aligns. The display role is earned through
-weight, size and tracking rather than a third face.
+**Space.** One 4px scale (`--s-1`…`--s-7`) plus a single 2px hairline step, and
+every margin, gap and padding in the stylesheet resolves to a step on it.
+Radii, control heights (32px, 24px for the small variant) and the three
+elevation levels are tokens for the same reason: the thing that made the panel
+read as six pages sharing a stylesheet rather than one product was that no two
+views agreed on what "a bit of space" meant.
+
+**Type.** System sans for prose and UI, system mono for every figure, id, path
+and glyph — both stacks resolve to faces with real tabular figures, so the
+ledger column aligns without shipping ~160KB of base64 webfont into a binary
+that serves its own assets. The identity here lives in the colour rule and the
+ledger column, not the typeface.
+
+Seven sizes, each with a job: `xs` is an eyebrow or a badge, `sm` a figure or a
+caption, `base` every control and every row of UI prose, `md` a card title,
+`lg` a section head, `xl` a page head, and `2xl` is reserved for the one number
+on Insights. Three weights, and line-height set per role rather than inherited.
+The display role is earned through weight, size and tracking rather than a
+third face. 12px is the floor for anything a user has to read.
 
 This deliberately avoids Inter + JetBrains Mono, which is what a developer tool
 defaults to, and it avoids the near-black-plus-acid-green dashboard, which is
-what an AI-designed developer tool defaults to. One superfamily, one accent
-rule, everything else quiet.
+what an AI-designed developer tool defaults to. One accent rule, everything
+else quiet.
+
+**Shell.** A full-height rail with icons and labels, collapsible to 56px and
+remembered; a topbar carrying the project scope, the live-stream state, a
+light/dark/system switch, and a ⌘K palette. The palette covers only the shell's
+own verbs — navigation, project scope, theme, sign out. It never dispatches a
+card or approves a plan: those decisions belong on the screen that shows what
+they act on, and a palette that acts on something you cannot see is a second
+place the decision gets made.
 
 **Layout.**
 
@@ -659,10 +701,22 @@ rule, everything else quiet.
 ```
 
 **Floor, not announced:** responsive to mobile (phone access is a stated goal),
-visible keyboard focus, `prefers-reduced-motion` respected, and the colour rule
-never load-bearing on its own — every status carries a glyph as well, because
-three hues that all mean "state" is exactly where a colour-blind user loses the
-board.
+visible keyboard focus, `prefers-reduced-motion` respected, touch targets no
+smaller than 24px, and the colour rule never load-bearing on its own — every
+status carries a glyph as well, because three hues that all mean "state" is
+exactly where a colour-blind user loses the board.
+
+Two CSS traps are worth naming, because both shipped silently and neither
+looked broken:
+
+- `.pill` sets a default `color`, and `.is-proven` is a single class too. The
+  status hue has to be restated at `.pill.is-*` or the later rule wins and
+  every status pill renders grey — the colour rule, dead, with nothing on
+  screen to say so.
+- The ledger's `nowrap` is `.row > :last-child:not(:first-child)`. The
+  `:not()` is load-bearing twice over: without it a single-child row is treated
+  as the figure column and right-aligned, and any override of the rule needs
+  the same specificity or it silently does nothing.
 
 ---
 
