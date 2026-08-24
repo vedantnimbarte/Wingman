@@ -4,8 +4,9 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phases 0–5 shipped; phase 6 planned.** Phases ship in order and
-> each one is independently useful. User-facing docs are in
+> **Status: all six phases shipped.** 1,107 Rust tests and 43 UI tests green.
+> Kept as the design record — the "why" behind each decision, and what building
+> it turned up that the plan did not anticipate. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
 ---
@@ -158,14 +159,6 @@ precisely the kind of silent degradation that ships. `ui_bundle_is_embedded` is
   cannot disagree." Every later phase subscribes rather than polling.
 - Error, empty and loading states defined **once**, here. Six phases of
   features will otherwise each invent their own.
-
-New routes, all three deliberately outside the auth gate:
-
-| Method | Path | Why ungated |
-| --- | --- | --- |
-| `POST` | `/v1/ui/session` | It *is* the authentication — it checks the token itself, constant-time, before setting anything. |
-| `DELETE` | `/v1/ui/session` | A browser holding a cookie the server no longer accepts must still be able to drop it. |
-| `GET` | `/v1/health` (extended) | Gained `auth_required`, so the panel can skip its sign-in screen on a loopback server with no token instead of demanding a secret that does not exist. |
 
 New routes, all three deliberately outside the auth gate:
 
@@ -532,7 +525,7 @@ one bad line, and `list` swallows that into an empty result — so a transcript
 with a single malformed record reports zero turns and no model rather than an
 error. A `thinking` block's field is `text`, not `thinking`.
 
-## Phase 6 — observability
+## Phase 6 — observability ✅ shipped
 
 Mostly generated from `GET /v1/schema`, which publishes the route table and
 "cannot drift from the implementation… they are the same array."
@@ -543,6 +536,44 @@ real chart), **context** (the per-turn tax), **doctor** (a checklist), and
 **index status**. Everything else — `knows`, `attest`, `router stats`, `diff`,
 `explain`, `review` — renders generically from the table, JSON where it parses
 and text where it doesn't, which is what the routes already promise.
+
+### Found while building it
+
+**"Zero new Rust" held.** `cost` and `context` already return real structure;
+everything else comes back as `{stdout, stderr, exit}` and is rendered as the
+text it is. `isTextOutput` checks which shape actually arrived rather than
+assuming, because the routes promise both.
+
+**The comparison list includes the model you are already on**, and its figure
+is your actual spend to the last decimal — `$2.534208` against `$2.534208` on
+this repo — because the server derives both from the same token volume. The
+first version charted it beside the "you" bar, so `anthropic/claude-sonnet-5`
+appeared twice with the same number. Dropped rather than labelled: it is not an
+alternative to anything.
+
+**The chart scale has to include the actual spend.** Sizing the bars against
+the alternatives alone sends the "you are here" bar off the end the moment the
+model you picked is the expensive one — which, for anyone running Opus, is
+always.
+
+**No charting library.** Two horizontal bar lists are a CSS grid and a
+percentage width. A library would also have brought its own colour opinions
+into a palette whose whole rule is that hue means epistemic status — so the
+"you" bar is marked by weight and a darker fill, never by turning it green or
+red. Cost has no colour anywhere in this panel.
+
+**The reports list generates itself.** `GET /v1/schema` publishes the route
+table and cannot drift from the implementation, so the long tail lists the
+eleven remaining read routes with the descriptions and backing subcommands the
+table already carries. A report added to the CLI appears here without this page
+changing.
+
+**`NotYet` was deleted.** It existed to name the phase an unbuilt section was
+waiting for. With six of six shipped it had no callers, and a placeholder
+component kept "for later" is how a codebase accumulates scaffolding nobody
+dares remove.
+
+---
 
 ## Design
 

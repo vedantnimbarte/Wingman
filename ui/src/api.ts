@@ -289,6 +289,61 @@ export type TurnEvent =
   | { type: 'end'; exit?: number }
   | { type: 'log'; [k: string]: unknown }
 
+/* ── Observability ────────────────────────────────────────────────────────
+ *
+ * Two of these routes return real structure; the rest are CLI output. The
+ * table-driven routes are honest about that — output that parses as JSON comes
+ * back as JSON, anything else as `{stdout, stderr, exit}` — so the panel
+ * renders whichever it actually got rather than pretending everything is a
+ * chart.
+ */
+
+export type CostReport = {
+  rows: {
+    key: string
+    input_tokens: number
+    output_tokens: number
+    cache_read_tokens: number
+    cache_write_tokens: number
+    usd: number
+  }[]
+  /** What this exact token volume would have cost elsewhere. Empty without `?compare`. */
+  comparison: { model: string; would_cost_usd: number }[]
+  total_input_tokens: number
+  total_output_tokens: number
+  total_usd: number
+}
+
+/** The per-turn context tax, before you have typed anything. */
+export type ContextReport = {
+  system_prompt_bytes: number
+  system_prompt_tokens: number
+  tool_count: number
+  tool_schema_tokens: number
+  first_turn_tokens: number
+  tools: { name: string; bytes: number; tokens: number }[]
+}
+
+/** What a table-driven route returns when its output is not JSON. */
+export type TextOutput = { stdout: string; stderr: string; exit: number }
+
+export function isTextOutput(v: unknown): v is TextOutput {
+  return typeof v === 'object' && v !== null && 'stdout' in v && 'exit' in v
+}
+
+/** One row of `GET /v1/schema` — the route table, generated from the table itself. */
+export type RouteInfo = {
+  method: string
+  path: string
+  auth?: boolean
+  about?: string
+  returns?: string
+  runs?: string
+  params?: string[] | Record<string, string>
+}
+
+export type ApiSchema = { version: string; ceiling: string; routes: RouteInfo[] }
+
 /* ── Config ───────────────────────────────────────────────────────────────
  *
  * The schema is derived from the `wingman-config` structs, so the forms in the
@@ -465,6 +520,26 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  cost: (project: string, compare = false) =>
+    request<CostReport>(
+      `/v1/projects/${encodeURIComponent(project)}/cost${compare ? '?compare' : ''}`,
+    ),
+
+  context: (project: string) =>
+    request<ContextReport>(`/v1/projects/${encodeURIComponent(project)}/context`),
+
+  apiSchema: () => request<ApiSchema>('/v1/schema'),
+
+  /**
+   * Run any table-driven read route by its trailing path.
+   *
+   * Deliberately untyped: these are CLI commands behind a table, and what they
+   * return is whatever the command printed. The caller decides how to render
+   * it once it can see which it got.
+   */
+  report: (project: string, tail: string) =>
+    request<unknown>(`/v1/projects/${encodeURIComponent(project)}/${tail}`),
 
   sessions: (project: string) =>
     request<{ sessions: SessionSummary[] }>(

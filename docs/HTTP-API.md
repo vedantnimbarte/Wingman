@@ -293,7 +293,6 @@ documentation — alongside `defaults`, `redacted_keys`, `readonly_sections`, an
 `writes_to`. The two lists are the same constants the server enforces on read
 and on write, so a client cannot be holding a stale copy of either.
 
-
 There is no `/v1/skills`, `/v1/mcp`, or `/v1/providers`: no CLI command backs a
 listing for those today, and faking one would report something the tool cannot
 actually tell you. `GET .../knows` and `GET .../doctor` cover the same ground.

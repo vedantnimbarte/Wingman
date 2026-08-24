@@ -8,10 +8,8 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phases 0–5 shipped** — the delivery pipeline, the app shell, sign-in,
-the live event stream, the board, live pilot runs, the full config surface, and
-sessions. Insights arrives in phase 6; the panel names the phase on each section rather than
-pretending they are missing by accident. Build order and the reasoning behind
+Status: **shipped.** Board, live pilot runs, sessions and chat, the full config
+surface, and cost/context observability. Build order and the reasoning behind
 each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
 The terminal board (`wingman board`) is unaffected and stays the default. This
@@ -238,47 +236,6 @@ changing one field produces a one-line diff. Your comments, key order and
 formatting survive, and a comment sitting above a setting stays attached to it
 when the value changes.
 
-## Config
-
-Every setting Wingman has, as forms **generated from the config types
-themselves**. `GET /v1/config/schema` derives a JSON Schema from the
-`wingman-config` structs, so each field arrives with its `///` comment as help
-text and its real default. Add a field to a Rust struct and it appears in the
-panel, documented, with nobody editing the UI.
-
-Booleans, numbers, strings, string lists and enums each get a proper control —
-an enum's per-variant doc comment becomes its option tooltip. Shapes a form
-cannot express are edited as JSON: arrays of objects like
-`[[hooks.pre_tool_use]]`, and maps keyed by names you choose like
-`[mcp.<name>]`. Flattening those into text inputs would drop fields on save.
-
-### Four rules the panel follows
-
-**Saves land in the global file, never a repo's.** The path is printed above
-the form. A project's `.wingman/config.toml` is the untrusted layer, and an API
-that could write it would be a way to smuggle executable keys into a repo.
-
-**`[serve]` is shown, read-only, with the reason.** `PATCH` refuses it outright
-— a server that can rewrite its own token, ceiling or project allowlist has no
-ceiling. Hiding the section instead would just turn that into a mysterious
-failed save.
-
-**Credentials render as `set · hidden`, not as empty boxes.** Reads come back
-redacted; an empty input would offer to overwrite a real key with nothing.
-Replacing one is a deliberate act behind a **Replace** button, and only a value
-you actually type is ever sent.
-
-**There is no client-side validation.** `PATCH` round-trips the result through
-the real config parser and returns its error, which the panel shows inline. One
-validator, and it is the one that actually has to load the file.
-
-### Saves are a minimal diff
-
-A save edits the TOML document in place rather than re-serialising it, so
-changing one field produces a one-line diff. Your comments, key order and
-formatting survive, and a comment sitting above a setting stays attached to it
-when the value changes.
-
 ## Sessions
 
 Transcripts, and holding a conversation with the agent.
@@ -309,6 +266,29 @@ embedded into the global session store for `recall_session`, so removing only
 the JSONL would leave the conversation findable by search — a delete that does
 not delete. The response says whether the index entry went too, and the panel
 repeats it.
+
+## Insights
+
+**What this repo has cost, and what the same work would have cost elsewhere.**
+Your real token volume repriced against ten other models, as a bar chart with
+your actual spend in it. It is a price comparison, not a recommendation — a
+cheaper model that needs three attempts is not cheaper.
+
+Below it, the per-turn tax: the system prompt and tool schemas every turn pays
+for before you type anything, with a per-tool breakdown of where the schema
+budget goes.
+
+Then the long tail — `knows`, `doctor`, `attest`, `diff`, `explain`, `review`,
+`router stats`, `index status`, `trust`, `memory`, `config` — listed from
+`GET /v1/schema`, which is generated from the server's own route table. A
+report added to the CLI appears here without the panel changing. Output that
+parses as JSON renders as JSON; anything else renders as the text it is,
+because that is exactly what those routes promise.
+
+There is no charting library. Two bar lists are a CSS grid and a percentage
+width, and a library would have brought its own colour opinions into a palette
+whose rule is that hue means epistemic status. Cost is never coloured — the row
+you actually paid for is marked by weight, not by turning it green.
 
 ## Scope
 

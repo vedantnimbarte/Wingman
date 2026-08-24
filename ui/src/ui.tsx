@@ -44,34 +44,3 @@ export function Failed({
     </div>
   )
 }
-
-/**
- * A section the panel routes to but has not built yet.
- *
- * Naming the phase and what already works is the difference between "this
- * product is unfinished" and "this part arrives next" — and it stops someone
- * filing a bug against a screen that was never claimed to exist.
- */
-export function NotYet({
-  title,
-  phase,
-  children,
-}: {
-  title: string
-  phase: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="view">
-      <span className="eyebrow">{phase}</span>
-      <h1>{title}</h1>
-      <div className="state">
-        <p>{children}</p>
-        <p>
-          Everything here works from the terminal today — see <code>docs/WEB-UI-PLAN.md</code> for
-          what lands when.
-        </p>
-      </div>
-    </div>
-  )
-}

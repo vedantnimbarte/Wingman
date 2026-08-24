@@ -1050,6 +1050,83 @@ body {
   align-items: center;
 }
 
+/* ── Insights ───────────────────────────────────────────────────────────── */
+
+/* The one big figure on the page. Cost gets typography, not colour — that is
+   the palette rule, and a green total would read as "good" rather than "spent". */
+.headline {
+  font-size: 3rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  margin: 0.5rem 0 0.25rem;
+}
+
+.bars {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.75rem 0 var(--space);
+  max-width: 44rem;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) 1fr minmax(3.5rem, auto);
+  gap: 0.6rem;
+  align-items: center;
+  font-size: var(--step-0);
+}
+
+.bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 0.75rem;
+  background: var(--raised);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--muted);
+  border-radius: 2px;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The row you actually paid for. Marked by weight and a darker fill rather
+   than a hue, so it reads as "this one" and not as a verdict. */
+.bar-actual .bar-label,
+.bar-actual .bar-value {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bar-actual .bar-fill {
+  background: var(--ink);
+}
+
+.report {
+  margin: 0.5rem 0 var(--space);
+  padding: 0.75rem;
+  max-height: 30rem;
+  overflow: auto;
+  background: var(--raised);
+  border-radius: 4px;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
 @media (max-width: 40rem) {
@@ -1132,5 +1209,28 @@ body {
 
   .config-input {
     width: 100%;
+  }
+
+  /* Label above the bar rather than a 8rem column beside it. */
+  .bar-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'label value'
+      'track track';
+    gap: 0.2rem 0.6rem;
+  }
+
+  .bar-label {
+    grid-area: label;
+  }
+  .bar-track {
+    grid-area: track;
+  }
+  .bar-value {
+    grid-area: value;
+  }
+
+  .headline {
+    font-size: 2.25rem;
   }
 }

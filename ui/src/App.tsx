@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { api, type Health, type Project } from './api'
 import { Board } from './Board'
+import { navigate, segments, useRoute } from './router'
 import { Runs } from './Runs'
 import { Config } from './Config'
 import { Sessions } from './Sessions'
-import { navigate, segments, useRoute } from './router'
+import { Insights } from './Insights'
 import { EventsProvider, message, useEvents, useProjects, useSession } from './state'
-import { Failed, Loading, NotYet } from './ui'
+import { Failed, Loading } from './ui'
 
 const SECTIONS = [
   { path: '/', label: 'Overview' },
@@ -244,12 +245,7 @@ function Section({
     case '/config':
       return <Config />
     case '/insights':
-      return (
-        <NotYet title="Insights" phase="Phase 6">
-          Token spend and what the same work would have cost on another model, the per-turn context
-          tax, and <code>doctor</code>.
-        </NotYet>
-      )
+      return <Insights project={project?.id ?? null} />
     default:
       return (
         <div className="view">

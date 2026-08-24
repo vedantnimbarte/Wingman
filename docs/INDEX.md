@@ -43,7 +43,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 
 - **[WEB-UI.md](WEB-UI.md)** — The web control panel `wingman serve` hosts: a React app embedded in the binary, alongside the TUI rather than replacing it.
   - Best for: driving the board, runs, and config from a browser or a phone.
-  - Read this if: you're building the panel, or a binary is serving "the web UI was not built".
+  - Read this if: you want the board, runs, config or a chat from a browser — or a binary is serving "the web UI was not built".
   - Build order and design record: [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
 - **[TOOLS.md](TOOLS.md)** — Reference for all 20+ built-in tools (file I/O, search, shell, semantic search, memory, skills, session management).
@@ -64,7 +64,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 - **[BOARD.md](BOARD.md)** — `wingman board`: a persistent, multi-project kanban board over pilot runs. Cards are goals that outlive their runs; columns are derived from run state, never stored.
   - Best for: seeing what is planned, running, in review and done across every repo — with the agent, model, cost and logs behind each task.
   - Read this if: you want a backlog that survives runs, or you're implementing it.
-  - Spec: [BOARD-SPEC.md](BOARD-SPEC.md). Build order and design record: [BOARD-PLAN.md](BOARD-PLAN.md). Status: **planned**.
+  - Spec: [BOARD-SPEC.md](BOARD-SPEC.md). Build order and design record: [BOARD-PLAN.md](BOARD-PLAN.md). Status: **shipped** — in the terminal and in the panel ([WEB-UI.md](WEB-UI.md)).
 
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
   - Best for: Understanding how Wingman plans to beat Claude Code/Codex on speed, trust, and retention.
@@ -88,7 +88,7 @@ Key commands:
 - `wingman skill extract` — mine skills from sessions.
 - `wingman discover` — find local LLMs.
 - `wingman pilot run "<goal>"` — multi-agent orchestration → PR (see [PILOT-MODE.md](PILOT-MODE.md)).
-- `wingman serve` — HTTP/SSE API for remote control (see [HTTP-API.md](HTTP-API.md)).
+- `wingman serve` — HTTP/SSE API for remote control, and the browser control panel (see [HTTP-API.md](HTTP-API.md), [WEB-UI.md](WEB-UI.md)).
 
 ### Configuration
 
