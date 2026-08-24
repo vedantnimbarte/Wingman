@@ -194,6 +194,9 @@ jobs:
       - name: Install deps
         working-directory: ui
         run: npm ci
+      - name: Unit tests
+        working-directory: ui
+        run: npm test
       - name: Type-check and build
         working-directory: ui
         run: npm run build

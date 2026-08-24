@@ -24,6 +24,11 @@ export function useRoute(): string {
   return path
 }
 
+/** `/runs/2026-08-21-2005-nkocjd` → `["runs", "2026-08-21-2005-nkocjd"]`. */
+export function segments(path: string): string[] {
+  return path.split('/').filter(Boolean)
+}
+
 export function navigate(to: string) {
   if (window.location.pathname === to) return
   window.history.pushState(null, '', to)

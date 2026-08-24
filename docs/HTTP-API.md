@@ -169,7 +169,7 @@ that root and are rejected if they escape it.
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/v1/projects/{p}/pilot/runs` | `RunSummary[]` — id, goal, status, task counts, cost, timestamps. |
+| `GET` | `/v1/projects/{p}/pilot/runs` | `RunSummary[]` — `run_id`, `goal`, `status`, `done`/`total`, `terminal`. Newest first. No cost or timestamps: `RunSummary` does not carry them — read one run for `totals`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}` | Full `RunState` snapshot. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/events?tail=n` | Last `n` events from `tasks.jsonl`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/stream` | SSE: events as they are appended. |

@@ -167,6 +167,77 @@ export type BoardData = {
 
 export type Dispatched = { run_id: string; project: string; pid: number }
 
+/* ── Pilot runs ───────────────────────────────────────────────────────────
+ *
+ * `RunState` is the atomic `state.json` pilot writes after every event, served
+ * verbatim. Nothing is projected server-side, so these types are the model
+ * itself rather than a wire shape invented for the panel.
+ */
+
+export type RunSummary = {
+  run_id: string
+  goal: string
+  status: RunStatus
+  done: number
+  total: number
+  terminal: boolean
+}
+
+export type TaskOutcome = { summary: string; files_changed: string[] }
+
+export type Task = {
+  id: string
+  role: string
+  title: string
+  goal: string
+  deps: string[]
+  /** Paths this task declared it would write — the write-set scheduler's input. */
+  writes: string[]
+  acceptance: unknown[]
+  reversibility: string
+  reversibility_reason: string | null
+  status: TaskStatus
+  agent: string | null
+  worktree: string | null
+  usd: number
+  commits: string[]
+  outcome: TaskOutcome | null
+  started_at: string | null
+  ended_at: string | null
+  attempts: number
+}
+
+export type AgentStatus = 'idle' | 'in_progress' | 'done' | 'failed' | 'aborted'
+
+export type Agent = {
+  id: string
+  /** Docker-style display name. Empty on runs predating the field. */
+  name: string
+  role: string
+  current_task: string | null
+  current_tool: string | null
+  pid: number | null
+  status: AgentStatus
+  session_id: string | null
+  spawned_at: string | null
+  model: string | null
+  usd: number
+}
+
+export type RunState = {
+  run_id: string
+  goal: string
+  base_commit: string
+  integration_branch: string
+  status: RunStatus
+  tasks: Task[]
+  agents: Agent[]
+  totals: { usd: number; tokens_in: number; tokens_out: number }
+  pr_url: string | null
+}
+
+export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
+
 export const api = {
   health: () => request<Health>('/v1/health'),
   projects: () => request<{ projects: Project[] }>('/v1/projects').then((r) => r.projects),
@@ -201,6 +272,32 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  runs: (project: string) =>
+    request<{ runs: RunSummary[] }>(`/v1/projects/${encodeURIComponent(project)}/pilot/runs`).then(
+      (r) => r.runs,
+    ),
+
+  run: (project: string, runId: string) =>
+    request<RunState>(
+      `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}`,
+    ),
+
+  /**
+   * Each of these appends one `ControlCommand` to the run's `control.jsonl`;
+   * the orchestrator's own watchdog applies it. The API never reaches into a
+   * running process, which is why a control call can return before the run has
+   * acted on it.
+   */
+  control: (project: string, runId: string, action: ControlAction, body: { task?: string } = {}) =>
+    request<unknown>(
+      `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/${action}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    ),
 
   archiveCard: (id: string, restore = false) =>
     request<{ id: string; archived: boolean }>(

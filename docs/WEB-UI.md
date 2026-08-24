@@ -8,9 +8,9 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phases 0–2 shipped** — the delivery pipeline, the app shell, sign-in,
-the live event stream, and the board. Runs, config, sessions and insights
-arrive in phases 3–6; the panel names the phase on each section rather than
+Status: **phases 0–3 shipped** — the delivery pipeline, the app shell, sign-in,
+the live event stream, the board, and live pilot runs. Config, sessions and
+insights arrive in phases 4–6; the panel names the phase on each section rather than
 pretending they are missing by accident. Build order and the reasoning behind
 each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 
@@ -157,6 +157,86 @@ machinery that makes runs converge. If it is ever built it belongs in the
 orchestrator behind its own gate — see
 [BOARD-PLAN.md](BOARD-PLAN.md) § Scope creep toward drag-and-drop. Cards move
 because runs move.
+
+## Runs
+
+Every pilot run in the selected repo, and a detail view per run: status, spend,
+tokens, integration branch, the plan, and the workers.
+
+The plan is **indented by dependency depth**, deepest last, with each task
+naming what it waits on. Expanding a task shows its goal, model, worktree,
+declared writes, transcript id and the worker's reported outcome.
+
+The detail view holds an `EventSource` on the run's `tasks.jsonl` stream and
+re-reads the `state.json` snapshot on each event, rather than applying events
+to local state. `state.json` is written atomically after every event, so this
+stays authoritative — a second reducer in the browser would be one more thing
+to keep in step with the orchestrator.
+
+### The plan gate
+
+A run with `[pilot.approval]` configured stops after planning and waits. That
+is the moment the panel earns itself: the whole plan is on screen, and
+**Approve plan** / **Reject plan** are one click.
+
+Per-task **Retry** and **Abort task** appear only where the server would accept
+them — retry for a task that stopped without finishing, abort for one still
+moving — because a button that always returns `409` is worse than no button.
+
+**A control action is recorded, not applied.** Each one appends a single
+command to the run's `control.jsonl`; the orchestrator's watchdog picks it up
+on its own schedule, and the API never reaches into the running process. The
+panel says so ("Sent `approve` — the run applies it on its next check") rather
+than optimistically flipping the status to something that has not happened yet.
+
+### Elapsed time
+
+Reported only where it means something: exact when a task recorded an
+`ended_at`, counting up while the run is live, and omitted for a task with no
+recorded end on a run that has already finished. In that last case the task
+never stopped cleanly, and counting from now would report the time since the
+run died rather than any work done.
+
+## Config
+
+Every setting Wingman has, as forms **generated from the config types
+themselves**. `GET /v1/config/schema` derives a JSON Schema from the
+`wingman-config` structs, so each field arrives with its `///` comment as help
+text and its real default. Add a field to a Rust struct and it appears in the
+panel, documented, with nobody editing the UI.
+
+Booleans, numbers, strings, string lists and enums each get a proper control —
+an enum's per-variant doc comment becomes its option tooltip. Shapes a form
+cannot express are edited as JSON: arrays of objects like
+`[[hooks.pre_tool_use]]`, and maps keyed by names you choose like
+`[mcp.<name>]`. Flattening those into text inputs would drop fields on save.
+
+### Four rules the panel follows
+
+**Saves land in the global file, never a repo's.** The path is printed above
+the form. A project's `.wingman/config.toml` is the untrusted layer, and an API
+that could write it would be a way to smuggle executable keys into a repo.
+
+**`[serve]` is shown, read-only, with the reason.** `PATCH` refuses it outright
+— a server that can rewrite its own token, ceiling or project allowlist has no
+ceiling. Hiding the section instead would just turn that into a mysterious
+failed save.
+
+**Credentials render as `set · hidden`, not as empty boxes.** Reads come back
+redacted; an empty input would offer to overwrite a real key with nothing.
+Replacing one is a deliberate act behind a **Replace** button, and only a value
+you actually type is ever sent.
+
+**There is no client-side validation.** `PATCH` round-trips the result through
+the real config parser and returns its error, which the panel shows inline. One
+validator, and it is the one that actually has to load the file.
+
+### Saves are a minimal diff
+
+A save edits the TOML document in place rather than re-serialising it, so
+changing one field produces a one-line diff. Your comments, key order and
+formatting survive, and a comment sitting above a setting stays attached to it
+when the value changes.
 
 ## Scope
 

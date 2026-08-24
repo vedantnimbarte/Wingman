@@ -4,7 +4,7 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phases 0–2 shipped; phases 3–6 planned.** Phases ship in order and
+> **Status: phases 0–3 shipped; phases 4–6 planned.** Phases ship in order and
 > each one is independently useful. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
@@ -305,7 +305,7 @@ request reaches `plan_dispatch`: `{"args":["--watch"]}` comes back `400` with
 the refusal from the shared validation list. Spawn itself is covered by
 `wingman-board`'s own tests and by `board dispatch` in the CLI.
 
-## Phase 3 — pilot runs, live
+## Phase 3 — pilot runs, live ✅ shipped
 
 **Zero new Rust.** Run list, run detail, task DAG with `dep` edges, per-task
 agent/model/cost, live `tasks.jsonl` via the existing
@@ -315,6 +315,65 @@ shipped control routes.
 The plan gate is the moment this phase justifies itself: `run.awaiting_approval`
 arrives on the firehose, and approving a seven-task plan is genuinely better
 with a mouse and the full plan on screen.
+
+### Found while building it
+
+**"Zero new Rust" held.** Nothing in `serve` changed. The one doc correction:
+HTTP-API.md claimed `GET /pilot/runs` returns cost and timestamps, and
+`RunSummary` carries neither — only `run_id`, `goal`, `status`, `done`, `total`.
+The list shows counts; spend lives on the run detail, where `totals` is real.
+
+**The DAG is indentation, not a graph library.** Tasks are ordered by
+dependency depth and indented by it, with `needs t1 t2` spelled out. A real
+node-edge layout needs a layout dependency, and the thing a reader actually
+wants — what is waiting on what — survives the flattening.
+
+Depth is the **longest** path to a root, not the shortest. With `t4` depending
+on both `t1` and a chain through `t2`, shortest-path depth would render `t4`
+beside `t2`, above work it is actually waiting on. The walk is bounded by the
+task count so a malformed `state.json` with a dependency cycle cannot hang the
+tab — pilot's planner rejects cycles, but an infinite loop in a renderer is a
+bad way to discover a bad file.
+
+**Elapsed time disagreed with the board, and both were following the same
+rule.** `wingman-board` and this view both compute "now minus start" for a task
+with no `ended_at`. But the board's roll-ups are cached against `state.json`'s
+mtime, so a dead run's card keeps whatever figure was current when it was last
+written, while the panel recomputed live — the board said `33m32s`, the run
+detail said `68h52m`, for the same task on a run that died in minutes.
+
+Neither number was useful. A task with no `ended_at` on a run that has already
+finished never recorded an end, so counting from `now` reports time since the
+run died, not elapsed work. The panel now reports elapsed only when it means
+something: exact when `ended_at` exists, ticking while the run is live, and
+absent otherwise. The board's cache is untouched — deleting that table is
+always safe, and it is not wrong, just frozen.
+
+**A control click looked like nothing happened.** Every control route appends
+one command to `control.jsonl` and returns; the orchestrator's watchdog applies
+it on its own schedule, and the API deliberately never reaches into the run's
+process. So approving a gated plan left the gate on screen. Optimistically
+flipping the status would have been the dishonest fix — the panel now says
+"Sent `approve` — the run applies it on its next check", which is what actually
+occurred.
+
+**`.eyebrow` uppercased a run id.** Identifiers are meant to be copied into CLI
+commands, and a transformed one reads as real and pastes as wrong. Identifiers
+now opt out of the transform wherever they appear inside an eyebrow.
+
+**`vitest` was added — one devDependency.** `ordered()` is a loop with a cycle
+guard, `elapsedSecs` has three branches and a regression worth pinning, and
+`money`/`duration` are formatters that can be wrong without looking wrong. It
+reads the existing `vite.config.ts` and needs no config of its own; `npm test`
+runs in the `web-ui` CI job ahead of the build. 15 tests.
+
+**Verified without spending anything.** A real gated run costs money to
+produce, so the gate was exercised against a synthetic seven-task `state.json`
+written into `.wingman/autonomous/` and deleted afterwards. Approve and veto
+both landed correctly in `control.jsonl`. Worth knowing for the next person:
+`state.json` will not parse if `reversibility` is anything but
+`trivial | hard | irreversible`, and the 404 that produces looks exactly like a
+missing run.
 
 ## Phase 4 — config
 

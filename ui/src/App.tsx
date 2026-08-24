@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { api, type Health, type Project } from './api'
 import { Board } from './Board'
-import { navigate, useRoute } from './router'
+import { Runs } from './Runs'
+import { navigate, segments, useRoute } from './router'
 import { EventsProvider, message, useEvents, useProjects, useSession } from './state'
 import { Failed, Loading, NotYet } from './ui'
 
@@ -134,7 +135,9 @@ function Shell({ health }: { health: Health }) {
             key={s.path}
             type="button"
             className="nav-item"
-            aria-current={path === s.path ? 'page' : undefined}
+            // Compared on the section root so a nested route like
+            // `/runs/{id}` still marks Runs as the current section.
+            aria-current={`/${segments(path)[0] ?? ''}` === s.path ? 'page' : undefined}
             onClick={() => navigate(s.path)}
           >
             {s.label}
@@ -218,7 +221,11 @@ function Section({
   health: Health
   project: Project | null
 }) {
-  switch (path) {
+  // Matched on the first segment so nested routes like `/runs/{id}` reach
+  // their section rather than falling through to "No such page".
+  const [head, ...rest] = segments(path)
+
+  switch (`/${head ?? ''}`) {
     case '/':
       return <Overview health={health} project={project} />
     case '/board':
@@ -229,12 +236,7 @@ function Section({
       // empty one.
       return <Board project={project?.id ?? null} />
     case '/runs':
-      return (
-        <NotYet title="Runs" phase="Phase 3">
-          Live pilot runs: the task graph, per-task spend, and the plan gate — approve, veto, abort,
-          retry.
-        </NotYet>
-      )
+      return <Runs project={project?.id ?? null} runId={rest[0] ?? null} />
     case '/sessions':
       return (
         <NotYet title="Sessions" phase="Phase 5">

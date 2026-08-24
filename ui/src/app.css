@@ -677,6 +677,141 @@ body {
   margin: var(--space) 0 0.25rem;
 }
 
+/* ── Runs ───────────────────────────────────────────────────────────────── */
+
+.back {
+  padding-left: 0;
+  margin-bottom: 0.5rem;
+}
+
+.section-head {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: calc(var(--space) * 1.75) 0 0.25rem;
+}
+
+.run-summary {
+  margin-bottom: var(--space);
+}
+
+/* A whole row that navigates. Kept as a button rather than an anchor because
+   it drives the history API, not a document load. */
+.row-link {
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
+.row-link:hover {
+  background: var(--raised);
+}
+
+.run-goal {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The plan gate. The one place in the panel that asks for a decision, so it
+   gets a rule and a tint rather than sitting inline as another paragraph. */
+.gate {
+  border: 1px solid var(--asserted);
+  border-radius: 5px;
+  padding: 0.75rem 0.9rem;
+  margin: var(--space) 0;
+  max-width: 44rem;
+}
+
+.gate h2 {
+  font-size: var(--step-1);
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+.gate p {
+  margin: 0 0 0.75rem;
+  font-size: var(--step-0);
+  color: var(--muted);
+}
+
+.task-row {
+  align-items: flex-start;
+}
+
+.task-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-toggle {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--step-1);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.task-toggle:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.task-meta {
+  display: block;
+  font-size: var(--step--1);
+  margin-top: 0.1rem;
+}
+
+.task-usd {
+  flex: none;
+}
+
+.task-detail {
+  display: grid;
+  grid-template-columns: minmax(6rem, auto) 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.5rem 0 0.25rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--rule);
+}
+
+.task-detail dt {
+  margin: 0;
+}
+
+.task-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-tools {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.task-tools .button {
+  padding: 0.1rem 0.4rem;
+  font-size: var(--step--1);
+}
+
+.run-tools {
+  margin-top: var(--space);
+}
+
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
 @media (max-width: 40rem) {
