@@ -229,7 +229,7 @@ and shows up in `wingman session list` like any other.
 | `POST` | `/v1/projects/{p}/sessions` | `{"model":"…","mode":"…"}` | `{"session_id":"…"}` |
 | `GET` | `/v1/projects/{p}/sessions` | — | Sessions with id, first prompt, model, turn count, mtime. |
 | `GET` | `/v1/projects/{p}/sessions/{id}` | — | Full transcript as `SessionRecord[]`. |
-| `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream: `text`, `tool_start`, `tool_result`, `usage`, `verification`, `stop`. Resumes the session history. |
+| `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream of `wingman_core::AgentEvent`: `text_delta`, `thinking_delta`, `tool_start`, `tool_result`, `usage`, `turn_complete`, `verification`, `stop`, `error`. The event name is the payload's own `type`, so this list is the enum. Resumes the session history. |
 | `POST` | `/v1/projects/{p}/turns` | same | One-shot turn, no session continuity. |
 | `DELETE` | `/v1/projects/{p}/sessions/{id}` | — | Forget the session: deletes the transcript **and** its entries in the global session index, so `recall_session` cannot resurface it. Reports `deindexed` so a partial delete is visible in the response, not a surprise later. |
 

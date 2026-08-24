@@ -238,6 +238,57 @@ export type RunState = {
 
 export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
 
+/* ── Sessions ─────────────────────────────────────────────────────────────
+ *
+ * A session is not a server object with a timeout — it is the same
+ * `.wingman/sessions/<id>.jsonl` the TUI writes. One started in the browser
+ * shows up in `wingman session list` and resumes from the terminal, because
+ * the transcript on disk *is* the state.
+ */
+
+export type SessionSummary = {
+  session_id: string
+  first_prompt: string | null
+  model: string | null
+  provider: string | null
+  turns: number
+}
+
+/** A block inside an assistant message. Mirrors `wingman_core::ContentBlock`. */
+export type ContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  | { type: 'image'; data: string; media_type: string }
+  | { type: 'thinking'; text: string; signature?: string; redacted?: boolean }
+
+/** One line of a transcript. Mirrors `wingman_session::SessionRecord`. */
+export type SessionRecord =
+  | { kind: 'session_start'; ts: string; model: string; provider: string }
+  | { kind: 'user'; ts: string; text: string }
+  | { kind: 'assistant'; ts: string; blocks: ContentBlock[] }
+  | { kind: 'tool_result'; ts: string; id: string; output: string; is_error: boolean }
+  | { kind: 'usage_delta'; ts: string; usage: Record<string, number> }
+  | { kind: 'stop'; ts: string; reason: string }
+
+/**
+ * Events a turn streams. These are `wingman_core::AgentEvent` verbatim — the
+ * child's NDJSON `type` becomes the SSE event name with no translation table,
+ * so this list is the enum and cannot drift from it.
+ */
+export type TurnEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'thinking_delta'; text: string }
+  | { type: 'tool_start'; id: string; name: string; input: unknown }
+  | { type: 'tool_result'; id: string; output: string; is_error: boolean }
+  | { type: 'usage'; usage: Record<string, number> }
+  | { type: 'turn_complete' }
+  | { type: 'stop'; reason: string }
+  | { type: 'verification'; passed: boolean; summary: string }
+  | { type: 'error'; message: string }
+  | { type: 'end'; exit?: number }
+  | { type: 'log'; [k: string]: unknown }
+
 /* ── Config ───────────────────────────────────────────────────────────────
  *
  * The schema is derived from the `wingman-config` structs, so the forms in the
@@ -273,8 +324,115 @@ export type ConfigSchema = {
   writes_to: string
 }
 
+/**
+ * Read an SSE stream from a `POST`.
+ *
+ * `EventSource` cannot do this — it only issues `GET` and sets no body — so a
+ * turn's stream is parsed by hand off `fetch`'s `ReadableStream`. That is also
+ * why this is the one place a stream is decoded rather than reusing the
+ * `EventSource` in `state.tsx`.
+ *
+ * Only the `data:` lines are read. The event name is already carried inside
+ * each payload as `type` (the server sets both from the same field), so
+ * parsing `event:` as well would mean two sources for one fact.
+ */
+async function streamPost(
+  path: string,
+  body: unknown,
+  onEvent: (e: TurnEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    })
+  } catch (e) {
+    if (signal?.aborted) return
+    throw new ApiError(0, 'No answer from the daemon. Is `wingman serve` running?')
+  }
+
+  // A refusal arrives as JSON with a status, not as a stream — a 409 for a
+  // second turn on the same session, a 403 above the ceiling, a 429 when the
+  // turn queue is full.
+  if (!res.ok) throw new ApiError(res.status, await errorText(res))
+  if (!res.body) throw new ApiError(500, 'the daemon returned no stream')
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    const { events, rest } = drainFrames(buf)
+    buf = rest
+    events.forEach(onEvent)
+  }
+}
+
+/**
+ * Pull every complete SSE frame out of a buffer, returning what is left over.
+ *
+ * Frames are separated by a blank line, and a chunk boundary can fall anywhere
+ * — mid-frame, mid-line, or between the two newlines that end one. Whatever
+ * follows the last complete frame is returned as `rest` and waits for the next
+ * chunk: dropping it would silently lose a message, and parsing it early would
+ * truncate one.
+ */
+export function drainFrames(buf: string): { events: TurnEvent[]; rest: string } {
+  const events: TurnEvent[] = []
+  let split: number
+  while ((split = buf.indexOf('\n\n')) !== -1) {
+    const frame = buf.slice(0, split)
+    buf = buf.slice(split + 2)
+    for (const line of frame.split('\n')) {
+      // Only `data:` carries a payload. The `event:` name duplicates the
+      // `type` inside it, and a line starting `:` is a keepalive comment.
+      if (!line.startsWith('data:')) continue
+      const data = line.slice(5).replace(/^ /, '')
+      try {
+        events.push(JSON.parse(data) as TurnEvent)
+      } catch {
+        // Not JSON: the child's own output, forwarded as a log line by the
+        // server. Surfacing it beats dropping it silently.
+        events.push({ type: 'log', raw: data })
+      }
+    }
+  }
+  return { events, rest: buf }
+}
+
 export const api = {
   health: () => request<Health>('/v1/health'),
+
+  /**
+   * Run a turn, streaming the agent's events as they happen.
+   *
+   * `id` omitted runs a one-shot turn with no session continuity. A second
+   * turn on the same session while one is in flight is a `409` — the child
+   * would otherwise replay a transcript the first turn is still appending to.
+   */
+  turn: (
+    project: string,
+    id: string | null,
+    body: { prompt: string; mode?: string; model?: string },
+    onEvent: (e: TurnEvent) => void,
+    signal?: AbortSignal,
+  ) =>
+    streamPost(
+      id
+        ? `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}/turns`
+        : `/v1/projects/${encodeURIComponent(project)}/turns`,
+      body,
+      onEvent,
+      signal,
+    ),
   projects: () => request<{ projects: Project[] }>('/v1/projects').then((r) => r.projects),
 
   /**
@@ -307,6 +465,28 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+
+  sessions: (project: string) =>
+    request<{ sessions: SessionSummary[] }>(
+      `/v1/projects/${encodeURIComponent(project)}/sessions`,
+    ).then((r) => r.sessions),
+
+  session: (project: string, id: string) =>
+    request<{ session_id: string; records: SessionRecord[] }>(
+      `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`,
+    ),
+
+  newSession: (project: string) =>
+    request<{ session_id: string }>(`/v1/projects/${encodeURIComponent(project)}/sessions`, {
+      method: 'POST',
+    }),
+
+  /** Reports `deindexed` so a partial delete is visible now, not a surprise later. */
+  deleteSession: (project: string, id: string) =>
+    request<{ deleted: string; deindexed: unknown }>(
+      `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
+    ),
 
   config: () => request<Record<string, unknown>>('/v1/config'),
   configSchema: () => request<ConfigSchema>('/v1/config/schema'),

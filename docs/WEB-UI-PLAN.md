@@ -4,7 +4,7 @@ A React control panel served by the existing daemon: the kanban board, live
 pilot runs, sessions, observability, and the full config surface. The TUI stays
 exactly as it is — this is a second renderer, not a replacement.
 
-> **Status: phases 0–4 shipped; phases 5–6 planned.** Phases ship in order and
+> **Status: phases 0–5 shipped; phase 6 planned.** Phases ship in order and
 > each one is independently useful. User-facing docs are in
 > [WEB-UI.md](WEB-UI.md).
 
@@ -470,7 +470,7 @@ cannot show live status for them. `doctor` and `knows` cover some of that
 ground. Closing the gap properly means new CLI commands first, and that is out
 of scope here rather than faked in the UI.
 
-## Phase 5 — sessions and chat
+## Phase 5 — sessions and chat ✅ shipped
 
 Session list, transcript rendering, and a streaming turn against
 `POST /v1/sessions/{id}/turns` — `text`, `tool_start`, `tool_result`, `usage`,
@@ -481,6 +481,56 @@ Session list, transcript rendering, and a streaming turn against
 Largest UI surface in the plan. Two contracts to respect: a second turn on the
 same session returns `409` while the first is in flight, and `DELETE` reports
 `deindexed` so a partial delete is visible rather than a surprise later.
+
+### Found while building it
+
+**A turn's stream cannot use `EventSource`.** It is a `POST` with a body, and
+`EventSource` only issues `GET`. The stream is parsed by hand off `fetch`'s
+`ReadableStream`, which is why `drainFrames` exists and is the one place in the
+panel that decodes SSE itself. It is also the piece most able to be wrong
+invisibly — a chunk boundary can land mid-JSON, and the failure looks like the
+model simply said less. Seven tests cover it, including the split-frame case.
+
+**The documented event list was wrong.** HTTP-API.md said a turn streams
+`text`, `tool_start`, `tool_result`, `usage`, `verification`, `stop`. The
+authority is `wingman_core::AgentEvent`, whose `type` the server copies
+verbatim onto the SSE event name: the text event is **`text_delta`**, and
+`thinking_delta`, `turn_complete` and `error` were missing entirely. Corrected
+in the doc; the panel's `TurnEvent` mirrors the enum rather than the prose.
+
+**Thinking is kept out of the answer.** `thinking_delta` accumulates
+separately from `text_delta` and renders folded away. The enum's own comment
+says why it is a distinct variant — it is the model's working-out, not what it
+is telling you — and concatenating the two would put reasoning in the reply.
+
+**A transcript pairs tool calls and results differently from a live stream.**
+Streaming, `tool_start` and `tool_result` arrive with matching ids and are
+joined as they come. In a stored transcript the call is a `tool_use` block
+inside an assistant message while the result is its own `tool_result` record,
+so they have to be rejoined when rendering. The first version discarded the
+result record — every tool in a replayed transcript showed as still running,
+with its output never displayed — and the code comment asserting results
+"already appear under the call" was simply false. Both fixed.
+
+**The transcript on disk stays authoritative.** When a turn finishes the panel
+re-reads the session file rather than keeping the text it assembled while
+streaming. That is what makes a just-finished turn render identically to every
+older one, instead of being a second in-memory shape that renders almost the
+same.
+
+**Verified without spending anything.** A live turn calls a real model on real
+keys, so it was not fired. What was exercised: the transcript renderer against
+a synthetic seven-record session (written to `.wingman/sessions/`, deleted
+afterwards through the panel's own Delete button, which also confirmed the
+`deindexed` report), and the turn route's refusals — empty prompt `400`,
+traversing session id `400`, `mode: "yolo"` above the ceiling `403`, unknown
+transcript `404`, mint-a-session `201`. The `409` for a concurrent turn needs
+two real turns and remains unexercised end to end.
+
+Worth knowing for the next person: `load_session` fails the **whole file** on
+one bad line, and `list` swallows that into an empty result — so a transcript
+with a single malformed record reports zero turns and no model rather than an
+error. A `thinking` block's field is `text`, not `thinking`.
 
 ## Phase 6 — observability
 

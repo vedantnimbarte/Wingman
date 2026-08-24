@@ -8,9 +8,9 @@ this machine or a phone on the same network.
 wingman serve                      # the panel is at http://<[serve].addr>/
 ```
 
-Status: **phases 0–4 shipped** — the delivery pipeline, the app shell, sign-in,
-the live event stream, the board, live pilot runs, and the full config surface.
-Sessions and insights arrive in phases 5–6; the panel names the phase on each section rather than
+Status: **phases 0–5 shipped** — the delivery pipeline, the app shell, sign-in,
+the live event stream, the board, live pilot runs, the full config surface, and
+sessions. Insights arrives in phase 6; the panel names the phase on each section rather than
 pretending they are missing by accident. Build order and the reasoning behind
 each decision are in [WEB-UI-PLAN.md](WEB-UI-PLAN.md).
 

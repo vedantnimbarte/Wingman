@@ -3,6 +3,7 @@ import { api, type Health, type Project } from './api'
 import { Board } from './Board'
 import { Runs } from './Runs'
 import { Config } from './Config'
+import { Sessions } from './Sessions'
 import { navigate, segments, useRoute } from './router'
 import { EventsProvider, message, useEvents, useProjects, useSession } from './state'
 import { Failed, Loading, NotYet } from './ui'
@@ -239,12 +240,7 @@ function Section({
     case '/runs':
       return <Runs project={project?.id ?? null} runId={rest[0] ?? null} />
     case '/sessions':
-      return (
-        <NotYet title="Sessions" phase="Phase 5">
-          Transcripts and streaming turns. A session started here shows up in{' '}
-          <code>wingman session list</code> like any other.
-        </NotYet>
-      )
+      return <Sessions project={project?.id ?? null} id={rest[0] ?? null} />
     case '/config':
       return <Config />
     case '/insights':

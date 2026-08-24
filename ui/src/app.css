@@ -935,6 +935,121 @@ body {
   background: var(--paper);
 }
 
+/* ── Chat ───────────────────────────────────────────────────────────────── */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  max-width: 52rem;
+}
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  padding: var(--space) 0;
+}
+
+.msg-start {
+  margin: 0;
+}
+
+/* Speaker is marked by an eyebrow and a rule, not by a coloured bubble —
+   colour here would collide with the status palette. */
+.msg {
+  border-left: 2px solid var(--rule);
+  padding-left: 0.75rem;
+}
+
+.msg-user {
+  border-left-color: var(--ink);
+}
+
+.msg-text {
+  margin: 0.2rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The model's working-out, folded away by default: it is not the answer. */
+.thinking,
+.tool {
+  margin-top: 0.4rem;
+  font-size: var(--step-0);
+}
+
+.thinking summary,
+.tool summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.thinking summary::-webkit-details-marker,
+.tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking summary::before,
+.tool summary::before {
+  content: '▸ ';
+  color: var(--muted);
+}
+
+.thinking[open] summary::before,
+.tool[open] summary::before {
+  content: '▾ ';
+}
+
+.thinking pre,
+.tool pre {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem;
+  max-height: 22rem;
+  overflow: auto;
+  background: var(--raised);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--step--1);
+}
+
+/* Blinking insertion point while text streams. Held still under
+   prefers-reduced-motion by the global rule above. */
+.caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: text-bottom;
+  background: var(--ink);
+  animation: caret 1s step-end infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.composer .add-tools {
+  align-items: center;
+}
+
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
 @media (max-width: 40rem) {
