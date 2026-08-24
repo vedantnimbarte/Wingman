@@ -12,7 +12,10 @@ name = "wingman"
 path = "src/main.rs"
 
 [dependencies]
-wingman-config = { workspace = true }
+# `schema` derives JsonSchema for the config types so `wingman serve` can emit
+# the schema the web panel builds its settings forms from. Enabled here and
+# nowhere else — see wingman-config's [features].
+wingman-config = { workspace = true, features = ["schema"] }
 wingman-core = { workspace = true }
 wingman-providers = { workspace = true }
 wingman-tools = { workspace = true }
@@ -40,6 +43,12 @@ tracing-appender = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+# Format-preserving TOML editing for `PATCH /v1/config`. Already in the tree —
+# `toml` 0.8 is built on it — so this is a direct dependency on a crate that was
+# being compiled anyway, not a new one. Parsing to `toml::Table` and
+# re-serialising would silently drop the user's comments and reorder every
+# section on save.
+toml_edit = "0.22"
 rand = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }

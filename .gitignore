@@ -24,3 +24,9 @@ Thumbs.db
 # VS Code extension build artifacts
 editors/vscode/node_modules/
 editors/vscode/dist/
+
+# Web panel build artifacts. `crates/wingman-cli/build.rs` embeds ui/dist when
+# it exists and substitutes a placeholder when it does not, so a clone without
+# these still builds.
+ui/node_modules/
+ui/dist/

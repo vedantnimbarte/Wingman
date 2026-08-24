@@ -62,6 +62,7 @@ impl From<toml::ser::Error> for ConfigError {
 
 /// Permission model — controls when the user is prompted before writes / shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     /// Reads/searches free; every write or shell call prompts.
@@ -107,6 +108,7 @@ impl std::fmt::Display for PermissionMode {
 
 /// Per-project tool settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ToolsConfig {
     /// OS-level containment for `run_shell`: `auto` | `off` | `required`.
@@ -159,6 +161,7 @@ pub struct ToolsConfig {
 
 /// A user-defined command tool (see [`ToolsConfig::custom`]).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct CustomToolConfig {
     /// Tool name the model calls (e.g. "run_migration"). Snake_case advised.
@@ -213,6 +216,7 @@ impl Default for ToolsConfig {
 
 /// Top-level merged configuration. Constructed via [`Config::load`].
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub default_provider: Option<String>,
@@ -297,6 +301,7 @@ pub struct Config {
 
 /// Settings for the HTTP API daemon. See `docs/HTTP-API.md`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ServeConfig {
     /// Bind address. Binding anything other than loopback requires a token
@@ -344,6 +349,7 @@ pub const MIN_REMOTE_TOKEN_LEN: usize = 32;
 
 /// One repo the API may operate on.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ServeProject {
     /// URL-safe identifier used in paths (`/v1/projects/<id>/…`). Defaults
@@ -370,6 +376,7 @@ impl ServeProject {
 
 /// Outbound push: the server POSTs to `url` on subscribed events.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ServePushConfig {
     /// Target URL. Slack incoming-webhook shape, or any POST endpoint.
@@ -381,6 +388,7 @@ pub struct ServePushConfig {
 
 /// Settings for the memory / skills loop.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct LearnConfig {
     /// May the *agent* write global memories (`~/.wingman/memory/`)?
@@ -400,6 +408,7 @@ pub struct LearnConfig {
 /// `wingman attest` reports the guarantees — for regulated / air-gapped teams
 /// that cloud agents structurally can't serve.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PrivacyConfig {
     pub local_only: bool,
@@ -409,6 +418,7 @@ pub struct PrivacyConfig {
 /// (`wingman memory push` / `pull`). The git-backed `wingman memory sync`
 /// needs no server; this is for teams that prefer a central store.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct TeamConfig {
     /// Base URL of the team memory service. Empty disables push/pull.
@@ -419,6 +429,7 @@ pub struct TeamConfig {
 
 /// Append-only audit trail of tool calls — an enterprise/compliance aid.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct AuditConfig {
     /// When true, every tool dispatch appends a JSONL record (timestamp, tool,
@@ -430,6 +441,7 @@ pub struct AuditConfig {
 
 /// Git-native workflow options.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
     /// When true, after a turn in which the agent edited files (and the
@@ -451,6 +463,7 @@ impl Default for GitConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ScheduledTask {
     /// Stable id used to record last-run-at.
@@ -470,6 +483,7 @@ pub struct ScheduledTask {
 /// turns a tool call into an error (for `pre_tool_use`) or surfaces a
 /// warning otherwise.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct HooksConfig {
     /// Fired before a tool runs. Receives `WINGMAN_TOOL_NAME` and
@@ -491,6 +505,7 @@ pub struct HooksConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct Hook {
     /// Shell command to execute. Run via `sh -c` (or `cmd /C` on Windows).
@@ -524,6 +539,7 @@ impl Default for Hook {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderConfig {
     /// API key. Resolved against env at load time if it looks like `${ENV_VAR}`.
@@ -534,7 +550,16 @@ pub struct ProviderConfig {
     /// Optional explicit model id for this provider.
     pub model: Option<String>,
     /// Free-form extras passed through to provider impls.
+    ///
+    /// `toml::Value` has no `JsonSchema` impl and could not gain a meaningful
+    /// one — the point of this map is that its shape is not known here. It is
+    /// described to the schema as arbitrary JSON, which is what a settings UI
+    /// should show it as: a free-form area, not a typed field.
     #[serde(flatten)]
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "BTreeMap<String, serde_json::Value>")
+    )]
     pub extra: BTreeMap<String, toml::Value>,
 }
 
@@ -543,6 +568,7 @@ fn default_reasoning() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct TuiConfig {
     /// Theme name: "default" | "light" | "mono" — or any custom name that
@@ -557,6 +583,7 @@ pub struct TuiConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeColors {
     pub user_prompt: Option<String>,
@@ -581,6 +608,7 @@ impl Default for TuiConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct TokenConfig {
     /// Compact when used context exceeds this many tokens.
@@ -608,6 +636,7 @@ impl Default for TokenConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct RouterConfig {
     /// "Fast" model used for classification, summarization, and recap.
@@ -658,6 +687,7 @@ impl RouterConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct VerifyConfig {
     /// Post-edit turn gate. Run after a turn in which mutating tools
@@ -698,6 +728,7 @@ pub struct VerifyConfig {
 
 /// Headless-browser visual verification settings (see [`VerifyConfig::browser`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct BrowserVerifyConfig {
     /// URL to load and screenshot (e.g. a local dev server). Empty disables it.
@@ -736,6 +767,7 @@ impl Default for VerifyConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     /// `tracing-subscriber` env-filter directive.
@@ -754,6 +786,7 @@ impl Default for LoggingConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct McpServerConfig {
     /// Transport: "stdio" (default) or "http".
@@ -1983,6 +2016,7 @@ fn strip_env_placeholder(s: &str) -> Option<&str> {
 /// default for day-to-day work; `autopilot` enables daemon discovery, the
 /// critic agent, and sandboxed execution. See `plan.md` § Capability tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum PilotTier {
     Assist,
@@ -2021,6 +2055,7 @@ impl std::fmt::Display for PilotTier {
 /// $10 budget, 30-minute task timeout, `cargo check --workspace` as the
 /// per-turn gate (E5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotConfig {
     pub tier: PilotTier,
@@ -2109,6 +2144,7 @@ impl Default for PilotConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotApprovalConfig {
     pub auto_approve_usd: f64,
@@ -2146,6 +2182,7 @@ impl Default for PilotApprovalConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotPrConfig {
     pub auto_merge: bool,
@@ -2183,6 +2220,7 @@ impl Default for PilotPrConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSandboxConfig {
     /// "host" | "container" | "vm" — where workers run by default.
@@ -2210,6 +2248,7 @@ impl Default for PilotSandboxConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotDaemonConfig {
     pub enabled: bool,
@@ -2269,6 +2308,7 @@ impl Default for PilotDaemonConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotRefineConfig {
     /// Cap on clarifying questions the agent may ask before planning (J1).
@@ -2290,6 +2330,7 @@ impl Default for PilotRefineConfig {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSkillsConfig {
     /// Installed skill packs, each `owner/name@semver`.
@@ -2298,6 +2339,7 @@ pub struct PilotSkillsConfig {
 
 /// R6 — security pass run before E8's auto-merge gate.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSecurityConfig {
     /// Secrets scanner binary to invoke on the diff (e.g. "gitleaks").
@@ -2319,6 +2361,7 @@ pub struct PilotSecurityConfig {
 /// `info` are single tokens that may be a channel, "digest", or
 /// "suppress".
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotNotificationsConfig {
     pub escalation: Vec<String>,
@@ -2367,6 +2410,21 @@ impl Default for PilotSecurityConfig {
             block_severity: "medium".into(),
         }
     }
+}
+
+/// JSON Schema for the whole [`Config`], as a `serde_json::Value`.
+///
+/// Behind the `schema` feature, and exposed as a function so `schemars` stays
+/// an implementation detail of this crate — callers get a plain JSON value and
+/// never link the schema machinery themselves.
+///
+/// The `///` comments on every config field become `description` entries here.
+/// That is the point: a settings UI generated from this reads like the
+/// documentation, and a field added to a struct shows up with its explanation
+/// without anyone writing a form for it.
+#[cfg(feature = "schema")]
+pub fn json_schema() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(Config)).unwrap_or_default()
 }
 
 #[cfg(test)]

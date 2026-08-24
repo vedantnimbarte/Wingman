@@ -15,6 +15,10 @@ Status: **shipped.** Build order and the reasoning behind each decision are in
 [BOARD-PLAN.md](BOARD-PLAN.md); exact schema, types, and derivation rules are
 in [BOARD-SPEC.md](BOARD-SPEC.md).
 
+The same board is also available in a browser, served by `wingman serve` — see
+[WEB-UI.md](WEB-UI.md). It is a second renderer over this crate's headless
+derivation, not a reimplementation, and the TUI stays the default.
+
 ---
 
 ## Design in one paragraph

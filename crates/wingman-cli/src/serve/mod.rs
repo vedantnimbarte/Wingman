@@ -20,6 +20,7 @@
 mod admin;
 mod argv;
 pub mod auth;
+mod board;
 mod child;
 mod http;
 mod pilot;
@@ -28,6 +29,7 @@ mod push;
 mod routes;
 mod sessions;
 mod table;
+mod ui;
 
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -134,6 +136,13 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
         started: Instant::now(),
     });
 
+    // Put the allowlisted repos on the board once, so the panel opens onto a
+    // board that can actually take a card. Without it a `serve`-only user sees
+    // an empty registry and cannot add one, because registration otherwise
+    // happens by running pilot from a terminal — the trip the panel exists to
+    // avoid. Idempotent and best-effort; see `board::import_projects`.
+    board::import_projects(&state);
+
     // Outbound push runs alongside the listener when configured, so a phone
     // learns a run finished without holding a connection open.
     if state.cfg.serve.push.url.is_some() {
@@ -154,6 +163,14 @@ pub async fn run(cfg: Config, opts: ServeOptions) -> Result<ExitCode> {
     );
     for p in &state.projects {
         eprintln!("  {:<16} {}", p.id, projects::display_root(&p.root));
+    }
+    // Say which UI is being served. A binary built without `ui/dist/` answers
+    // `/` with a placeholder, and finding that out from the browser rather
+    // than the terminal wastes someone's afternoon.
+    if ui::embedded() {
+        eprintln!("  panel            http://{addr}/");
+    } else {
+        eprintln!("  panel            not built — run `npm run build` in ui/, then rebuild");
     }
 
     loop {

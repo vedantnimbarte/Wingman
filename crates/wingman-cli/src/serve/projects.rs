@@ -113,7 +113,11 @@ pub fn contains(root: &Path, candidate: &Path) -> bool {
 /// mishandle.
 pub fn display_root(root: &Path) -> String {
     let s = root.to_string_lossy();
-    s.strip_prefix(r"\?\").unwrap_or(&s).to_string()
+    // The Windows extended-length prefix is `\\?\` — four characters, two of
+    // them leading backslashes. Stripping `\?\` matched nothing, so canonical
+    // Windows roots reached the startup banner, `serve --list`, and
+    // `GET /v1/projects` with the prefix still attached.
+    s.strip_prefix(r#"\\?\"#).unwrap_or(&s).to_string()
 }
 
 /// JSON view of a project for `GET /v1/projects`.
@@ -150,6 +154,18 @@ fn current_branch(root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_extended_length_prefix_is_stripped_for_display() {
+        assert_eq!(
+            display_root(Path::new(r#"\\?\C:\Users\me\repo"#)),
+            r"C:\Users\me\repo"
+        );
+        // Anything without the prefix, on any platform, passes through whole —
+        // including a path that merely contains a `?`.
+        assert_eq!(display_root(Path::new("/home/me/repo")), "/home/me/repo");
+        assert_eq!(display_root(Path::new(r"C:\plain")), r"C:\plain");
+    }
 
     fn cfg_with(projects: Vec<ServeProject>) -> ServeConfig {
         ServeConfig {

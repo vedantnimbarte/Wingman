@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, pilot, projects, push, sessions, table, ServeState};
+use super::{admin, auth, board, pilot, projects, push, sessions, table, ui, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -29,6 +29,24 @@ pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Res
     // without holding the token. It reports nothing but liveness.
     if req.segments().as_slice() == ["v1", "health"] {
         return health(&state, &mut sock).await;
+    }
+
+    // The web panel's static shell, also unauthenticated — a browser must load
+    // the page before it can present a credential. It is three embedded files
+    // with no project data in them; everything the panel *shows* comes from
+    // `/v1`, which is gated below exactly as before. See `serve::ui`.
+    if ui::is_shell(&req.method, &req.segments()) {
+        return ui::serve(&req, &mut sock).await;
+    }
+
+    // Sign-in and sign-out sit ahead of the gate for the same chicken-and-egg
+    // reason: sign-in *is* the authentication (it checks the token itself
+    // before setting anything), and sign-out must work for a browser holding a
+    // cookie the server has stopped accepting.
+    match (req.method.as_str(), req.segments().as_slice()) {
+        ("POST", ["v1", "ui", "session"]) => return ui::sign_in(&state, &req, &mut sock).await,
+        ("DELETE", ["v1", "ui", "session"]) => return ui::sign_out(&mut sock).await,
+        _ => {}
     }
 
     if !auth::authorized(state.token.as_deref(), auth::presented(|n| req.header(n))) {
@@ -50,8 +68,13 @@ async fn dispatch(
         }
         ("GET", ["v1", "schema"]) => http::write_json(sock, 200, &schema(state)).await,
         ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
+        ("GET", ["v1", "config", "schema"]) => admin::get_config_schema(sock).await,
         ("GET", ["v1", "events"]) => events(state, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
+
+        // The board is global — one store spanning every project — so it sits
+        // beside `/v1/config` rather than under `/v1/projects/{p}`.
+        (_, ["v1", "board", rest @ ..]) => board::route(state, req, rest, sock).await,
 
         // Everything below operates on one repo. Resolve it once here so no
         // handler can forget the allowlist check.
@@ -115,6 +138,12 @@ async fn health(state: &Arc<ServeState>, sock: &mut TcpStream) -> std::io::Resul
             "ok": true,
             "version": env!("CARGO_PKG_VERSION"),
             "uptime_secs": state.started.elapsed().as_secs(),
+            // Whether a credential is needed at all, so the panel can skip its
+            // sign-in screen on a loopback server with no token rather than
+            // demanding a secret that does not exist. This leaks nothing: an
+            // unauthenticated caller learns it is unauthenticated, which the
+            // next 401 would have told it anyway.
+            "auth_required": state.token.is_some(),
         }),
     )
     .await
@@ -154,7 +183,12 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
         "ceiling": state.ceiling.to_string(),
         "routes": [
             { "method": "GET", "path": "/v1/health", "auth": false,
-              "returns": "liveness, version, uptime" },
+              "returns": "liveness, version, uptime, whether a credential is required" },
+            { "method": "POST", "path": "/v1/ui/session", "auth": false,
+              "body": { "token": "string" },
+              "returns": "sets the web panel's HttpOnly cookie; 401 on a wrong token" },
+            { "method": "DELETE", "path": "/v1/ui/session", "auth": false,
+              "returns": "clears the panel cookie; never gated, so a stale cookie can always be dropped" },
             { "method": "GET", "path": "/v1/schema", "auth": true,
               "returns": "this document" },
             { "method": "GET", "path": "/v1/projects", "auth": true,
@@ -190,6 +224,7 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
         ],
     });
     if let Some(routes) = doc["routes"].as_array_mut() {
+        routes.extend(board::schema());
         routes.extend(sessions::schema());
         routes.extend(table::schema());
         routes.extend(admin::schema());
@@ -253,6 +288,84 @@ mod tests {
         .await;
         assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
         assert!(resp.contains("\"ok\":true"), "{resp}");
+    }
+
+    /// The panel's whole sign-in loop, through the real accept → parse → auth
+    /// path: a good token comes back as a cookie, and that cookie then opens a
+    /// route that rejected the same request without it.
+    #[tokio::test]
+    async fn signing_in_returns_a_cookie_that_authenticates() {
+        let body = r#"{"token":"sekrit"}"#;
+        let resp = round_trip(
+            Some("sekrit"),
+            &format!(
+                "POST /v1/ui/session HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains("wingman_token=sekrit"), "{resp}");
+        assert!(resp.contains("HttpOnly"), "{resp}");
+        assert!(resp.contains("SameSite=Strict"), "{resp}");
+
+        let with_cookie = round_trip(
+            Some("sekrit"),
+            "GET /v1/projects HTTP/1.1\r\nHost: x\r\nCookie: wingman_token=sekrit\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(with_cookie.starts_with("HTTP/1.1 200"), "{with_cookie}");
+    }
+
+    #[tokio::test]
+    async fn signing_in_with_the_wrong_token_sets_no_cookie() {
+        let body = r#"{"token":"guess"}"#;
+        let resp = round_trip(
+            Some("sekrit"),
+            &format!(
+                "POST /v1/ui/session HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 401"), "{resp}");
+        assert!(!resp.contains("Set-Cookie"), "{resp}");
+        // The reply must not confirm any part of the guess.
+        assert!(!resp.contains("sekrit"), "{resp}");
+    }
+
+    /// Signing out has to work for a browser whose cookie the server has
+    /// stopped accepting, so it is never gated.
+    #[tokio::test]
+    async fn signing_out_clears_the_cookie_without_a_valid_one() {
+        let resp = round_trip(
+            Some("sekrit"),
+            "DELETE /v1/ui/session HTTP/1.1\r\nHost: x\r\nCookie: wingman_token=stale\r\n\
+             Content-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 204"), "{resp}");
+        assert!(resp.contains("Max-Age=0"), "{resp}");
+    }
+
+    #[tokio::test]
+    async fn health_reports_whether_a_credential_is_needed() {
+        let with = round_trip(
+            Some("sekrit"),
+            "GET /v1/health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(with.contains(r#""auth_required":true"#), "{with}");
+
+        let without = round_trip(
+            None,
+            "GET /v1/health HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await;
+        assert!(without.contains(r#""auth_required":false"#), "{without}");
     }
 
     #[tokio::test]

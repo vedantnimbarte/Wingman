@@ -1,0 +1,1236 @@
+/*
+ * Ledger — the panel's design system. Direction and reasoning in
+ * `docs/WEB-UI-PLAN.md` § Design.
+ *
+ * One rule holds the palette together:
+ *
+ *   Colour encodes epistemic status, and nothing else.
+ *
+ * `--proven` is a verification that passed or a task that finished.
+ * `--asserted` is running and unproven. `--failed` is failed or blocked. None
+ * of the three is ever a brand accent, a hover state, or a chart decoration.
+ * A scan of the board answers one question — what here is actually true, and
+ * what is merely running — and colour is how it answers.
+ *
+ * Cost deliberately has no colour. It gets typography: tabular figures on the
+ * ledger rule at the right edge, and nothing else in the layout is
+ * right-aligned. That rule runs unbroken through every view; sub-task spend
+ * sums into its card, cards into their column, columns into the header.
+ *
+ * Status is never carried by colour alone — every state also has a glyph, or
+ * three hues that all mean "state" is where a colour-blind reader loses the
+ * board.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --paper: #fcfcfd;
+  --raised: #f4f5f8;
+  --ink: #16181d;
+  --muted: #5c6370;
+  --rule: #e4e6eb;
+
+  --proven: #0b7a5a; /* 5.19:1 on --paper */
+  /* 4.76:1. The plan's #b4690e measured 4.12:1, under the 4.5:1 floor for the
+     13px this is set at — status text that fails contrast is status nobody
+     reads. Darkened until it passes, stopping before it turns brown. */
+  --asserted: #a85f0b;
+  --failed: #b03a2e; /* 5.87:1 */
+
+  /* Phase 1 ships system stacks rather than IBM Plex: the identity here lives
+     in the colour rule and the ledger column, not the typeface, and ~160KB of
+     base64 webfont in a locally served panel is weight the design does not
+     earn. Both stacks resolve to faces with real tabular figures. */
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    sans-serif;
+  --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
+
+  --step--1: 0.75rem;
+  --step-0: 0.8125rem;
+  --step-1: 0.9375rem;
+  --step-2: 1.25rem;
+  --step-3: 1.75rem;
+
+  --space: 1rem;
+  --rail: 12rem;
+  --header: 3.25rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0e1014;
+    --raised: #171a20;
+    --ink: #e8eaf0;
+    --muted: #8a909c;
+    --rule: #22262e;
+
+    --proven: #3fb68b;
+    --asserted: #e0a458;
+    --failed: #e0705f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: var(--step-1);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── Type roles ─────────────────────────────────────────────────────────── */
+
+/* Every figure in the panel. Tabular so columns of numbers line up down the
+   page — the ledger only reads as a ledger if the digits are on a grid. */
+.figure {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--step-0);
+}
+
+.eyebrow {
+  font-size: var(--step--1);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+/* ── Epistemic status ───────────────────────────────────────────────────── */
+
+.is-proven {
+  color: var(--proven);
+}
+.is-asserted {
+  color: var(--asserted);
+}
+.is-failed {
+  color: var(--failed);
+}
+
+/* Glyph carries the state too, so colour is never the only signal. */
+.dot::before {
+  content: '●';
+  font-size: 0.7em;
+  vertical-align: 0.15em;
+  margin-right: 0.4em;
+}
+.dot.is-asserted::before {
+  content: '◐';
+}
+.dot.is-failed::before {
+  content: '✕';
+}
+
+/* ── Shell ──────────────────────────────────────────────────────────────── */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail) 1fr;
+  grid-template-rows: var(--header) 1fr;
+  grid-template-areas:
+    'brand header'
+    'nav   main';
+  height: 100%;
+}
+
+.shell-brand {
+  grid-area: brand;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 var(--space);
+  border-bottom: 1px solid var(--rule);
+  border-right: 1px solid var(--rule);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.shell-header {
+  grid-area: header;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: 0 var(--space);
+  border-bottom: 1px solid var(--rule);
+}
+
+.shell-nav {
+  grid-area: nav;
+  border-right: 1px solid var(--rule);
+  padding: var(--space) 0;
+  overflow-y: auto;
+}
+
+.shell-main {
+  grid-area: main;
+  overflow: auto;
+  /* The ledger rule: one continuous vertical line at the right edge of every
+     view, which the figures hang on. Drawn as a background so it runs the full
+     scroll height rather than stopping with the content. */
+  background:
+    linear-gradient(var(--rule), var(--rule)) right / 1px 100% no-repeat;
+}
+
+.view {
+  padding: calc(var(--space) * 1.5);
+  padding-right: calc(var(--space) * 1.5 + 1px);
+  max-width: 68rem;
+}
+
+/* ── Nav ────────────────────────────────────────────────────────────────── */
+
+.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: 0.4rem var(--space);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--step-0);
+  cursor: pointer;
+}
+
+.nav-item:hover {
+  color: var(--ink);
+  background: var(--raised);
+}
+
+.nav-item[aria-current='page'] {
+  color: var(--ink);
+  border-left-color: var(--ink);
+  font-weight: 600;
+}
+
+/* ── Controls ───────────────────────────────────────────────────────────── */
+
+.select,
+.input,
+.button {
+  font: inherit;
+  font-size: var(--step-0);
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 0.35rem 0.5rem;
+}
+
+.button {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.button:hover:not(:disabled) {
+  background: var(--raised);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  color: var(--muted);
+}
+
+.button-quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.button-quiet:hover {
+  color: var(--ink);
+}
+
+/* ── Ledger rows ────────────────────────────────────────────────────────── */
+
+.rows {
+  border-top: 1px solid var(--rule);
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space);
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+/* `nowrap` keeps short figures on the ledger axis rather than wrapping a
+   number mid-column. It is wrong for values that are not figures — a worktree
+   path or a session id has no natural width — so anywhere those appear, the
+   rule is relaxed rather than left to overflow the panel. */
+.row > :last-child {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.detail .row > :last-child {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* ── States ─────────────────────────────────────────────────────────────── */
+
+.state {
+  padding: calc(var(--space) * 2) 0;
+  max-width: 34rem;
+}
+
+.state h2 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.375rem;
+}
+
+.state p {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: var(--step-0);
+}
+
+.state code {
+  font-family: var(--mono);
+  font-size: 0.95em;
+  background: var(--raised);
+  border-radius: 3px;
+  padding: 0.05rem 0.3rem;
+}
+
+/* ── Sign-in ────────────────────────────────────────────────────────────── */
+
+.signin {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--space);
+}
+
+.signin form {
+  width: min(24rem, 100%);
+}
+
+.signin h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0 0 0.25rem;
+}
+
+.signin p {
+  margin: 0 0 1.25rem;
+  color: var(--muted);
+  font-size: var(--step-0);
+}
+
+.signin label {
+  display: block;
+  margin-bottom: 0.375rem;
+}
+
+.signin .input {
+  width: 100%;
+  font-family: var(--mono);
+  margin-bottom: 0.75rem;
+}
+
+/* ── Page heads ─────────────────────────────────────────────────────────── */
+
+.view h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0.25rem 0 0.25rem;
+}
+
+.view > .eyebrow {
+  display: block;
+}
+
+.view-intro {
+  color: var(--muted);
+  font-size: var(--step-0);
+  margin: 0 0 calc(var(--space) * 1.5);
+  max-width: 44rem;
+}
+
+/* ── Board ──────────────────────────────────────────────────────────────
+ *
+ * Five columns side by side, scrolling horizontally rather than compressing
+ * into slivers — the TUI drops to a grouped list below 100 columns for the
+ * same reason, and a 90px-wide card is not a card.
+ */
+
+.board {
+  padding: calc(var(--space) * 1.5);
+  padding-right: calc(var(--space) * 1.5 + 1px);
+}
+
+.board-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.board-head h1 {
+  font-size: var(--step-3);
+  font-weight: 600;
+  letter-spacing: -0.025em;
+  margin: 0.25rem 0 0;
+}
+
+.board-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(15rem, 1fr);
+  gap: var(--space);
+  overflow-x: auto;
+  padding-bottom: var(--space);
+}
+
+.column {
+  min-width: 0;
+}
+
+.column-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: 0.4rem;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 0.75rem;
+}
+
+/* Cards are flat, ruled panels rather than floating shadowed tiles: this is a
+   ledger, and the page should read as ruled paper. */
+.card {
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.6rem 0.7rem;
+  margin-bottom: 0.6rem;
+  background: var(--paper);
+}
+
+.card-missing {
+  border-style: dashed;
+}
+
+.card-top {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+}
+
+.card-toggle {
+  flex: none;
+  width: 1rem;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--step-0);
+  cursor: pointer;
+  text-align: left;
+}
+
+.card-toggle:hover {
+  color: var(--ink);
+}
+
+.card-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--step-1);
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.card-short {
+  flex: none;
+}
+
+.card-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.3rem;
+  font-size: var(--step-0);
+}
+
+.card-meta > :first-child {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Spend hangs on the right edge of the card, on the same axis as the column
+   total and the board total above it. */
+.card-usd,
+.subrow-usd {
+  flex: none;
+  text-align: right;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.4rem;
+}
+
+.badge {
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0 0.3rem;
+  font-size: var(--step--1);
+  color: var(--muted);
+}
+
+.card-note {
+  margin: 0.4rem 0 0;
+  font-size: var(--step--1);
+}
+
+.subrow {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  width: 100%;
+  margin-top: 0.3rem;
+  padding: 0.2rem 0.25rem;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--step-0);
+  text-align: left;
+  cursor: pointer;
+}
+
+.subrow:hover {
+  background: var(--raised);
+}
+
+.glyph {
+  flex: none;
+  font-family: var(--mono);
+  /* The board's sub-rows are flex and get their spacing from `gap`; the run
+     plan's rows are not, so the glyph needs its own or it collides with the
+     task id. */
+  margin-right: 0.4em;
+}
+
+/* Identifiers keep their case wherever they appear, including inside an
+   eyebrow. A run id or session id is meant to be copied. */
+.identifier {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.subrow-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subrow-agent {
+  flex: none;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+}
+
+.card-tools {
+  display: flex;
+  gap: 0.25rem;
+  margin-top: 0.5rem;
+}
+
+.card-tools .button {
+  padding: 0.15rem 0.4rem;
+  font-size: var(--step--1);
+}
+
+/* ── Add card ───────────────────────────────────────────────────────────── */
+
+.add-card {
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  padding: 0.75rem;
+  margin-bottom: var(--space);
+  display: grid;
+  gap: 0.6rem;
+  max-width: 44rem;
+}
+
+.add-card label {
+  display: block;
+}
+
+.add-card .eyebrow {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.add-card .input {
+  width: 100%;
+}
+
+.add-row {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.add-grow {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.add-tools {
+  display: flex;
+  gap: 0.4rem;
+}
+
+/* ── Task detail ────────────────────────────────────────────────────────── */
+
+.detail {
+  position: fixed;
+  inset: auto 0 0 auto;
+  top: 0;
+  width: min(26rem, 100%);
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space);
+  background: var(--paper);
+  border-left: 1px solid var(--rule);
+}
+
+.detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space);
+  margin-bottom: var(--space);
+}
+
+.detail-head h2 {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: 0.15rem 0 0;
+}
+
+.detail-outcome {
+  margin: var(--space) 0 0.25rem;
+}
+
+/* ── Runs ───────────────────────────────────────────────────────────────── */
+
+.back {
+  padding-left: 0;
+  margin-bottom: 0.5rem;
+}
+
+.section-head {
+  font-size: var(--step-2);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin: calc(var(--space) * 1.75) 0 0.25rem;
+}
+
+.run-summary {
+  margin-bottom: var(--space);
+}
+
+/* A whole row that navigates. Kept as a button rather than an anchor because
+   it drives the history API, not a document load. */
+.row-link {
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+}
+
+.row-link:hover {
+  background: var(--raised);
+}
+
+.run-goal {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The plan gate. The one place in the panel that asks for a decision, so it
+   gets a rule and a tint rather than sitting inline as another paragraph. */
+.gate {
+  border: 1px solid var(--asserted);
+  border-radius: 5px;
+  padding: 0.75rem 0.9rem;
+  margin: var(--space) 0;
+  max-width: 44rem;
+}
+
+.gate h2 {
+  font-size: var(--step-1);
+  font-weight: 600;
+  margin: 0 0 0.25rem;
+}
+
+.gate p {
+  margin: 0 0 0.75rem;
+  font-size: var(--step-0);
+  color: var(--muted);
+}
+
+.task-row {
+  align-items: flex-start;
+}
+
+.task-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-toggle {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: var(--step-1);
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.task-toggle:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.task-meta {
+  display: block;
+  font-size: var(--step--1);
+  margin-top: 0.1rem;
+}
+
+.task-usd {
+  flex: none;
+}
+
+.task-detail {
+  display: grid;
+  grid-template-columns: minmax(6rem, auto) 1fr;
+  gap: 0.15rem 0.75rem;
+  margin: 0.5rem 0 0.25rem;
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--rule);
+}
+
+.task-detail dt {
+  margin: 0;
+}
+
+.task-detail dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.task-tools {
+  display: inline-flex;
+  gap: 0.25rem;
+  margin-top: 0.35rem;
+}
+
+.task-tools .button {
+  padding: 0.1rem 0.4rem;
+  font-size: var(--step--1);
+}
+
+.run-tools {
+  margin-top: var(--space);
+}
+
+/* ── Config ─────────────────────────────────────────────────────────────── */
+
+.config {
+  max-width: none;
+}
+
+.config-body {
+  display: grid;
+  grid-template-columns: 11rem 1fr;
+  gap: calc(var(--space) * 1.5);
+  align-items: start;
+}
+
+.config-nav {
+  position: sticky;
+  top: var(--space);
+  border-right: 1px solid var(--rule);
+  padding-right: 0.5rem;
+}
+
+.config-nav .nav-item {
+  padding-left: 0.5rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+}
+
+.config-fields {
+  min-width: 0;
+  max-width: 46rem;
+}
+
+/* A settings row is label-above-help on the left, control on the right. The
+   help text is the field's own `///` comment, so it is the documentation
+   rather than a paraphrase of it. */
+.config-row {
+  align-items: flex-start;
+  gap: calc(var(--space) * 1.5);
+}
+
+.config-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-family: var(--mono);
+  font-size: var(--step-0);
+  overflow-wrap: anywhere;
+}
+
+.config-dirty {
+  font-weight: 600;
+}
+
+/* An edited-but-unsaved field is marked structurally, not by colour — hue is
+   reserved for whether something is proven, running, or failed. */
+.config-dirty::after {
+  content: ' •';
+  color: var(--asserted);
+}
+
+.config-help {
+  font-family: var(--sans);
+  font-size: var(--step--1);
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.config-default {
+  font-size: var(--step--1);
+}
+
+.config-input {
+  flex: none;
+  width: min(20rem, 45%);
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: stretch;
+  text-align: left;
+}
+
+.config-input .input,
+.config-input .select {
+  width: 100%;
+}
+
+.config-input input[type='checkbox'] {
+  width: auto;
+  align-self: flex-start;
+}
+
+.config-area {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  resize: vertical;
+}
+
+.config-redacted {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.config-note {
+  font-size: var(--step-0);
+  max-width: 44rem;
+}
+
+/* The save bar sticks to the bottom: with twenty-one sections and a hundred
+   and sixty fields, a button at the end of the page is a button nobody finds. */
+.config-save {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: var(--space);
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+/* ── Chat ───────────────────────────────────────────────────────────────── */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  max-width: 52rem;
+}
+
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space);
+  padding: var(--space) 0;
+}
+
+.msg-start {
+  margin: 0;
+}
+
+/* Speaker is marked by an eyebrow and a rule, not by a coloured bubble —
+   colour here would collide with the status palette. */
+.msg {
+  border-left: 2px solid var(--rule);
+  padding-left: 0.75rem;
+}
+
+.msg-user {
+  border-left-color: var(--ink);
+}
+
+.msg-text {
+  margin: 0.2rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The model's working-out, folded away by default: it is not the answer. */
+.thinking,
+.tool {
+  margin-top: 0.4rem;
+  font-size: var(--step-0);
+}
+
+.thinking summary,
+.tool summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.thinking summary::-webkit-details-marker,
+.tool summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking summary::before,
+.tool summary::before {
+  content: '▸ ';
+  color: var(--muted);
+}
+
+.thinking[open] summary::before,
+.tool[open] summary::before {
+  content: '▾ ';
+}
+
+.thinking pre,
+.tool pre {
+  margin: 0.3rem 0 0;
+  padding: 0.5rem;
+  max-height: 22rem;
+  overflow: auto;
+  background: var(--raised);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--step--1);
+}
+
+/* Blinking insertion point while text streams. Held still under
+   prefers-reduced-motion by the global rule above. */
+.caret {
+  display: inline-block;
+  width: 0.5em;
+  height: 1em;
+  margin-left: 0.1em;
+  vertical-align: text-bottom;
+  background: var(--ink);
+  animation: caret 1s step-end infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.composer textarea {
+  width: 100%;
+  resize: vertical;
+}
+
+.composer .add-tools {
+  align-items: center;
+}
+
+/* ── Insights ───────────────────────────────────────────────────────────── */
+
+/* The one big figure on the page. Cost gets typography, not colour — that is
+   the palette rule, and a green total would read as "good" rather than "spent". */
+.headline {
+  font-size: 3rem;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  margin: 0.5rem 0 0.25rem;
+}
+
+.bars {
+  display: grid;
+  gap: 0.3rem;
+  margin: 0.75rem 0 var(--space);
+  max-width: 44rem;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) 1fr minmax(3.5rem, auto);
+  gap: 0.6rem;
+  align-items: center;
+  font-size: var(--step-0);
+}
+
+.bar-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  height: 0.75rem;
+  background: var(--raised);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--muted);
+  border-radius: 2px;
+}
+
+.bar-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The row you actually paid for. Marked by weight and a darker fill rather
+   than a hue, so it reads as "this one" and not as a verdict. */
+.bar-actual .bar-label,
+.bar-actual .bar-value {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bar-actual .bar-fill {
+  background: var(--ink);
+}
+
+.report {
+  margin: 0.5rem 0 var(--space);
+  padding: 0.75rem;
+  max-height: 30rem;
+  overflow: auto;
+  background: var(--raised);
+  border-radius: 4px;
+  font-size: var(--step--1);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
+
+@media (max-width: 40rem) {
+  .shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: var(--header) auto 1fr;
+    grid-template-areas:
+      'header'
+      'nav'
+      'main';
+  }
+
+  .shell-brand {
+    display: none;
+  }
+
+  .shell-nav {
+    display: flex;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding: 0;
+  }
+
+  .nav-item {
+    width: auto;
+    white-space: nowrap;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+    padding: 0.5rem 0.75rem;
+  }
+
+  .nav-item[aria-current='page'] {
+    border-left-color: transparent;
+    border-bottom-color: var(--ink);
+  }
+
+  .view,
+  .board {
+    padding: var(--space);
+  }
+
+  /* One column at a time on a phone, stacked. Five side-by-side columns on a
+     375px screen is five slivers; the TUI degrades the same way below 100
+     columns, and for the same reason. */
+  .columns {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+    overflow-x: visible;
+  }
+
+  /* An empty column is a heading with nothing under it — worth the row on a
+     wide screen where the grid explains it, not on a phone. */
+  .column:not(:has(.card)) {
+    display: none;
+  }
+
+  .detail {
+    width: 100%;
+  }
+
+  /* Section list above the fields rather than beside them. */
+  .config-body {
+    grid-template-columns: 1fr;
+  }
+
+  .config-nav {
+    position: static;
+    display: flex;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 0 0.25rem;
+  }
+
+  .config-row {
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .config-input {
+    width: 100%;
+  }
+
+  /* Label above the bar rather than a 8rem column beside it. */
+  .bar-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'label value'
+      'track track';
+    gap: 0.2rem 0.6rem;
+  }
+
+  .bar-label {
+    grid-area: label;
+  }
+  .bar-track {
+    grid-area: track;
+  }
+  .bar-value {
+    grid-area: value;
+  }
+
+  .headline {
+    font-size: 2.25rem;
+  }
+}

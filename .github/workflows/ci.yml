@@ -172,6 +172,37 @@ jobs:
         working-directory: editors/vscode
         run: npm run build
 
+  # Build the web panel and prove it actually lands inside the binary.
+  #
+  # Unlike the vscode job above, this one is NOT informational. `build.rs`
+  # substitutes a placeholder page when `ui/dist` is missing so that a clone
+  # without node still compiles — which means a broken UI build would
+  # otherwise ship a binary that serves "the web UI was not built" and passes
+  # every other check. `ui_bundle_is_embedded` is the assertion that catches
+  # it. It is `#[ignore]`d so a contributor running `cargo test` without node
+  # never sees it fail.
+  web-ui:
+    name: web-ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install deps
+        working-directory: ui
+        run: npm ci
+      - name: Unit tests
+        working-directory: ui
+        run: npm test
+      - name: Type-check and build
+        working-directory: ui
+        run: npm run build
+      - name: Assert the bundle is embedded
+        run: cargo test -p wingman-cli --bins -- --ignored ui_bundle_is_embedded
+
   # License + duplicate-dependency + source policy via cargo-deny. Advisories
   # are checked by the `audit` job above, which is required; this one stays
   # informational until `multiple-versions` flips to "deny" (pending the

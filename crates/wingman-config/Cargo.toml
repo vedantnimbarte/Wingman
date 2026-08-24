@@ -16,3 +16,12 @@ tracing = { workspace = true }
 directories = { workspace = true }
 keyring = { workspace = true }
 sha2 = { workspace = true }
+schemars = { workspace = true, optional = true }
+
+[features]
+default = []
+# Derive JSON Schema for every config type, so `wingman serve` can emit a
+# schema the web panel generates settings forms from. Off by default: only the
+# CLI needs it, and the other crates that depend on this one should not pay for
+# a proc-macro they never use.
+schema = ["dep:schemars"]

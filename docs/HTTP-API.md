@@ -97,7 +97,7 @@ TLS and does not pretend to.
 
 ## Authentication
 
-Every route except `GET /v1/health` requires:
+Every route except `GET /v1/health` and the two session routes below requires:
 
 ```
 Authorization: Bearer <token>
@@ -109,6 +109,23 @@ Compared in constant time. A failed auth returns `401` with
 
 There is one token. Per-token ceilings and per-token project scoping are a
 deliberate non-goal for now (see [Non-goals](#non-goals)).
+
+**Browsers use a cookie instead**, because `EventSource` cannot set headers and
+a token in a query string ends up in every access log.
+
+| Method | Path | Effect |
+|---|---|---|
+| `POST` | `/v1/ui/session` | Body `{"token":"…"}`. Verifies it with the same constant-time comparison, then returns `Set-Cookie: wingman_token=…; Path=/; HttpOnly; SameSite=Strict`. A wrong token is `401` and sets nothing. Ungated, because this *is* the authentication. |
+| `DELETE` | `/v1/ui/session` | Clears the cookie. Ungated, so a browser holding a cookie the server no longer accepts can still drop it. |
+
+`GET /v1/health` reports `auth_required` so a client can tell whether any of
+this is needed before asking for a secret that may not exist.
+
+An explicit `Authorization` or `X-Wingman-Token` header wins over the cookie: a
+script that sends a credential means it, and must not have a stale browser
+cookie silently substituted. `Secure` is not set — the panel is served over
+plain HTTP on loopback or a LAN address, where a `Secure` cookie is discarded;
+see [WEB-UI.md](WEB-UI.md) for the full reasoning and what it costs.
 
 ---
 
@@ -152,7 +169,7 @@ that root and are rejected if they escape it.
 
 | Method | Path | Returns |
 |---|---|---|
-| `GET` | `/v1/projects/{p}/pilot/runs` | `RunSummary[]` — id, goal, status, task counts, cost, timestamps. |
+| `GET` | `/v1/projects/{p}/pilot/runs` | `RunSummary[]` — `run_id`, `goal`, `status`, `done`/`total`, `terminal`. Newest first. No cost or timestamps: `RunSummary` does not carry them — read one run for `totals`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}` | Full `RunState` snapshot. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/events?tail=n` | Last `n` events from `tasks.jsonl`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/stream` | SSE: events as they are appended. |
@@ -173,6 +190,34 @@ run's process.
 | `POST` | `/v1/projects/{p}/pilot/runs/{run}/retry` | `{"task":"id"}` | Re-queue a failed or blocked task. |
 | `POST` | `/v1/projects/{p}/pilot/goals` | `{"text":"…","author":"…"}` | Write an intake file for the discovery daemon. A body-claimed author never earns trust over the API — trust comes from `[pilot.daemon].trusted_authors` as the daemon matches it, not from a request asserting an identity. |
 
+### Board
+
+The board is **global** — one `~/.wingman/board.db` spanning every project — so
+these routes are not project-scoped. `wingman-board` is called in-process, so
+the column, roll-up and badges are the same derivation `wingman board` renders.
+
+| Method | Path | Effect |
+|---|---|---|
+| `GET` | `/v1/board?project=&archived` | Columns, cards with derived column / roll-up / badges, and the project registry in one response. |
+| `GET` | `/v1/board/projects` | The board's registry, each with whether its directory still exists. |
+| `POST` | `/v1/board/cards` | `{"project":"…","title":"…","goal":"…?","notes":"…?","labels":[]}` → `{id, short}`. |
+| `GET` | `/v1/board/cards/{card}` | One card and its dispatch history. `{card}` is an id or a unique prefix. |
+| `POST` | `/v1/board/cards/{card}/dispatch` | `{"again":bool,"args":[]}` → `{run_id, project, pid}`, spawned detached. |
+| `POST` | `/v1/board/cards/{card}/archive` | `{"restore":bool}` to unarchive instead. |
+| `DELETE` | `/v1/board/cards/{card}` | Forgets the card and its dispatch history. The runs on disk are untouched. |
+
+`badges` carry `{kind, text}` rather than the bare strings
+`board list --json` emits, so a renderer can tell a `progress` badge from a
+label a user typed without parsing formatted text.
+
+**Dispatch is bounded by the allowlist.** The registry can name repos this
+daemon does not serve; dispatching one is a `403`. Without that, the token
+would start an agent with write access in any directory the board remembers.
+
+`args` are forwarded to `pilot run` verbatim and validated by the same list the
+CLI uses — `--worker-mode`, `--detached`, `-d` and `--watch` are refused with a
+`400`.
+
 ### Sessions and turns
 
 Conversations are server-held: the transcript is a normal
@@ -184,7 +229,7 @@ and shows up in `wingman session list` like any other.
 | `POST` | `/v1/projects/{p}/sessions` | `{"model":"…","mode":"…"}` | `{"session_id":"…"}` |
 | `GET` | `/v1/projects/{p}/sessions` | — | Sessions with id, first prompt, model, turn count, mtime. |
 | `GET` | `/v1/projects/{p}/sessions/{id}` | — | Full transcript as `SessionRecord[]`. |
-| `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream: `text`, `tool_start`, `tool_result`, `usage`, `verification`, `stop`. Resumes the session history. |
+| `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream of `wingman_core::AgentEvent`: `text_delta`, `thinking_delta`, `tool_start`, `tool_result`, `usage`, `turn_complete`, `verification`, `stop`, `error`. The event name is the payload's own `type`, so this list is the enum. Resumes the session history. |
 | `POST` | `/v1/projects/{p}/turns` | same | One-shot turn, no session continuity. |
 | `DELETE` | `/v1/projects/{p}/sessions/{id}` | — | Forget the session: deletes the transcript **and** its entries in the global session index, so `recall_session` cannot resurface it. Reports `deindexed` so a partial delete is visible in the response, not a surprise later. |
 
@@ -218,6 +263,7 @@ is returned as JSON; anything else comes back as
 | `POST /v1/projects/{p}/schedule/run?all` | `schedule [--all]` |
 | `GET /v1/projects/{p}/config` | `config show --json` |
 | `GET /v1/config` / `PATCH /v1/config` | the server's merged config; patch writes the **global** file |
+| `GET /v1/config/schema` | JSON Schema derived from the config types, plus defaults, redacted keys, read-only sections, and the file a patch writes to |
 
 Every table route is project-scoped, including the config-adjacent ones: the
 merged view depends on which repo you are in. Query parameters are an allowlist
@@ -233,6 +279,19 @@ could write it would be a way to smuggle executable keys into a repo. It refuses
 `[serve]` outright, because a server that can rewrite its own token, ceiling, or
 allowlist has no ceiling. Patches are validated by round-tripping through the
 real config parser before anything is written.
+
+**A patch is a minimal edit, not a rewrite.** The file is edited as a TOML
+document, so changing one field yields a one-line diff and comments, key order
+and formatting all survive — including the comment sitting above the key whose
+value changed. Earlier builds parsed to a table and re-serialised it, which
+reordered every section and discarded every comment in the file.
+
+`GET /v1/config/schema` exists so a client can build a settings UI without
+hard-coding anything about the config. It returns a JSON Schema derived from
+the `wingman-config` types — every field's type, default, and `///`
+documentation — alongside `defaults`, `redacted_keys`, `readonly_sections`, and
+`writes_to`. The two lists are the same constants the server enforces on read
+and on write, so a client cannot be holding a stale copy of either.
 
 There is no `/v1/skills`, `/v1/mcp`, or `/v1/providers`: no CLI command backs a
 listing for those today, and faking one would report something the tool cannot

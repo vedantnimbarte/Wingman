@@ -1,0 +1,491 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  api,
+  ApiError,
+  type ContentBlock,
+  type SessionRecord,
+  type SessionSummary,
+  type TurnEvent,
+} from './api'
+import { navigate } from './router'
+import { message } from './state'
+import { Failed, Loading } from './ui'
+
+/**
+ * Sessions — transcripts, and holding a conversation with the agent.
+ *
+ * A session is the same `.wingman/sessions/<id>.jsonl` the TUI writes, so one
+ * started here appears in `wingman session list` and resumes from a terminal.
+ * The server keeps no conversation state; the file on disk is the state, which
+ * is what makes "start on the laptop, continue on the phone" work with no sync
+ * protocol behind it.
+ */
+export function Sessions({ project, id }: { project: string | null; id: string | null }) {
+  if (!project) {
+    return (
+      <div className="view">
+        <Failed
+          title="No project selected"
+          detail="Sessions live in a repo. Pick one in the header."
+          action={{ label: 'Go to Overview', onClick: () => navigate('/') }}
+        />
+      </div>
+    )
+  }
+  return id ? (
+    <Conversation key={id} project={project} id={id} />
+  ) : (
+    <SessionList project={project} />
+  )
+}
+
+/* ── List ──────────────────────────────────────────────────────────────── */
+
+function SessionList({ project }: { project: string }) {
+  const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [note, setNote] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setSessions(await api.sessions(project))
+      setError(null)
+    } catch (e) {
+      setError(message(e))
+    }
+  }, [project])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function remove(id: string) {
+    setNote(null)
+    try {
+      const res = await api.deleteSession(project, id)
+      // The API reports what happened to the search index as well as the file.
+      // "The transcript is gone but recall may still find it" is something to
+      // learn here, not from a surprise later.
+      const deindexed = res.deindexed
+      setNote(
+        deindexed && typeof deindexed === 'object' && 'error' in deindexed
+          ? `Transcript deleted, but its search-index entry remains: ${String((deindexed as { error: unknown }).error)}`
+          : `Deleted ${id}${deindexed === false ? ' (nothing was indexed for it)' : ' and its search-index entry'}`,
+      )
+      await load()
+    } catch (e) {
+      setNote(message(e))
+    }
+  }
+
+  if (error)
+    return (
+      <div className="view">
+        <Failed
+          title="Could not list sessions"
+          detail={error}
+          action={{ label: 'Try again', onClick: () => void load() }}
+        />
+      </div>
+    )
+  if (!sessions) return <Loading what="sessions" />
+
+  return (
+    <div className="view">
+      <span className="eyebrow">Sessions</span>
+      <h1>{sessions.length === 1 ? '1 session' : `${sessions.length} sessions`}</h1>
+      <p className="view-intro">
+        Transcripts in <code>.wingman/sessions/</code>. A conversation started here is a normal
+        session file — it shows up in <code>wingman session list</code> and resumes from a terminal.
+      </p>
+
+      <div className="add-tools">
+        <button type="button" className="button" onClick={() => navigate('/sessions/new')}>
+          New conversation
+        </button>
+      </div>
+
+      {note && (
+        <p className="figure config-note" role="status">
+          {note}
+        </p>
+      )}
+
+      {sessions.length === 0 ? (
+        <div className="state">
+          <h2>No sessions yet</h2>
+          <p>Start one above, or run `wingman` in this repo from a terminal.</p>
+        </div>
+      ) : (
+        <div className="rows">
+          {sessions.map((s) => (
+            <div key={s.session_id} className="row">
+              <button
+                type="button"
+                className="task-toggle"
+                onClick={() => navigate(`/sessions/${s.session_id}`)}
+              >
+                {s.first_prompt ?? <span className="muted">(no prompt yet)</span>}
+                <span className="task-meta muted">
+                  <span className="identifier">{s.session_id}</span>
+                  {s.model && ` · ${s.model}`}
+                  {` · ${s.turns} ${s.turns === 1 ? 'turn' : 'turns'}`}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="button button-quiet"
+                onClick={() => void remove(s.session_id)}
+                title="Delete the transcript and its search-index entry"
+              >
+                Delete
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ── Conversation ──────────────────────────────────────────────────────── */
+
+/** What the composer is doing. `live` carries the text streamed so far. */
+export type Turn =
+  | { state: 'idle' }
+  | { state: 'streaming'; text: string; thinking: string; tools: ToolCall[] }
+  | { state: 'failed'; detail: string }
+
+export type ToolCall = { id: string; name: string; output?: string; failed?: boolean }
+
+function Conversation({ project, id }: { project: string; id: string }) {
+  const isNew = id === 'new'
+  const [records, setRecords] = useState<SessionRecord[] | null>(isNew ? [] : null)
+  const [error, setError] = useState<string | null>(null)
+  const [prompt, setPrompt] = useState('')
+  const [turn, setTurn] = useState<Turn>({ state: 'idle' })
+  const [verification, setVerification] = useState<{ passed: boolean; summary: string } | null>(null)
+  const abort = useRef<AbortController | null>(null)
+  const foot = useRef<HTMLDivElement | null>(null)
+
+  const load = useCallback(async () => {
+    if (isNew) return
+    try {
+      setRecords((await api.session(project, id)).records)
+      setError(null)
+    } catch (e) {
+      setError(message(e))
+    }
+  }, [project, id, isNew])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // Keep the newest text in view while a turn streams.
+  useEffect(() => {
+    foot.current?.scrollIntoView({ block: 'end' })
+  }, [turn])
+
+  useEffect(() => () => abort.current?.abort(), [])
+
+  async function send() {
+    const text = prompt.trim()
+    if (!text) return
+
+    // A session id is minted before the first turn so the URL is stable and
+    // the conversation is linkable from the moment it starts.
+    let target = id
+    if (isNew) {
+      try {
+        target = (await api.newSession(project)).session_id
+      } catch (e) {
+        return setTurn({ state: 'failed', detail: message(e) })
+      }
+    }
+
+    setPrompt('')
+    setVerification(null)
+    setTurn({ state: 'streaming', text: '', thinking: '', tools: [] })
+    abort.current = new AbortController()
+
+    try {
+      await api.turn(
+        project,
+        target,
+        { prompt: text },
+        (e) => apply(e, setTurn, setVerification),
+        abort.current.signal,
+      )
+      // The transcript on disk is authoritative: re-reading it is what puts
+      // this turn into the same shape as every earlier one, rather than
+      // keeping a separately-assembled copy in memory.
+      if (isNew) navigate(`/sessions/${target}`)
+      else await load()
+      setTurn({ state: 'idle' })
+    } catch (e) {
+      const detail =
+        e instanceof ApiError && e.status === 409
+          ? 'This session already has a turn running. Wait for it to finish — a second turn would replay a transcript the first is still writing.'
+          : message(e)
+      setTurn({ state: 'failed', detail })
+    }
+  }
+
+  if (error)
+    return (
+      <div className="view">
+        <Failed
+          title="Could not load the session"
+          detail={error}
+          action={{ label: 'Back to sessions', onClick: () => navigate('/sessions') }}
+        />
+      </div>
+    )
+  if (!records) return <Loading what="the transcript" />
+
+  const streaming = turn.state === 'streaming'
+
+  // In a live stream `tool_start` and `tool_result` are paired by id as they
+  // arrive. In a transcript they are separate records — the call is a block
+  // inside an assistant message, the result is its own line — so they have to
+  // be rejoined here. Without this every tool renders as still running and its
+  // output is never shown.
+  const results = new Map<string, { output: string; failed: boolean }>()
+  for (const r of records) {
+    if (r.kind === 'tool_result') results.set(r.id, { output: r.output, failed: r.is_error })
+  }
+
+  return (
+    <div className="view chat">
+      <button
+        type="button"
+        className="button button-quiet back"
+        onClick={() => navigate('/sessions')}
+      >
+        ← Sessions
+      </button>
+      <span className="eyebrow">
+        <span className="figure identifier">{isNew ? 'new conversation' : id}</span>
+      </span>
+
+      <div className="transcript">
+        {records.map((r, i) => (
+          <Record key={i} record={r} results={results} />
+        ))}
+
+        {streaming && (
+          <div className="msg msg-assistant">
+            <span className="eyebrow">Assistant</span>
+            {turn.thinking && (
+              <details className="thinking">
+                <summary className="muted">Thinking</summary>
+                <pre className="figure">{turn.thinking}</pre>
+              </details>
+            )}
+            {turn.tools.map((t) => (
+              <ToolLine key={t.id} tool={t} />
+            ))}
+            <p className="msg-text">
+              {turn.text}
+              <span className="caret" aria-hidden="true" />
+            </p>
+          </div>
+        )}
+
+        {turn.state === 'failed' && (
+          <p className="is-failed dot" role="alert">
+            {turn.detail}
+          </p>
+        )}
+
+        {verification && (
+          <p className={`dot ${verification.passed ? 'is-proven' : 'is-failed'}`}>
+            Verification {verification.passed ? 'passed' : 'failed'} — {verification.summary}
+          </p>
+        )}
+
+        <div ref={foot} />
+      </div>
+
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault()
+          void send()
+        }}
+      >
+        <textarea
+          className="input"
+          rows={3}
+          value={prompt}
+          disabled={streaming}
+          placeholder={streaming ? 'Waiting for this turn to finish…' : 'Ask for something'}
+          onChange={(e) => setPrompt(e.target.value)}
+          onKeyDown={(e) => {
+            // Enter sends; Shift+Enter is a newline. A multi-line prompt is
+            // common enough that Enter-only would be the wrong default.
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              void send()
+            }
+          }}
+        />
+        <div className="add-tools">
+          <button type="submit" className="button" disabled={streaming || prompt.trim() === ''}>
+            Send
+          </button>
+          {streaming && (
+            <button
+              type="button"
+              className="button button-quiet"
+              onClick={() => abort.current?.abort()}
+            >
+              Stop
+            </button>
+          )}
+          <span className="muted config-help">
+            The turn runs in <code>{project}</code> at the server's permission ceiling.
+          </span>
+        </div>
+      </form>
+    </div>
+  )
+}
+
+/** Fold one streamed event into the in-flight turn. */
+export function apply(
+  e: TurnEvent,
+  setTurn: React.Dispatch<React.SetStateAction<Turn>>,
+  setVerification: (v: { passed: boolean; summary: string } | null) => void,
+) {
+  if (e.type === 'verification') return setVerification({ passed: e.passed, summary: e.summary })
+
+  setTurn((prev) => {
+    if (prev.state !== 'streaming') return prev
+    switch (e.type) {
+      case 'text_delta':
+        return { ...prev, text: prev.text + e.text }
+      // Kept separate from the answer and folded away by default: this is the
+      // model's working-out, not what it is telling you.
+      case 'thinking_delta':
+        return { ...prev, thinking: prev.thinking + e.text }
+      case 'tool_start':
+        return { ...prev, tools: [...prev.tools, { id: e.id, name: e.name }] }
+      case 'tool_result':
+        return {
+          ...prev,
+          tools: prev.tools.map((t) =>
+            t.id === e.id ? { ...t, output: e.output, failed: e.is_error } : t,
+          ),
+        }
+      default:
+        return prev
+    }
+  })
+}
+
+/* ── Transcript rendering ──────────────────────────────────────────────── */
+
+type Results = Map<string, { output: string; failed: boolean }>
+
+function Record({ record, results }: { record: SessionRecord; results: Results }) {
+  switch (record.kind) {
+    case 'session_start':
+      return (
+        <p className="eyebrow msg-start">
+          {record.provider} · <span className="identifier figure">{record.model}</span>
+        </p>
+      )
+
+    case 'user':
+      return (
+        <div className="msg msg-user">
+          <span className="eyebrow">You</span>
+          <p className="msg-text">{record.text}</p>
+        </div>
+      )
+
+    case 'assistant':
+      return (
+        <div className="msg msg-assistant">
+          <span className="eyebrow">Assistant</span>
+          {record.blocks.map((b, i) => (
+            <Block key={i} block={b} results={results} />
+          ))}
+        </div>
+      )
+
+    // Rendered under the `tool_use` block that produced it, via `results`.
+    case 'tool_result':
+      return null
+
+    case 'usage_delta':
+      return null
+
+    case 'stop':
+      return record.reason === 'end_turn' ? null : (
+        <p className="eyebrow msg-start is-asserted">stopped: {record.reason}</p>
+      )
+  }
+}
+
+function Block({ block, results }: { block: ContentBlock; results: Results }) {
+  switch (block.type) {
+    case 'text':
+      return <p className="msg-text">{block.text}</p>
+    case 'tool_use': {
+      const done = results.get(block.id)
+      return (
+        <ToolLine
+          tool={{ id: block.id, name: block.name, output: done?.output, failed: done?.failed }}
+          input={block.input}
+        />
+      )
+    }
+    case 'tool_result':
+      return (
+        <ToolLine
+          tool={{
+            id: block.tool_use_id,
+            name: 'result',
+            output: block.content,
+            failed: block.is_error,
+          }}
+        />
+      )
+    case 'thinking':
+      return null
+    case 'image':
+      return <p className="muted figure">[image · {block.media_type}]</p>
+  }
+}
+
+function ToolLine({ tool, input }: { tool: ToolCall; input?: unknown }) {
+  const done = tool.output !== undefined
+  return (
+    <details className="tool">
+      <summary>
+        <span className={`glyph ${tool.failed ? 'is-failed' : done ? 'is-proven' : 'is-asserted'}`}>
+          {tool.failed ? '✕' : done ? '✓' : '◐'}
+        </span>
+        <span className="figure">{tool.name}</span>
+      </summary>
+      {input !== undefined && <pre className="figure">{stringify(input)}</pre>}
+      {tool.output !== undefined && <pre className="figure">{clamp(tool.output)}</pre>}
+    </details>
+  )
+}
+
+/** Tool output can be enormous; the transcript is not a log viewer. */
+function clamp(s: string, max = 4000): string {
+  return s.length <= max ? s : `${s.slice(0, max)}\n… ${s.length - max} more characters`
+}
+
+function stringify(v: unknown): string {
+  try {
+    return JSON.stringify(v, null, 2) ?? ''
+  } catch {
+    return String(v)
+  }
+}
