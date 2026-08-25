@@ -4897,7 +4897,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "windows-sys 0.59.0",
@@ -4916,7 +4916,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tracing",
  "wingman-autonomous",
  "wingman-config",
@@ -4928,7 +4928,7 @@ version = "0.2.0"
 dependencies = [
  "headless_chrome",
  "image",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4951,7 +4951,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "toml",
  "toml_edit",
@@ -4986,7 +4986,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "toml",
  "tracing",
 ]
@@ -5001,7 +5001,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5017,7 +5017,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5034,7 +5034,7 @@ version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
 ]
@@ -5049,7 +5049,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5068,7 +5068,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5090,7 +5090,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5106,7 +5106,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "wingman-config",
@@ -5117,7 +5117,7 @@ dependencies = [
 name = "wingman-skills"
 version = "0.2.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tracing",
  "wingman-config",
 ]
@@ -5136,7 +5136,7 @@ dependencies = [
  "serde_json",
  "similar",
  "tempfile",
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tokio",
  "tracing",
  "urlencoding",
@@ -5155,7 +5155,7 @@ dependencies = [
 name = "wingman-ts"
 version = "0.2.0"
 dependencies = [
- "thiserror 1.0.69",
+ "thiserror 2.0.20",
  "tracing",
  "tree-sitter",
  "tree-sitter-go",
