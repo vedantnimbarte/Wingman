@@ -1166,6 +1166,35 @@ async fn handle_reassign(
     // The watchdog calls this on every Failed event without tracking
     // its own counter; this is the single place rung state is mutated.
 
+    // Reassign is the *retry* path: every rung below resets the task to Todo
+    // and starts a fresh worker in a clean worktree. Applied to a task that
+    // already reached Review or Done, that discards finished work and redoes
+    // it from scratch — and if the second attempt runs out of turns, a task
+    // that had succeeded ends the run Failed.
+    //
+    // The HTTP retry route already refuses this (`serve::pilot` gates on
+    // Failed | Blocked), but the manager's `reassign_task` tool and the
+    // control file reach the actor directly and did not. The guard belongs
+    // here, where all three callers meet, rather than in one of them.
+    {
+        let store_g = store.lock().await;
+        if let Some(t) = store_g.state().task(task_id) {
+            if matches!(t.status, TaskStatus::Review | TaskStatus::Done) {
+                tracing::warn!(
+                    target: "pilot::retry",
+                    task = %task_id,
+                    status = ?t.status,
+                    "refusing to reassign a task that already completed"
+                );
+                return Err(OrchestratorError::BadTransition(
+                    task_id.to_string(),
+                    t.status,
+                    "reassign (task already complete)",
+                ));
+            }
+        }
+    }
+
     // Capture failure context BEFORE incrementing — the worker's
     // outcome on the failing attempt feeds the next rung's history.
     let failure_note = {
@@ -2344,6 +2373,65 @@ mod tests {
             .unwrap();
         let state = handle.snapshot().await.unwrap();
         assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// Regression, from a live `auto_dispatch` run (#34).
+    ///
+    /// A task reached Review with its work done and acceptance green. Something
+    /// then called Reassign on it — the manager has a `reassign_task` tool, and
+    /// unlike the HTTP retry route it did not check the status. The ladder reset
+    /// the task to Todo, a fresh worker redid the work from scratch, ran out of
+    /// turns, and the run ended Failed with the finished edit stranded
+    /// uncommitted in the worktree.
+    ///
+    /// Reassign is the retry path. Retrying work that already succeeded is never
+    /// right: at best it is paid for twice, at worst it destroys it.
+    #[tokio::test]
+    async fn reassigning_a_completed_task_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        let _agent = handle.assign_task("t1").await.unwrap();
+        wait_for_review(&handle, "t1").await;
+
+        // The exact call the manager's tool makes.
+        let err = handle.reassign("t1").await;
+        assert!(
+            err.is_err(),
+            "a Review task must not be reassignable: {err:?}"
+        );
+
+        // And the work is still there: still Review, still finalizable.
+        let state = handle.snapshot().await.unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().status,
+            TaskStatus::Review,
+            "reassign must not have reset the task"
+        );
+        handle
+            .finalize_task("t1", Some("sha-1".into()))
+            .await
+            .unwrap();
+        let state = handle.snapshot().await.unwrap();
+        assert_eq!(state.task("t1").unwrap().status, TaskStatus::Done);
+
+        // Done is protected too — nothing may send a merged task round again.
+        assert!(
+            handle.reassign("t1").await.is_err(),
+            "a Done task must not be reassignable either"
+        );
+
         handle.shutdown().await;
         let _ = join.await;
     }
