@@ -18,6 +18,16 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    ignore:
+      # `dtolnay/rust-toolchain@1.88` is not a dependency pin — the ref *is*
+      # the toolchain, and it is deliberately the same 1.88 as
+      # `rust-version` in the workspace Cargo.toml. Dependabot reads it as a
+      # version tag and proposes the newest release, which would quietly
+      # point the MSRV job at a toolchain that is not the MSRV: the job keeps
+      # passing while proving nothing about the version we promise to support.
+      # Raising the floor is a decision to make in Cargo.toml first, and this
+      # ref follows it by hand.
+      - dependency-name: dtolnay/rust-toolchain
 
   # The VS Code extension has its own npm toolchain.
   - package-ecosystem: npm
