@@ -356,8 +356,14 @@ pub async fn run_worker(
         status.success(),
         &spec.task.acceptance,
     ) {
-        let verified =
-            crate::acceptance::run_acceptance_checks(&spec.task.acceptance, &spec.worktree);
+        // Bounded by the task's own timeout rather than a constant: this is
+        // usually the first compile in a brand-new worktree, and judging it
+        // against 60s produced a red check for a tree that builds fine.
+        let verified = crate::acceptance::run_acceptance_checks_within(
+            &spec.task.acceptance,
+            &spec.worktree,
+            spec.timeout,
+        );
         if crate::acceptance::all_green(&verified) {
             tracing::info!(
                 target: "pilot::worker",
@@ -411,7 +417,11 @@ pub async fn run_worker(
         (Some(o), _) => Some(o.clone()),
         (None, TaskStatus::Failed) => Some(TaskOutcome {
             summary: failure_summary(&acceptance, &spec.task.acceptance, exit_code, stop),
-            files_changed: Vec::new(),
+            // What the attempt actually touched, not an assumption that a
+            // failure means nothing happened. A worker that ran out of turns
+            // has usually written real work, and reporting `[]` next to a
+            // modified worktree is how that work becomes invisible.
+            files_changed: crate::worktree::changed_files(&spec.worktree),
         }),
         (None, _) => None,
     };

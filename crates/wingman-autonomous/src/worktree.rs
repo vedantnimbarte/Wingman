@@ -254,6 +254,40 @@ pub fn commit_residual_changes(
     Ok(Some(sha))
 }
 
+/// Paths the worker left modified in `worktree_path`, committed or not.
+///
+/// Used to describe a *failed* attempt honestly. A worker that runs out of
+/// turns mid-task has usually written something, and recording an empty
+/// `files_changed` alongside a modified tree reads as "it did nothing" — which
+/// sent a correct edit to the bin once already. Best-effort: an unreadable or
+/// non-git worktree yields an empty list, same as no changes.
+pub fn changed_files(worktree_path: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .arg("status")
+        .arg("--porcelain")
+        .output();
+    let Ok(out) = out else { return Vec::new() };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        // Porcelain v1: two status columns, a space, then the path. Renames
+        // arrive as `old -> new`; the new name is the one that exists.
+        .filter_map(|l| l.get(3..).map(str::trim))
+        .map(|p| {
+            p.rsplit(" -> ")
+                .next()
+                .unwrap_or(p)
+                .trim_matches('"')
+                .to_string()
+        })
+        .filter(|p| !p.is_empty())
+        .collect()
+}
+
 /// Topologically sort tasks by dep edges. Stable within a layer: tasks
 /// with equal depth come out in their original id order. Returns Err on
 /// any cycle (caller should already have caught this in
@@ -660,6 +694,56 @@ mod tests {
         let mut t = Task::new(id, Role::Developer, format!("title {id}"));
         t.deps = deps.into_iter().map(String::from).collect();
         t
+    }
+
+    /// Regression, from the live `auto_dispatch` run in #34: a worker that ran
+    /// out of turns had written a correct edit, and the recorded outcome said
+    /// `files_changed: []`. The work was invisible and was thrown away.
+    #[test]
+    fn changed_files_reports_what_the_attempt_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        std::fs::write(root.join("seed.txt"), "seed").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["add", "-A"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["commit", "-qm", "seed"])
+            .output()
+            .unwrap();
+
+        // Clean tree: nothing to report.
+        assert!(changed_files(root).is_empty());
+
+        // A modification and an untracked file both count as work done.
+        std::fs::write(root.join("seed.txt"), "edited").unwrap();
+        std::fs::write(root.join("new.rs"), "fn main() {}").unwrap();
+        let mut got = changed_files(root);
+        got.sort();
+        assert_eq!(got, vec!["new.rs".to_string(), "seed.txt".to_string()]);
+
+        // A path that is not a git worktree yields nothing rather than panicking.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(changed_files(plain.path()).is_empty());
     }
 
     #[test]

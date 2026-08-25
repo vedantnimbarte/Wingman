@@ -67,16 +67,33 @@ pub fn all_green(results: &[AcceptanceResult]) -> bool {
 /// function is synchronous; callers in async contexts should wrap with
 /// `tokio::task::spawn_blocking`.
 pub fn run_acceptance_checks(checks: &[Acceptance], cwd: &Path) -> Vec<AcceptanceResult> {
+    run_acceptance_checks_within(checks, cwd, DEFAULT_SHELL_TIMEOUT)
+}
+
+/// Run every check, sharing one `budget` across the whole set.
+///
+/// The budget is a deadline, not a per-check allowance: checks run in sequence
+/// and each gets what is left. A single slow check therefore cannot multiply
+/// into `n * budget`, and a caller that passes the task's own timeout gets
+/// acceptance bounded by the same number that bounds everything else — rather
+/// than by a constant that has no idea how long this project takes to build.
+pub fn run_acceptance_checks_within(
+    checks: &[Acceptance],
+    cwd: &Path,
+    budget: Duration,
+) -> Vec<AcceptanceResult> {
+    let deadline = std::time::Instant::now() + budget;
     let mut out = Vec::with_capacity(checks.len());
     for c in checks {
-        out.push(run_one(c, cwd));
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        out.push(run_one(c, cwd, left));
     }
     out
 }
 
-fn run_one(check: &Acceptance, cwd: &Path) -> AcceptanceResult {
+fn run_one(check: &Acceptance, cwd: &Path, timeout: Duration) -> AcceptanceResult {
     match check {
-        Acceptance::Shell { cmd } => run_shell(cmd, cwd),
+        Acceptance::Shell { cmd } => run_shell(cmd, cwd, timeout),
         Acceptance::Grep { pattern, path } => run_grep(pattern, path, cwd),
         // J6 — real HTTP GET via `curl` (no async runtime, no new dep). The
         // status line proves reachability; `must_match` asserts on body/code.
@@ -85,7 +102,7 @@ fn run_one(check: &Acceptance, cwd: &Path) -> AcceptanceResult {
         // command) like a shell check, but label it as a run.
         Acceptance::Run { target, script } => {
             let cmd = script.clone().unwrap_or_else(|| target.clone());
-            let mut res = run_shell(&cmd, cwd);
+            let mut res = run_shell(&cmd, cwd, timeout);
             res.label = format!("run: {target}");
             res
         }
@@ -213,10 +230,19 @@ fn run_assert(path: &str, must_contain: &[String], cwd: &Path) -> AcceptanceResu
     }
 }
 
-const SHELL_TIMEOUT: Duration = Duration::from_secs(60);
+/// Fallback per-check timeout, used only by [`run_acceptance_checks`].
+///
+/// 60s was the original value and it is wrong for the checks planners
+/// actually write. `cargo check` in a freshly created worktree compiles the
+/// dependency graph from nothing, which is the *first* run in every worktree,
+/// not an edge case — and blowing the cap records a red check indistinguishable
+/// from a compile error. Callers that know the task's real budget should pass
+/// it via [`run_acceptance_checks_within`]; this is the floor for those that
+/// do not.
+pub const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(600);
 const OUTPUT_TAIL_BYTES: usize = 1024;
 
-fn run_shell(cmd: &str, cwd: &Path) -> AcceptanceResult {
+fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> AcceptanceResult {
     let label = format!("shell: {cmd}");
     let (program, args) = if cfg!(windows) {
         ("cmd", vec!["/C".to_string(), cmd.to_string()])
@@ -271,13 +297,10 @@ fn run_shell(cmd: &str, cwd: &Path) -> AcceptanceResult {
                 }
             }
             Ok(None) => {
-                if started.elapsed() > SHELL_TIMEOUT {
+                if started.elapsed() > timeout {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return AcceptanceResult::fail(
-                        label,
-                        format!("timed out after {:?}", SHELL_TIMEOUT),
-                    );
+                    return AcceptanceResult::fail(label, format!("timed out after {timeout:?}"));
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -340,13 +363,23 @@ pub fn summarize(results: &[AcceptanceResult]) -> String {
     if failed == 0 {
         format!("{total}/{total} green")
     } else {
+        // The label alone says *which* check failed and nothing about why,
+        // so a check that timed out and a check whose command genuinely
+        // returned non-zero produce identical text. That is how a 60s cap on
+        // a cold `cargo check` was recorded as if the code did not compile.
+        // One line of the detail is enough to tell those apart.
         format!(
             "{}/{total} green; failing: {}",
             total - failed,
             results
                 .iter()
                 .filter(|r| !r.ok)
-                .map(|r| r.label.as_str())
+                .map(|r| {
+                    match r.output.lines().find(|l| !l.trim().is_empty()) {
+                        Some(first) => format!("{} ({})", r.label, first.trim()),
+                        None => r.label.clone(),
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -504,6 +537,69 @@ mod tests {
         let s = summarize(&r);
         assert!(s.contains("2/3 green"));
         assert!(s.contains("b: bad"));
+    }
+
+    /// Regression, from the live `auto_dispatch` run in #34.
+    ///
+    /// A `cargo check` that blew the per-check timeout was summarised as
+    /// `failing: shell: cargo check -p wingman-config` — the same sentence a
+    /// genuine compile error produces. The run was recorded as if the code did
+    /// not build, when the tree built fine and the cap was simply too small.
+    #[test]
+    fn summarize_says_why_a_check_failed() {
+        let timed_out = vec![
+            AcceptanceResult::ok("grep: doc comment", "found"),
+            AcceptanceResult::fail("shell: cargo check", "timed out after 600s"),
+        ];
+        let s = summarize(&timed_out);
+        assert!(s.contains("1/2 green"), "{s}");
+        assert!(
+            s.contains("timed out"),
+            "a timeout must be distinguishable from a failing command: {s}"
+        );
+
+        // And the other way: a real non-zero exit still reads as one.
+        let broke = vec![AcceptanceResult::fail(
+            "shell: cargo check",
+            "exit 101
+error[E0425]: cannot find value",
+        )];
+        let s = summarize(&broke);
+        assert!(s.contains("exit 101"), "{s}");
+        assert!(!s.contains("timed out"), "{s}");
+    }
+
+    /// The budget is a deadline shared by the whole set, not an allowance each
+    /// check gets in full — otherwise `n` slow checks multiply into `n *
+    /// budget` and outlive the task that owns them.
+    #[test]
+    fn the_acceptance_budget_is_shared_not_per_check() {
+        let dir = tempdir().unwrap();
+        let sleep = if cfg!(windows) {
+            "ping -n 6 127.0.0.1 >NUL"
+        } else {
+            "sleep 5"
+        };
+        // Four slow checks against a 2s budget. Sharing the deadline costs
+        // ~2s in total; handing each check the full budget costs ~8s. The
+        // assertion sits between those with room on both sides, so it is a
+        // real discriminator rather than a stopwatch.
+        let checks = vec![
+            Acceptance::Shell { cmd: sleep.into() },
+            Acceptance::Shell { cmd: sleep.into() },
+            Acceptance::Shell { cmd: sleep.into() },
+            Acceptance::Shell { cmd: sleep.into() },
+        ];
+        let started = std::time::Instant::now();
+        let results = run_acceptance_checks_within(&checks, dir.path(), Duration::from_secs(2));
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), 4);
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "four checks shared a 2s budget but took {elapsed:?} —              each one was given the whole budget instead of what was left"
+        );
+        assert!(results.iter().any(|r| !r.ok), "expected a timeout");
     }
 
     #[test]
