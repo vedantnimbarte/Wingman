@@ -36,6 +36,12 @@ pub enum RagError {
     Embedder(String),
     #[error("dim mismatch: index has {expected}, embedder produces {actual}")]
     DimMismatch { expected: usize, actual: usize },
+    /// The index was stamped by a different embedding model. Separate from
+    /// [`RagError::DimMismatch`] because two models can agree on dimension and
+    /// still produce vectors that mean nothing to each other — reporting that
+    /// as a dim mismatch prints "4-dim vs 4-dim" and tells nobody anything.
+    #[error("embedder changed: index was built by {expected}, this session uses {actual}")]
+    EmbedderChanged { expected: String, actual: String },
     #[error("{0}")]
     Other(String),
 }
