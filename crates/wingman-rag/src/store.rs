@@ -73,10 +73,19 @@ impl IndexStore {
             .optional()?;
 
         match (existing_id.as_deref(), existing_dim) {
-            (Some(id), Some(d)) if id != embedder_id || d as usize != dim => {
+            // Dimension first: it is the more specific complaint, and a model
+            // that changed dimension has also changed identity, so checking id
+            // first would report the vaguer of the two facts.
+            (Some(_), Some(d)) if d as usize != dim => {
                 return Err(RagError::DimMismatch {
                     expected: d as usize,
                     actual: dim,
+                });
+            }
+            (Some(id), Some(_)) if id != embedder_id => {
+                return Err(RagError::EmbedderChanged {
+                    expected: id.to_string(),
+                    actual: embedder_id.to_string(),
                 });
             }
             (None, _) | (_, None) => {
@@ -497,14 +506,29 @@ fn bytes_to_f32_vec(b: &[u8]) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    /// A unique path per call.
+    ///
+    /// The timestamp alone was not unique. `cargo test` runs these in parallel
+    /// threads of one process, so the pid is shared, and the macOS clock is
+    /// coarse enough that two calls land in the same tick — handing two tests
+    /// the same database. One opens it as `test-embedder`, the other as
+    /// `test`, and the second fails the embedder check. It reproduced on CI as
+    /// `DimMismatch { expected: 4, actual: 4 }`, which is the other half of
+    /// this commit.
+    ///
+    /// The counter is what actually guarantees uniqueness within a process;
+    /// the pid and timestamp keep runs from colliding with a stale file left
+    /// in the temp directory by an earlier one.
     fn tmp_db() -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         std::env::temp_dir().join(format!(
-            "wingman-store-{}-{}.db",
+            "wingman-store-{}-{}-{}.db",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ))
     }
 
@@ -535,6 +559,42 @@ mod tests {
         assert_eq!(store.chunk_count().unwrap(), 0);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// A model swap at the same dimension is an embedder change, not a dim
+    /// mismatch. This is the case that used to report
+    /// `DimMismatch { expected: 4, actual: 4 }` — an error that names two
+    /// identical numbers and leaves the reader no wiser.
+    #[test]
+    fn same_dim_different_embedder_says_so() {
+        let path = tmp_db();
+        IndexStore::open(&path, "embedder-a", 4).unwrap();
+
+        match IndexStore::open(&path, "embedder-b", 4).err() {
+            Some(RagError::EmbedderChanged { expected, actual }) => {
+                assert_eq!(expected, "embedder-a");
+                assert_eq!(actual, "embedder-b");
+            }
+            other => panic!("expected EmbedderChanged, got {other:?}"),
+        }
+
+        // A real dimension change still reports the dimensions.
+        match IndexStore::open(&path, "embedder-a", 8).err() {
+            Some(RagError::DimMismatch { expected, actual }) => {
+                assert_eq!((expected, actual), (4, 8));
+            }
+            other => panic!("expected DimMismatch, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every call gets its own database. Two tests sharing one is what made
+    /// the embedder check fail on a machine with a coarse clock.
+    #[test]
+    fn tmp_db_paths_are_unique() {
+        let paths: std::collections::HashSet<_> = (0..64).map(|_| tmp_db()).collect();
+        assert_eq!(paths.len(), 64, "tmp_db() handed out a duplicate path");
     }
 
     #[test]
