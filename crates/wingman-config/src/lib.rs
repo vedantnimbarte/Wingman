@@ -125,6 +125,7 @@ pub struct ToolsConfig {
     ///   - `required` — refuse to run shell commands at all when no mechanism
     ///     is available. Use for untrusted code.
     ///   - `off` — never wrap.
+    #[cfg_attr(feature = "schema", schemars(with = "SandboxPolicy"))]
     pub shell_sandbox: String,
     /// Additional shell patterns to always deny even in yolo mode.
     /// e.g. ["rm -rf /", "sudo"]
@@ -595,6 +596,95 @@ pub enum ReasoningLevel {
     High,
 }
 
+/// OS-level containment policy for `run_shell`, for the schema only.
+///
+/// `run_shell` tests for `off` and `required` by name and treats everything
+/// else as `auto`, so these three are the whole vocabulary.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum SandboxPolicy {
+    /// Wrap when a mechanism is available, run unconfined when none is.
+    Auto,
+    /// Never wrap.
+    Off,
+    /// Refuse to run at all unless the filesystem can be scoped.
+    Required,
+}
+
+/// MCP transports, for the schema only.
+///
+/// The only closed set here that the code already enforces: `mcp::connect`
+/// rejects anything else with `unknown transport`.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum McpTransport {
+    /// Spawn the server as a child process and speak over its stdio.
+    Stdio,
+    /// Connect to an already-running server over HTTP.
+    Http,
+}
+
+/// The severity ladder, for the schema only.
+///
+/// One enum for every `*_severity` gate, because they are all parsed by the
+/// same `Severity: FromStr` in `wingman-autonomous` and a per-field list would
+/// be three chances to drift from it.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum SeverityLevel {
+    /// Informational / nitpick. Never blocks.
+    Info,
+    /// Worth fixing, but not on its own a reason to stop.
+    Low,
+    /// The usual gate: real problems, not stylistic ones.
+    Medium,
+    /// Serious — correctness, security, or data loss.
+    High,
+    /// Must-fix; always blocks auto-merge and escalates.
+    Critical,
+}
+
+/// Where pilot workers run, for the schema only.
+///
+/// Matches `IsolationTier::parse`, which recognises `container` and `vm` and
+/// falls back to `host`.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum IsolationTierName {
+    /// Directly on this machine, in a git worktree.
+    Host,
+    /// Inside a container image.
+    Container,
+    /// Inside a virtual machine.
+    Vm,
+}
+
+/// The goal-challenge gate, for the schema only.
+///
+/// [`SeverityLevel`] plus `off`, because `refine::challenge_threshold` reads
+/// `off` before it tries the severity parser.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum ChallengeThreshold {
+    /// Never challenge the goal.
+    Off,
+    /// Challenge on any doubt at all.
+    Info,
+    /// Challenge on minor doubts and above.
+    Low,
+    /// Challenge when the goal looks substantively wrong.
+    Medium,
+    /// Challenge only on serious doubts.
+    High,
+    /// Challenge only when the goal looks certain to cause harm.
+    Critical,
+}
+
 /// The TUI themes that actually resolve, for the schema only.
 ///
 /// Kept in step with `wingman_tui::theme::resolve`, which matches `light` and
@@ -842,6 +932,7 @@ impl Default for LoggingConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct McpServerConfig {
     /// Transport: "stdio" (default) or "http".
+    #[cfg_attr(feature = "schema", schemars(with = "McpTransport"))]
     pub transport: String,
     /// Command to spawn for stdio transport.
     pub command: Option<String>,
@@ -2240,6 +2331,7 @@ pub struct PilotPrConfig {
     pub auto_merge: bool,
     /// "low" | "medium" | "high" — auto-merge is vetoed if `wingman review`
     /// turns up any finding at or above this severity.
+    #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
     pub auto_merge_max_severity: String,
     pub require_ci_green: bool,
     /// Branch the pilot opens its PR against. Defaults to `main`; set this to
@@ -2251,6 +2343,7 @@ pub struct PilotPrConfig {
     /// acceptance checks already gate functional correctness before review, so
     /// an over-eager reviewer model can't loop a correct change. Lower it for
     /// stricter review with a well-calibrated reviewer model.
+    #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
     pub reviewer_rework_severity: String,
 }
 
@@ -2276,9 +2369,15 @@ impl Default for PilotPrConfig {
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSandboxConfig {
     /// "host" | "container" | "vm" — where workers run by default.
+    #[cfg_attr(feature = "schema", schemars(with = "IsolationTierName"))]
     pub default_tier: String,
     pub container_image: String,
     /// "firecracker" | "qemu" | "cloud".
+    ///
+    /// Currently inert: nothing reads this. `IsolationTier::parse` selects the
+    /// tier and no VM backend consults a provider name, so setting it has no
+    /// effect. Deliberately left as free text rather than given schema choices
+    /// — offering a dropdown would advertise a decision the code never makes.
     pub vm_provider: String,
     /// Fail-closed switch for the untrusted/irreversible ("vm") tier.
     /// Real sandboxed worker execution isn't wired yet, so by default pilot
@@ -2367,6 +2466,7 @@ pub struct PilotRefineConfig {
     pub max_clarifying_questions: u32,
     /// "off" | "low" | "medium" | "high" — how aggressively the agent
     /// challenges goals it thinks are wrong.
+    #[cfg_attr(feature = "schema", schemars(with = "ChallengeThreshold"))]
     pub challenge_threshold: String,
     pub suggest_alternatives: bool,
 }
@@ -2404,6 +2504,7 @@ pub struct PilotSecurityConfig {
     pub allowed_licenses: Vec<String>,
     /// Findings at or above this severity block auto-merge.
     /// "info" | "low" | "medium" | "high" | "critical".
+    #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
     pub block_severity: String,
 }
 
@@ -2483,17 +2584,19 @@ pub fn json_schema() -> serde_json::Value {
 mod tests {
     use super::*;
 
-    /// `reasoning` and `tui.theme` are `String`s whose valid values live in the
-    /// schema rather than the type. Nothing in the compiler ties the two
-    /// together, so this asserts the link the settings UI depends on: drop the
-    /// `schemars(with = ...)` and both fields silently become free-text boxes
-    /// again, which is exactly how they shipped.
+    /// Every field whose valid values live in the schema rather than in the
+    /// type. Nothing in the compiler ties the two together, so this asserts the
+    /// link the settings UI depends on: drop a `schemars(with = ...)` and that
+    /// field silently becomes a free-text box again, which is exactly how all
+    /// of these shipped.
     #[cfg(feature = "schema")]
     #[test]
     fn schema_offers_choices_for_the_string_enums() {
         let schema = json_schema();
+        let defs = &schema["definitions"];
+        let sev = vec!["info", "low", "medium", "high", "critical"];
 
-        // Both are `allOf: [{$ref}]` so the field keeps its own description;
+        // Each is `allOf: [{$ref}]` so the field keeps its own description;
         // the choices live on the referenced definition.
         for (node, def, expected) in [
             (
@@ -2502,9 +2605,44 @@ mod tests {
                 vec!["off", "low", "medium", "high"],
             ),
             (
-                &schema["definitions"]["TuiConfig"]["properties"]["theme"],
+                &defs["TuiConfig"]["properties"]["theme"],
                 "ThemeName",
                 vec!["default", "light", "mono"],
+            ),
+            (
+                &defs["ToolsConfig"]["properties"]["shell_sandbox"],
+                "SandboxPolicy",
+                vec!["auto", "off", "required"],
+            ),
+            (
+                &defs["McpServerConfig"]["properties"]["transport"],
+                "McpTransport",
+                vec!["stdio", "http"],
+            ),
+            (
+                &defs["PilotPrConfig"]["properties"]["auto_merge_max_severity"],
+                "SeverityLevel",
+                sev.clone(),
+            ),
+            (
+                &defs["PilotPrConfig"]["properties"]["reviewer_rework_severity"],
+                "SeverityLevel",
+                sev.clone(),
+            ),
+            (
+                &defs["PilotSecurityConfig"]["properties"]["block_severity"],
+                "SeverityLevel",
+                sev.clone(),
+            ),
+            (
+                &defs["PilotSandboxConfig"]["properties"]["default_tier"],
+                "IsolationTierName",
+                vec!["host", "container", "vm"],
+            ),
+            (
+                &defs["PilotRefineConfig"]["properties"]["challenge_threshold"],
+                "ChallengeThreshold",
+                vec!["off", "info", "low", "medium", "high", "critical"],
             ),
         ] {
             assert_eq!(
@@ -2518,15 +2656,30 @@ mod tests {
             let branches = schema["definitions"][def]["oneOf"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{def} should be a oneOf of variants"));
+
+            // The trap this test exists for. schemars collapses variants that
+            // carry no `///` into one combined branch, and `enumChoices()` in
+            // `ui/src/schema.ts` bails to `undefined` the moment any branch
+            // holds more than one value — so a half-documented enum renders as
+            // the free-text box this whole change was removing. Every variant
+            // needs its own comment, and this is what says so.
+            for b in branches {
+                let n = b["enum"].as_array().map_or(0, |e| e.len());
+                assert_eq!(
+                    n, 1,
+                    "{def}: branch {b} carries {n} values; give every variant a /// comment"
+                );
+                assert!(
+                    b["description"].is_string(),
+                    "{def}: every choice needs its own description"
+                );
+            }
+
             let values: Vec<&str> = branches
                 .iter()
                 .map(|b| b["enum"][0].as_str().unwrap())
                 .collect();
             assert_eq!(values, expected);
-            assert!(
-                branches.iter().all(|b| b["description"].is_string()),
-                "{def}: every choice needs its own description"
-            );
         }
     }
 
