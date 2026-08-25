@@ -195,12 +195,10 @@ pub fn now() -> String {
 /// (`pilot::new_run_id`), minus the date prefix — a card id is typed by hand
 /// as a prefix, so every character should carry entropy.
 pub fn new_id() -> String {
-    use rand::Rng;
-    rand::thread_rng()
-        .sample_iter(rand::distributions::Alphanumeric)
-        .take(12)
-        .map(|c| (c as char).to_ascii_lowercase())
-        .collect()
+    use rand::distr::SampleString;
+    rand::distr::Alphanumeric
+        .sample_string(&mut rand::rng(), 12)
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
