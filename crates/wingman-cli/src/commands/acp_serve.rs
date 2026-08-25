@@ -20,6 +20,8 @@
 //!     single tool call, on top of Wingman's own permission mode
 //!   - `fs/read_text_file`          — read through the editor, so the agent
 //!     sees the buffer the user is looking at rather than a stale file
+//!   - `fs/write_text_file`         — hand the editor the result of a write,
+//!     so its buffer shows the edit instead of going stale against the disk
 //!
 //! Because those are *requests* rather than notifications, the read loop can't
 //! block on a turn: [`run`] pumps stdin in its own task and routes replies back
@@ -32,10 +34,20 @@
 //! may touch. Same for reads: the path is checked against the project
 //! containment rules before the client is asked for it.
 //!
-//! Not yet wired: `fs/write_text_file`. Routing writes through the client would
-//! take them out of the registry's dispatch path, which is where `/undo`
-//! checkpoints and the audit log are written — those have to move with it, so
-//! it is deliberately left for its own change rather than half-done here.
+//! **Writes reach the editor after the registry, not instead of it.** The
+//! obvious reading of `fs/write_text_file` is to put the client between the
+//! agent and the disk. That is the wrong shape here: the registry's dispatch
+//! path is where `/undo` checkpoints and the audit log are written, so
+//! diverting writes around it would silently cost both — an agent edit that
+//! `/undo` cannot reverse and that the audit log never saw.
+//!
+//! So the registry still performs every write, exactly as it does outside ACP,
+//! and the editor is handed the result afterwards. `/undo` and the audit log
+//! are untouched because nothing moved; the editor's buffer stops going stale
+//! because it is told what the file now says. A client that declines the
+//! capability, answers an error, or is not there at all changes nothing about
+//! the write that already happened — which is the same "extra gate, never a
+//! replacement" rule the permission and read paths follow.
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -59,6 +71,7 @@ const PROTOCOL_VERSION: u64 = 1;
 #[derive(Debug, Default, Clone, Copy)]
 struct ClientCaps {
     read_text_file: bool,
+    write_text_file: bool,
 }
 
 impl ClientCaps {
@@ -71,6 +84,7 @@ impl ClientCaps {
         };
         Self {
             read_text_file: flag("readTextFile"),
+            write_text_file: flag("writeTextFile"),
         }
     }
 }
@@ -85,6 +99,12 @@ struct Client {
     /// Cleared the first time the client answers `session/request_permission`
     /// with "method not found", so we ask once and then stop pestering it.
     permission_supported: AtomicBool,
+    /// Test-only record of the methods we asked the client to run, so a test
+    /// can assert that the editor was — or pointedly was not — called back.
+    /// Absent from release builds: in a real session this would grow for as
+    /// long as the editor stays open.
+    #[cfg(test)]
+    sent: std::sync::Mutex<Vec<String>>,
 }
 
 impl Client {
@@ -95,11 +115,19 @@ impl Client {
             next_id: AtomicU64::new(1),
             caps: std::sync::RwLock::new(ClientCaps::default()),
             permission_supported: AtomicBool::new(true),
+            #[cfg(test)]
+            sent: std::sync::Mutex::new(Vec::new()),
         }
     }
 
     fn caps(&self) -> ClientCaps {
         *self.caps.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Test-only view of [`Client::sent`].
+    #[cfg(test)]
+    fn sent_methods(&self) -> Vec<String> {
+        self.sent.lock().expect("sent lock").clone()
     }
 
     fn set_caps(&self, caps: ClientCaps) {
@@ -112,6 +140,11 @@ impl Client {
         method: &str,
         params: Value,
     ) -> std::result::Result<Value, ClientError> {
+        #[cfg(test)]
+        self.sent
+            .lock()
+            .expect("sent lock")
+            .push(method.to_string());
         let id = format!("wm-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id.clone(), tx);
@@ -590,6 +623,68 @@ impl EditorGate {
             }
         }
     }
+
+    /// The single file a successful call to `name` just wrote, if there is one.
+    ///
+    /// Derived from the tool's declared capability rather than a hard-coded
+    /// list, so a write tool added later is covered without editing this.
+    /// Tools that write more than one file (`apply_patch`) have no single
+    /// `path` argument and so are skipped — telling the editor about one of
+    /// several changed files would be worse than telling it about none.
+    fn written_path(&self, name: &str, args: &Value) -> Option<std::path::PathBuf> {
+        if !self.inner.capability_of(name)?.contains(Capability::WRITE) {
+            return None;
+        }
+        let raw = args.get("path").and_then(Value::as_str)?;
+        Some(self.inner.ctx().resolve(raw))
+    }
+
+    /// Tell the editor what a file says now that the registry has written it.
+    ///
+    /// Best-effort by construction: the write is already on disk and already
+    /// checkpointed, so every failure here is logged and swallowed. The worst
+    /// case is the buffer the user sees being stale, which is exactly where
+    /// this started — never a lost or half-applied edit.
+    async fn push_write_to_client(&self, name: &str, args: &Value) {
+        if !self.client.caps().write_text_file {
+            return;
+        }
+        let Some(path) = self.written_path(name, args) else {
+            return;
+        };
+        // Containment is re-checked on the way out for the same reason it is
+        // checked on the way in: the client is an extra gate, and must not be
+        // handed a path the agent was never allowed to touch.
+        if !self.inner.ctx().allows_write(&path) {
+            return;
+        }
+        // Read back what the registry actually wrote rather than reconstructing
+        // it from the arguments — for `edit_file` and `edit_symbol` the final
+        // text is the result of applying an edit, not anything in `args`.
+        let content = match tokio::fs::read_to_string(&path).await {
+            Ok(c) => c,
+            // Deleted, replaced by a directory, or not UTF-8. Nothing useful to
+            // hand a text-file API.
+            Err(e) => {
+                tracing::debug!(
+                    target: "wingman::acp",
+                    "not syncing {}: {e}", path.display()
+                );
+                return;
+            }
+        };
+        let params = json!({
+            "sessionId": self.session_id,
+            "path": path.display().to_string(),
+            "content": content,
+        });
+        if let Err(e) = self.client.request("fs/write_text_file", params).await {
+            tracing::debug!(
+                target: "wingman::acp",
+                "fs/write_text_file failed ({e}); the edit is on disk regardless"
+            );
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -612,7 +707,13 @@ impl ToolDispatcher for EditorGate {
                 return outcome;
             }
         }
-        self.inner.dispatch(name, args).await
+        let outcome = self.inner.dispatch(name, args.clone()).await;
+        // Only after the registry has succeeded: a failed write has nothing to
+        // tell the editor about, and a rejected one must not look applied.
+        if !outcome.is_error {
+            self.push_write_to_client(name, &args).await;
+        }
+        outcome
     }
 }
 
@@ -764,6 +865,7 @@ mod tests {
         assert!(!caps.read_text_file);
         let caps = ClientCaps::from_initialize(&json!({ "clientCapabilities": { "fs": {} } }));
         assert!(!caps.read_text_file);
+        assert!(!caps.write_text_file);
     }
 
     #[test]
@@ -772,6 +874,7 @@ mod tests {
             "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": true } }
         }));
         assert!(caps.read_text_file);
+        assert!(caps.write_text_file);
     }
 
     #[test]
@@ -875,6 +978,144 @@ mod tests {
         assert!(!target.exists(), "the file was written despite the decline");
     }
 
+    /// The acceptance criterion for the write half: after the agent edits a
+    /// file, the editor is told what it now says, so its buffer cannot go
+    /// stale against the disk.
+    ///
+    /// Two replies are queued because a write is gated: the first answers
+    /// `session/request_permission`, the second `fs/write_text_file`.
+    #[tokio::test]
+    async fn a_write_is_pushed_to_the_editor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        client.set_caps(ClientCaps {
+            read_text_file: false,
+            write_text_file: true,
+        });
+        fake_client(
+            client.clone(),
+            vec![
+                Ok(json!({ "outcome": { "outcome": "selected", "optionId": "allow" } })),
+                Ok(json!({})),
+            ],
+        );
+
+        let gate = gate_over(dir.path(), client.clone());
+        let out = gate
+            .dispatch(
+                "write_file",
+                json!({ "path": "note.txt", "content": "hello" }),
+            )
+            .await;
+
+        assert!(!out.is_error, "got: {}", out.content);
+        // The registry still did the writing — that is what keeps `/undo`
+        // checkpoints and the audit log intact.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("note.txt")).expect("written"),
+            "hello"
+        );
+        // And the client was asked to take the same content.
+        assert!(
+            client
+                .sent_methods()
+                .contains(&"fs/write_text_file".to_string()),
+            "sent: {:?}",
+            client.sent_methods()
+        );
+    }
+
+    /// A client that never claimed `writeTextFile` must not be called for it,
+    /// and the write must still land.
+    #[tokio::test]
+    async fn without_the_capability_the_write_still_lands_unannounced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        // Only the permission reply is queued: nothing else should be asked.
+        fake_client(
+            client.clone(),
+            vec![Ok(
+                json!({ "outcome": { "outcome": "selected", "optionId": "allow" } }),
+            )],
+        );
+
+        let gate = gate_over(dir.path(), client.clone());
+        let out = gate
+            .dispatch("write_file", json!({ "path": "n.txt", "content": "x" }))
+            .await;
+
+        assert!(!out.is_error, "got: {}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("n.txt")).expect("written"),
+            "x"
+        );
+        assert!(
+            !client
+                .sent_methods()
+                .contains(&"fs/write_text_file".to_string()),
+            "sent: {:?}",
+            client.sent_methods()
+        );
+    }
+
+    /// A declined call wrote nothing, so there is nothing to announce. Telling
+    /// the editor here would show an edit that does not exist.
+    #[tokio::test]
+    async fn a_declined_write_is_not_pushed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        client.set_caps(ClientCaps {
+            read_text_file: false,
+            write_text_file: true,
+        });
+        fake_client(
+            client.clone(),
+            vec![Ok(
+                json!({ "outcome": { "outcome": "selected", "optionId": "reject" } }),
+            )],
+        );
+
+        let gate = gate_over(dir.path(), client.clone());
+        let out = gate
+            .dispatch("write_file", json!({ "path": "no.txt", "content": "x" }))
+            .await;
+
+        assert!(out.is_error);
+        assert!(!dir.path().join("no.txt").exists());
+        assert!(
+            !client
+                .sent_methods()
+                .contains(&"fs/write_text_file".to_string()),
+            "sent: {:?}",
+            client.sent_methods()
+        );
+    }
+
+    /// `written_path` is derived from the tool's capability, not a list of
+    /// names: a read tool is never announced, and a multi-file write has no
+    /// single path to announce.
+    #[tokio::test]
+    async fn only_single_path_writes_are_announced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+        let client = Arc::new(Client::new(stdout));
+        let gate = gate_over(dir.path(), client);
+
+        assert!(gate
+            .written_path("write_file", &json!({ "path": "a.txt" }))
+            .is_some());
+        assert!(gate
+            .written_path("read_file", &json!({ "path": "a.txt" }))
+            .is_none());
+        // apply_patch can touch many files and takes no `path`.
+        assert!(gate
+            .written_path("apply_patch", &json!({ "patch": "..." }))
+            .is_none());
+    }
+
     /// Reads are not worth a prompt — if `read_file` asked for permission, the
     /// fake client above would never answer and this would hang.
     #[tokio::test]
@@ -885,6 +1126,7 @@ mod tests {
         let client = Arc::new(Client::new(stdout));
         client.set_caps(ClientCaps {
             read_text_file: true,
+            write_text_file: false,
         });
         fake_client(
             client.clone(),
