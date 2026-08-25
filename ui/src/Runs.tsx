@@ -210,18 +210,6 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
           </>
         }
         title={run.goal}
-        actions={
-          terminal ? null : (
-            <button
-              type="button"
-              className="button"
-              disabled={busy !== null}
-              onClick={() => void control('abort')}
-            >
-              {busy === 'abort' ? 'Aborting…' : 'Abort run'}
-            </button>
-          )
-        }
       />
 
       <div className="rows run-summary">
@@ -317,6 +305,23 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
           />
         ))}
       </div>
+
+      {/* Below the plan, not up in the page head. Aborting is the one
+          irreversible thing this screen does, and it reads the plan it is
+          ending — a destructive control sitting next to the title is one the
+          hand finds before the eye has read what it would stop. */}
+      {!terminal && (
+        <div className="actions run-tools">
+          <button
+            type="button"
+            className="button button-quiet"
+            disabled={busy !== null}
+            onClick={() => void control('abort')}
+          >
+            {busy === 'abort' ? 'Aborting…' : 'Abort run'}
+          </button>
+        </div>
+      )}
 
       {run.agents.length > 0 && (
         <>
