@@ -9,7 +9,7 @@ import {
 } from './api'
 import { navigate } from './router'
 import { message } from './state'
-import { Failed, Loading } from './ui'
+import { Empty, Failed, Icon, Loading, Note, PageHead } from './ui'
 
 /**
  * Sessions — transcripts, and holding a conversation with the agent.
@@ -92,30 +92,37 @@ function SessionList({ project }: { project: string }) {
 
   return (
     <div className="view">
-      <span className="eyebrow">Sessions</span>
-      <h1>{sessions.length === 1 ? '1 session' : `${sessions.length} sessions`}</h1>
-      <p className="view-intro">
-        Transcripts in <code>.wingman/sessions/</code>. A conversation started here is a normal
-        session file — it shows up in <code>wingman session list</code> and resumes from a terminal.
-      </p>
+      <PageHead
+        eyebrow="Sessions"
+        title={sessions.length === 1 ? '1 session' : `${sessions.length} sessions`}
+        intro={
+          <>
+            Transcripts in <code>.wingman/sessions/</code>. A conversation started here is a normal
+            session file — it shows up in <code>wingman session list</code> and resumes from a
+            terminal.
+          </>
+        }
+        actions={
+          <button
+            type="button"
+            className="button button-primary"
+            onClick={() => navigate('/sessions/new')}
+          >
+            New conversation
+          </button>
+        }
+      />
 
-      <div className="add-tools">
-        <button type="button" className="button" onClick={() => navigate('/sessions/new')}>
-          New conversation
-        </button>
-      </div>
-
-      {note && (
-        <p className="figure config-note" role="status">
-          {note}
-        </p>
-      )}
+      {note && <Note>{note}</Note>}
 
       {sessions.length === 0 ? (
-        <div className="state">
-          <h2>No sessions yet</h2>
-          <p>Start one above, or run `wingman` in this repo from a terminal.</p>
-        </div>
+        <Empty
+          title="No conversations yet"
+          action={{ label: 'Start one', onClick: () => navigate('/sessions/new') }}
+        >
+          A conversation here writes the same transcript a terminal session does, so you can start
+          on one and finish on the other.
+        </Empty>
       ) : (
         <div className="rows">
           {sessions.map((s) => (
@@ -126,7 +133,7 @@ function SessionList({ project }: { project: string }) {
                 onClick={() => navigate(`/sessions/${s.session_id}`)}
               >
                 {s.first_prompt ?? <span className="muted">(no prompt yet)</span>}
-                <span className="task-meta muted">
+                <span className="task-meta faint">
                   <span className="identifier">{s.session_id}</span>
                   {s.model && ` · ${s.model}`}
                   {` · ${s.turns} ${s.turns === 1 ? 'turn' : 'turns'}`}
@@ -134,7 +141,7 @@ function SessionList({ project }: { project: string }) {
               </button>
               <button
                 type="button"
-                className="button button-quiet"
+                className="button button-quiet button-sm"
                 onClick={() => void remove(s.session_id)}
                 title="Delete the transcript and its search-index entry"
               >
@@ -263,11 +270,15 @@ function Conversation({ project, id }: { project: string; id: string }) {
         className="button button-quiet back"
         onClick={() => navigate('/sessions')}
       >
-        ← Sessions
+        <Icon name="collapse" size={14} />
+        Sessions
       </button>
-      <span className="eyebrow">
-        <span className="figure identifier">{isNew ? 'new conversation' : id}</span>
-      </span>
+      <header className="page-head">
+        <div className="page-title">
+          <span className="eyebrow">Conversation</span>
+          <h1 className="figure identifier">{isNew ? 'new conversation' : id}</h1>
+        </div>
+      </header>
 
       <div className="transcript">
         {records.map((r, i) => (
@@ -294,15 +305,15 @@ function Conversation({ project, id }: { project: string; id: string }) {
         )}
 
         {turn.state === 'failed' && (
-          <p className="is-failed dot" role="alert">
+          <Note tone="is-failed" role="alert">
             {turn.detail}
-          </p>
+          </Note>
         )}
 
         {verification && (
-          <p className={`dot ${verification.passed ? 'is-proven' : 'is-failed'}`}>
+          <Note tone={verification.passed ? 'is-proven' : 'is-failed'}>
             Verification {verification.passed ? 'passed' : 'failed'} — {verification.summary}
-          </p>
+          </Note>
         )}
 
         <div ref={foot} />
@@ -331,22 +342,26 @@ function Conversation({ project, id }: { project: string; id: string }) {
             }
           }}
         />
-        <div className="add-tools">
-          <button type="submit" className="button" disabled={streaming || prompt.trim() === ''}>
-            Send
-          </button>
+        <div className="composer-tools">
+          <span className="composer-hint">
+            Enter sends · Shift+Enter for a newline · runs in {project} at the server's ceiling
+          </span>
           {streaming && (
             <button
               type="button"
-              className="button button-quiet"
+              className="button button-quiet button-sm"
               onClick={() => abort.current?.abort()}
             >
               Stop
             </button>
           )}
-          <span className="muted config-help">
-            The turn runs in <code>{project}</code> at the server's permission ceiling.
-          </span>
+          <button
+            type="submit"
+            className="button button-primary"
+            disabled={streaming || prompt.trim() === ''}
+          >
+            Send
+          </button>
         </div>
       </form>
     </div>

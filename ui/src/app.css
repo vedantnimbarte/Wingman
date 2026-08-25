@@ -12,6 +12,10 @@
  * A scan of the board answers one question — what here is actually true, and
  * what is merely running — and colour is how it answers.
  *
+ * That rule is why there is no brand hue anywhere in this file. A primary
+ * action is solid `--ink`; emphasis is weight, elevation and surface, never a
+ * fourth colour competing with the three that mean something.
+ *
  * Cost deliberately has no colour. It gets typography: tabular figures on the
  * ledger rule at the right edge, and nothing else in the layout is
  * right-aligned. That rule runs unbroken through every view; sub-task spend
@@ -22,14 +26,28 @@
  * board.
  */
 
+/* ── Tokens ─────────────────────────────────────────────────────────────── */
+
 :root {
   color-scheme: light dark;
 
-  --paper: #fcfcfd;
-  --raised: #f4f5f8;
-  --ink: #16181d;
-  --muted: #5c6370;
-  --rule: #e4e6eb;
+  /* Surfaces, ground upward. Four of them, because a panel with one
+     background cannot show a card sitting on a page or an input sunk into a
+     card, and depth is how a dense screen stays legible. */
+  --paper: #fbfbfc;
+  --surface: #ffffff;
+  --raised: #f2f3f6;
+  --sunken: #f6f7f9;
+
+  --ink: #14161b;
+  --muted: #5f6879;
+  /* 4.96:1 on --paper, 5.13 on --surface, 4.63 on --raised. It carries run ids
+     and spend captions, so it clears AA on every ground it can land on — the
+     same test --asserted was darkened to pass. */
+  --faint: #666e7d;
+
+  --rule: #e5e7ec;
+  --rule-strong: #d2d7e0;
 
   --proven: #0b7a5a; /* 5.19:1 on --paper */
   /* 4.76:1. The plan's #b4690e measured 4.12:1, under the 4.5:1 floor for the
@@ -37,6 +55,25 @@
      reads. Darkened until it passes, stopping before it turns brown. */
   --asserted: #a85f0b;
   --failed: #b03a2e; /* 5.87:1 */
+
+  /* Status washes. Derived from the three hues rather than picked, so a pill's
+     fill can never drift from the text it sits behind.
+     6% is the measured ceiling: the tint darkens the ground under text that is
+     already close to the floor, and at 6% the weakest pair — --asserted on its
+     own wash — still measures 4.51:1. At the 10% this started on it was 4.28,
+     which is a status pill nobody can read. */
+  --proven-wash: color-mix(in srgb, var(--proven) 6%, var(--surface));
+  --asserted-wash: color-mix(in srgb, var(--asserted) 6%, var(--surface));
+  --failed-wash: color-mix(in srgb, var(--failed) 6%, var(--surface));
+  --proven-edge: color-mix(in srgb, var(--proven) 26%, transparent);
+  --asserted-edge: color-mix(in srgb, var(--asserted) 28%, transparent);
+  --failed-edge: color-mix(in srgb, var(--failed) 26%, transparent);
+
+  --shadow-1: 0 1px 2px rgb(17 20 27 / 5%);
+  --shadow-2:
+    0 1px 2px rgb(17 20 27 / 4%), 0 8px 20px -8px rgb(17 20 27 / 12%);
+  --shadow-3:
+    0 2px 6px rgb(17 20 27 / 6%), 0 28px 64px -16px rgb(17 20 27 / 24%);
 
   /* Phase 1 ships system stacks rather than IBM Plex: the identity here lives
      in the colour rule and the ledger column, not the typeface, and ~160KB of
@@ -46,30 +83,102 @@
     sans-serif;
   --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
 
-  --step--1: 0.75rem;
-  --step-0: 0.8125rem;
-  --step-1: 0.9375rem;
-  --step-2: 1.25rem;
-  --step-3: 1.75rem;
+  /* Type. Seven sizes, each with a job: xs is an eyebrow or a badge, sm is a
+     figure or a caption, base is every control and every row of prose in the
+     UI, md is a card title, lg a section head, xl a page head, and 2xl is
+     reserved for the one number on the Insights page. */
+  --t-xs: 0.75rem;
+  --t-sm: 0.8125rem;
+  --t-base: 0.875rem;
+  --t-md: 1rem;
+  --t-lg: 1.1875rem;
+  --t-xl: 1.625rem;
+  --t-2xl: 2.75rem;
 
-  --space: 1rem;
-  --rail: 12rem;
+  --w-normal: 400;
+  --w-med: 500;
+  --w-bold: 600;
+
+  --lh-tight: 1.2;
+  --lh-snug: 1.4;
+  --lh-base: 1.55;
+
+  /* One 4px scale, plus a 2px hairline step for the gap inside a two-line
+     label. Every margin, gap and padding in this file resolves to a step on
+     it — the ad-hoc rem values this replaced were the reason nothing lined up
+     across two views. */
+  --s-0: 0.125rem;
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+
+  --r-1: 6px;
+  --r-2: 10px;
+  --r-3: 14px;
+  --r-pill: 999px;
+
+  --rail: 14rem;
+  --rail-tight: 3.5rem;
   --header: 3.25rem;
+  --control: 2rem;
+
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
+  --fast: 130ms;
 }
 
+/* Dark is a real second palette, not the light one inverted. Applied for an
+   explicit choice, and for the system default when no choice was made. */
 @media (prefers-color-scheme: dark) {
-  :root {
-    --paper: #0e1014;
-    --raised: #171a20;
-    --ink: #e8eaf0;
-    --muted: #8a909c;
-    --rule: #22262e;
+  :root:not([data-theme='light']) {
+    --paper: #0c0e12;
+    --surface: #14171d;
+    --raised: #1c2027;
+    --sunken: #0f1217;
+
+    --ink: #e9ecf2;
+    --muted: #949cab;
+    --faint: #818b9d; /* 5.62 / 5.22 / 4.76 on paper, surface, raised */
+
+    --rule: #232830;
+    --rule-strong: #333a45;
 
     --proven: #3fb68b;
     --asserted: #e0a458;
     --failed: #e0705f;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-2: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 20px -8px rgb(0 0 0 / 55%);
+    --shadow-3: 0 2px 6px rgb(0 0 0 / 35%), 0 28px 64px -16px rgb(0 0 0 / 65%);
   }
 }
+
+:root[data-theme='dark'] {
+  --paper: #0c0e12;
+  --surface: #14171d;
+  --raised: #1c2027;
+  --sunken: #0f1217;
+
+  --ink: #e9ecf2;
+  --muted: #949cab;
+  --faint: #818b9d; /* 5.62 / 5.22 / 4.76 on paper, surface, raised */
+
+  --rule: #232830;
+  --rule-strong: #333a45;
+
+  --proven: #3fb68b;
+  --asserted: #e0a458;
+  --failed: #e0705f;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+  --shadow-2: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 20px -8px rgb(0 0 0 / 55%);
+  --shadow-3: 0 2px 6px rgb(0 0 0 / 35%), 0 28px 64px -16px rgb(0 0 0 / 65%);
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────── */
 
 * {
   box-sizing: border-box;
@@ -86,15 +195,48 @@ body {
   background: var(--paper);
   color: var(--ink);
   font-family: var(--sans);
-  font-size: var(--step-1);
-  line-height: 1.5;
+  font-size: var(--t-base);
+  line-height: var(--lh-base);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 :focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
-  border-radius: 2px;
+  border-radius: var(--r-1);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--ink) 16%, transparent);
+}
+
+/* Thin, unpainted-until-needed scrollbars. A 16px grey trough down the middle
+   of a two-pane layout is the loudest thing on the screen otherwise. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: var(--r-pill);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--faint);
+  background-clip: content-box;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -106,6 +248,27 @@ body {
   }
 }
 
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: var(--w-bold);
+  line-height: var(--lh-tight);
+  letter-spacing: -0.02em;
+}
+
+p {
+  margin: 0;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.95em;
+  background: var(--raised);
+  border-radius: var(--r-1);
+  padding: var(--s-0) var(--s-1);
+}
+
 /* ── Type roles ─────────────────────────────────────────────────────────── */
 
 /* Every figure in the panel. Tabular so columns of numbers line up down the
@@ -113,19 +276,39 @@ body {
 .figure {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
+  letter-spacing: -0.01em;
 }
 
 .eyebrow {
-  font-size: var(--step--1);
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--muted);
+  line-height: var(--lh-snug);
 }
 
 .muted {
   color: var(--muted);
+}
+
+.faint {
+  color: var(--faint);
+}
+
+/* Identifiers keep their case wherever they appear, including inside an
+   eyebrow. A run id or session id is meant to be copied. */
+.identifier {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.truncate {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Epistemic status ───────────────────────────────────────────────────── */
@@ -154,6 +337,61 @@ body {
   content: '✕';
 }
 
+/* The pill form of the same three states: glyph, label, a wash mixed from the
+   hue itself. Used where a status is a field's value rather than a note. */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  padding: 0 var(--s-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+/* `.pill` sets a default `color`, and `.is-proven` is a single class too — so
+   the status hue has to be restated at `.pill.is-*` or the later rule wins and
+   every pill renders grey. The one place in this file where two selectors
+   compete for the same property, and it is load-bearing: colour is what says
+   whether the thing is true. */
+.pill.is-proven {
+  color: var(--proven);
+  background: var(--proven-wash);
+  border-color: var(--proven-edge);
+}
+.pill.is-asserted {
+  color: var(--asserted);
+  background: var(--asserted-wash);
+  border-color: var(--asserted-edge);
+}
+.pill.is-failed {
+  color: var(--failed);
+  background: var(--failed-wash);
+  border-color: var(--failed-edge);
+}
+
+.pill-glyph {
+  font-size: 1em;
+}
+
+/* A running state gets a slow pulse — the one animated thing in the panel, and
+   it means the same as `◐`: unproven, still moving. */
+.pill.is-asserted .pill-glyph {
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
 /* ── Shell ──────────────────────────────────────────────────────────────── */
 
 .shell {
@@ -164,67 +402,135 @@ body {
     'brand header'
     'nav   main';
   height: 100%;
+  background: var(--paper);
+}
+
+.shell-tight {
+  --rail: var(--rail-tight);
 }
 
 .shell-brand {
   grid-area: brand;
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0 var(--space);
+  gap: var(--s-2);
+  padding: 0 var(--s-4);
   border-bottom: 1px solid var(--rule);
   border-right: 1px solid var(--rule);
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  font-weight: var(--w-bold);
+  font-size: var(--t-md);
+  letter-spacing: -0.03em;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.shell-tight .shell-brand {
+  padding: 0;
+  justify-content: center;
+}
+
+.brand-mark {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--r-1);
+  background: var(--ink);
+  color: var(--paper);
 }
 
 .shell-header {
   grid-area: header;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space);
-  padding: 0 var(--space);
+  gap: var(--s-3);
+  padding: 0 var(--s-4);
   border-bottom: 1px solid var(--rule);
+  background: var(--paper);
+}
+
+.header-end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
 }
 
 .shell-nav {
   grid-area: nav;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
   border-right: 1px solid var(--rule);
-  padding: var(--space) 0;
+  padding: var(--s-3) var(--s-2);
   overflow-y: auto;
+}
+
+.nav-spacer {
+  flex: 1;
+  min-height: var(--s-4);
+}
+
+.nav-foot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--rule);
 }
 
 .shell-main {
   grid-area: main;
   overflow: auto;
-  /* The ledger rule: one continuous vertical line at the right edge of every
-     view, which the figures hang on. Drawn as a background so it runs the full
-     scroll height rather than stopping with the content. */
-  background:
-    linear-gradient(var(--rule), var(--rule)) right / 1px 100% no-repeat;
+  scroll-behavior: smooth;
 }
 
+/*
+ * The ledger rule.
+ *
+ * One continuous hairline down the right edge of the content column, which
+ * every figure in the panel hangs on. Drawn on the column rather than the
+ * viewport so the line and the numbers are the same edge — a rule at the far
+ * right of a wide window is a border, not a ledger.
+ */
 .view {
-  padding: calc(var(--space) * 1.5);
-  padding-right: calc(var(--space) * 1.5 + 1px);
-  max-width: 68rem;
+  width: 100%;
+  max-width: 74rem;
+  margin-inline: auto;
+  padding: var(--s-5) var(--s-5) var(--s-7);
+  border-right: 1px solid var(--rule);
+  min-height: 100%;
+}
+
+.view-wide {
+  max-width: none;
+  border-right: 0;
 }
 
 /* ── Nav ────────────────────────────────────────────────────────────────── */
 
 .nav-item {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
   width: 100%;
-  text-align: left;
-  background: none;
+  padding: var(--s-2) var(--s-3);
   border: 0;
-  border-left: 2px solid transparent;
-  padding: 0.4rem var(--space);
+  border-radius: var(--r-1);
+  background: none;
   color: var(--muted);
   font: inherit;
-  font-size: var(--step-0);
+  font-size: var(--t-base);
+  font-weight: var(--w-med);
+  text-align: left;
+  white-space: nowrap;
   cursor: pointer;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.nav-item svg {
+  flex: none;
 }
 
 .nav-item:hover {
@@ -234,47 +540,353 @@ body {
 
 .nav-item[aria-current='page'] {
   color: var(--ink);
-  border-left-color: var(--ink);
-  font-weight: 600;
+  background: var(--raised);
+  font-weight: var(--w-bold);
+}
+
+.shell-tight .nav-item {
+  justify-content: center;
+  padding: var(--s-2) 0;
+}
+
+.shell-tight .nav-label {
+  display: none;
 }
 
 /* ── Controls ───────────────────────────────────────────────────────────── */
 
-.select,
 .input,
-.button {
-  font: inherit;
-  font-size: var(--step-0);
+.select,
+textarea.input {
+  width: auto;
+  min-height: var(--control);
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-1);
+  background: var(--surface);
   color: var(--ink);
-  background: var(--paper);
-  border: 1px solid var(--rule);
-  border-radius: 4px;
-  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: var(--t-base);
+  line-height: var(--lh-snug);
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
 }
 
-.button {
+.input::placeholder,
+textarea.input::placeholder {
+  color: var(--faint);
+}
+
+.input:hover:not(:disabled),
+.select:hover:not(:disabled) {
+  border-color: var(--faint);
+}
+
+.input:disabled,
+.select:disabled,
+.textarea:disabled {
+  background: var(--raised);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.select option {
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.select {
+  padding-right: var(--s-5);
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 0.85rem center, right 0.6rem center;
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
   cursor: pointer;
-  font-weight: 600;
+}
+
+/*
+ * Three button weights, and that is the whole set.
+ *
+ * `.button` is the default: a bordered surface control. `.button-primary` is
+ * solid ink — the one action a screen wants you to take, and the reason there
+ * is no brand accent to spend on it. `.button-quiet` is a ghost, for anything
+ * that undoes or dismisses.
+ */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  min-height: var(--control);
+  padding: 0 var(--s-3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-base);
+  font-weight: var(--w-med);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease),
+    color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
 }
 
 .button:hover:not(:disabled) {
   background: var(--raised);
+  border-color: var(--faint);
+}
+
+.button:active:not(:disabled) {
+  background: var(--rule);
 }
 
 .button:disabled {
   cursor: not-allowed;
-  color: var(--muted);
+  color: var(--faint);
+  background: var(--raised);
+  border-color: var(--rule);
+}
+
+.button-primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+  font-weight: var(--w-bold);
+  box-shadow: var(--shadow-1);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 88%, var(--paper));
+  border-color: color-mix(in srgb, var(--ink) 88%, var(--paper));
+  color: var(--paper);
+}
+
+.button-primary:active:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 78%, var(--paper));
 }
 
 .button-quiet {
   border-color: transparent;
   background: none;
   color: var(--muted);
-  font-weight: 400;
+  font-weight: var(--w-med);
+  box-shadow: none;
 }
 
-.button-quiet:hover {
+.button-quiet:hover:not(:disabled) {
   color: var(--ink);
+  background: var(--raised);
+  border-color: transparent;
+}
+
+.button-quiet:disabled {
+  background: none;
+  border-color: transparent;
+}
+
+.button-sm {
+  min-height: 1.5rem;
+  padding: 0 var(--s-2);
+  font-size: var(--t-xs);
+}
+
+/* A square control that holds one glyph: the theme switch, the rail collapse,
+   the drawer close. */
+.button-icon {
+  width: var(--control);
+  min-height: var(--control);
+  padding: 0;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+/* ── Command palette trigger ────────────────────────────────────────────── */
+
+.omni {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 12rem;
+  max-width: 22rem;
+  flex: 1;
+  min-height: var(--control);
+  padding: 0 var(--s-2) 0 var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--sunken);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-base);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease);
+}
+
+.omni:hover {
+  border-color: var(--rule-strong);
+  background: var(--surface);
+}
+
+.omni-label {
+  flex: 1;
+}
+
+.kbd {
+  flex: none;
+  padding: 0 var(--s-1);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.4;
+}
+
+.palette-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  padding: 12vh var(--s-4) var(--s-4);
+  background: color-mix(in srgb, var(--ink) 24%, transparent);
+  backdrop-filter: blur(2px);
+  animation: fade var(--fast) var(--ease);
+}
+
+.palette {
+  width: min(34rem, 100%);
+  overflow: hidden;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: rise 180ms var(--ease);
+}
+
+.palette-input {
+  width: 100%;
+  min-height: 3rem;
+  padding: 0 var(--s-4);
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  background: none;
+  font-size: var(--t-md);
+}
+
+.palette-input:focus-visible {
+  outline: none;
+}
+
+.palette-list {
+  max-height: 20rem;
+  overflow-y: auto;
+  padding: var(--s-2);
+  margin: 0;
+  list-style: none;
+}
+
+.palette-item {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  border-radius: var(--r-1);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-base);
+  text-align: left;
+  cursor: pointer;
+}
+
+.palette-item[aria-selected='true'] {
+  background: var(--raised);
+}
+
+.palette-item .figure {
+  margin-left: auto;
+  color: var(--faint);
+}
+
+.palette-empty {
+  padding: var(--s-4);
+  color: var(--muted);
+  font-size: var(--t-base);
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+/* ── Page heads ─────────────────────────────────────────────────────────── */
+
+/* Every view opens with this block, so the distance from the top of the scroll
+   area to the first row of content is the same number on all six of them. */
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+  margin-bottom: var(--s-5);
+}
+
+.page-head h1 {
+  font-size: var(--t-xl);
+  margin-top: var(--s-1);
+}
+
+.page-title {
+  min-width: 0;
+}
+
+.page-intro {
+  color: var(--muted);
+  font-size: var(--t-base);
+  line-height: var(--lh-base);
+  margin-top: var(--s-2);
+  max-width: 46rem;
+}
+
+.section-head {
+  font-size: var(--t-lg);
+  letter-spacing: -0.015em;
+  margin: var(--s-6) 0 var(--s-2);
+}
+
+.section-intro {
+  color: var(--muted);
+  font-size: var(--t-base);
+  margin-bottom: var(--s-3);
+  max-width: 46rem;
+}
+
+.back {
+  margin-bottom: var(--s-3);
+  margin-left: calc(var(--s-2) * -1);
 }
 
 /* ── Ledger rows ────────────────────────────────────────────────────────── */
@@ -287,18 +899,32 @@ body {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--space);
-  padding: 0.55rem 0;
+  gap: var(--s-4);
+  padding: var(--s-3) 0;
   border-bottom: 1px solid var(--rule);
 }
 
 /* `nowrap` keeps short figures on the ledger axis rather than wrapping a
    number mid-column. It is wrong for values that are not figures — a worktree
    path or a session id has no natural width — so anywhere those appear, the
-   rule is relaxed rather than left to overflow the panel. */
-.row > :last-child {
+   rule is relaxed rather than left to overflow the panel.
+   `:not(:first-child)` matters: a row with a single child is a row with no
+   figure column, and right-aligning its only element was pushing the Reports
+   list off the page. */
+.row > :last-child:not(:first-child) {
   text-align: right;
   white-space: nowrap;
+}
+
+/* A value with no natural width — a path, an id, a branch name. Still on the
+   ledger axis, but allowed to wrap onto a second line rather than run past
+   the edge of a phone.
+   The `:not(:first-child)` is not redundant: it matches the specificity of the
+   rule above so this one wins on document order. Drop it and the ledger's
+   `nowrap` outranks this by one class and the override silently does nothing. */
+.row-wrap > :last-child:not(:first-child) {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .detail .row > :last-child {
@@ -306,32 +932,162 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* A settings row is a `.row`, so its control column inherits the ledger's
+   `nowrap`. That is right for a figure and wrong for a paragraph of help text,
+   which then runs 300px past the page. */
+.config-row > :last-child {
+  white-space: normal;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+/* A whole row that navigates. Kept as a button rather than an anchor because
+   it drives the history API, not a document load. */
+.row-link {
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* Bleeds half a step past the ledger column on each side so the hover target
+     reaches the figure at the right edge rather than stopping short of it. */
+  width: calc(100% + var(--s-4));
+  padding-inline: var(--s-2);
+  margin-inline: calc(var(--s-2) * -1);
+  border-radius: var(--r-1);
+  transition: background var(--fast) var(--ease);
+}
+
+.row-link:hover {
+  background: var(--raised);
+}
+
+/* ── Stat tiles ─────────────────────────────────────────────────────────── */
+
+/* The one place a number is allowed to be large outside Insights: four facts
+   about the daemon, read at a glance before anything else on the page. */
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--s-3);
+  margin-bottom: var(--s-6);
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.tile-value {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-lg);
+  font-weight: var(--w-med);
+  letter-spacing: -0.02em;
+  line-height: var(--lh-tight);
+}
+
+.tile-note {
+  font-size: var(--t-xs);
+  color: var(--faint);
+}
+
 /* ── States ─────────────────────────────────────────────────────────────── */
 
+/* Empty is an invitation, not a shrug: a bordered panel with the one thing to
+   do next inside it. */
 .state {
-  padding: calc(var(--space) * 2) 0;
-  max-width: 34rem;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-2);
+  padding: var(--s-6);
+  border: 1px dashed var(--rule-strong);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  max-width: 40rem;
 }
 
 .state h2 {
-  font-size: var(--step-2);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  margin: 0 0 0.375rem;
+  font-size: var(--t-md);
 }
 
 .state p {
-  margin: 0 0 0.75rem;
   color: var(--muted);
-  font-size: var(--step-0);
+  font-size: var(--t-base);
+  max-width: 34rem;
 }
 
-.state code {
-  font-family: var(--mono);
-  font-size: 0.95em;
-  background: var(--raised);
-  border-radius: 3px;
-  padding: 0.05rem 0.3rem;
+.state .button {
+  margin-top: var(--s-2);
+}
+
+.state-plain {
+  border-style: solid;
+}
+
+/* A message the whole view is waiting on. Centred rather than top-left, so a
+   loading panel does not read as a page that finished rendering short. */
+.state-center {
+  align-items: center;
+  text-align: center;
+  margin: var(--s-7) auto;
+  border: 0;
+  background: none;
+}
+
+.spinner {
+  width: 1.125rem;
+  height: 1.125rem;
+  border: 2px solid var(--rule-strong);
+  border-top-color: var(--ink);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+/* An inline note: a save result, a control that was recorded, a partial
+   delete. Reads as an aside, not as a row of the ledger. */
+.note {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  font-size: var(--t-base);
+  margin: var(--s-3) 0;
+  max-width: 46rem;
+}
+
+.note.is-failed {
+  border-color: var(--failed-edge);
+  background: var(--failed-wash);
+}
+
+.note.is-asserted {
+  border-color: var(--asserted-edge);
+  background: var(--asserted-wash);
+}
+
+.note.is-proven {
+  border-color: var(--proven-edge);
+  background: var(--proven-wash);
 }
 
 /* ── Sign-in ────────────────────────────────────────────────────────────── */
@@ -340,55 +1096,60 @@ body {
   min-height: 100%;
   display: grid;
   place-items: center;
-  padding: var(--space);
+  padding: var(--s-4);
 }
 
 .signin form {
   width: min(24rem, 100%);
+  display: grid;
+  gap: var(--s-3);
+  padding: var(--s-6);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-3);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.signin-brand {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-md);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.03em;
 }
 
 .signin h1 {
-  font-size: var(--step-3);
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  margin: 0 0 0.25rem;
+  font-size: var(--t-lg);
 }
 
-.signin p {
-  margin: 0 0 1.25rem;
+.signin-sub {
   color: var(--muted);
-  font-size: var(--step-0);
+  font-size: var(--t-base);
+  margin-top: calc(var(--s-2) * -1);
 }
 
 .signin label {
   display: block;
-  margin-bottom: 0.375rem;
+  margin-bottom: var(--s-1);
+  font-size: var(--t-base);
+  font-weight: var(--w-med);
 }
 
 .signin .input {
   width: 100%;
   font-family: var(--mono);
-  margin-bottom: 0.75rem;
 }
 
-/* ── Page heads ─────────────────────────────────────────────────────────── */
-
-.view h1 {
-  font-size: var(--step-3);
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  margin: 0.25rem 0 0.25rem;
+.signin .button {
+  width: 100%;
 }
 
-.view > .eyebrow {
-  display: block;
-}
-
-.view-intro {
+.signin-foot {
   color: var(--muted);
-  font-size: var(--step-0);
-  margin: 0 0 calc(var(--space) * 1.5);
-  max-width: 44rem;
+  font-size: var(--t-sm);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--rule);
 }
 
 /* ── Board ──────────────────────────────────────────────────────────────
@@ -398,83 +1159,96 @@ body {
  * same reason, and a 90px-wide card is not a card.
  */
 
-.board {
-  padding: calc(var(--space) * 1.5);
-  padding-right: calc(var(--space) * 1.5 + 1px);
-}
-
-.board-head {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: var(--space);
-  margin-bottom: var(--space);
-}
-
-.board-head h1 {
-  font-size: var(--step-3);
-  font-weight: 600;
-  letter-spacing: -0.025em;
-  margin: 0.25rem 0 0;
-}
-
-.board-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-}
-
 .columns {
   display: grid;
   grid-auto-flow: column;
   grid-auto-columns: minmax(15rem, 1fr);
-  gap: var(--space);
+  gap: var(--s-4);
   overflow-x: auto;
-  padding-bottom: var(--space);
+  padding-bottom: var(--s-4);
 }
 
 .column {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .column-head {
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding-bottom: 0.4rem;
+  align-items: center;
+  gap: var(--s-2);
+  padding-bottom: var(--s-2);
   border-bottom: 1px solid var(--rule);
-  margin-bottom: 0.75rem;
+  margin-bottom: var(--s-3);
 }
 
-/* Cards are flat, ruled panels rather than floating shadowed tiles: this is a
-   ledger, and the page should read as ruled paper. */
+.column-count {
+  display: grid;
+  place-items: center;
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding: 0 var(--s-1);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The column's own rung on the ledger: every card below it sums to this. */
+.column-usd {
+  margin-left: auto;
+}
+
+.column-empty {
+  padding: var(--s-4);
+  border: 1px dashed var(--rule);
+  border-radius: var(--r-2);
+  color: var(--faint);
+  font-size: var(--t-sm);
+  text-align: center;
+}
+
+/* Cards are ruled panels that sit on the page rather than floating tiles: one
+   step of elevation, a second on hover, and nothing more. */
 .card {
   border: 1px solid var(--rule);
-  border-radius: 5px;
-  padding: 0.6rem 0.7rem;
-  margin-bottom: 0.6rem;
-  background: var(--paper);
+  border-radius: var(--r-2);
+  padding: var(--s-3);
+  margin-bottom: var(--s-3);
+  background: var(--surface);
+  box-shadow: var(--shadow-1);
+  transition: box-shadow var(--fast) var(--ease), border-color var(--fast) var(--ease);
+}
+
+.card:hover {
+  box-shadow: var(--shadow-2);
+  border-color: var(--rule-strong);
 }
 
 .card-missing {
   border-style: dashed;
+  box-shadow: none;
 }
 
 .card-top {
   display: flex;
   align-items: baseline;
-  gap: 0.4rem;
+  gap: var(--s-2);
 }
 
 .card-toggle {
   flex: none;
-  width: 1rem;
+  width: 1.5rem;
+  min-height: 1.5rem;
   background: none;
   border: 0;
   padding: 0;
-  color: var(--muted);
+  color: var(--faint);
   font: inherit;
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
   cursor: pointer;
   text-align: left;
 }
@@ -486,23 +1260,24 @@ body {
 .card-title {
   flex: 1;
   min-width: 0;
-  margin: 0;
-  font-size: var(--step-1);
-  font-weight: 600;
-  line-height: 1.3;
+  font-size: var(--t-base);
+  font-weight: var(--w-bold);
+  line-height: var(--lh-snug);
+  letter-spacing: -0.01em;
   overflow-wrap: anywhere;
 }
 
 .card-short {
   flex: none;
+  color: var(--faint);
 }
 
 .card-meta {
   display: flex;
   align-items: baseline;
-  gap: 0.5rem;
-  margin-top: 0.3rem;
-  font-size: var(--step-0);
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  font-size: var(--t-sm);
 }
 
 .card-meta > :first-child {
@@ -521,61 +1296,71 @@ body {
   text-align: right;
 }
 
+/* A card's progress, as a bar rather than a second copy of "3/7". Muted fill,
+   because how far along a card is is not a verdict on it. */
+.meter {
+  height: 3px;
+  margin-top: var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.meter-fill {
+  display: block;
+  height: 100%;
+  border-radius: var(--r-pill);
+  background: var(--faint);
+}
+
 .badges {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.25rem;
-  margin-top: 0.4rem;
+  gap: var(--s-1);
+  margin-top: var(--s-2);
 }
 
 .badge {
   border: 1px solid var(--rule);
-  border-radius: 3px;
-  padding: 0 0.3rem;
-  font-size: var(--step--1);
+  border-radius: var(--r-1);
+  padding: 0 var(--s-1);
+  font-size: var(--t-xs);
+  line-height: 1.5;
   color: var(--muted);
+  background: var(--sunken);
+}
+
+.badge.is-failed {
+  border-color: var(--failed-edge);
+  background: var(--failed-wash);
 }
 
 .card-note {
-  margin: 0.4rem 0 0;
-  font-size: var(--step--1);
+  margin-top: var(--s-2);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
 }
 
 .subrow {
   display: flex;
   align-items: baseline;
-  gap: 0.4rem;
-  width: 100%;
-  margin-top: 0.3rem;
-  padding: 0.2rem 0.25rem;
+  gap: var(--s-2);
+  width: calc(100% + var(--s-2));
+  margin: var(--s-1) calc(var(--s-1) * -1) 0;
+  padding: var(--s-1);
   border: 0;
-  border-radius: 3px;
+  border-radius: var(--r-1);
   background: none;
   color: inherit;
   font: inherit;
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
   text-align: left;
   cursor: pointer;
+  transition: background var(--fast) var(--ease);
 }
 
 .subrow:hover {
   background: var(--raised);
-}
-
-.glyph {
-  flex: none;
-  font-family: var(--mono);
-  /* The board's sub-rows are flex and get their spacing from `gap`; the run
-     plan's rows are not, so the glyph needs its own or it collides with the
-     task id. */
-  margin-right: 0.4em;
-}
-
-/* Identifiers keep their case wherever they appear, including inside an
-   eyebrow. A run id or session id is meant to be copied. */
-.identifier {
-  text-transform: none;
-  letter-spacing: 0;
 }
 
 .subrow-title {
@@ -589,30 +1374,41 @@ body {
 .subrow-agent {
   flex: none;
   font-family: var(--mono);
-  font-size: var(--step--1);
+  font-size: var(--t-xs);
+  color: var(--faint);
 }
 
+.glyph {
+  flex: none;
+  font-family: var(--mono);
+  /* The board's sub-rows are flex and get their spacing from `gap`; the run
+     plan's rows are not, so the glyph needs its own or it collides with the
+     task id. */
+  margin-right: 0.4em;
+}
+
+/* Card actions sit on their own line behind a rule, so "Dispatch" is never
+   mistaken for part of the card's content. */
 .card-tools {
   display: flex;
-  gap: 0.25rem;
-  margin-top: 0.5rem;
-}
-
-.card-tools .button {
-  padding: 0.15rem 0.4rem;
-  font-size: var(--step--1);
+  gap: var(--s-1);
+  margin-top: var(--s-3);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--rule);
 }
 
 /* ── Add card ───────────────────────────────────────────────────────────── */
 
 .add-card {
   border: 1px solid var(--rule);
-  border-radius: 5px;
-  padding: 0.75rem;
-  margin-bottom: var(--space);
+  border-radius: var(--r-2);
+  padding: var(--s-4);
+  margin-bottom: var(--s-5);
   display: grid;
-  gap: 0.6rem;
+  gap: var(--s-3);
   max-width: 44rem;
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
 }
 
 .add-card label {
@@ -621,16 +1417,17 @@ body {
 
 .add-card .eyebrow {
   display: block;
-  margin-bottom: 0.2rem;
+  margin-bottom: var(--s-1);
 }
 
-.add-card .input {
+.add-card .input,
+.add-card .select {
   width: 100%;
 }
 
 .add-row {
   display: flex;
-  gap: 0.6rem;
+  gap: var(--s-3);
   flex-wrap: wrap;
 }
 
@@ -639,105 +1436,97 @@ body {
   min-width: 12rem;
 }
 
-.add-tools {
-  display: flex;
-  gap: 0.4rem;
-}
-
-/* ── Task detail ────────────────────────────────────────────────────────── */
+/* ── Task detail drawer ─────────────────────────────────────────────────── */
 
 .detail {
   position: fixed;
-  inset: auto 0 0 auto;
-  top: 0;
-  width: min(26rem, 100%);
+  inset: 0 0 0 auto;
+  z-index: 30;
+  width: min(28rem, 100%);
   height: 100%;
   overflow-y: auto;
-  padding: var(--space);
-  background: var(--paper);
+  padding: var(--s-4) var(--s-5) var(--s-6);
+  background: var(--surface);
   border-left: 1px solid var(--rule);
+  box-shadow: var(--shadow-3);
+  animation: slide 200ms var(--ease);
+}
+
+@keyframes slide {
+  from {
+    transform: translateX(1.5rem);
+    opacity: 0;
+  }
 }
 
 .detail-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space);
-  margin-bottom: var(--space);
+  gap: var(--s-4);
+  margin-bottom: var(--s-4);
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--rule);
 }
 
 .detail-head h2 {
-  font-size: var(--step-2);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  margin: 0.15rem 0 0;
+  font-size: var(--t-md);
+  margin-top: var(--s-1);
 }
 
 .detail-outcome {
-  margin: var(--space) 0 0.25rem;
+  display: block;
+  margin: var(--s-4) 0 var(--s-1);
 }
 
 /* ── Runs ───────────────────────────────────────────────────────────────── */
 
-.back {
-  padding-left: 0;
-  margin-bottom: 0.5rem;
-}
-
-.section-head {
-  font-size: var(--step-2);
-  font-weight: 600;
-  letter-spacing: -0.015em;
-  margin: calc(var(--space) * 1.75) 0 0.25rem;
-}
-
-.run-summary {
-  margin-bottom: var(--space);
-}
-
-/* A whole row that navigates. Kept as a button rather than an anchor because
-   it drives the history API, not a document load. */
-.row-link {
-  border-left: 0;
-  border-right: 0;
-  border-top: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  width: 100%;
-}
-
-.row-link:hover {
-  background: var(--raised);
+/* The run list is a three-track grid, not two stacked `<br>`s: goal and id on
+   the left, progress in the middle, status pill on the right. */
+.run-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: var(--s-4);
+  align-items: center;
 }
 
 .run-goal {
-  flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-0);
+  font-size: var(--t-base);
   overflow-wrap: anywhere;
+}
+
+.run-progress {
+  text-align: right;
+  color: var(--muted);
+}
+
+.run-summary {
+  margin-bottom: var(--s-4);
 }
 
 /* The plan gate. The one place in the panel that asks for a decision, so it
    gets a rule and a tint rather than sitting inline as another paragraph. */
 .gate {
-  border: 1px solid var(--asserted);
-  border-radius: 5px;
-  padding: 0.75rem 0.9rem;
-  margin: var(--space) 0;
-  max-width: 44rem;
+  border: 1px solid var(--asserted-edge);
+  border-radius: var(--r-2);
+  background: var(--asserted-wash);
+  padding: var(--s-4);
+  margin: var(--s-5) 0;
+  max-width: 46rem;
 }
 
 .gate h2 {
-  font-size: var(--step-1);
-  font-weight: 600;
-  margin: 0 0 0.25rem;
+  font-size: var(--t-md);
+  margin-bottom: var(--s-1);
 }
 
 .gate p {
-  margin: 0 0 0.75rem;
-  font-size: var(--step-0);
+  margin-bottom: var(--s-3);
+  font-size: var(--t-base);
   color: var(--muted);
 }
 
@@ -758,7 +1547,7 @@ body {
   background: none;
   color: inherit;
   font: inherit;
-  font-size: var(--step-1);
+  font-size: var(--t-base);
   text-align: left;
   cursor: pointer;
   overflow-wrap: anywhere;
@@ -766,13 +1555,14 @@ body {
 
 .task-toggle:hover {
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--rule-strong);
 }
 
 .task-meta {
   display: block;
-  font-size: var(--step--1);
-  margin-top: 0.1rem;
+  font-size: var(--t-xs);
+  margin-top: var(--s-0);
 }
 
 .task-usd {
@@ -782,9 +1572,9 @@ body {
 .task-detail {
   display: grid;
   grid-template-columns: minmax(6rem, auto) 1fr;
-  gap: 0.15rem 0.75rem;
-  margin: 0.5rem 0 0.25rem;
-  padding-left: 0.75rem;
+  gap: var(--s-1) var(--s-3);
+  margin: var(--s-2) 0 var(--s-1);
+  padding: var(--s-2) 0 var(--s-2) var(--s-3);
   border-left: 2px solid var(--rule);
 }
 
@@ -799,43 +1589,51 @@ body {
 
 .task-tools {
   display: inline-flex;
-  gap: 0.25rem;
-  margin-top: 0.35rem;
-}
-
-.task-tools .button {
-  padding: 0.1rem 0.4rem;
-  font-size: var(--step--1);
+  gap: var(--s-1);
+  margin-top: var(--s-2);
 }
 
 .run-tools {
-  margin-top: var(--space);
+  margin-top: var(--s-4);
+}
+
+.worker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
 }
 
 /* ── Config ─────────────────────────────────────────────────────────────── */
 
-.config {
-  max-width: none;
-}
-
 .config-body {
   display: grid;
-  grid-template-columns: 11rem 1fr;
-  gap: calc(var(--space) * 1.5);
+  grid-template-columns: 12rem 1fr;
+  gap: var(--s-5);
   align-items: start;
 }
 
 .config-nav {
   position: sticky;
-  top: var(--space);
+  top: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: var(--s-2);
   border-right: 1px solid var(--rule);
-  padding-right: 0.5rem;
+  max-height: calc(100vh - var(--header) - var(--s-6));
+  overflow-y: auto;
 }
 
 .config-nav .nav-item {
-  padding-left: 0.5rem;
+  padding: var(--s-1) var(--s-2);
   font-family: var(--mono);
-  font-size: var(--step--1);
+  font-size: var(--t-sm);
+  font-weight: var(--w-normal);
+}
+
+.config-nav .nav-item[aria-current='page'] {
+  font-weight: var(--w-med);
 }
 
 .config-fields {
@@ -848,7 +1646,8 @@ body {
    rather than a paraphrase of it. */
 .config-row {
   align-items: flex-start;
-  gap: calc(var(--space) * 1.5);
+  gap: var(--s-5);
+  padding: var(--s-3) 0;
 }
 
 .config-label {
@@ -856,14 +1655,14 @@ body {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 0.15rem;
+  gap: var(--s-1);
   font-family: var(--mono);
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
   overflow-wrap: anywhere;
 }
 
 .config-dirty {
-  font-weight: 600;
+  font-weight: var(--w-bold);
 }
 
 /* An edited-but-unsaved field is marked structurally, not by colour — hue is
@@ -875,13 +1674,14 @@ body {
 
 .config-help {
   font-family: var(--sans);
-  font-size: var(--step--1);
+  font-size: var(--t-xs);
   color: var(--muted);
-  line-height: 1.45;
+  line-height: var(--lh-snug);
 }
 
 .config-default {
-  font-size: var(--step--1);
+  font-size: var(--t-xs);
+  color: var(--faint);
 }
 
 .config-input {
@@ -889,7 +1689,7 @@ body {
   width: min(20rem, 45%);
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: var(--s-1);
   align-items: stretch;
   text-align: left;
 }
@@ -900,39 +1700,46 @@ body {
 }
 
 .config-input input[type='checkbox'] {
-  width: auto;
+  width: 1rem;
+  height: 1rem;
+  margin: var(--s-2) 0 0;
+  accent-color: var(--ink);
   align-self: flex-start;
 }
 
 .config-area {
   font-family: var(--mono);
-  font-size: var(--step--1);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
   resize: vertical;
+  padding: var(--s-2);
 }
 
 .config-redacted {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: var(--s-2);
 }
 
-.config-note {
-  font-size: var(--step-0);
-  max-width: 44rem;
-}
-
-/* The save bar sticks to the bottom: with twenty-one sections and a hundred
+/* The save bar floats above the page: with twenty-one sections and a hundred
    and sixty fields, a button at the end of the page is a button nobody finds. */
 .config-save {
   position: sticky;
-  bottom: 0;
+  bottom: var(--s-4);
+  z-index: 10;
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  margin-top: var(--space);
-  padding: 0.6rem 0;
-  border-top: 1px solid var(--rule);
-  background: var(--paper);
+  gap: var(--s-3);
+  margin-top: var(--s-5);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.config-save-spacer {
+  flex: 1;
 }
 
 /* ── Chat ───────────────────────────────────────────────────────────────── */
@@ -940,48 +1747,81 @@ body {
 .chat {
   display: flex;
   flex-direction: column;
-  max-width: 52rem;
+  max-width: 56rem;
 }
 
 .transcript {
   display: flex;
   flex-direction: column;
-  gap: var(--space);
-  padding: var(--space) 0;
+  gap: var(--s-5);
+  padding: var(--s-4) 0 var(--s-5);
+  flex: 1;
 }
 
 .msg-start {
-  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding-bottom: var(--s-2);
+  border-bottom: 1px solid var(--rule);
 }
 
-/* Speaker is marked by an eyebrow and a rule, not by a coloured bubble —
+/* Speaker is marked by a label and a surface, not by a coloured bubble —
    colour here would collide with the status palette. */
 .msg {
-  border-left: 2px solid var(--rule);
-  padding-left: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
 }
 
 .msg-user {
-  border-left-color: var(--ink);
+  align-self: flex-end;
+  max-width: min(42rem, 92%);
+  align-items: flex-end;
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-3) var(--r-3) var(--r-1) var(--r-3);
+  background: var(--raised);
+}
+
+.msg-assistant {
+  max-width: 100%;
 }
 
 .msg-text {
-  margin: 0.2rem 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+  line-height: var(--lh-base);
+}
+
+.msg-user .msg-text {
+  text-align: left;
 }
 
 /* The model's working-out, folded away by default: it is not the answer. */
 .thinking,
 .tool {
-  margin-top: 0.4rem;
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--sunken);
+  overflow: hidden;
 }
 
 .thinking summary,
 .tool summary {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-1) var(--s-2);
   cursor: pointer;
   list-style: none;
+  color: var(--muted);
+}
+
+.thinking summary:hover,
+.tool summary:hover {
+  background: var(--raised);
 }
 
 .thinking summary::-webkit-details-marker,
@@ -991,26 +1831,28 @@ body {
 
 .thinking summary::before,
 .tool summary::before {
-  content: '▸ ';
-  color: var(--muted);
+  content: '▸';
+  font-size: 0.7em;
+  color: var(--faint);
 }
 
 .thinking[open] summary::before,
 .tool[open] summary::before {
-  content: '▾ ';
+  content: '▾';
 }
 
 .thinking pre,
 .tool pre {
-  margin: 0.3rem 0 0;
-  padding: 0.5rem;
+  margin: 0;
+  padding: var(--s-3);
   max-height: 22rem;
   overflow: auto;
-  background: var(--raised);
-  border-radius: 4px;
+  border-top: 1px solid var(--rule);
+  background: var(--surface);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font-size: var(--step--1);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
 }
 
 /* Blinking insertion point while text streams. Held still under
@@ -1031,23 +1873,55 @@ body {
   }
 }
 
+/* The composer is one panel: the field has no border of its own, the toolbar
+   sits inside the same rounded box, and the whole thing lifts on focus. */
 .composer {
   position: sticky;
-  bottom: 0;
+  bottom: var(--s-4);
   display: grid;
-  gap: 0.5rem;
-  padding: 0.75rem 0;
-  border-top: 1px solid var(--rule);
-  background: var(--paper);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+  transition: border-color var(--fast) var(--ease);
+}
+
+.composer:focus-within {
+  border-color: var(--faint);
 }
 
 .composer textarea {
   width: 100%;
+  min-height: 4.5rem;
+  padding: var(--s-3);
+  border: 0;
+  border-radius: var(--r-2) var(--r-2) 0 0;
+  background: none;
   resize: vertical;
+  font-size: var(--t-base);
+  line-height: var(--lh-base);
 }
 
-.composer .add-tools {
+.composer textarea:focus-visible {
+  outline: none;
+}
+
+.composer-tools {
+  display: flex;
   align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-2) var(--s-2) var(--s-3);
+  border-top: 1px solid var(--rule);
+}
+
+.composer-hint {
+  flex: 1;
+  min-width: 0;
+  color: var(--faint);
+  font-size: var(--t-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ── Insights ───────────────────────────────────────────────────────────── */
@@ -1055,58 +1929,62 @@ body {
 /* The one big figure on the page. Cost gets typography, not colour — that is
    the palette rule, and a green total would read as "good" rather than "spent". */
 .headline {
-  font-size: 3rem;
-  font-weight: 600;
-  letter-spacing: -0.03em;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-2xl);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.04em;
   line-height: 1;
-  margin: 0.5rem 0 0.25rem;
+  margin: var(--s-2) 0 var(--s-1);
 }
 
 .bars {
   display: grid;
-  gap: 0.3rem;
-  margin: 0.75rem 0 var(--space);
-  max-width: 44rem;
+  gap: var(--s-1);
+  margin: var(--s-3) 0 var(--s-4);
+  max-width: 46rem;
 }
 
 .bar-row {
   display: grid;
-  grid-template-columns: minmax(8rem, 14rem) 1fr minmax(3.5rem, auto);
-  gap: 0.6rem;
+  grid-template-columns: minmax(8rem, 15rem) 1fr minmax(3.5rem, auto);
+  gap: var(--s-3);
   align-items: center;
-  font-size: var(--step-0);
+  font-size: var(--t-sm);
 }
 
 .bar-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  color: var(--muted);
 }
 
 .bar-track {
-  height: 0.75rem;
+  height: 0.5rem;
   background: var(--raised);
-  border-radius: 2px;
+  border-radius: var(--r-pill);
   overflow: hidden;
 }
 
 .bar-fill {
   display: block;
   height: 100%;
-  background: var(--muted);
-  border-radius: 2px;
+  background: var(--faint);
+  border-radius: var(--r-pill);
 }
 
 .bar-value {
   text-align: right;
   font-variant-numeric: tabular-nums;
+  color: var(--muted);
 }
 
 /* The row you actually paid for. Marked by weight and a darker fill rather
    than a hue, so it reads as "this one" and not as a verdict. */
 .bar-actual .bar-label,
 .bar-actual .bar-value {
-  font-weight: 600;
+  font-weight: var(--w-bold);
   color: var(--ink);
 }
 
@@ -1115,22 +1993,51 @@ body {
 }
 
 .report {
-  margin: 0.5rem 0 var(--space);
-  padding: 0.75rem;
+  margin: var(--s-2) 0 var(--s-4);
+  padding: var(--s-3);
   max-height: 30rem;
   overflow: auto;
-  background: var(--raised);
-  border-radius: 4px;
-  font-size: var(--step--1);
-  line-height: 1.5;
+  background: var(--sunken);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* ── Mobile: the rail becomes a bar ─────────────────────────────────────── */
 
+@media (max-width: 52rem) {
+  .config-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .config-nav {
+    position: static;
+    flex-direction: row;
+    min-width: 0;
+    overflow-x: auto;
+    max-height: none;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 0 var(--s-2);
+  }
+
+  .config-row {
+    flex-direction: column;
+    gap: var(--s-2);
+  }
+
+  .config-input {
+    width: 100%;
+  }
+}
+
 @media (max-width: 40rem) {
-  .shell {
+  .shell,
+  .shell-tight {
+    --rail: 0;
     grid-template-columns: 1fr;
     grid-template-rows: var(--header) auto 1fr;
     grid-template-areas:
@@ -1143,30 +2050,48 @@ body {
     display: none;
   }
 
+  .shell-header {
+    padding: 0 var(--s-3);
+  }
+
   .shell-nav {
-    display: flex;
+    flex-direction: row;
+    gap: var(--s-1);
     overflow-x: auto;
     border-right: 0;
     border-bottom: 1px solid var(--rule);
-    padding: 0;
+    padding: var(--s-2) var(--s-3);
   }
 
+  .nav-spacer,
+  .nav-foot {
+    display: none;
+  }
+
+  .shell-tight .nav-item,
   .nav-item {
     width: auto;
-    white-space: nowrap;
-    border-left: 0;
-    border-bottom: 2px solid transparent;
-    padding: 0.5rem 0.75rem;
+    justify-content: flex-start;
+    padding: 0.3rem var(--s-3);
+    border-radius: var(--r-pill);
   }
 
-  .nav-item[aria-current='page'] {
-    border-left-color: transparent;
-    border-bottom-color: var(--ink);
+  .shell-tight .nav-label {
+    display: inline;
   }
 
-  .view,
-  .board {
-    padding: var(--space);
+  .omni {
+    min-width: 0;
+  }
+
+  .omni-label,
+  .kbd {
+    display: none;
+  }
+
+  .view {
+    padding: var(--s-4) var(--s-3) var(--s-6);
+    border-right: 0;
   }
 
   /* One column at a time on a phone, stacked. Five side-by-side columns on a
@@ -1188,27 +2113,12 @@ body {
     width: 100%;
   }
 
-  /* Section list above the fields rather than beside them. */
-  .config-body {
-    grid-template-columns: 1fr;
+  .run-row {
+    grid-template-columns: 1fr auto;
   }
 
-  .config-nav {
-    position: static;
-    display: flex;
-    overflow-x: auto;
-    border-right: 0;
-    border-bottom: 1px solid var(--rule);
-    padding: 0 0 0.25rem;
-  }
-
-  .config-row {
-    flex-direction: column;
-    gap: 0.4rem;
-  }
-
-  .config-input {
-    width: 100%;
+  .run-progress {
+    display: none;
   }
 
   /* Label above the bar rather than a 8rem column beside it. */
@@ -1217,7 +2127,7 @@ body {
     grid-template-areas:
       'label value'
       'track track';
-    gap: 0.2rem 0.6rem;
+    gap: 0.2rem var(--s-3);
   }
 
   .bar-label {
@@ -1232,5 +2142,9 @@ body {
 
   .headline {
     font-size: 2.25rem;
+  }
+
+  .msg-user {
+    max-width: 100%;
   }
 }

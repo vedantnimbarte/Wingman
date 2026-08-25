@@ -233,7 +233,14 @@ pub struct Config {
     ///
     /// Defaults to `"off"`: reasoning costs output tokens, so turning it on is
     /// your call, not ours.
+    ///
+    /// Stays a `String` rather than becoming an enum: `ReasoningEffort::parse`
+    /// accepts `none`, `false`, `med` and `max` as aliases, and a serde enum
+    /// would turn every config using one of those into a load error. The
+    /// schema is taught the four canonical levels instead, so a settings UI
+    /// offers a choice without the type refusing what the parser accepts.
     #[serde(default = "default_reasoning")]
+    #[cfg_attr(feature = "schema", schemars(with = "ReasoningLevel"))]
     pub reasoning: String,
 
     /// Per-provider configuration, keyed by stable provider id
@@ -567,12 +574,57 @@ fn default_reasoning() -> String {
     "off".into()
 }
 
+/// The four canonical `reasoning` levels, for the schema only.
+///
+/// Never deserialized — [`Config::reasoning`] is a `String` so the parser's
+/// aliases keep working. This exists so `GET /v1/config/schema` describes the
+/// field as a choice rather than as free text, which is the difference between
+/// a settings form with a dropdown and one where `hgih` is accepted until the
+/// daemon rejects the save.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum ReasoningLevel {
+    /// No reasoning. The default — it costs output tokens.
+    Off,
+    /// A short budget. Anthropic 4096 thinking tokens, OpenAI `low`.
+    Low,
+    /// Anthropic 16384 thinking tokens, OpenAI `medium`.
+    Medium,
+    /// Anthropic 32768 thinking tokens, OpenAI `high`.
+    High,
+}
+
+/// The TUI themes that actually resolve, for the schema only.
+///
+/// Kept in step with `wingman_tui::theme::resolve`, which matches `light` and
+/// `mono` and falls through to the default for everything else. Like
+/// [`ReasoningLevel`] this is never deserialized: the field stays a `String`
+/// so an unrecognised name still loads and falls back, rather than bricking
+/// the binary over a cosmetic setting.
+#[cfg(feature = "schema")]
+#[derive(schemars::JsonSchema)]
+#[schemars(rename_all = "lowercase")]
+pub enum ThemeName {
+    /// The shipped dark theme.
+    Default,
+    /// For light terminals.
+    Light,
+    /// No colour beyond the terminal's own foreground.
+    Mono,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct TuiConfig {
-    /// Theme name: "default" | "light" | "mono" — or any custom name that
-    /// matches a `~/.wingman/themes/<name>.toml` file.
+    /// Theme name: `"default"` | `"light"` | `"mono"`.
+    ///
+    /// Resolved by `wingman_tui::theme::resolve`, which falls back to the
+    /// default for any other value rather than failing — which is why this is
+    /// a `String` and not an enum. It is a fixed set, not a lookup into
+    /// `~/.wingman/themes/`: there is no loader for per-file themes.
+    #[cfg_attr(feature = "schema", schemars(with = "ThemeName"))]
     pub theme: String,
     pub show_token_usage: bool,
     /// Optional color overrides; if any are set they override the named
@@ -2430,6 +2482,65 @@ pub fn json_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `reasoning` and `tui.theme` are `String`s whose valid values live in the
+    /// schema rather than the type. Nothing in the compiler ties the two
+    /// together, so this asserts the link the settings UI depends on: drop the
+    /// `schemars(with = ...)` and both fields silently become free-text boxes
+    /// again, which is exactly how they shipped.
+    #[cfg(feature = "schema")]
+    #[test]
+    fn schema_offers_choices_for_the_string_enums() {
+        let schema = json_schema();
+
+        // Both are `allOf: [{$ref}]` so the field keeps its own description;
+        // the choices live on the referenced definition.
+        for (node, def, expected) in [
+            (
+                &schema["properties"]["reasoning"],
+                "ReasoningLevel",
+                vec!["off", "low", "medium", "high"],
+            ),
+            (
+                &schema["definitions"]["TuiConfig"]["properties"]["theme"],
+                "ThemeName",
+                vec!["default", "light", "mono"],
+            ),
+        ] {
+            assert_eq!(
+                node["allOf"][0]["$ref"].as_str(),
+                Some(format!("#/definitions/{def}").as_str()),
+                "{def} field should reference its definition"
+            );
+
+            // One `oneOf` branch per value, each a single-value `enum` with its
+            // own description — the shape the panel turns into a `<select>`.
+            let branches = schema["definitions"][def]["oneOf"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{def} should be a oneOf of variants"));
+            let values: Vec<&str> = branches
+                .iter()
+                .map(|b| b["enum"][0].as_str().unwrap())
+                .collect();
+            assert_eq!(values, expected);
+            assert!(
+                branches.iter().all(|b| b["description"].is_string()),
+                "{def}: every choice needs its own description"
+            );
+        }
+    }
+
+    /// The schema advertises the canonical spellings, but the field is a
+    /// `String` precisely so the parser's aliases still load. If this ever
+    /// fails, the two have been made to disagree.
+    #[test]
+    fn reasoning_aliases_still_parse() {
+        for alias in ["none", "false", "med", "max", ""] {
+            let cfg: Config = toml::from_str(&format!("reasoning = \"{alias}\""))
+                .unwrap_or_else(|e| panic!("alias {alias:?} should still load: {e}"));
+            assert_eq!(cfg.reasoning, alias);
+        }
+    }
 
     /// Parse a TOML document into a raw table for the project-layer tests.
     fn raw(s: &str) -> toml::Table {
