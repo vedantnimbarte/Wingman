@@ -13,7 +13,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use rand::RngCore;
+use rand::Rng;
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -38,7 +38,7 @@ pub async fn chatgpt_oauth_login() -> Result<(String, String)> {
     // 2. Random state for CSRF protection.
     let state = {
         let mut buf = [0u8; 16];
-        rand::thread_rng().fill_bytes(&mut buf);
+        rand::rng().fill_bytes(&mut buf);
         URL_SAFE_NO_PAD.encode(buf)
     };
 
@@ -183,7 +183,7 @@ pub fn token_is_expiring(token: &str, margin_secs: u64) -> bool {
 
 fn generate_pkce() -> (String, String) {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     let code_verifier = URL_SAFE_NO_PAD.encode(bytes);
 
     let mut hasher = Sha256::new();

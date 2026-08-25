@@ -54,12 +54,10 @@ pub struct Dispatched {
 /// function is private to the CLI, and a board-minted id must be
 /// indistinguishable from a pilot-minted one on disk.
 fn new_run_id() -> String {
-    use rand::Rng;
-    let suffix: String = rand::thread_rng()
-        .sample_iter(rand::distributions::Alphanumeric)
-        .take(6)
-        .map(|c| (c as char).to_ascii_lowercase())
-        .collect();
+    use rand::distr::SampleString;
+    let suffix = rand::distr::Alphanumeric
+        .sample_string(&mut rand::rng(), 6)
+        .to_ascii_lowercase();
     format!("{}-{suffix}", chrono::Utc::now().format("%Y-%m-%d-%H%M"))
 }
 
