@@ -1050,13 +1050,11 @@ fn resolve_run_id() -> String {
 
 /// Generate a run id of the form `YYYY-MM-DD-HHMM-<rand6>`.
 fn new_run_id() -> String {
-    use rand::Rng;
+    use rand::distr::SampleString;
     let now = chrono::Utc::now();
-    let suffix: String = rand::thread_rng()
-        .sample_iter(rand::distributions::Alphanumeric)
-        .take(6)
-        .map(|c| (c as char).to_ascii_lowercase())
-        .collect();
+    let suffix = rand::distr::Alphanumeric
+        .sample_string(&mut rand::rng(), 6)
+        .to_ascii_lowercase();
     format!("{}-{suffix}", now.format("%Y-%m-%d-%H%M"))
 }
 
