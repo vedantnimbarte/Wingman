@@ -23,7 +23,7 @@ anyhow = { workspace = true }
 # Filesystem walking + watching
 ignore = "0.4"
 notify = "6"
-notify-debouncer-mini = "0.4"
+notify-debouncer-mini = "0.7"
 
 # Storage
 rusqlite = { version = "0.31", features = ["bundled", "blob"] }
