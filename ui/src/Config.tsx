@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type ConfigSchema, type SchemaNode } from './api'
 import { at, fieldsOf, resolve, toPatch, type Field } from './schema'
 import { message } from './state'
-import { Failed, Loading } from './ui'
+import { Failed, Loading, Note, PageHead } from './ui'
 
 const REDACTED = '<redacted>'
 
@@ -129,15 +129,19 @@ export function Config() {
   }
 
   return (
-    <div className="view config">
-      <span className="eyebrow">Config</span>
-      <h1>Settings</h1>
-      <p className="view-intro">
-        Generated from the schema the daemon derives from its own config types, so every field here
-        carries the documentation the source does. Saving writes to{' '}
-        <code className="figure">{meta.writes_to}</code> — the global file, never a repo's{' '}
-        <code>.wingman/config.toml</code>.
-      </p>
+    <div className="view">
+      <PageHead
+        eyebrow="Config"
+        title="Settings"
+        intro={
+          <>
+            Generated from the schema the daemon derives from its own config types, so every field
+            here carries the documentation the source does. Saving writes to{' '}
+            <code className="figure">{meta.writes_to}</code> — the global file, never a repo's{' '}
+            <code>.wingman/config.toml</code>.
+          </>
+        }
+      />
 
       <div className="config-body">
         <nav className="config-nav" aria-label="Config sections">
@@ -157,14 +161,14 @@ export function Config() {
 
         <section className="config-fields">
           <h2 className="section-head">{active}</h2>
-          {resolved.description && <p className="view-intro">{resolved.description}</p>}
+          {resolved.description && <p className="section-intro">{resolved.description}</p>}
 
           {readOnly && (
-            <p className="is-asserted dot config-note">
+            <Note tone="is-asserted">
               <code>[{active}]</code> cannot be changed through the API it configures — a server
               that can rewrite its own token, ceiling or project allowlist has no ceiling. Edit the
               file directly.
-            </p>
+            </Note>
           )}
 
           {fields.length === 0 ? (
@@ -197,20 +201,36 @@ export function Config() {
       </div>
 
       <div className="config-save">
-        <button type="button" className="button" disabled={saving || edits.size === 0} onClick={() => void save()}>
-          {saving ? 'Saving…' : edits.size === 0 ? 'No changes' : `Save ${edits.size} change${edits.size === 1 ? '' : 's'}`}
-        </button>
+        <span className="config-save-spacer">
+          {saved && <span className="is-proven dot figure">Saved</span>}
+          {saveError && (
+            <span className="is-failed dot figure" role="alert">
+              {saveError}
+            </span>
+          )}
+          {!saved && !saveError && edits.size > 0 && (
+            <span className="faint figure">
+              {edits.size} field{edits.size === 1 ? '' : 's'} edited
+            </span>
+          )}
+        </span>
         {edits.size > 0 && (
           <button type="button" className="button button-quiet" onClick={() => setEdits(new Map())}>
             Discard
           </button>
         )}
-        {saved && <span className="is-proven dot figure">Saved</span>}
-        {saveError && (
-          <span className="is-failed dot figure" role="alert">
-            {saveError}
-          </span>
-        )}
+        <button
+          type="button"
+          className="button button-primary"
+          disabled={saving || edits.size === 0}
+          onClick={() => void save()}
+        >
+          {saving
+            ? 'Saving…'
+            : edits.size === 0
+              ? 'No changes'
+              : `Save ${edits.size} change${edits.size === 1 ? '' : 's'}`}
+        </button>
       </div>
     </div>
   )
@@ -276,7 +296,11 @@ function Redacted({
       <span className="config-redacted">
         <span className="figure muted">set · hidden</span>
         {!readOnly && (
-          <button type="button" className="button button-quiet" onClick={() => setReplacing(true)}>
+          <button
+            type="button"
+            className="button button-sm"
+            onClick={() => setReplacing(true)}
+          >
             Replace
           </button>
         )}

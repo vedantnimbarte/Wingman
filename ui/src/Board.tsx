@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type Badge, type BoardData, type Card, type SubRow, type TaskStatus } from './api'
 import { message, useEvents } from './state'
-import { Failed, Loading } from './ui'
+import { Empty, Failed, Icon, Loading, PageHead, Pill } from './ui'
 
 /**
  * The board.
@@ -69,19 +69,31 @@ export function Board({ project }: { project: string | null }) {
   const target = known && !known.missing ? known : (live[0] ?? null)
 
   return (
-    <div className="board">
-      <header className="board-head">
-        <div>
-          <span className="eyebrow">Board</span>
-          <h1>{cards.length === 1 ? '1 card' : `${cards.length} cards`}</h1>
-        </div>
-        <div className="board-actions">
-          <span className="figure muted">{money(total(cards))}</span>
-          <button type="button" className="button" onClick={() => setAdding(true)} disabled={!target}>
-            Add card
-          </button>
-        </div>
-      </header>
+    <div className="view view-wide">
+      <PageHead
+        eyebrow="Board"
+        title={cards.length === 1 ? '1 card' : `${cards.length} cards`}
+        intro={
+          known
+            ? `Cards filed against ${known.name}. A card is durable — it outlives the runs that execute it.`
+            : 'Every card the registry knows about. Pick a project in the header to scope this to one repo.'
+        }
+        actions={
+          <>
+            <span className="figure muted" title="Spend across every card shown">
+              {money(total(cards))}
+            </span>
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={() => setAdding(true)}
+              disabled={!target}
+            >
+              Add card
+            </button>
+          </>
+        }
+      />
 
       {adding && target && (
         <AddCard
@@ -96,7 +108,7 @@ export function Board({ project }: { project: string | null }) {
       )}
 
       {cards.length === 0 ? (
-        <Empty hasProject={Boolean(target)} />
+        <NoCards hasProject={Boolean(target)} onAdd={() => setAdding(true)} />
       ) : (
         <div className="columns">
           {data.columns.map((col) => {
@@ -105,8 +117,12 @@ export function Board({ project }: { project: string | null }) {
               <section key={col.id} className="column" aria-label={col.title}>
                 <header className="column-head">
                   <span className="eyebrow">{col.title}</span>
-                  <span className="figure muted">{inCol.length || ''}</span>
+                  <span className="column-count">{inCol.length}</span>
+                  {/* The column's rung on the ledger: the cards below sum to
+                      this, and it sums into the figure in the page head. */}
+                  <span className="figure muted column-usd">{money(total(inCol))}</span>
                 </header>
+                {inCol.length === 0 && <p className="column-empty">Nothing here</p>}
                 {inCol.map((c) => (
                   <CardTile
                     key={c.id}
@@ -128,23 +144,20 @@ export function Board({ project }: { project: string | null }) {
   )
 }
 
-function Empty({ hasProject }: { hasProject: boolean }) {
+function NoCards({ hasProject, onAdd }: { hasProject: boolean; onAdd: () => void }) {
+  if (!hasProject) {
+    return (
+      <Empty title="No registered project still exists on disk">
+        Add a repo under <code>[[serve.projects]]</code> in the global config and restart the
+        daemon, or clear the stale ones with <code>wingman board projects --forget</code>.
+      </Empty>
+    )
+  }
   return (
-    <div className="state">
-      <h2>No cards yet</h2>
-      {hasProject ? (
-        <p>
-          A card is a goal you author; it outlives the runs that execute it. Add one above, or from
-          a terminal with <code>wingman board add "…"</code>.
-        </p>
-      ) : (
-        <p>
-          No registered project still exists on disk. Add a repo under{' '}
-          <code>[[serve.projects]]</code> in the global config and restart the daemon, or clear the
-          stale ones with <code>wingman board projects --forget</code>.
-        </p>
-      )}
-    </div>
+    <Empty title="No cards yet" action={{ label: 'Add the first card', onClick: onAdd }}>
+      A card is a goal you author; it outlives the runs that execute it. You can also file one from
+      a terminal with <code>wingman board add "…"</code>.
+    </Empty>
   )
 }
 
@@ -207,12 +220,27 @@ function CardTile({
       <div className="card-meta">
         <span className="muted">{card.project_name}</span>
         {card.rollup && (
-          <span className="figure">
+          <span className="figure muted">
             {card.rollup.done}/{card.rollup.total}
           </span>
         )}
         <span className="figure card-usd">{card.rollup ? money(card.rollup.usd) : ''}</span>
       </div>
+
+      {/* Progress as a bar rather than a second copy of "3/7". The fill is
+          muted, not green: how far along a card is is not a verdict on it. */}
+      {card.rollup && card.rollup.total > 0 && (
+        <span
+          className="meter"
+          role="img"
+          aria-label={`${card.rollup.done} of ${card.rollup.total} tasks done`}
+        >
+          <span
+            className="meter-fill"
+            style={{ width: `${(card.rollup.done / card.rollup.total) * 100}%` }}
+          />
+        </span>
+      )}
 
       {extraBadges.length > 0 && (
         <div className="badges">
@@ -250,7 +278,7 @@ function CardTile({
       <div className="card-tools">
         <button
           type="button"
-          className="button button-quiet"
+          className="button button-sm"
           disabled={busy !== null || card.project_missing}
           onClick={() =>
             void act('dispatch', () => api.dispatchCard(card.id, { again: Boolean(card.run_id) }))
@@ -261,7 +289,7 @@ function CardTile({
         </button>
         <button
           type="button"
-          className="button button-quiet"
+          className="button button-quiet button-sm"
           disabled={busy !== null}
           onClick={() => void act('archive', () => api.archiveCard(card.id, card.archived))}
         >
@@ -313,20 +341,33 @@ function TaskDetail({ card, row, onClose }: { card: Card; row: SubRow; onClose: 
           <span className="eyebrow">{row.task_id}</span>
           <h2>{row.title}</h2>
         </div>
-        <button type="button" className="button button-quiet" onClick={onClose}>
-          Close
+        <button
+          type="button"
+          className="button button-quiet button-icon"
+          onClick={onClose}
+          aria-label="Close the task panel"
+          title="Close (Esc)"
+        >
+          <Icon name="close" />
         </button>
       </header>
 
       <div className="rows">
-        {fields.map(([label, value]) => (
-          <div key={label} className="row">
-            <span className="muted">{label}</span>
-            <span className={`figure${label === 'Status' ? ` ${statusClass(row.status)}` : ''}`}>
-              {value ?? '—'}
-            </span>
-          </div>
-        ))}
+        {fields.map(([label, value]) =>
+          label === 'Status' ? (
+            <div key={label} className="row">
+              <span className="muted">{label}</span>
+              <Pill status={statusClass(row.status)} glyph={glyph(row.status)}>
+                {row.status.replace('_', ' ')}
+              </Pill>
+            </div>
+          ) : (
+            <div key={label} className="row">
+              <span className="muted">{label}</span>
+              <span className="figure">{value ?? '—'}</span>
+            </div>
+          ),
+        )}
       </div>
 
       {row.outcome && (
@@ -414,8 +455,12 @@ function AddCard({
         </p>
       )}
 
-      <div className="add-tools">
-        <button type="submit" className="button" disabled={busy || title.trim() === ''}>
+      <div className="actions">
+        <button
+          type="submit"
+          className="button button-primary"
+          disabled={busy || title.trim() === ''}
+        >
           {busy ? 'Adding…' : 'Add card'}
         </button>
         <button type="button" className="button button-quiet" onClick={onClose}>
