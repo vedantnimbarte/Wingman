@@ -665,15 +665,17 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
         // the 64-dim hash fallback, and every later run with real embeddings
         // available fails to open it. The feature simply vanished, permanently,
         // with nothing to rebuild it.
-        Err(wingman_rag::RagError::DimMismatch { expected, actual }) => {
-            tracing::info!(
-                "rebuilding semantic index: it was built with a {expected}-dim embedder, \
-                 this session uses {actual}-dim"
-            );
-            eprintln!(
-                "wingman: the semantic index was built by a different embedding model \
-                 ({expected}-dim vs {actual}-dim); rebuilding it."
-            );
+        Err(
+            e @ (wingman_rag::RagError::DimMismatch { .. }
+            | wingman_rag::RagError::EmbedderChanged { .. }),
+        ) => {
+            // Both mean the same thing operationally — the vectors on disk were
+            // produced by something this session cannot reproduce — so both
+            // rebuild. They are reported apart because "4-dim vs 4-dim" is what
+            // the user saw when a same-dimension model swap was described as a
+            // dimension mismatch.
+            tracing::info!("rebuilding semantic index: {e}");
+            eprintln!("wingman: the semantic index is stale ({e}); rebuilding it.");
             // Remove the stale db (and any sqlite sidecars) and open fresh.
             let _ = std::fs::remove_file(&paths.index_db);
             for suffix in ["-wal", "-shm"] {
