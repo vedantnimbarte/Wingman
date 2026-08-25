@@ -12,7 +12,7 @@ import {
 import { duration, glyph, money, statusClass } from './Board'
 import { navigate } from './router'
 import { message, useEvents } from './state'
-import { Failed, Loading } from './ui'
+import { Empty, Failed, Icon, Loading, Note, PageHead, Pill } from './ui'
 
 /**
  * Pilot runs, live.
@@ -70,42 +70,50 @@ function RunList({ project }: { project: string }) {
 
   return (
     <div className="view">
-      <span className="eyebrow">Runs</span>
-      <h1>{runs.length === 1 ? '1 run' : `${runs.length} runs`}</h1>
-      <p className="view-intro">
-        Every pilot run in this repo, newest first. Runs are read from{' '}
-        <code>.wingman/autonomous/</code> on disk, so one started from a terminal shows up here and
-        one started here shows up in <code>wingman pilot watch</code>.
-      </p>
+      <PageHead
+        eyebrow="Runs"
+        title={runs.length === 1 ? '1 run' : `${runs.length} runs`}
+        intro={
+          <>
+            Every pilot run in this repo, newest first. Runs are read from{' '}
+            <code>.wingman/autonomous/</code> on disk, so one started from a terminal shows up here
+            and one started here shows up in <code>wingman pilot watch</code>.
+          </>
+        }
+        actions={
+          <button type="button" className="button" onClick={() => navigate('/board')}>
+            Go to the board
+          </button>
+        }
+      />
 
       {runs.length === 0 ? (
-        <div className="state">
-          <h2>No runs yet</h2>
-          <p>
-            Dispatch a card from the board, or start one with{' '}
-            <code>wingman pilot run "&hellip;"</code>.
-          </p>
-        </div>
+        <Empty
+          title="No runs yet"
+          action={{ label: 'Dispatch a card', onClick: () => navigate('/board') }}
+        >
+          A run starts when you dispatch a card from the board, or from a terminal with{' '}
+          <code>wingman pilot run "&hellip;"</code>.
+        </Empty>
       ) : (
         <div className="rows">
           {runs.map((r) => (
             <button
               key={r.run_id}
               type="button"
-              className="row row-link"
+              className="row row-link run-row"
               onClick={() => navigate(`/runs/${r.run_id}`)}
             >
               <span className="run-goal">
-                <span className={`dot ${runClass(r.status)}`} />
-                {r.goal}
-                <br />
-                <span className="figure muted">{r.run_id}</span>
+                <span className="truncate">{r.goal}</span>
+                <span className="figure faint identifier">{r.run_id}</span>
               </span>
-              <span className="figure">
+              <span className="figure run-progress">
                 {r.done}/{r.total}
-                <br />
-                <span className={runClass(r.status)}>{r.status.replace('_', ' ')}</span>
               </span>
+              <Pill status={runClass(r.status)} glyph={runGlyph(r.status)}>
+                {r.status.replace('_', ' ')}
+              </Pill>
             </button>
           ))}
         </div>
@@ -187,22 +195,41 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
   return (
     <div className="view">
       <button type="button" className="button button-quiet back" onClick={() => navigate('/runs')}>
-        ← Runs
+        <Icon name="collapse" size={14} />
+        Runs
       </button>
 
       {/* The run id is an identifier someone will copy into a CLI command, so
           it is not put through the eyebrow's uppercase transform — a
           transformed id reads as real and pastes as wrong. */}
-      <span className="eyebrow">
-        <span className="figure identifier">{run.run_id}</span> ·{' '}
-        {live ? 'live' : terminal ? 'finished' : 'not streaming'}
-      </span>
-      <h1>{run.goal}</h1>
+      <PageHead
+        eyebrow={
+          <>
+            <span className="figure identifier">{run.run_id}</span> ·{' '}
+            {live ? 'live' : terminal ? 'finished' : 'not streaming'}
+          </>
+        }
+        title={run.goal}
+        actions={
+          terminal ? null : (
+            <button
+              type="button"
+              className="button"
+              disabled={busy !== null}
+              onClick={() => void control('abort')}
+            >
+              {busy === 'abort' ? 'Aborting…' : 'Abort run'}
+            </button>
+          )
+        }
+      />
 
       <div className="rows run-summary">
         <div className="row">
           <span className="muted">Status</span>
-          <span className={`figure dot ${runClass(run.status)}`}>{run.status.replace('_', ' ')}</span>
+          <Pill status={runClass(run.status)} glyph={runGlyph(run.status)}>
+            {run.status.replace('_', ' ')}
+          </Pill>
         </div>
         <div className="row">
           <span className="muted">Tasks</span>
@@ -239,10 +266,10 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
             Pilot planned {run.tasks.length} {run.tasks.length === 1 ? 'task' : 'tasks'} and will not
             start until the plan is approved. Read it below, then decide.
           </p>
-          <div className="add-tools">
+          <div className="actions">
             <button
               type="button"
-              className="button"
+              className="button button-primary"
               disabled={busy !== null}
               onClick={() => void control('approve')}
             >
@@ -261,19 +288,19 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
       )}
 
       {actionError && (
-        <p className="is-failed dot figure" role="alert">
+        <Note tone="is-failed" role="alert">
           {actionError}
-        </p>
+        </Note>
       )}
 
       {sent && !actionError && (
-        <p className="is-asserted dot figure" role="status">
+        <Note tone="is-asserted">
           Sent <code>{sent}</code> — the run applies it on its next check.
-        </p>
+        </Note>
       )}
 
       <h2 className="section-head">Plan</h2>
-      <p className="view-intro">
+      <p className="section-intro">
         Indented by dependency depth. A task runs when every task it names has finished and no other
         running task claims a file it declared it would write.
       </p>
@@ -291,35 +318,22 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
         ))}
       </div>
 
-      {!terminal && (
-        <div className="add-tools run-tools">
-          <button
-            type="button"
-            className="button button-quiet"
-            disabled={busy !== null}
-            onClick={() => void control('abort')}
-          >
-            {busy === 'abort' ? 'Aborting…' : 'Abort run'}
-          </button>
-        </div>
-      )}
-
       {run.agents.length > 0 && (
         <>
           <h2 className="section-head">Workers</h2>
           <div className="rows">
             {run.agents.map((a) => (
               <div key={a.id} className="row">
-                <span>
-                  <span className={`dot ${agentClass(a.status)}`} />
-                  {a.name || a.id}
-                  <span className="muted"> · {a.role}</span>
-                  {a.current_tool && <span className="muted"> · {a.current_tool}</span>}
+                <span className="worker-row">
+                  <span className={`dot ${agentClass(a.status)}`} aria-hidden="true" />
+                  <span className="truncate">
+                    {a.name || a.id}
+                    <span className="muted"> · {a.role}</span>
+                    {a.current_tool && <span className="muted"> · {a.current_tool}</span>}
+                  </span>
                 </span>
                 <span className="figure">
-                  {a.model ?? '—'}
-                  <br />
-                  {money(a.usd)}
+                  <span className="muted">{a.model ?? '—'}</span> {money(a.usd)}
                 </span>
               </div>
             ))}
@@ -399,7 +413,7 @@ function TaskRow({
             {canRetry && (
               <button
                 type="button"
-                className="button button-quiet"
+                className="button button-sm"
                 disabled={busy !== null}
                 onClick={() => onControl('retry', { task: task.id })}
               >
@@ -409,7 +423,7 @@ function TaskRow({
             {canAbort && (
               <button
                 type="button"
-                className="button button-quiet"
+                className="button button-quiet button-sm"
                 disabled={busy !== null}
                 onClick={() => onControl('abort', { task: task.id })}
               >
@@ -504,6 +518,21 @@ export function elapsedSecs(task: Task, runTerminal: boolean, now = Date.now()):
   const end = Date.parse(task.ended_at)
   if (Number.isNaN(end)) return null
   return Math.max(0, (end - start) / 1000)
+}
+
+/** The run's state as a glyph, so the pill never depends on hue alone. */
+function runGlyph(status: RunStatus): string {
+  switch (status) {
+    case 'done':
+      return '✓'
+    case 'failed':
+    case 'aborted':
+      return '✕'
+    case 'awaiting_approval':
+      return '◇'
+    default:
+      return '◐'
+  }
 }
 
 function runClass(status: RunStatus): string {
