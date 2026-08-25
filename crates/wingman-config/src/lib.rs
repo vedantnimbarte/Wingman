@@ -2424,6 +2424,20 @@ pub struct PilotDaemonConfig {
     /// tuned.
     #[serde(default)]
     pub auto_dispatch: bool,
+    /// J2 — the most autonomous runs one discovery cycle may start.
+    ///
+    /// `auto_dispatch` opens PRs with nobody watching, and a cycle that
+    /// discovers twenty `AutoRun` candidates would previously dispatch all
+    /// twenty back to back. This bounds the blast radius of one cycle to a
+    /// number you chose. Candidates over the cap are still queued, so nothing
+    /// is lost — they are picked up by a later cycle or by a human reading the
+    /// queue.
+    ///
+    /// Defaults to 1: the daemon makes progress every cycle, at a rate
+    /// `poll_interval_secs` already governs. `0` means no cap, which is the
+    /// old behaviour and is not recommended.
+    #[serde(default = "default_max_auto_dispatch_per_cycle")]
+    pub max_auto_dispatch_per_cycle: usize,
     /// J3 file-drop intake directory (relative to the repo root). When the
     /// `intake` source is enabled, each `*.md` here is normalized into a goal
     /// candidate and flows through the same score/dispatch path as discovered
@@ -2438,6 +2452,10 @@ fn default_intake_dir() -> String {
     ".wingman/intake".into()
 }
 
+fn default_max_auto_dispatch_per_cycle() -> usize {
+    1
+}
+
 impl Default for PilotDaemonConfig {
     fn default() -> Self {
         Self {
@@ -2448,6 +2466,7 @@ impl Default for PilotDaemonConfig {
             trusted_authors: Vec::new(),
             trusted_labels: vec!["wingman:auto".into()],
             auto_dispatch: false,
+            max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
             // coverage_gaps, intake. The default advertises only
             // `github_issues`; add the others explicitly.
@@ -2681,6 +2700,28 @@ mod tests {
                 .collect();
             assert_eq!(values, expected);
         }
+    }
+
+    /// `auto_dispatch` opens PRs unattended, so the number of runs one cycle
+    /// may start on its own is capped, and the cap defaults to something small
+    /// rather than to "unlimited". A regression here would be silent: the
+    /// daemon would still work, and would simply do more per cycle than
+    /// anyone asked for.
+    #[test]
+    fn auto_dispatch_is_capped_by_default() {
+        let d = PilotDaemonConfig::default();
+        assert!(!d.auto_dispatch, "auto_dispatch must stay opt-in");
+        assert_eq!(d.max_auto_dispatch_per_cycle, 1);
+
+        // Explicitly opting out of the cap is allowed, but has to be written
+        // down — it is not what you get by leaving the key out.
+        let parsed: PilotDaemonConfig =
+            toml::from_str("max_auto_dispatch_per_cycle = 0").expect("parses");
+        assert_eq!(parsed.max_auto_dispatch_per_cycle, 0);
+
+        // And a config that says nothing about it still gets the cap.
+        let bare: PilotDaemonConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.max_auto_dispatch_per_cycle, 1);
     }
 
     /// The schema advertises the canonical spellings, but the field is a

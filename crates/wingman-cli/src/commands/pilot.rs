@@ -1682,6 +1682,10 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
         if results.is_empty() {
             eprintln!("[pilot] daemon cycle {n}: no candidates");
         }
+        // Per-cycle, not per-daemon: the cap bounds one burst of discovery,
+        // and `poll_interval_secs` governs the rate across cycles.
+        let mut dispatched = 0usize;
+        let mut deferred = 0usize;
         for (cand, action) in &results {
             eprintln!(
                 "[pilot] daemon cycle {n}: {:?} — {} (score {:.2}, {})",
@@ -1714,6 +1718,19 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
             if pilot.daemon.auto_dispatch
                 && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun)
             {
+                // Bound how much one cycle may start on its own. The candidate
+                // is already queued above, so hitting the cap defers work
+                // rather than dropping it — and it is said out loud, because a
+                // cap nobody is told about reads as "there was nothing else".
+                let cap = pilot.daemon.max_auto_dispatch_per_cycle;
+                if cap != 0 && dispatched >= cap {
+                    deferred += 1;
+                    eprintln!(
+                        "[pilot] daemon: cap reached ({cap}/cycle) — {:?} stays queued",
+                        cand.title
+                    );
+                    continue;
+                }
                 if dry_run {
                     // Validation path (#34): show the decision, open nothing.
                     eprintln!(
@@ -1726,6 +1743,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
                     continue;
                 }
                 eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
+                dispatched += 1;
                 let opts = PilotOptions {
                     goal: cand.title.clone(),
                     yes: true, // trusted, already scored above threshold
@@ -1738,6 +1756,12 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
                     Err(e) => eprintln!("[pilot] daemon: dispatched run failed: {e}"),
                 }
             }
+        }
+
+        if deferred > 0 {
+            eprintln!(
+                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a                  later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
+            );
         }
 
         n += 1;
