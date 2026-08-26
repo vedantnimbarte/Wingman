@@ -168,6 +168,9 @@ jobs:
       - name: Type-check
         working-directory: editors/vscode
         run: npx tsc --noEmit
+      - name: Test
+        working-directory: editors/vscode
+        run: npm test
       - name: Bundle
         working-directory: editors/vscode
         run: npm run build

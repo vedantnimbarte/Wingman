@@ -9,6 +9,8 @@
 import * as vscode from "vscode";
 import { ChildProcessWithoutNullStreams, spawn } from "child_process";
 
+import { SearchHit, parseHits } from "./search";
+
 /** Minimal MCP-over-stdio client for a single spawned server process. */
 class McpClient {
   private proc: ChildProcessWithoutNullStreams | undefined;
@@ -103,14 +105,56 @@ async function showToolResult(title: string, text: string): Promise<void> {
   void vscode.window.setStatusBarMessage(title, 3000);
 }
 
+/**
+ * Open a hit and put the cursor on its first line.
+ *
+ * `semantic_search` reports repo-relative paths, but resolve absolute ones too
+ * rather than joining them onto the workspace root and producing a path that
+ * exists nowhere.
+ */
+async function reveal(hit: SearchHit): Promise<void> {
+  const root = vscode.workspace.workspaceFolders?.[0];
+  const absolute = /^([a-zA-Z]:[\\/]|[\\/])/.test(hit.path);
+  const uri =
+    absolute || !root ? vscode.Uri.file(hit.path) : vscode.Uri.joinPath(root.uri, hit.path);
+
+  const editor = await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(uri));
+  // The tool's lines are 1-based; the API's are 0-based.
+  const line = Math.max(0, hit.startLine - 1);
+  const start = new vscode.Position(line, 0);
+  editor.selection = new vscode.Selection(start, start);
+  editor.revealRange(new vscode.Range(start, start), vscode.TextEditorRevealType.InCenter);
+}
+
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("wingman.semanticSearch", async () => {
       const query = await vscode.window.showInputBox({ prompt: "Wingman semantic search" });
       if (!query) return;
       try {
-        const text = await getClient().callTool("semantic_search", { query });
-        await showToolResult("Wingman: search complete", text);
+        const text = await vscode.window.withProgress(
+          { location: vscode.ProgressLocation.Window, title: "Wingman: searching…" },
+          () => getClient().callTool("semantic_search", { query })
+        );
+        const hits = parseHits(text);
+        // Nothing to navigate to (no matches, or an error string) — fall back
+        // to showing whatever the tool said rather than an empty picker.
+        if (hits.length === 0) {
+          await showToolResult("Wingman: no results", text);
+          return;
+        }
+        const pick = await vscode.window.showQuickPick(
+          hits.map((hit) => ({
+            label: `${hit.path}:${hit.startLine}`,
+            description: [hit.symbol, hit.score && `score ${hit.score}`]
+              .filter(Boolean)
+              .join("  ·  "),
+            detail: hit.snippet.split("\n")[0]?.trim(),
+            hit,
+          })),
+          { placeHolder: query, matchOnDetail: true }
+        );
+        if (pick) await reveal(pick.hit);
       } catch (e) {
         void vscode.window.showErrorMessage(`Wingman: ${e}`);
       }

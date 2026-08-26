@@ -27,8 +27,14 @@ use wingman_core::ToolDispatcher;
 const DEFAULT_PROTOCOL: &str = "2024-11-05";
 
 pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
-    let registry = crate::runtime::build_registry(&cfg, mode).await?;
     let paths = ProjectPaths::discover(&std::env::current_dir()?);
+    // Build the learn handles up front: without them `build_registry` drops
+    // `recall_memory`, `save_memory`, `forget_memory`, `invoke_skill`,
+    // `recall_session` and `read_session`, so a connected client saw a
+    // registry missing exactly the half this command's docs advertise.
+    // Writes stay gated by `mode` (read-only by default), not by absence.
+    let learn = crate::runtime::build_learn(&paths, format!("mcp-serve-{}", std::process::id()));
+    let registry = crate::runtime::build_registry_with_learn(&cfg, mode, learn).await?;
 
     eprintln!(
         "wingman mcp-serve: exposing {} tools over stdio (mode: {:?}). Connect an MCP client to this process.",
