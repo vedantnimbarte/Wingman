@@ -25,12 +25,12 @@ use tokio::net::TcpStream;
 use super::http::{self, Request};
 use super::{auth, ServeState};
 
-const INDEX_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui/index.html"));
-const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui/app.js"));
-const APP_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/ui/app.css"));
+const INDEX_HTML: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel/index.html"));
+const APP_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel/app.js"));
+const APP_CSS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/panel/app.css"));
 
 /// Whether a real bundle was embedded, or the `build.rs` placeholder stood in
-/// for a missing `ui/dist/`. Reported at startup so a stub page is never a
+/// for a missing `panel/dist/`. Reported at startup so a stub page is never a
 /// mystery.
 pub fn embedded() -> bool {
     env!("WINGMAN_UI_EMBEDDED") == "true"
@@ -190,12 +190,12 @@ mod tests {
     /// Without it, a broken UI build ships a binary that quietly serves the
     /// `build.rs` placeholder and passes every other check.
     #[test]
-    #[ignore = "requires `npm run build` in ui/ first; CI runs it with --ignored"]
+    #[ignore = "requires `npm run build` in panel/ first; CI runs it with --ignored"]
     fn ui_bundle_is_embedded() {
         assert!(
             embedded(),
-            "ui/dist was missing at compile time, so the placeholder was embedded instead of \
-             the panel. Run `npm ci && npm run build` in ui/, then rebuild."
+            "panel/dist was missing at compile time, so the placeholder was embedded instead of \
+             the panel. Run `npm ci && npm run build` in panel/, then rebuild."
         );
         assert!(
             APP_JS.len() > 1024,

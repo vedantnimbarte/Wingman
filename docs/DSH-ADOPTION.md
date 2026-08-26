@@ -611,10 +611,11 @@ sees, and `records_to_messages` replays them. E3 ships as the one invariant
 that matters here (`debug_assert_reconstructs`) rather than a general
 registry. A2 falls out incrementally and has not been forced yet.
 
-Known gap left open deliberately: **pilot workers (`--worker-mode`) never open
-a session log at all**, so `wingman session fork` cannot target a worker's
-turns despite the orchestrator recording a session id for exactly that. That
-is a separate pre-existing bug, not part of making an existing log faithful.
+That gap is now closed too: pilot workers open the log their session id
+already named. It needed the owning project root rather than the discovered
+one — a worker runs inside a git worktree, whose `.git` is a *file*, so the
+obvious `paths.root` is the worktree and a transcript written there is
+force-removed with it at cleanup.
 
 **Fourth — capability gaps.** P3 (jobs), then P11 (PTY) on the plumbing P3
 establishes. Trigger for P3 is someone actually hitting the 600s ceiling, not

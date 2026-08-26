@@ -141,6 +141,56 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     };
     let mut agent = AgentLoop::new(provider, registry, agent_cfg);
 
+    // Open the worker's own transcript.
+    //
+    // The orchestrator mints a session id and passes `--session-id`, and
+    // `AgentRecord.session_id` is documented as "the worker's own JSONL log
+    // under `<project>/.wingman/sessions/`. Lets `wingman session fork`
+    // operate on any worker's transcript." No worker ever opened one, so that
+    // id named a file that did not exist and a worker's turns could not be
+    // forked, resumed, or recalled.
+    //
+    // Deliberately the OWNING project, not `paths.root`. A worker `cd`s into
+    // `<project>/.wingman/worktrees/<name>` first, and a git worktree has a
+    // `.git` file — so `paths.root` is the worktree, which is force-removed at
+    // cleanup. A log written there would be deleted along with the evidence of
+    // what the worker did.
+    let sessions_dir = wingman_config::find_owning_project_root(
+        &std::env::current_dir().unwrap_or_else(|_| paths.root.clone()),
+    )
+    .join(".wingman")
+    .join("sessions");
+    let opened = match opts.session_id.as_deref() {
+        Some(id) => wingman_session::SessionLog::open_named(&sessions_dir, id).await,
+        // The flag is optional. A worker started by hand still gets a
+        // transcript; it just gets a timestamped name.
+        None => wingman_session::SessionLog::create(&sessions_dir).await,
+    };
+    let session = match opened {
+        Ok(mut log) => {
+            let _ = log
+                .write(wingman_session::SessionRecord::SessionStart {
+                    ts: chrono::Utc::now().to_rfc3339(),
+                    model: selection.model.clone(),
+                    provider: selection.provider_id.clone(),
+                    system_hash: agent.system_prompt().map(wingman_session::system_hash),
+                })
+                .await;
+            Some(std::sync::Arc::new(wingman_session::SessionLogSink::new(
+                log,
+            )))
+        }
+        Err(e) => {
+            // Best-effort: a worker that cannot write its transcript still
+            // does the task. The supervisor reads the NDJSON stream, not this.
+            eprintln!("[worker] session log disabled: {e}");
+            None
+        }
+    };
+    if let Some(sink) = &session {
+        agent.set_context_sink(sink.clone());
+    }
+
     // E10 — read manager→worker IPC commands from stdin. `cancel` sets a
     // shared flag the run loop checks; `pivot`/`clarify` are queued into
     // `ipc_injections` and the learning hook splices them into the next
@@ -272,6 +322,15 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             _ => {}
         }
     }
+    // Queue the transcript for indexing, the same way headless does — a
+    // worker's log that no `recall_session` can find is only half a record.
+    // Appending to the queue is cheap; a later session drains it.
+    if let Some(sink) = session.as_ref() {
+        if let Err(e) = wingman_learn::session_index::enqueue_pending(sink.path()) {
+            eprintln!("[worker] could not queue session for indexing: {e}");
+        }
+    }
+
     Ok(exit)
 }
 
@@ -403,5 +462,56 @@ mod tests {
         assert!(injected.contains("use tabs") && injected.contains("target v2"));
         // ...then drained, so the next turn injects nothing.
         assert!(hook.before_turn(&[]).await.is_none());
+    }
+
+    /// The regression this fixes: the orchestrator hands the worker a session
+    /// id and documents it as the worker's log under
+    /// `<project>/.wingman/sessions/`, so `wingman session fork` can target a
+    /// worker's turns. The worker never opened one, and — because it `cd`s
+    /// into a git worktree first — the obvious fix would have written it
+    /// somewhere cleanup deletes.
+    #[tokio::test]
+    async fn a_workers_log_lands_in_the_project_not_the_worktree() {
+        let tmp = std::env::temp_dir().join(format!(
+            "wingman-worker-log-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let project = tmp.join("repo");
+        let worktree = project.join(".wingman").join("worktrees").join("auto-x");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(project.join(".wingman")).unwrap();
+        // A git worktree's `.git` is a file, which is what makes
+        // `find_project_root` stop inside the worktree.
+        std::fs::write(worktree.join(".git"), "gitdir: ../../../.git").unwrap();
+
+        // The path the worker computes, from inside its worktree.
+        let sessions_dir = wingman_config::find_owning_project_root(&worktree)
+            .join(".wingman")
+            .join("sessions");
+        assert_eq!(
+            sessions_dir,
+            project.join(".wingman").join("sessions"),
+            "the transcript must outlive the worktree it was produced in"
+        );
+        assert!(
+            !sessions_dir.starts_with(&worktree),
+            "a log under the worktree is force-removed at cleanup"
+        );
+
+        // And the id the orchestrator passed names a real, findable file.
+        let log = wingman_session::SessionLog::open_named(&sessions_dir, "sess-1")
+            .await
+            .expect("worker should be able to open its named log");
+        drop(log);
+        assert!(
+            wingman_session::session_path(&sessions_dir, "sess-1").is_some(),
+            "`wingman session fork sess-1` must be able to find it"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

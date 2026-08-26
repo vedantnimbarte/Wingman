@@ -46,6 +46,39 @@ pub fn project_dir(project_root: &Path) -> PathBuf {
 /// directory is never returned as a project root (the global `~/.wingman/`
 /// would otherwise be a false positive). Falls back to `start` itself if
 /// no marker is found.
+/// The project that *owns* `start`, looking through a pilot worktree.
+///
+/// [`find_project_root`] deliberately stops at a pilot worktree: a worker's
+/// file access should be contained to its own branch, so that is the right
+/// root for tool containment. It is the wrong root for anything that must
+/// outlive the task, because worktrees live at
+/// `<project>/.wingman/worktrees/<name>` and are force-removed at cleanup —
+/// a worker's session log written under one is deleted with it.
+///
+/// Walks out to the owning project when `start` is inside a worktree, and is
+/// otherwise identical to [`find_project_root`].
+pub fn find_owning_project_root(start: &Path) -> PathBuf {
+    let here = find_project_root(start);
+    // `<project>/.wingman/worktrees/<name>` — recognised by the two
+    // components above it, not by the directory's own name, so an ordinary
+    // project that happens to be called "worktrees" is unaffected.
+    let mut cursor = here.as_path();
+    while let Some(parent) = cursor.parent() {
+        if parent.file_name().is_some_and(|n| n == "worktrees")
+            && parent
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == ".wingman")
+        {
+            if let Some(project) = parent.parent().and_then(|p| p.parent()) {
+                return project.to_path_buf();
+            }
+        }
+        cursor = parent;
+    }
+    here
+}
+
 pub fn find_project_root(start: &Path) -> PathBuf {
     let mut current = start.to_path_buf();
     if current.is_file() {
@@ -132,6 +165,37 @@ mod tests {
         assert!(pp.config_file.ends_with("config.toml"));
         assert!(pp.sessions_dir.ends_with("sessions"));
         assert!(pp.index_db.ends_with("index.db"));
+    }
+
+    #[test]
+    fn owning_root_looks_through_a_pilot_worktree() {
+        let tmp = std::env::temp_dir().join(format!("wingman-owning-{}", std::process::id()));
+        let project = tmp.join("repo");
+        let worktree = project.join(".wingman").join("worktrees").join("auto-x");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(project.join(".wingman")).unwrap();
+        // A git worktree's `.git` is a FILE, which is why find_project_root
+        // stops here — and why a session log written under it is deleted with
+        // the worktree at cleanup.
+        std::fs::write(
+            worktree.join(".git"),
+            "gitdir: ../../../.git/worktrees/auto-x",
+        )
+        .unwrap();
+
+        assert_eq!(find_project_root(&worktree), worktree, "containment root");
+        assert_eq!(find_owning_project_root(&worktree), project, "owning root");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn owning_root_is_the_plain_root_outside_a_worktree() {
+        let tmp = std::env::temp_dir().join(format!("wingman-owning2-{}", std::process::id()));
+        let nested = tmp.join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(tmp.join(".wingman")).unwrap();
+        assert_eq!(find_owning_project_root(&nested), tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

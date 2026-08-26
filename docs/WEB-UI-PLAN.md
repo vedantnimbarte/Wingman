@@ -45,7 +45,7 @@ emission, and the UI itself.
 | Decision | Choice | Consequence |
 | --- | --- | --- |
 | TUI's fate | **Kept, unchanged** | `board_tui.rs` (1,718 lines) is not touched. Board over SSH keeps working. |
-| Framework | **React + TypeScript + Vite** | New npm project at `ui/`. Chosen for future extension, per the brief. |
+| Framework | **React + TypeScript + Vite** | New npm project at `panel/`. Chosen for future extension, per the brief. |
 | Bundle delivery | **Embedded at compile time** | `wingman serve` stays a single static binary with no runtime file dependency. |
 | Config UI | **Server emits a schema; UI generates forms** | New config fields appear in the UI for free. No hand-maintained form that can drift from the Rust structs. |
 | v1 scope | **Full control panel** | Six phases. Board, runs, config, sessions, observability. |
@@ -60,20 +60,20 @@ decided: (a) in each case.**
 
 ### 1. Embedding must not break `cargo build` ✅ (a)
 
-`include_bytes!("../../ui/dist/app.js")` is a compile error when `dist/` does
+`include_bytes!("../../panel/dist/app.js")` is a compile error when `dist/` does
 not exist — which is the state of every fresh clone, every contributor without
 node, and `cargo install wingman`. Embedding makes the npm build **load-bearing
 for the Rust build**, and today the node job is explicitly *"Informational: a
 separate ecosystem shouldn't block Rust PRs."* That contract changes here, and
 it should change deliberately.
 
-- **(a) `build.rs` stubs the missing files.** ~15 lines: if `ui/dist/` is
+- **(a) `build.rs` stubs the missing files.** ~15 lines: if `panel/dist/` is
   absent, emit a placeholder `index.html` reading "web UI not built — see
   docs/WEB-UI.md" into `OUT_DIR` and embed that instead. `cargo build` never
   breaks, `cargo install` works, release CI builds the real bundle.
   **Recommended.** The cost is that a broken UI build ships a working binary
   with a stub page, so CI must assert the real bundle is present on release.
-- **(b) Commit `ui/dist/` to the repo.** Cargo builds standalone with no
+- **(b) Commit `panel/dist/` to the repo.** Cargo builds standalone with no
   build.rs. Cost: a minified bundle in every diff and a merge conflict surface.
 - **(c) Cargo feature `web-ui`, default off.** Purest, but the panel is then
   absent from the binary people actually download, which defeats the point.
@@ -103,7 +103,7 @@ repos via `POST /v1/projects/{p}/exec`. It is not a read credential.
 Prove the whole path end to end on the smallest possible surface, before any
 design or feature work rests on it.
 
-- `ui/` — Vite + React + TS. **Stable output filenames**
+- `panel/` — Vite + React + TS. **Stable output filenames**
   (`entryFileNames: 'app.js'`, `assetFileNames: 'app.[ext]'`), so embedding is
   three `include_bytes!` calls and needs **no new Rust dependency**. Hashed
   filenames would force `include_dir` or `rust-embed`; cache-busting is
@@ -114,7 +114,7 @@ design or feature work rests on it.
   an SPA fallback so client-side routes deep-link. Mounted **before** the auth
   gate for the shell only; every `/v1/*` call it makes stays authenticated.
 - `build.rs` per decision 1.
-- CI: extend the existing node job to build `ui/` and type-check it.
+- CI: extend the existing node job to build `panel/` and type-check it.
   `release.yml` gains a node step before `cargo build` for all five targets.
 - **Ships:** a page that renders `GET /v1/health`. Worthless as a feature,
   decisive as proof — build, embed, serve, auth, deep-link, five-target release.
@@ -131,9 +131,9 @@ second writer in `ui.rs` would have duplicated the half-close at the bottom of
 `HTTP/1.1 304 Status`. Pre-existing and invisible until a route returned a
 status the table never anticipated.
 
-**Rerun detection is by mtime, and I misdiagnosed it once.** Moving `ui/dist`
+**Rerun detection is by mtime, and I misdiagnosed it once.** Moving `panel/dist`
 away and back left the embed stale, and the first explanation — that cargo
-does not normalise the `..` in `crates/wingman-cli/../../ui/dist` — was wrong.
+does not normalise the `..` in `crates/wingman-cli/../../panel/dist` — was wrong.
 Cargo compares timestamps, and `mv` preserves them, so the restored files were
 older than the last build-script run and correctly did not trigger one. A real
 `npm run build` rewrites all three files and does. The path was cleaned up
@@ -144,7 +144,7 @@ anyway for legibility, but it fixed nothing; the honest note is in `build.rs`.
 machinery than the decision it tests.
 
 **The placeholder needs a gate, not just a comment.** A binary built without
-`ui/dist` serves a "not built" page and passes every other check, which is
+`panel/dist` serves a "not built" page and passes every other check, which is
 precisely the kind of silent degradation that ships. `ui_bundle_is_embedded` is
 `#[ignore]`d so `cargo test` stays green without node, and CI runs it with
 `--ignored` after building the bundle.

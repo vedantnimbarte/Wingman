@@ -69,7 +69,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       # The web panel is embedded into the binary by `crates/wingman-cli/
-      # build.rs`, which substitutes a placeholder page when `ui/dist` is
+      # build.rs`, which substitutes a placeholder page when `panel/dist` is
       # absent so a clone without node still compiles. That fallback is what
       # makes this step mandatory: without it every released binary would
       # silently serve "the web UI was not built" and nothing would fail.
@@ -79,7 +79,7 @@ jobs:
         with:
           node-version: "20"
       - name: Build the web panel
-        working-directory: ui
+        working-directory: panel
         run: npm ci && npm run build
       # taiki-e's action builds the binary natively for the runner's target,
       # archives it, generates a SHA256 checksum, and uploads everything to

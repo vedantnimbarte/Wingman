@@ -15,8 +15,9 @@ pub mod secrets;
 pub mod trust;
 
 pub use paths::{
-    ensure_global_dir, ensure_global_logs_dir, find_project_root, global_config_path,
-    global_credentials_path, global_dir, global_logs_dir, project_dir, ProjectPaths,
+    ensure_global_dir, ensure_global_logs_dir, find_owning_project_root, find_project_root,
+    global_config_path, global_credentials_path, global_dir, global_logs_dir, project_dir,
+    ProjectPaths,
 };
 
 use serde::{Deserialize, Serialize};
@@ -2895,7 +2896,7 @@ mod tests {
 
             // The trap this test exists for. schemars collapses variants that
             // carry no `///` into one combined branch, and `enumChoices()` in
-            // `ui/src/schema.ts` bails to `undefined` the moment any branch
+            // `panel/src/schema.ts` bails to `undefined` the moment any branch
             // holds more than one value — so a half-documented enum renders as
             // the free-text box this whole change was removing. Every variant
             // needs its own comment, and this is what says so.

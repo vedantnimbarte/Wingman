@@ -19,18 +19,18 @@ is a second renderer, not a replacement — see [BOARD.md](BOARD.md).
 
 ## How it reaches you
 
-The panel lives in `ui/` and is built by npm, not cargo. `crates/wingman-cli/
+The panel lives in `panel/` and is built by npm, not cargo. `crates/wingman-cli/
 build.rs` stages exactly three files — `index.html`, `app.js`, `app.css` — into
 `OUT_DIR`, and `serve::ui` embeds them with `include_bytes!`. There is no
 runtime file dependency: `wingman serve` remains a single static binary.
 
 Vite is configured to emit those three stable names rather than hashed ones
-(`ui/vite.config.ts`). Hashed filenames would force a dependency that can walk
+(`panel/vite.config.ts`). Hashed filenames would force a dependency that can walk
 an unknown tree, and cache-busting buys nothing here — the `ETag` is a hash of
 the bytes, so a rebuilt bundle invalidates the cache and an unchanged one gets
 a `304`.
 
-**A missing bundle does not break the build.** When `ui/dist` is absent —
+**A missing bundle does not break the build.** When `panel/dist` is absent —
 a fresh clone, a contributor without node, `cargo install wingman` — `build.rs`
 embeds a placeholder page saying the UI was not built, and everything else
 compiles and runs normally. The API is unaffected either way.
@@ -52,7 +52,7 @@ wingman serve: listening on 127.0.0.1:8787 — 1 project(s), ceiling auto-edit, 
 ```bash
 cd ui
 npm ci
-npm run build          # tsc --noEmit && vite build → ui/dist
+npm run build          # tsc --noEmit && vite build → panel/dist
 cd .. && cargo build --release
 ```
 
@@ -63,7 +63,7 @@ wingman serve          # in one terminal
 cd ui && npm run dev   # in another — HMR, proxies /v1 to 127.0.0.1:8787
 ```
 
-Change the proxy target in `ui/vite.config.ts` if your `[serve].addr` differs.
+Change the proxy target in `panel/vite.config.ts` if your `[serve].addr` differs.
 
 ## Authentication
 

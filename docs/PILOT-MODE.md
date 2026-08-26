@@ -124,6 +124,24 @@ End-to-end `copilot` runs have been validated on a live provider
 `autopilot`-only gaps: inbound Slack/email intake, the `vm` sandbox tier,
 and live-validated auto-dispatch.
 
+## Worker transcripts
+
+Each worker writes its own session log under
+`<project>/.wingman/sessions/<session-id>.jsonl` — the id the orchestrator
+minted and reports on the board, so a worker's turns can be inspected,
+forked, or resumed like any other session:
+
+```bash
+wingman session fork <session-id>
+```
+
+The log goes to the **owning project**, not the worker's worktree. Workers run
+in `<project>/.wingman/worktrees/<name>`, which git marks with a `.git` *file*
+— so ordinary project-root discovery stops there, and a transcript written
+under it would be force-removed with the worktree at cleanup. Worker
+transcripts are also queued for the recall index, so `recall_session` can find
+what a past worker did.
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

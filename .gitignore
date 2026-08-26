@@ -25,8 +25,8 @@ Thumbs.db
 editors/vscode/node_modules/
 editors/vscode/dist/
 
-# Web panel build artifacts. `crates/wingman-cli/build.rs` embeds ui/dist when
+# Web panel build artifacts. `crates/wingman-cli/build.rs` embeds panel/dist when
 # it exists and substitutes a placeholder when it does not, so a clone without
 # these still builds.
-ui/node_modules/
-ui/dist/
+panel/node_modules/
+panel/dist/

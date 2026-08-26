@@ -1,9 +1,9 @@
 //! Stage the web UI bundle into `OUT_DIR` so `serve::ui` can `include_bytes!`
 //! it by name.
 //!
-//! The panel lives in `ui/` and is built by npm, not cargo. Embedding it with
-//! a bare `include_bytes!("../../ui/dist/app.js")` would make every fresh
-//! clone, every contributor without node, and `cargo install wingman` fail to
+//! The panel lives in `panel/` and is built by npm, not cargo. Embedding it
+//! with a bare `include_bytes!("../../panel/dist/app.js")` would make every
+//! fresh clone, every contributor without node, and `cargo install wingman` fail to
 //! compile — so this copies the built bundle when it exists and substitutes a
 //! placeholder when it does not. `cargo build` never depends on npm.
 //!
@@ -17,7 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Files `serve::ui` embeds, with what to fall back to. Vite is configured to
-/// emit exactly these names (`ui/vite.config.ts`).
+/// emit exactly these names (`panel/vite.config.ts`).
 const FILES: [(&str, &str); 3] = [
     ("index.html", PLACEHOLDER_HTML),
     ("app.js", ""),
@@ -74,10 +74,10 @@ fn main() {
         .ancestors()
         .nth(2)
         .expect("crates/wingman-cli is two levels below the workspace root");
-    let dist = root.join("ui").join("dist");
-    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("ui");
+    let dist = root.join("panel").join("dist");
+    let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")).join("panel");
 
-    fs::create_dir_all(&out).expect("creating OUT_DIR/ui");
+    fs::create_dir_all(&out).expect("creating OUT_DIR/panel");
 
     // Watch the directory as well as the files: when `dist/` does not exist,
     // watching only the files inside it would leave nothing to notice its
@@ -98,7 +98,7 @@ fn main() {
                 fallback.as_bytes().to_vec()
             }
         };
-        fs::write(out.join(name), body).expect("staging ui asset");
+        fs::write(out.join(name), body).expect("staging panel asset");
     }
 
     // Readable by `serve::ui` so the daemon can say which it is, and by CI so

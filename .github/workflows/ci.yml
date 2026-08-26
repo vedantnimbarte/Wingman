@@ -175,7 +175,7 @@ jobs:
   # Build the web panel and prove it actually lands inside the binary.
   #
   # Unlike the vscode job above, this one is NOT informational. `build.rs`
-  # substitutes a placeholder page when `ui/dist` is missing so that a clone
+  # substitutes a placeholder page when `panel/dist` is missing so that a clone
   # without node still compiles — which means a broken UI build would
   # otherwise ship a binary that serves "the web UI was not built" and passes
   # every other check. `ui_bundle_is_embedded` is the assertion that catches
@@ -192,13 +192,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: Install deps
-        working-directory: ui
+        working-directory: panel
         run: npm ci
       - name: Unit tests
-        working-directory: ui
+        working-directory: panel
         run: npm test
       - name: Type-check and build
-        working-directory: ui
+        working-directory: panel
         run: npm run build
       - name: Assert the bundle is embedded
         run: cargo test -p wingman-cli --bins -- --ignored ui_bundle_is_embedded
