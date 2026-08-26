@@ -32,6 +32,13 @@ pub struct Cli {
     )]
     pub reasoning: Option<String>,
 
+    /// Restrict this session to a named tool preset: `review` | `minimal`, or
+    /// any name under `[tools.presets]`. Tools outside it are not registered,
+    /// so their schemas are not billed — check the saving with
+    /// `wingman --preset review context`.
+    #[arg(long, value_name = "NAME", global = true, env = "WINGMAN_PRESET")]
+    pub preset: Option<String>,
+
     /// Print a single response and exit (non-interactive).
     #[arg(long, value_name = "PROMPT")]
     pub print: Option<String>,
@@ -960,10 +967,18 @@ fn is_remote_flag(arg: &str) -> bool {
 /// same for the whole process anyway.
 static REASONING_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// `--preset` applied at config-load time, for the same reason as
+/// [`REASONING_OVERRIDE`]: one process-wide value, ~20 `load_config()` call
+/// sites.
+static PRESET_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 pub async fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
     if let Some(r) = cli.reasoning.clone() {
         let _ = REASONING_OVERRIDE.set(r);
+    }
+    if let Some(p) = cli.preset.clone() {
+        let _ = PRESET_OVERRIDE.set(p);
     }
     // Suppress INFO logs during TUI mode (no verbose flag) so stderr output
     // doesn't bleed into the alternate-screen buffer and corrupt the display.
@@ -1647,6 +1662,9 @@ fn load_config() -> Result<Config> {
     // restricted this to the four valid levels.
     if let Some(r) = REASONING_OVERRIDE.get() {
         cfg.reasoning = r.clone();
+    }
+    if let Some(p) = PRESET_OVERRIDE.get() {
+        cfg.tools.preset = p.clone();
     }
     Ok(cfg)
 }

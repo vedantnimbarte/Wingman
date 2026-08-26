@@ -41,6 +41,33 @@ show_token_usage = true
 allow_network = false
 redact_output_secrets = true   # redact secret tokens in tool output (default on)
 
+# Backstop deadline for one tool call. Without it a wedged language server or
+# an unresponsive MCP server hangs the turn with no upper bound. Tools that
+# bound themselves — run_shell, custom command tools, spawn_subagent — opt
+# out, so raising this does not extend them. 0 disables the backstop.
+tool_timeout_secs = 120
+
+# Loop hygiene. A run of calls to the same tool with identical arguments is
+# almost always a loop the model cannot see itself in; at each threshold the
+# tool result gains an advisory to re-read the last result and change
+# approach or conclude. Never blocks a call. [] disables the guard.
+repeat_thresholds = [3, 5, 8]
+# Tools transparent to the chain: an excluded call neither increments the
+# counter nor resets it, so bookkeeping interleaved into a loop cannot
+# launder it. Trailing `*` matches by prefix.
+repeat_exempt = ["update_tasks", "task_complete"]
+
+# Restrict the session to a named tool preset (or pass `--preset`). Every
+# tool's schema is billed on every request, so a session that only reads code
+# pays for write_file and run_shell on every turn. Built-ins: "review"
+# (read/search/navigate/recall, no writes) and "minimal" (find, change,
+# check). Empty = every registered tool. Compare with `wingman context`.
+preset = ""
+
+# Define or override a preset. A name here shadows the built-in.
+# [tools.presets]
+# docs = ["read_file", "write_file", "glob_tool", "grep_tool", "lsp_*"]
+
 # Verification gate (runs after edits): compile check + affected tests + LSP
 # diagnostics, and optional headless-browser visual check.
 [verify]

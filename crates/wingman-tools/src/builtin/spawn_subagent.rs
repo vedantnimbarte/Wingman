@@ -67,6 +67,14 @@ impl Tool for SpawnSubagent {
         Capability::NONE
     }
 
+    /// A subagent runs a whole inner agent loop — many model round trips and
+    /// many tool calls, each already bounded by the inner registry's own
+    /// deadline. Bounding the outer call would cap total delegated work at
+    /// one tool's budget, which is the wrong unit entirely.
+    fn owns_timeout(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "spawn_subagent".into(),

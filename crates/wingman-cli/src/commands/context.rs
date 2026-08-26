@@ -97,7 +97,8 @@ pub async fn run(cfg: Config, json: bool) -> Result<ExitCode> {
     }
 
     println!(
-        "\nTrim with [tools].disabled_tools, or `--json` for the full list.\n\
+        "\nTrim with `--preset review` (or [tools].preset / [tools].disabled_tools),\n\
+         or `--json` for the full list.\n\
          MCP servers add their tools to this total the moment they connect."
     );
     Ok(ExitCode::SUCCESS)

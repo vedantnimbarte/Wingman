@@ -19,6 +19,34 @@ pub struct ToolRegistry {
     /// Redact high-confidence secret tokens in tool output before it reaches
     /// the model (data-exfiltration guard). Default on.
     redact_output: bool,
+    /// Backstop deadline for one tool call. `None` disables it. Tools that
+    /// bound themselves opt out via [`Tool::owns_timeout`].
+    tool_timeout: Option<std::time::Duration>,
+    /// Repeat-guard policy: thresholds and the tools transparent to the chain.
+    repeat: RepeatPolicy,
+    /// The live repeat chain: the last tracked call and how many times in a
+    /// row it has been made.
+    ///
+    /// One chain per registry is one chain per agent — a subagent is given
+    /// its own `ToolRegistry`, so a child's repetition can never trip its
+    /// parent's counter and no per-agent keying is needed here.
+    chain: std::sync::Mutex<Option<RepeatChain>>,
+}
+
+/// Repeat-guard configuration. Empty `thresholds` disables the guard.
+#[derive(Debug, Clone, Default)]
+struct RepeatPolicy {
+    thresholds: Vec<u32>,
+    exempt: Vec<String>,
+}
+
+/// A run of identical consecutive tool calls.
+#[derive(Debug, Clone)]
+struct RepeatChain {
+    /// Tool name plus canonicalized arguments.
+    key: String,
+    /// How many times in a row, including the call just made.
+    count: u32,
 }
 
 impl ToolRegistry {
@@ -29,7 +57,32 @@ impl ToolRegistry {
             hooks: HooksConfig::default(),
             audit: None,
             redact_output: true,
+            tool_timeout: None,
+            repeat: RepeatPolicy::default(),
+            chain: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Arm the per-call backstop deadline. `0` disables it. Builder-style.
+    pub fn with_tool_timeout(mut self, secs: u64) -> Self {
+        self.tool_timeout = (secs > 0).then(|| std::time::Duration::from_secs(secs));
+        self
+    }
+
+    /// Configure the repeat guard. Empty `thresholds` disables it.
+    /// Builder-style.
+    pub fn with_repeat_guard(mut self, thresholds: Vec<u32>, exempt: Vec<String>) -> Self {
+        // Ascending, deduplicated, and never below 2 — a "threshold" of 1
+        // would fire on every first call, and an unsorted list would make
+        // the first (generic) reminder land at an arbitrary run length.
+        let mut thresholds: Vec<u32> = thresholds.into_iter().filter(|n| *n >= 2).collect();
+        thresholds.sort_unstable();
+        thresholds.dedup();
+        // `tool_matches` treats an empty pattern as "matches everything", so
+        // a stray "" in the exempt list would silently disable the guard.
+        let exempt = exempt.into_iter().filter(|p| !p.is_empty()).collect();
+        self.repeat = RepeatPolicy { thresholds, exempt };
+        self
     }
 
     /// Attach a hooks configuration. Returns `self` for builder-style chaining.
@@ -86,6 +139,67 @@ impl ToolRegistry {
         {
             let _ = writeln!(f, "{record}");
         }
+    }
+
+    /// Record one dispatched call against the repeat chain and return an
+    /// advisory when the run length has just reached a configured threshold.
+    ///
+    /// Advisory only: it never blocks a call and never rewrites one. The
+    /// decision — retry differently, gather more evidence, or conclude —
+    /// stays with the model, and a legitimately repeated call is delayed by
+    /// nothing.
+    fn note_call_and_advise(&self, name: &str, args: &Value) -> Option<String> {
+        if self.repeat.thresholds.is_empty() {
+            return None;
+        }
+        // An exempt tool is *transparent* to the chain: it neither increments
+        // the counter nor resets it. That is what makes exemption useful —
+        // bookkeeping interleaved into a loop must not launder it, so
+        // `grep X → update_tasks → grep X` still reads as two consecutive
+        // `grep X`.
+        if self
+            .repeat
+            .exempt
+            .iter()
+            .any(|pattern| tool_matches(name, pattern))
+        {
+            return None;
+        }
+
+        let key = format!("{name}\u{1}{}", canonical_args(args));
+        let count = {
+            let mut guard = self.chain.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.as_mut() {
+                Some(chain) if chain.key == key => {
+                    chain.count = chain.count.saturating_add(1);
+                    chain.count
+                }
+                _ => {
+                    *guard = Some(RepeatChain { key, count: 1 });
+                    1
+                }
+            }
+        };
+
+        // Fire only on the exact threshold, so one long run produces one
+        // reminder per threshold rather than one per call after the first.
+        if !self.repeat.thresholds.contains(&count) {
+            return None;
+        }
+        // The first threshold is a light nudge; later ones name the tool and
+        // the run length, because by then the model has ignored the nudge.
+        Some(if count == self.repeat.thresholds[0] {
+            "[wingman] That call repeated with identical arguments. Re-read the \
+             previous result before trying it again."
+                .to_string()
+        } else {
+            format!(
+                "[wingman] `{name}` has now been called {count} times in a row with \
+                 identical arguments, and the result will not change. Re-read the \
+                 last result, then either change approach or conclude with what \
+                 you already have."
+            )
+        })
     }
 
     pub fn hooks(&self) -> &HooksConfig {
@@ -328,7 +442,31 @@ impl ToolDispatcher for ToolRegistry {
             // each tool so that forgetting to check `ToolCtx` fails closed.
             Some(tool) => match capability_denial(name, tool.capabilities(), &self.ctx) {
                 Some(msg) => ToolOutcome::err(msg),
-                None => tool.run(args.clone(), &self.ctx).await,
+                None => {
+                    let run = tool.run(args.clone(), &self.ctx);
+                    // Backstop deadline. A tool that bounds itself runs
+                    // unwrapped, so its own (possibly longer) budget stands.
+                    match self.tool_timeout.filter(|_| !tool.owns_timeout()) {
+                        None => run.await,
+                        Some(limit) => match tokio::time::timeout(limit, run).await {
+                            Ok(outcome) => outcome,
+                            Err(_) => {
+                                tracing::warn!(
+                                    target: "wingman::tools",
+                                    tool = %name,
+                                    secs = limit.as_secs(),
+                                    "tool call exceeded the backstop deadline"
+                                );
+                                ToolOutcome::err(format!(
+                                    "`{name}` exceeded the {}s deadline and was abandoned. \
+                                     Raise [tools].tool_timeout_secs if this tool is \
+                                     legitimately slow, or try a narrower request.",
+                                    limit.as_secs()
+                                ))
+                            }
+                        },
+                    }
+                }
             },
             None => ToolOutcome::err(format!("unknown tool: {name}")),
         };
@@ -347,8 +485,20 @@ impl ToolDispatcher for ToolRegistry {
             wingman_core::checkpoint::commit(&self.ctx.project_root, pres);
         }
 
-        // Append to the compliance audit trail, if enabled.
+        // Append to the compliance audit trail, if enabled. Done before the
+        // repeat advisory is attached, so the trail records the tool's own
+        // verdict rather than Wingman's commentary on it.
         self.write_audit(name, &args, outcome.is_error);
+
+        // Loop hygiene. Counted here, after the capability gate, so a call
+        // the permission mode keeps refusing still counts — a model hammering
+        // a denied call is exactly the loop worth breaking.
+        if let Some(advisory) = self.note_call_and_advise(name, &args) {
+            if !outcome.content.is_empty() {
+                outcome.content.push_str("\n\n");
+            }
+            outcome.content.push_str(&advisory);
+        }
 
         // Post-tool-use hooks: fire-and-forget; failures only logged.
         for hook in &self.hooks.post_tool_use {
@@ -450,6 +600,51 @@ pub fn redact_output_secrets(text: &str) -> (String, usize) {
         }
     }
     (out, n)
+}
+
+/// Serialize `v` with object keys in sorted order, so two calls whose
+/// arguments differ only in property order produce the same chain key.
+///
+/// `serde_json`'s `Map` is a `BTreeMap` today and would sort anyway, but that
+/// is a default-feature accident: any crate in the dependency graph enabling
+/// `serde_json/preserve_order` flips it to insertion order for *everyone*,
+/// and the repeat guard would quietly stop matching. Sorting explicitly costs
+/// a few lines and does not depend on a transitive feature flag.
+///
+/// Array order is meaningful and is preserved.
+fn canonical_args(v: &Value) -> String {
+    fn write(v: &Value, out: &mut String) {
+        match v {
+            Value::Object(map) => {
+                let mut keys: Vec<&String> = map.keys().collect();
+                keys.sort_unstable();
+                out.push('{');
+                for (i, k) in keys.into_iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    out.push_str(&Value::String(k.clone()).to_string());
+                    out.push(':');
+                    write(&map[k], out);
+                }
+                out.push('}');
+            }
+            Value::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    write(item, out);
+                }
+                out.push(']');
+            }
+            scalar => out.push_str(&scalar.to_string()),
+        }
+    }
+    let mut out = String::new();
+    write(v, &mut out);
+    out
 }
 
 fn tool_matches(name: &str, pattern: &str) -> bool {
@@ -855,5 +1050,125 @@ mod tests {
         let _ = reg.dispatch("echo", serde_json::json!({})).await;
         assert!(!dir.join("audit.log").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A tool that sleeps longer than any deadline the tests arm.
+    struct SlowTool(bool);
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: "slow".into(),
+                description: "slow".into(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+        async fn run(&self, _args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            ToolOutcome::ok("finished after all")
+        }
+        fn owns_timeout(&self) -> bool {
+            self.0
+        }
+    }
+
+    fn guarded(thresholds: Vec<u32>, exempt: Vec<&str>) -> ToolRegistry {
+        let mut reg = ToolRegistry::new(ctx_in(PermissionMode::Yolo))
+            .with_repeat_guard(thresholds, exempt.iter().map(|s| s.to_string()).collect());
+        reg.register(EchoTool);
+        reg
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backstop_deadline_abandons_a_wedged_tool() {
+        let mut reg = ToolRegistry::new(ctx_in(PermissionMode::Yolo)).with_tool_timeout(5);
+        reg.register(SlowTool(false));
+        let out = reg.dispatch("slow", serde_json::json!({})).await;
+        assert!(out.is_error, "a tool past its deadline must fail the call");
+        assert!(out.content.contains("5s deadline"), "{}", out.content);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tool_that_owns_its_timeout_is_not_cut_short() {
+        let mut reg = ToolRegistry::new(ctx_in(PermissionMode::Yolo)).with_tool_timeout(5);
+        reg.register(SlowTool(true));
+        let out = reg.dispatch("slow", serde_json::json!({})).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content, "finished after all");
+    }
+
+    #[tokio::test]
+    async fn repeat_guard_nudges_only_on_each_threshold() {
+        let reg = guarded(vec![3, 5], vec![]);
+        let args = serde_json::json!({ "q": "x" });
+        let mut fired = Vec::new();
+        for call in 1..=6 {
+            // Sequential on purpose: the chain counts a *run*, so racing the
+            // calls would make which one crosses the threshold arbitrary.
+            if reg
+                .dispatch("echo", args.clone())
+                .await
+                .content
+                .contains("[wingman]")
+            {
+                fired.push(call);
+            }
+        }
+        // 3rd call: first threshold. 5th: second. Not the 4th or 6th — one
+        // reminder per threshold, not one per call once the run is long.
+        assert_eq!(fired, vec![3, 5]);
+    }
+
+    #[tokio::test]
+    async fn repeat_guard_resets_when_the_arguments_change() {
+        let reg = guarded(vec![2], vec![]);
+        for q in ["a", "b", "c"] {
+            let out = reg.dispatch("echo", serde_json::json!({ "q": q })).await;
+            assert!(!out.content.contains("[wingman]"), "reset failed at {q}");
+        }
+    }
+
+    #[tokio::test]
+    async fn argument_order_does_not_launder_a_repeat() {
+        let reg = guarded(vec![2], vec![]);
+        reg.dispatch("echo", serde_json::json!({ "a": 1, "b": 2 }))
+            .await;
+        // Same call, keys written the other way round.
+        let out = reg
+            .dispatch("echo", serde_json::json!({ "b": 2, "a": 1 }))
+            .await;
+        assert!(out.content.contains("[wingman]"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn an_exempt_tool_is_transparent_rather_than_resetting() {
+        let mut reg = guarded(vec![2], vec!["book*"]);
+        reg.register(CapTool("bookkeep", crate::Capability::NONE));
+        reg.dispatch("echo", serde_json::json!({ "q": "x" })).await;
+        // Interleaved bookkeeping must neither count nor clear the chain.
+        let noise = reg.dispatch("bookkeep", serde_json::json!({})).await;
+        assert!(!noise.content.contains("[wingman]"));
+        let out = reg.dispatch("echo", serde_json::json!({ "q": "x" })).await;
+        assert!(
+            out.content.contains("[wingman]"),
+            "bookkeeping laundered the loop: {}",
+            out.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_call_still_counts_toward_the_chain() {
+        let mut reg =
+            ToolRegistry::new(ctx_in(PermissionMode::ReadOnly)).with_repeat_guard(vec![2], vec![]);
+        reg.register(CapTool("writer", crate::Capability::WRITE));
+        let first = reg.dispatch("writer", serde_json::json!({})).await;
+        assert!(first.is_error, "read-only must refuse a write tool");
+        let second = reg.dispatch("writer", serde_json::json!({})).await;
+        assert!(
+            second.content.contains("[wingman]"),
+            "hammering a denied call is exactly the loop worth breaking: {}",
+            second.content
+        );
     }
 }

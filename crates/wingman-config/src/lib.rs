@@ -158,6 +158,130 @@ pub struct ToolsConfig {
     /// the result. Runs under the shell permission (auto-edit/yolo).
     #[serde(default)]
     pub custom: Vec<CustomToolConfig>,
+    /// Backstop deadline, in seconds, for a single tool call (default 120).
+    ///
+    /// Without it a wedged language server, a slow host, or an unresponsive
+    /// MCP server hangs the turn with no upper bound. Tools that bound
+    /// themselves — `run_shell`, custom command tools, `spawn_subagent` —
+    /// opt out via `Tool::owns_timeout`, so raising this does not extend
+    /// them and lowering it does not truncate them. `0` disables the
+    /// backstop entirely.
+    #[serde(default = "default_tool_timeout")]
+    pub tool_timeout_secs: u64,
+    /// Consecutive-repeat counts at which the agent is reminded that it is
+    /// repeating itself (default `[3, 5, 8]`; empty disables the guard).
+    ///
+    /// A run of calls to the same tool with identical arguments is almost
+    /// always a loop the model cannot see itself in. At each threshold the
+    /// tool result gains an advisory telling it to re-read the last result
+    /// and either change approach or conclude. It never blocks a call and
+    /// never rewrites one — a legitimately repeated call is delayed by
+    /// nothing.
+    #[serde(default = "default_repeat_thresholds")]
+    pub repeat_thresholds: Vec<u32>,
+    /// Tools that are transparent to the repeat guard's chain (default
+    /// `["update_tasks", "task_complete"]`).
+    ///
+    /// An excluded call neither increments the counter nor resets it, so
+    /// bookkeeping interleaved into a loop cannot launder it:
+    /// `grep X → update_tasks → grep X` still counts as two consecutive
+    /// `grep X`. Supports a trailing `*` wildcard.
+    #[serde(default = "default_repeat_exempt")]
+    pub repeat_exempt: Vec<String>,
+    /// Restrict the session to one named tool preset (`--preset`, or
+    /// `[tools].preset` in config). Empty = every registered tool.
+    ///
+    /// Every tool's schema is billed on every request, so a session that only
+    /// reads code pays for `write_file`, `apply_patch`, and `run_shell` on
+    /// every turn. A preset is a keep-list: tools outside it are unregistered
+    /// at startup, exactly as `disabled_tools` does, and `wingman context`
+    /// then reports the smaller number.
+    ///
+    /// Built-ins are `review` and `minimal`; `[tools.presets]` defines or
+    /// overrides any name.
+    #[serde(default)]
+    pub preset: String,
+    /// User-defined tool presets: name → the tools to keep. A trailing `*`
+    /// matches by prefix (`lsp_*`). A name defined here shadows a built-in.
+    #[serde(default)]
+    pub presets: std::collections::HashMap<String, Vec<String>>,
+}
+
+/// Tools kept by the built-in `review` preset: read, search, navigate, and
+/// recall — everything needed to understand code, nothing that changes it.
+const PRESET_REVIEW: &[&str] = &[
+    "read_file",
+    "glob_tool",
+    "grep_tool",
+    "list_dir",
+    "semantic_search",
+    "outline",
+    "find_symbol",
+    "who_calls",
+    "lsp_*",
+    "recall_memory",
+    "recall_session",
+    "read_session",
+    "ask_user",
+];
+
+/// Tools kept by the built-in `minimal` preset: the smallest set that can
+/// still find something, change it, and check the change.
+const PRESET_MINIMAL: &[&str] = &[
+    "read_file",
+    "write_file",
+    "edit_file",
+    "glob_tool",
+    "grep_tool",
+    "list_dir",
+    "run_shell",
+];
+
+impl ToolsConfig {
+    /// The keep-list for the active preset, or `None` when no preset is set.
+    ///
+    /// A user-defined entry shadows a built-in of the same name, so a project
+    /// can widen `review` without inventing a new word for it. An unknown
+    /// name returns `None` — the caller warns rather than silently starting a
+    /// session with no tools, which is what an empty keep-list would mean.
+    pub fn preset_keep_list(&self) -> Option<Vec<String>> {
+        if self.preset.is_empty() {
+            return None;
+        }
+        if let Some(custom) = self.presets.get(&self.preset) {
+            return Some(custom.clone());
+        }
+        let builtin = match self.preset.as_str() {
+            "review" => PRESET_REVIEW,
+            "minimal" => PRESET_MINIMAL,
+            _ => return None,
+        };
+        Some(builtin.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    /// Every preset name that resolves, for error messages and `--help`.
+    pub fn known_presets(&self) -> Vec<String> {
+        let mut names: Vec<String> = ["review", "minimal"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(self.presets.keys().cloned())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
+fn default_tool_timeout() -> u64 {
+    120
+}
+
+fn default_repeat_thresholds() -> Vec<u32> {
+    vec![3, 5, 8]
+}
+
+fn default_repeat_exempt() -> Vec<String> {
+    vec!["update_tasks".into(), "task_complete".into()]
 }
 
 /// A user-defined command tool (see [`ToolsConfig::custom`]).
@@ -211,6 +335,11 @@ impl Default for ToolsConfig {
             allow_network: false,
             redact_output_secrets: true,
             custom: Vec::new(),
+            tool_timeout_secs: default_tool_timeout(),
+            repeat_thresholds: default_repeat_thresholds(),
+            repeat_exempt: default_repeat_exempt(),
+            preset: String::new(),
+            presets: std::collections::HashMap::new(),
         }
     }
 }
@@ -2621,6 +2750,51 @@ pub fn json_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_preset_keeps_every_tool() {
+        assert!(ToolsConfig::default().preset_keep_list().is_none());
+    }
+
+    #[test]
+    fn an_unknown_preset_resolves_to_nothing_rather_than_an_empty_keep_list() {
+        // `None` means "keep everything and warn"; `Some(vec![])` would mean
+        // "unregister every tool", which is never what a typo intends.
+        let cfg = ToolsConfig {
+            preset: "reviewww".into(),
+            ..Default::default()
+        };
+        assert!(cfg.preset_keep_list().is_none());
+    }
+
+    #[test]
+    fn builtin_review_preset_reads_but_cannot_write() {
+        let cfg = ToolsConfig {
+            preset: "review".into(),
+            ..Default::default()
+        };
+        let keep = cfg.preset_keep_list().expect("review is a built-in");
+        assert!(keep.iter().any(|t| t == "read_file"));
+        assert!(keep.iter().any(|t| t == "lsp_*"));
+        for forbidden in ["write_file", "edit_file", "run_shell", "apply_patch"] {
+            assert!(
+                !keep.iter().any(|t| t == forbidden),
+                "`review` must not keep {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_defined_preset_shadows_the_builtin_of_the_same_name() {
+        let mut presets = std::collections::HashMap::new();
+        presets.insert("review".to_string(), vec!["read_file".to_string()]);
+        let cfg = ToolsConfig {
+            preset: "review".into(),
+            presets,
+            ..Default::default()
+        };
+        assert_eq!(cfg.preset_keep_list().unwrap(), vec!["read_file"]);
+    }
 
     /// Every field whose valid values live in the schema rather than in the
     /// type. Nothing in the compiler ties the two together, so this asserts the
