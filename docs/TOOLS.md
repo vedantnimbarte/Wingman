@@ -5,12 +5,20 @@ Wingman provides a comprehensive suite of built-in tools. This document describe
 ## Overview
 
 Tools are registered in `ToolRegistry` (`crates/wingman-tools/src/registry.rs`). When the agent calls a tool:
-1. Registry looks up the tool by name.
-2. Checks permission mode (read-only, plan, auto-edit, yolo).
-3. Runs pre-tool hooks (if configured).
-4. Executes the tool.
-5. Truncates output per `tool_output_max_lines`.
-6. Runs post-tool hooks.
+1. Runs pre-tool hooks (if configured); a blocking hook can refuse the call.
+2. Registry looks up the tool by name.
+3. Checks permission mode (read-only, plan, auto-edit, yolo).
+4. Executes the tool, under the `[tools].tool_timeout_secs` backstop deadline
+   unless the tool bounds itself (`Tool::owns_timeout`).
+5. Redacts high-confidence secrets from the output.
+6. Truncates output per `tool_output_max_lines`.
+7. Writes the audit record, then appends a repeat-guard advisory if this call
+   has just reached a `[tools].repeat_thresholds` run length.
+8. Runs post-tool hooks.
+
+Which tools are registered at all depends on `[tools].preset` (`--preset`)
+and `[tools].disabled_tools`. Run `wingman context` to see the active set and
+what its schemas cost per turn.
 
 Tools return `ToolOutcome`:
 ```rust
@@ -132,6 +140,16 @@ Agent edits with:
   old_string: "fn add(a: i32, b: i32) {\n    a + b\n}"
   new_string: "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}"
 ```
+
+### `edit_symbol`
+
+Replace the body of a named function or method using tree-sitter. Args:
+`path`, `name`, `new_body` (all required). Returns a unified diff.
+
+Safer than `edit_file` when the same text appears in several places, because
+it targets the symbol rather than a string. `new_body` excludes the outer
+braces for brace-delimited languages; for Python, supply the indented block.
+Supported languages: rust, python, javascript, typescript, tsx, go.
 
 ### `apply_patch`
 
@@ -428,7 +446,87 @@ crates/wingman-ts/src/parse.rs:370  [in fn outline]          let symbols = extra
   references, so it can over-report same-named symbols and miss dynamic calls.
 - Pair with `find_symbol` (definition) for the full picture of a symbol.
 
+### `outline`
+
+Signatures-only outline of a source file — one line per fn/struct/class — so
+you can see a file's shape without reading every body. Args: `path`
+(required). Supported languages: rust, python, javascript, typescript, tsx,
+go; falls back to a short message for anything else.
+
+Reach for this before `read_file` on an unfamiliar large file: it is the
+cheapest way to decide *which* part is worth reading.
+
+## LSP — Resolved Code Intelligence
+
+Backed by whatever language server is on `PATH` (rust-analyzer, pyright,
+typescript-language-server, gopls, and others — 11 languages). These resolve
+imports, types, and re-exports rather than matching names, which is the
+difference between a rename that is correct and a find-and-replace that
+catches a comment. With no server installed they degrade to the tree-sitter
+heuristics above rather than failing. See [LSP.md](LSP.md).
+
+### `lsp_definition`
+
+Resolve where a symbol is *defined*. Args: `path`, `line`, `character` or
+`symbol`.
+
+### `lsp_references`
+
+Every *resolved* reference to a symbol — true references, not name matches.
+Args: `path`, `line`, `character` or `symbol`.
+
+### `lsp_hover`
+
+The type, signature, and doc summary the language server shows on hover.
+Args: `path`, `line`, `character` or `symbol`.
+
+### `lsp_diagnostics`
+
+The language server's live diagnostics for a file. Args: `path` (required),
+`errors_only` (default false).
+
+Also consumed by the verification gate: `[verify].lsp_diagnostics` folds the
+diagnostics for *changed* files into the turn verdict.
+
+### `lsp_rename`
+
+Rename a symbol project-wide, updating every resolved reference. Args:
+`path`, `line`, `character` or `symbol`, `new_name`. Requires write
+permission.
+
+### `lsp_code_action`
+
+List or apply the language server's *own* code actions — add missing import,
+implement trait, fix lint. Args: `path` (required), `line`, `character`,
+`symbol`, `kind` (e.g. `"quickfix"`, `"source.organizeImports"`),
+`organize_imports`. Applying an action requires write permission.
+
 ## Planning & Structured Output
+
+### `update_tasks`
+
+Maintain the visible checklist for a multi-step task. Args: `tasks`
+(required) — the full list, in order, each `{ text, status }` with status one
+of `pending` | `in_progress` | `done`.
+
+Each call **replaces the whole list**. Use it for non-trivial work (roughly
+3+ steps) and skip it for one-shot requests; keep exactly one task
+`in_progress` at a time.
+
+Exempt from the repeat-tool guard by default (see
+[CONFIGURATION.md](CONFIGURATION.md)), since checklist bookkeeping
+legitimately recurs.
+
+### `ask_user`
+
+Ask the user a question at a genuine decision fork or before an irreversible
+action — which of two designs, an ambiguous requirement, deleting something
+important. Args: `question` (required), `options` (optional suggested
+answers).
+
+Not for routine choices the agent can make itself. When no interactive
+surface is available it returns a note saying so, and the agent is expected
+to proceed on its best judgment and state the assumption.
 
 ### `present_plan`
 
@@ -628,6 +726,33 @@ Fetch the full JSONL transcript of a session.
 - Used after `recall_session` returns relevant session ID.
 - Enables "pattern replay" from past work.
 
+## Pilot Mode
+
+### `task_complete`
+
+Terminal call for a pilot-mode worker: reports the final summary and the
+files changed, after which the worker ends its turn and the orchestrator
+takes over. Args: `summary` (required), `files_changed`, `outcome` (e.g.
+`approve` / `rework` for reviewer tasks), `acceptance_results` (required when
+the task carries acceptance checks).
+
+Only registered for pilot workers — it is not part of an ordinary session's
+tool set. See [PILOT-MODE.md](PILOT-MODE.md).
+
+## User-Defined Tools
+
+### `[[tools.custom]]`
+
+Not one tool but a family: each `[[tools.custom]]` entry in config becomes a
+tool the model can call, letting you extend the agent with a shell command
+without recompiling. The tool input JSON arrives on stdin and in
+`$WINGMAN_TOOL_INPUT`; stdout becomes the result.
+
+Runs under the shell permission (auto-edit / yolo) and carries its own
+`timeout_secs` (default 30), so it opts out of the registry's backstop
+deadline. See [CONFIGURATION.md](CONFIGURATION.md) and
+[EXTENDING.md](EXTENDING.md).
+
 ## Subagent Control
 
 ### `spawn_subagent`
@@ -682,7 +807,18 @@ faster model while the parent session keeps the strongest one. An explicit
 | `semantic_search`   | Y    | —     | —     | always     | RAG index search               |
 | `find_symbol`       | Y    | —     | —     | always     | Where a symbol is defined      |
 | `who_calls`         | Y    | —     | —     | always     | References + enclosing symbol  |
+| `outline`           | Y    | —     | —     | always     | Signatures-only file shape     |
+| `edit_symbol`       | —    | Y     | —     | mode/tree  | Replace a function body (AST)  |
+| `lsp_definition`    | Y    | —     | —     | always     | Resolved go-to-definition      |
+| `lsp_references`    | Y    | —     | —     | always     | Resolved references            |
+| `lsp_hover`         | Y    | —     | —     | always     | Type / signature / docs        |
+| `lsp_diagnostics`   | Y    | —     | —     | always     | Live errors + warnings         |
+| `lsp_rename`        | —    | Y     | —     | mode/tree  | Project-wide resolved rename   |
+| `lsp_code_action`   | Y    | Y     | —     | mode/tree  | Server's own fixes; write to apply |
 | `present_plan`      | —    | —     | —     | always     | Structured plan (gates in plan mode) |
+| `update_tasks`      | —    | —     | —     | always     | Visible checklist; replaces whole list |
+| `ask_user`          | —    | —     | —     | always     | Pause and ask at a real fork   |
+| `task_complete`     | —    | —     | —     | always     | Pilot workers only; ends the task |
 | `save_memory`       | —    | Y     | —     | always     | Persist across sessions        |
 | `recall_memory`     | Y    | —     | —     | always     | Fetch memory body              |
 | `forget_memory`     | —    | Y     | —     | always     | Delete memory                  |

@@ -112,4 +112,16 @@ pub trait Tool: Send + Sync {
     fn capabilities(&self) -> Capability {
         Capability::NONE
     }
+
+    /// Whether this tool enforces its own deadline.
+    ///
+    /// The registry arms a per-call deadline (`[tools].tool_timeout_secs`) so
+    /// that a wedged language server, a slow host, or an unresponsive MCP
+    /// server cannot hang a turn forever. A tool that already bounds itself —
+    /// and whose bound is legitimately longer than the registry default —
+    /// returns `true` to opt out, rather than being killed mid-run by a
+    /// backstop that knows less about the work than it does.
+    fn owns_timeout(&self) -> bool {
+        false
+    }
 }

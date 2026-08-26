@@ -39,6 +39,12 @@ impl Tool for CommandTool {
         Capability::SHELL
     }
 
+    /// Each custom tool carries its own `timeout_secs` (default 30), so the
+    /// user's configured bound wins over the registry backstop.
+    fn owns_timeout(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name.clone(),

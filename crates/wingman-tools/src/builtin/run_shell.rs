@@ -55,6 +55,14 @@ impl Tool for RunShell {
         Capability::SHELL
     }
 
+    /// `run_shell` bounds itself — `timeout_secs` (default 60, max 600), and
+    /// on timeout it kills the whole process tree rather than orphaning it.
+    /// The registry backstop is shorter than that ceiling, so letting it
+    /// apply would cap a legitimate long build at the default.
+    fn owns_timeout(&self) -> bool {
+        true
+    }
+
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "run_shell".into(),

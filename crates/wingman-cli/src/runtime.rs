@@ -608,6 +608,11 @@ fn base_registry(
         .with_hooks(cfg.hooks.clone())
         .with_audit(audit_path)
         .with_output_redaction(cfg.tools.redact_output_secrets)
+        .with_tool_timeout(cfg.tools.tool_timeout_secs)
+        .with_repeat_guard(
+            cfg.tools.repeat_thresholds.clone(),
+            cfg.tools.repeat_exempt.clone(),
+        )
         .with_custom_tools(&cfg.tools.custom);
 
     // Air-gapped guard: hard-remove the network tools so no code leaves the
@@ -620,13 +625,55 @@ fn base_registry(
     reg
 }
 
-/// Honor `[tools].disabled_tools`. Applied after registration so it also
-/// removes builtins.
+/// Honor `[tools].preset` and `[tools].disabled_tools`. Applied after
+/// registration so both also remove builtins.
+///
+/// Preset first, then the denylist: a preset says what this session is *for*,
+/// and `disabled_tools` is the project's standing "not this one, ever". A
+/// denylist entry that survived a keep-list would be the wrong way round.
 fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
+    if let Some(keep) = cfg.tools.preset_keep_list() {
+        let dropped: Vec<String> = reg
+            .tool_names()
+            .into_iter()
+            .filter(|name| !keep.iter().any(|pattern| preset_matches(name, pattern)))
+            .collect();
+        for name in &dropped {
+            reg.unregister(name);
+        }
+        tracing::info!(
+            target: "wingman::tools",
+            preset = %cfg.tools.preset,
+            kept = reg.tool_names().len(),
+            dropped = dropped.len(),
+            "tool preset applied"
+        );
+    } else if !cfg.tools.preset.is_empty() {
+        // Unknown name. Warn and keep every tool rather than starting a
+        // session with an empty toolset, which is what a silently-empty
+        // keep-list would produce.
+        tracing::warn!(
+            target: "wingman::tools",
+            preset = %cfg.tools.preset,
+            "unknown tool preset — ignoring it and keeping every tool. Known: {}",
+            cfg.tools.known_presets().join(", ")
+        );
+    }
+
     for name in &cfg.tools.disabled_tools {
         if reg.unregister(name).is_some() {
             tracing::info!(target: "wingman::tools", tool = %name, "disabled via config");
         }
+    }
+}
+
+/// Match a tool name against a preset keep-list entry. A trailing `*` matches
+/// by prefix, so `lsp_*` keeps the whole language-server family without the
+/// list going stale each time one is added.
+fn preset_matches(name: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
     }
 }
 

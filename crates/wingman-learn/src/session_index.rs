@@ -207,8 +207,13 @@ pub async fn search_sessions(
         .into_iter()
         .next()
         .ok_or_else(|| crate::LearnError::Other("embedder returned no vector".into()))?;
+    // Hybrid, not vector-only. What you search past sessions *for* is
+    // usually an exact string — an error message, a commit SHA, a filename,
+    // an identifier — and that is precisely what an embedder blurs and BM25
+    // nails. The code index already fuses both; sessions were the one
+    // retrieval path still running dense-only.
     let raw = store
-        .search(&q, limit)
+        .search_hybrid(query, &q, limit)
         .map_err(|e| crate::LearnError::Other(format!("search: {e}")))?;
     Ok(raw.into_iter().map(SessionHit::from).collect())
 }
@@ -673,6 +678,67 @@ mod tests {
             .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].session_id.contains("20260101"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reason session search is hybrid rather than dense-only: what you
+    /// go looking for in an old session is usually a literal string you
+    /// remember seeing, and an embedder blurs exactly those.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_exact_error_string_finds_the_session_that_contains_it() {
+        let dir = std::env::temp_dir().join(format!(
+            "wingman-learn-si3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A decoy session on a nearby topic, and the one actually holding the
+        // error text.
+        let decoy = dir.join("20260101T010101000Z.jsonl");
+        write_session(&decoy);
+        let wanted = dir.join("20260202T020202000Z.jsonl");
+        {
+            let mut f = std::fs::File::create(&wanted).unwrap();
+            writeln!(
+                f,
+                r#"{{"kind":"session_start","ts":"now","model":"m","provider":"p","system_hash":null}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"kind":"user","ts":"now","text":"build fails with E0599 no method named start_paused"}}"#
+            )
+            .unwrap();
+            writeln!(
+                f,
+                r#"{{"kind":"assistant","ts":"now","blocks":[{{"type":"text","text":"Enable the tokio test-util feature."}}]}}"#
+            )
+            .unwrap();
+        }
+
+        let embedder = HashEmbedder::default();
+        let store =
+            IndexStore::open(&dir.join("sessions.db"), embedder.id(), embedder.dim()).unwrap();
+        index_session_into(&store, &embedder, &decoy).await.unwrap();
+        index_session_into(&store, &embedder, &wanted)
+            .await
+            .unwrap();
+
+        let hits = search_sessions(&store, &embedder, "E0599 start_paused", 5)
+            .await
+            .unwrap();
+        assert!(!hits.is_empty(), "exact-token query returned nothing");
+        assert!(
+            hits[0].session_id.contains("20260202"),
+            "BM25 half of the fusion should rank the session holding the \
+             literal tokens first, got {:?}",
+            hits.iter().map(|h| &h.session_id).collect::<Vec<_>>()
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
