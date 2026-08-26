@@ -205,6 +205,28 @@ pub struct ToolsConfig {
     /// matches by prefix (`lsp_*`). A name defined here shadows a built-in.
     #[serde(default)]
     pub presets: std::collections::HashMap<String, Vec<String>>,
+    /// Keep the full text of a truncated tool result on disk, under
+    /// `<project>/.wingman/spill/<session>/`, and tell the model where it is
+    /// (default true).
+    ///
+    /// `tool_output_max_lines` caps what a result costs the model by keeping
+    /// the head and tail. Without spilling, the elided middle is simply gone.
+    /// With it, the model gets a path it can re-read with `read_file`'s
+    /// `offset`/`limit` — the same context cost, minus the one-way door.
+    #[serde(default = "default_true")]
+    pub spill_tool_output: bool,
+    /// Prune a tool result larger than this many characters when the session
+    /// is over the compaction threshold (default 8192; `0` disables pruning).
+    ///
+    /// Compaction folds whole turns into a recap, discarding the assistant's
+    /// reasoning along with the bulk. Pruning takes the bulk only, which
+    /// usually postpones compaction entirely.
+    #[serde(default = "default_prune_threshold")]
+    pub prune_threshold_chars: usize,
+}
+
+fn default_prune_threshold() -> usize {
+    8192
 }
 
 /// Tools kept by the built-in `review` preset: read, search, navigate, and
@@ -340,6 +362,8 @@ impl Default for ToolsConfig {
             repeat_exempt: default_repeat_exempt(),
             preset: String::new(),
             presets: std::collections::HashMap::new(),
+            spill_tool_output: true,
+            prune_threshold_chars: default_prune_threshold(),
         }
     }
 }
@@ -3465,5 +3489,41 @@ max_retries_per_task = 1
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.verify.turn_gate, "off");
         assert_eq!(cfg.verify.max_retries, 1);
+    }
+}
+
+#[cfg(test)]
+mod documented_config_tests {
+    use super::*;
+
+    /// The `[tools]` block in docs/CONFIGURATION.md must parse.
+    ///
+    /// `ToolsConfig` is `deny_unknown_fields`, so a key documented under a
+    /// name the struct does not have is not a cosmetic docs bug: a user who
+    /// copies the block gets their whole config rejected.
+    #[test]
+    fn the_documented_tools_block_parses() {
+        let doc = include_str!("../../../docs/CONFIGURATION.md");
+        let start = doc.find("[tools]").expect("docs must document [tools]");
+        let end = doc[start..]
+            .find("\n[verify]")
+            .map(|i| start + i)
+            .expect("the [tools] block should be followed by [verify]");
+        // Uncomment the presets example so it is exercised too. Line endings
+        // are normalized first: this file is checked out CRLF on Windows, and
+        // the trailing newline matters because the slice ends on a comment
+        // line, which the parser rejects without a terminator.
+        let block = doc[start..end].replace("\r\n", "\n") + "\n";
+        let block = block.replace("# [tools.presets]\n# docs =", "[tools.presets]\ndocs =");
+
+        let parsed: Config = toml::from_str(&block)
+            .unwrap_or_else(|e| panic!("documented [tools] block does not parse: {e}\n\n{block}"));
+        // Spot-check that the values actually landed, not just that the
+        // parse succeeded on an empty table.
+        assert_eq!(parsed.tools.tool_timeout_secs, 120);
+        assert_eq!(parsed.tools.repeat_thresholds, vec![3, 5, 8]);
+        assert!(parsed.tools.spill_tool_output);
+        assert_eq!(parsed.tools.prune_threshold_chars, 8192);
+        assert!(parsed.tools.presets.contains_key("docs"));
     }
 }

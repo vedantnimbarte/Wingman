@@ -677,6 +677,30 @@ fn preset_matches(name: &str, pattern: &str) -> bool {
     }
 }
 
+/// The spill store for this session, if spilling is on.
+///
+/// Session-scoped so one run's oversized output cannot be confused with
+/// another's, and so the whole directory can be dropped when the session is
+/// no longer interesting. `[privacy].local_only` does not affect this — the
+/// bytes never leave the machine either way; they are already on it.
+fn build_spill(
+    cfg: &Config,
+    paths: &ProjectPaths,
+    session_id: &str,
+) -> Option<Arc<wingman_core::SpillStore>> {
+    if !cfg.tools.spill_tool_output {
+        return None;
+    }
+    let root = paths.dir.join("spill");
+    // Housekeeping on the way in: a spill is only useful to the session that
+    // produced it, so without this every truncated result would live in the
+    // user's repo forever.
+    wingman_core::spill::sweep_expired(&root);
+    Some(Arc::new(wingman_core::SpillStore::new(
+        root.join(session_id),
+    )))
+}
+
 /// The audit-log path implied by config, if auditing is on.
 fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathBuf> {
     if !cfg.audit.enabled {
@@ -1588,6 +1612,7 @@ pub async fn build_agent_registry_learn(
     // Build the learn hook first so we can hand its memory/stats handles to
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
+    let spill = build_spill(cfg, &paths, &session_id);
     let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
     // Give the learn hook the project index so it can inject relevant code
     // locations per turn (search escalation). Cheap: opens the store, no reindex.
@@ -1712,6 +1737,11 @@ pub async fn build_agent_registry_learn(
         model: selection.model.clone(),
         system: Some(system),
         tool_output_budget: ToolOutputBudget::new(cfg.effective_tool_output_max_lines()),
+        spill,
+        pruner: wingman_core::ToolResultPruner {
+            threshold_chars: cfg.tools.prune_threshold_chars,
+            ..Default::default()
+        },
         compactor: Compactor {
             trigger_tokens: cfg.tokens.compact_at_tokens,
             ..Default::default()

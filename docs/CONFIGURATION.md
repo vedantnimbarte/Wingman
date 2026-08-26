@@ -64,7 +64,24 @@ repeat_exempt = ["update_tasks", "task_complete"]
 # check). Empty = every registered tool. Compare with `wingman context`.
 preset = ""
 
-# Define or override a preset. A name here shadows the built-in.
+
+# `tool_output_max_lines` caps what a tool result costs by keeping the head
+# and tail. Without spilling, the elided middle is gone for good. With it, the
+# full text is written to .wingman/spill/<session>/ and the model is handed
+# the path, so it can re-read any span with read_file's offset/limit — same
+# context cost, minus the one-way door. Swept after 7 days.
+spill_tool_output = true
+
+# Prune a tool result larger than this many characters once the session is
+# over [tokens].compact_at_tokens. Compaction folds whole turns into a recap,
+# discarding the assistant's reasoning along with the bulk; pruning takes the
+# bulk only, and usually postpones compaction entirely. The most recent turns
+# are never pruned — the model is still working from them. 0 disables.
+prune_threshold_chars = 8192
+
+# Define or override a preset. A name here shadows the built-in. Keep this
+# subtable LAST in [tools]: every scalar key after it would be read as part
+# of it, not as a [tools] key.
 # [tools.presets]
 # docs = ["read_file", "write_file", "glob_tool", "grep_tool", "lsp_*"]
 

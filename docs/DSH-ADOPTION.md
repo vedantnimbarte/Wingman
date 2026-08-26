@@ -34,10 +34,10 @@ Effort estimates are rough and use this scale:
 | A1 | Event-sourced session log | **L** | Do it, but let P1/P4 force the timing. Diagnostic gap, not corruption. |
 | A2 | Widen existing traits into named seams | **M**, incremental | Do it opportunistically. |
 | A3 | Full plugin runtime (Cordis-equivalent) | **XL** | **Don't.** Reasoning in §A3. |
-| P1 | Tool-output spill | S–M | Do it. Best value in the list. |
+| P1 | Tool-output spill | S–M | **Done** — `[tools].spill_tool_output`. |
 | P2 | Repeat-tool-call guard | S | **Done** — `[tools].repeat_thresholds`. |
 | P3 | Background jobs | M | Do it. |
-| P4 | Tool-result pruning before compaction | S–M | Do it. |
+| P4 | Tool-result pruning before compaction | S–M | **Done** — `[tools].prune_threshold_chars`. |
 | P5 | Per-call tool deadlines | S | **Done** — `[tools].tool_timeout_secs`. |
 | P6 | Named tool presets | S | **Done** — `--preset review`, 24 tools → 13. |
 | P7 | `@file` references in the composer | — | **Already existed.** See note below. |
@@ -607,16 +607,18 @@ P6 (presets), P8 (session search) and the seven missing `TOOLS.md` entries
 landed together; P7 turned out to already exist. E1 (decision records) is
 still open.
 
-**Second — the context work.** P1 (spill) then P4 (pruning). P1 is the
-headline; P4 compounds with it because pruning a spilled result is cheap and
-lossless once the full text lives on disk.
+**Second — the context work. Done.** P1 (spill) and P4 (pruning) landed
+together. They compose as expected: pruning a *spilled* result is lossless,
+because the locator line sits in the head that pruning always keeps, so the
+full text stays one `read_file` away no matter how far the result is later
+shrunk.
 
-**Third — the architecture, when the features force it.** A1 (event-sourced
-log) with E3 (invariants). P1 and P4 both add model-visible state that wants
-a log variant, so they are the natural forcing function: do A1 when the
-second of them lands, not on a schedule of its own. Doing it earlier is
-correct but hard to justify against features; doing it later means migrating
-more. A2 falls out incrementally.
+**Third — the architecture. Now due.** A1 (event-sourced log) with E3
+(invariants). P1 and P4 were named as the forcing function and both have now
+landed, each adding model-visible state the log does not record: the spill
+locator line and the pruned tool result. The session log is now behind the
+model's context in three ways rather than one (recap, injected system text,
+and these). A2 falls out incrementally.
 
 **Fourth — capability gaps.** P3 (jobs), then P11 (PTY) on the plumbing P3
 establishes. Trigger for P3 is someone actually hitting the 600s ceiling, not

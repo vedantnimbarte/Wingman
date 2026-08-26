@@ -27,17 +27,25 @@ impl ToolOutputBudget {
         Self { max_lines }
     }
 
+    /// Whether [`trim`](Self::trim) would drop anything from `body`.
+    ///
+    /// The caller cannot infer this by comparing lengths: eliding a handful of
+    /// very short lines can make the trimmed form *longer* than the original
+    /// once the marker is added, so a length comparison would report "nothing
+    /// was lost" on a result that did lose a line. Spilling keys off this, and
+    /// it has to agree with `trim` exactly — hence one predicate, used by both.
+    pub fn would_trim(&self, body: &str) -> bool {
+        self.max_lines != 0 && body.lines().count() > self.max_lines as usize
+    }
+
     /// Returns the trimmed body. If the input fits, returns it unchanged.
     pub fn trim(&self, body: &str) -> String {
-        if self.max_lines == 0 {
+        if !self.would_trim(body) {
             return body.to_string();
         }
         let lines: Vec<&str> = body.lines().collect();
         let total = lines.len();
         let budget = self.max_lines as usize;
-        if total <= budget {
-            return body.to_string();
-        }
         let head = budget / 2;
         let tail = budget - head;
         let elided = total - head - tail;
@@ -46,9 +54,12 @@ impl ToolOutputBudget {
             out.push_str(line);
             out.push('\n');
         }
-        out.push_str(&format!(
-            "… {elided} lines elided (full output in session log) …\n"
-        ));
+        // No claim about where the rest went: when spilling is on, the
+        // locator line at the head of the result says so precisely, and when
+        // it is off the model has no way to reach the full text anyway.
+        // Pointing it at the session log was an instruction it could not act
+        // on.
+        out.push_str(&format!("… {elided} lines elided …\n"));
         for line in &lines[total - tail..] {
             out.push_str(line);
             out.push('\n');
@@ -103,6 +114,111 @@ pub fn estimate_history_tokens(history: &[Message], system: Option<&str>) -> u32
         }
     }
     total
+}
+
+/// Shrink oversized tool results in place, before compaction folds whole
+/// turns away.
+///
+/// Compaction is the blunt instrument: it replaces a span of history with a
+/// recap, which discards the assistant's reasoning along with the bulk. But
+/// the bulk and the reasoning are not the same thing — in a long session the
+/// tokens are overwhelmingly in tool *results*, while the value is in what
+/// the assistant concluded from them. Pruning takes the first without
+/// touching the second, which buys many more turns before anything has to be
+/// folded at all.
+///
+/// Model-free on purpose: this runs on every over-budget turn, and paying for
+/// a summarization call each time would defeat the point.
+#[derive(Debug, Clone, Copy)]
+pub struct ToolResultPruner {
+    /// Prune a tool result whose content exceeds this many characters.
+    pub threshold_chars: usize,
+    /// Leading characters kept.
+    pub head_chars: usize,
+    /// Trailing characters kept.
+    pub tail_chars: usize,
+    /// Never prune within the last N messages. The results the model is
+    /// actively working from must survive intact; pruning what it just asked
+    /// for would make it ask again, which costs more than it saves.
+    pub keep_recent: usize,
+}
+
+impl Default for ToolResultPruner {
+    fn default() -> Self {
+        Self {
+            threshold_chars: 8192,
+            head_chars: 4096,
+            tail_chars: 1024,
+            keep_recent: 6,
+        }
+    }
+}
+
+/// Marker left in place of the characters a prune removed.
+const PRUNE_MARKER: &str =
+    "\n… [wingman] middle of this earlier tool result pruned to save context …\n";
+
+impl ToolResultPruner {
+    /// Rewrite every over-budget tool result outside the recent window.
+    /// Returns how many were rewritten.
+    ///
+    /// Idempotent: the configuration is validated so that
+    /// `head + marker + tail` is smaller than `threshold_chars`, meaning a
+    /// pruned result is strictly under the threshold and a second pass finds
+    /// nothing to do. Without that property this would rewrite the same
+    /// results on every turn, churning the history and the cache prefix.
+    pub fn prune(&self, history: &mut [Message]) -> usize {
+        if !self.is_effective() {
+            return 0;
+        }
+        let cutoff = history.len().saturating_sub(self.keep_recent);
+        let mut pruned = 0;
+        for message in &mut history[..cutoff] {
+            for block in &mut message.content {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    if let Some(shorter) = self.shrink(content) {
+                        *content = shorter;
+                        pruned += 1;
+                    }
+                }
+            }
+        }
+        pruned
+    }
+
+    /// Whether this configuration can prune without growing or oscillating.
+    ///
+    /// A head and tail that do not leave room for the marker under the
+    /// threshold would produce output at or above the threshold, so the next
+    /// pass would prune it again forever. Rather than silently correcting the
+    /// numbers, such a configuration simply does nothing.
+    fn is_effective(&self) -> bool {
+        self.threshold_chars > 0
+            && self
+                .head_chars
+                .saturating_add(self.tail_chars)
+                .saturating_add(PRUNE_MARKER.chars().count())
+                < self.threshold_chars
+    }
+
+    /// The pruned form of `body`, or `None` if it is already small enough.
+    fn shrink(&self, body: &str) -> Option<String> {
+        let total = body.chars().count();
+        if total <= self.threshold_chars {
+            return None;
+        }
+        // Count in `char`s, never bytes: slicing a UTF-8 string at an
+        // arbitrary byte offset panics, and tool output is full of non-ASCII
+        // (tree-drawing characters, the elision ellipsis, source in any
+        // language). This can still split a multi-char grapheme cluster —
+        // acceptable for a display-only truncation.
+        let head: String = body.chars().take(self.head_chars).collect();
+        let tail: String = body
+            .chars()
+            .skip(total.saturating_sub(self.tail_chars))
+            .collect();
+        Some(format!("{head}{PRUNE_MARKER}{tail}"))
+    }
 }
 
 /// Compaction policy. When estimated context > `trigger_tokens`, the
@@ -385,5 +501,143 @@ mod tests {
         }]);
         let n = estimate_history_tokens(&[m], None);
         assert!(n > 10);
+    }
+
+    #[test]
+    fn would_trim_agrees_with_trim_even_when_eliding_makes_it_longer() {
+        let b = ToolOutputBudget::new(4);
+        // Five one-character lines: the marker is longer than the line it
+        // replaces, so the trimmed form is *bigger* than the input. A caller
+        // comparing lengths would conclude nothing was dropped — and skip
+        // spilling a result that really did lose a line.
+        let body = "a\nb\nc\nd\ne";
+        let out = b.trim(body);
+        assert!(b.would_trim(body));
+        assert!(out.len() > body.len(), "precondition for the trap");
+        assert!(!out.contains('c'), "the middle line really was dropped");
+
+        let fits = "a\nb\nc";
+        assert!(!b.would_trim(fits));
+        assert_eq!(b.trim(fits), fits);
+    }
+
+    fn tool_result(body: &str) -> Message {
+        Message {
+            role: Role::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call-1".into(),
+                content: body.into(),
+                is_error: false,
+            }],
+        }
+    }
+
+    fn result_body(m: &Message) -> String {
+        match &m.content[0] {
+            ContentBlock::ToolResult { content, .. } => content.clone(),
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    /// `keep_recent: 0` so the fixtures don't all have to be padded past the
+    /// recent window; the window itself is covered separately below.
+    fn pruner() -> ToolResultPruner {
+        ToolResultPruner {
+            threshold_chars: 200,
+            head_chars: 50,
+            tail_chars: 20,
+            keep_recent: 0,
+        }
+    }
+
+    #[test]
+    fn prunes_an_oversized_result_to_head_marker_and_tail() {
+        let body = "x".repeat(5000);
+        let mut history = vec![tool_result(&body)];
+        assert_eq!(pruner().prune(&mut history), 1);
+        let out = result_body(&history[0]);
+        assert!(out.starts_with(&"x".repeat(50)));
+        assert!(out.ends_with(&"x".repeat(20)));
+        assert!(out.contains("pruned"));
+        assert!(out.chars().count() < 200, "must land under the threshold");
+    }
+
+    #[test]
+    fn a_result_under_the_threshold_is_left_alone() {
+        let mut history = vec![tool_result("short output")];
+        assert_eq!(pruner().prune(&mut history), 0);
+        assert_eq!(result_body(&history[0]), "short output");
+    }
+
+    #[test]
+    fn pruning_is_idempotent() {
+        let mut history = vec![tool_result(&"y".repeat(5000))];
+        let p = pruner();
+        assert_eq!(p.prune(&mut history), 1);
+        let once = result_body(&history[0]);
+        // A second pass must find nothing: head + marker + tail is under the
+        // threshold by construction. Otherwise every turn would rewrite the
+        // same results and invalidate the cached prefix each time.
+        assert_eq!(p.prune(&mut history), 0);
+        assert_eq!(result_body(&history[0]), once);
+    }
+
+    #[test]
+    fn recent_results_survive_because_the_model_is_still_using_them() {
+        let big = "z".repeat(5000);
+        let mut history = vec![tool_result(&big), tool_result(&big), tool_result(&big)];
+        let p = ToolResultPruner {
+            keep_recent: 2,
+            ..pruner()
+        };
+        assert_eq!(p.prune(&mut history), 1, "only the oldest is prunable");
+        assert_eq!(result_body(&history[1]), big);
+        assert_eq!(result_body(&history[2]), big);
+    }
+
+    #[test]
+    fn pruning_a_multibyte_body_does_not_panic_or_corrupt() {
+        // Byte-slicing this at char 50 would panic; tool output is full of
+        // box-drawing characters and non-Latin source.
+        let body = "★日本語テキスト".repeat(500);
+        let mut history = vec![tool_result(&body)];
+        assert_eq!(pruner().prune(&mut history), 1);
+        let out = result_body(&history[0]);
+        assert!(out.starts_with('★'));
+        assert!(out.chars().count() < 200);
+    }
+
+    #[test]
+    fn a_configuration_that_cannot_shrink_does_nothing() {
+        // head + tail exceeds the threshold, so "pruning" would grow the
+        // result and re-trigger forever. Refuse rather than oscillate.
+        let p = ToolResultPruner {
+            threshold_chars: 100,
+            head_chars: 90,
+            tail_chars: 90,
+            keep_recent: 0,
+        };
+        let body = "q".repeat(5000);
+        let mut history = vec![tool_result(&body)];
+        assert_eq!(p.prune(&mut history), 0);
+        assert_eq!(result_body(&history[0]), body);
+    }
+
+    #[test]
+    fn pruning_reclaims_enough_to_matter() {
+        // A long session, where the protected recent window is a small
+        // fraction of history — the case pruning exists for. With only a
+        // handful of messages the default `keep_recent: 6` correctly protects
+        // most of them and there is little to reclaim.
+        let big = "w".repeat(40_000);
+        let mut history: Vec<Message> = (0..30).map(|_| tool_result(&big)).collect();
+        let before = estimate_history_tokens(&history, None);
+        let pruned = ToolResultPruner::default().prune(&mut history);
+        let after = estimate_history_tokens(&history, None);
+        assert_eq!(pruned, 24, "all but the recent window should prune");
+        assert!(
+            after < before / 2,
+            "expected a large reduction, {before} -> {after}"
+        );
     }
 }
