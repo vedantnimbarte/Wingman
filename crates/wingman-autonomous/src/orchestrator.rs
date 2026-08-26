@@ -1839,6 +1839,34 @@ async fn handle_abort(
     active: &Arc<Mutex<HashMap<String, tokio::task::JoinHandle<()>>>>,
     task_id: &str,
 ) -> Result<(), OrchestratorError> {
+    // Aborting a task that already finished throws its work away, and there is
+    // no worker left to stop — the point of an abort. A Review task has run,
+    // passed its acceptance gate and is waiting to be finalized; marking it
+    // Blocked discards it exactly as the reassign path used to, and for the
+    // same reason: neither asked what state the task was in.
+    //
+    // Observed doing precisely that: a manager called abort_task on tasks whose
+    // agents had already emitted `task_complete`, and three of them went
+    // review -> blocked, deadlocking the run on work that was done.
+    {
+        let store_g = store.lock().await;
+        if let Some(t) = store_g.state().task(task_id) {
+            if matches!(t.status, TaskStatus::Review | TaskStatus::Done) {
+                tracing::warn!(
+                    target: "pilot::orchestrator",
+                    task = %task_id,
+                    status = ?t.status,
+                    "refusing to abort a task that already completed"
+                );
+                return Err(OrchestratorError::BadTransition(
+                    task_id.to_string(),
+                    t.status,
+                    "abort (task already complete)",
+                ));
+            }
+        }
+    }
+
     let agent_id = {
         let store_g = store.lock().await;
         store_g
@@ -2430,6 +2458,62 @@ mod tests {
         assert!(
             handle.reassign("t1").await.is_err(),
             "a Done task must not be reassignable either"
+        );
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// Companion to `reassigning_a_completed_task_is_refused`, for the sibling
+    /// path that had the same hole.
+    ///
+    /// From a live run (#34): the manager called abort_task on tasks whose
+    /// agents had already emitted `task_complete`. `handle_abort` never looked
+    /// at the status, marked them Blocked, and the run deadlocked on three
+    /// tasks whose work was finished and thrown away.
+    ///
+    /// Abort exists to stop a worker. A Review task has no worker left to
+    /// stop — only work to lose.
+    #[tokio::test]
+    async fn aborting_a_completed_task_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        let _agent = handle.assign_task("t1").await.unwrap();
+        wait_for_review(&handle, "t1").await;
+
+        assert!(
+            handle.abort_task("t1").await.is_err(),
+            "a Review task must not be abortable"
+        );
+        let state = handle.snapshot().await.unwrap();
+        assert_eq!(
+            state.task("t1").unwrap().status,
+            TaskStatus::Review,
+            "abort must not have moved the task"
+        );
+
+        // Still finalizable afterwards — the work survived.
+        handle
+            .finalize_task("t1", Some("sha-1".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Done
+        );
+        assert!(
+            handle.abort_task("t1").await.is_err(),
+            "a Done task must not be abortable either"
         );
 
         handle.shutdown().await;

@@ -2207,6 +2207,20 @@ pub struct PilotConfig {
     pub default_model: Option<String>,
     /// Cheaper model used for worker subprocesses.
     pub worker_model: Option<String>,
+    /// How far the E5 retry ladder may climb for one task.
+    ///
+    /// The rungs are: 1 retry on the same model, 2 retry on an escalated
+    /// model, 3 decompose via the splitter, and above that the task is
+    /// Blocked. So this is also a choice of *which rungs exist* — at 1 a task
+    /// gets one same-model retry and is then blocked, and the escalation and
+    /// splitter rungs are unreachable no matter what the planner does.
+    ///
+    /// 3 makes the whole documented ladder available, and matches
+    /// `OrchestratorConfig::default()`. The pilot CLI used to hardcode 1,
+    /// which is why runs blocked tasks at `attempts=1` and reported the
+    /// ladder as exhausted when it had barely started.
+    #[serde(default = "default_max_retries_per_task")]
+    pub max_retries_per_task: u32,
     /// Model for the per-task reviewer / critic. Defaults to `default_model`
     /// when unset — point it at a stronger model for tougher review.
     #[serde(default)]
@@ -2265,6 +2279,7 @@ impl Default for PilotConfig {
             tier: PilotTier::default(),
             default_model: None,
             worker_model: None,
+            max_retries_per_task: default_max_retries_per_task(),
             reviewer_model: None,
             max_concurrent_agents: 4,
             max_usd: 10.0,
@@ -2450,6 +2465,10 @@ pub struct PilotDaemonConfig {
 
 fn default_intake_dir() -> String {
     ".wingman/intake".into()
+}
+
+fn default_max_retries_per_task() -> u32 {
+    3
 }
 
 fn default_max_auto_dispatch_per_cycle() -> usize {
@@ -2722,6 +2741,31 @@ mod tests {
         // And a config that says nothing about it still gets the cap.
         let bare: PilotDaemonConfig = toml::from_str("").expect("parses");
         assert_eq!(bare.max_auto_dispatch_per_cycle, 1);
+    }
+
+    /// The E5 ladder's rungs are 1 retry, 2 escalate model, 3 split. A cap of
+    /// 1 makes rungs 2 and 3 unreachable — the ladder is configured out of
+    /// existence while still being described in the code as three rungs. The
+    /// pilot CLI hardcoded exactly that, so runs blocked tasks at `attempts=1`
+    /// and reported the ladder exhausted when it had used one rung.
+    #[test]
+    fn the_retry_ladder_default_reaches_every_rung() {
+        let cfg = Config::default();
+        assert!(
+            cfg.pilot.max_retries_per_task >= 3,
+            "default {} cannot reach the splitter rung",
+            cfg.pilot.max_retries_per_task
+        );
+
+        // And it is settable, which it was not before — the CLI ignored config
+        // and passed a literal.
+        let parsed: Config = toml::from_str(
+            "[pilot]
+max_retries_per_task = 1
+",
+        )
+        .unwrap();
+        assert_eq!(parsed.pilot.max_retries_per_task, 1);
     }
 
     /// The schema advertises the canonical spellings, but the field is a
