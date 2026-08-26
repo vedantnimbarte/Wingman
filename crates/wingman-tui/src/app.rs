@@ -142,17 +142,26 @@ pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
     // failure to open the log must not stop the TUI. Written to the same dir
     // the /resume picker reads (`<project>/.wingman/sessions`).
     let sessions_dir = ctx.project_root.join(".wingman").join("sessions");
-    let mut session = wingman_session::SessionLog::create(&sessions_dir)
+    // The agent loop records what the model saw; the TUI only opens the file.
+    // It used to write the log itself, from the prompt text and the streamed
+    // assistant text — which meant a TUI session's log contained no tool calls
+    // and no tool results, and `/resume` rebuilt a conversation in which the
+    // agent had never used a tool.
+    let session = wingman_session::SessionLog::create(&sessions_dir)
         .await
-        .ok();
+        .ok()
+        .map(|log| std::sync::Arc::new(wingman_session::SessionLogSink::new(log)));
+    if let (Some(sink), Some(a)) = (&session, agent.as_mut()) {
+        a.set_context_sink(sink.clone());
+    }
     // Clone the shutdown indexer out before `ctx` moves into the loop.
     let session_indexer = ctx.session_indexer.clone();
-    let res = run_inner(&mut terminal, &mut agent, ctx, session.as_mut()).await;
+    let res = run_inner(&mut terminal, &mut agent, ctx).await;
     restore_terminal(&mut terminal)?;
     // Index this session now so it's recallable next time without waiting for a
     // startup backfill. Best-effort; only runs if the session index is live.
-    if let (Some(index), Some(log)) = (session_indexer, session.as_ref()) {
-        index(log.path().to_path_buf()).await;
+    if let (Some(index), Some(sink)) = (session_indexer, session.as_ref()) {
+        index(sink.path().to_path_buf()).await;
     }
     res
 }
@@ -441,7 +450,6 @@ async fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: &mut Option<AgentLoop>,
     ctx: AppCtx,
-    mut session: Option<&mut wingman_session::SessionLog>,
 ) -> Result<()> {
     let mut ui = UiState {
         transcript: Transcript::default(),
@@ -530,15 +538,7 @@ async fn run_inner(
                         };
                         ui.composer.busy = true;
                         draw(terminal, &ui)?;
-                        run_turn(
-                            terminal,
-                            a,
-                            &mut events,
-                            &mut ui,
-                            final_prompt,
-                            session.as_deref_mut(),
-                        )
-                        .await?;
+                        run_turn(terminal, a, &mut events, &mut ui, final_prompt).await?;
                         // Persist after every turn: an LLM round-trip already
                         // took seconds, so one small atomic write is noise, and
                         // it means an external kill/SIGHUP between turns can't
@@ -1456,13 +1456,9 @@ async fn run_turn(
     events: &mut EventStream,
     ui: &mut UiState,
     prompt: String,
-    session: Option<&mut wingman_session::SessionLog>,
 ) -> Result<()> {
-    // Accumulate the assistant's text so we can persist the turn to the
-    // session log. We record the conversation turn-locally (user prompt +
-    // assistant reply) rather than snapshotting agent.history(), because
-    // compaction rewrites history mid-conversation and would invalidate any
-    // index into it.
+    // Persistence is the agent loop's job now — it is the only place that
+    // knows what actually went into a request. This function only renders.
     let mut assistant_text = String::new();
     let mut stream = agent.run(prompt.clone());
     loop {
@@ -1510,18 +1506,6 @@ async fn run_turn(
         }
     }
     drop(stream);
-    if let Some(s) = session {
-        let _ = s
-            .record_message(&wingman_core::Message::user_text(prompt))
-            .await;
-        if !assistant_text.trim().is_empty() {
-            let _ = s
-                .record_message(&wingman_core::Message::assistant(vec![
-                    wingman_core::ContentBlock::text(assistant_text),
-                ]))
-                .await;
-        }
-    }
     Ok(())
 }
 

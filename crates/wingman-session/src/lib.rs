@@ -14,7 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
-use wingman_core::{AgentEvent, ContentBlock, Message, Role, Usage};
+use wingman_core::{AgentEvent, ContentBlock, ContextFact, Message, Role, Usage};
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -68,8 +68,38 @@ pub enum SessionRecord {
     ToolResult {
         ts: String,
         id: String,
+        /// What the tool produced, in full — the audit trail, and what the
+        /// user was shown.
         output: String,
+        /// The bounded form actually sent to the model, when it differed
+        /// (truncated, and carrying a spill locator). Absent means the model
+        /// saw `output` verbatim.
+        ///
+        /// Recorded separately so the log can answer both "what did the tool
+        /// say" and "what did the model receive" — logging only `output` made
+        /// a resumed session richer than the one it replaced.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_output: Option<String>,
         is_error: bool,
+    },
+    /// Compaction folded the oldest `replaced` messages into `text`.
+    Recap {
+        ts: String,
+        replaced: usize,
+        text: String,
+    },
+    /// An earlier tool result was shrunk in place to reclaim context.
+    ToolResultPruned {
+        ts: String,
+        id: String,
+        content: String,
+    },
+    /// Text spliced onto the system prompt for one turn. Not part of message
+    /// history, so it does not replay — but it changed the request, and a
+    /// reader asking why the agent did something needs to see it.
+    InjectedContext {
+        ts: String,
+        text: String,
     },
     UsageDelta {
         ts: String,
@@ -197,6 +227,7 @@ impl SessionLog {
                                 ts: ts.clone(),
                                 id: tool_use_id.clone(),
                                 output: content.clone(),
+                                model_output: None,
                                 is_error: *is_error,
                             })
                             .await?;
@@ -224,6 +255,80 @@ impl SessionLog {
             }
         }
         Ok(())
+    }
+
+    /// Write one [`ContextFact`] — the loop's record of what the model saw.
+    ///
+    /// This is the single writer the session log is supposed to have. It
+    /// replaced per-surface hand-rolled logging, which is why the TUI's logs
+    /// used to contain no tool calls at all.
+    pub async fn record_fact(&mut self, fact: &ContextFact) -> Result<(), SessionError> {
+        let ts = now();
+        match fact {
+            ContextFact::UserMessage { text } => {
+                self.write(SessionRecord::User {
+                    ts,
+                    text: text.clone(),
+                })
+                .await
+            }
+            ContextFact::AssistantMessage { blocks } => {
+                self.write(SessionRecord::Assistant {
+                    ts,
+                    blocks: blocks.clone(),
+                })
+                .await
+            }
+            ContextFact::ToolResult {
+                id,
+                full,
+                model_view,
+                is_error,
+            } => {
+                self.write(SessionRecord::ToolResult {
+                    ts,
+                    id: id.clone(),
+                    output: full.clone(),
+                    model_output: model_view.clone(),
+                    is_error: *is_error,
+                })
+                .await
+            }
+            ContextFact::Compacted { replaced, recap } => {
+                self.write(SessionRecord::Recap {
+                    ts,
+                    replaced: *replaced,
+                    text: recap.clone(),
+                })
+                .await
+            }
+            ContextFact::ToolResultPruned { id, content } => {
+                self.write(SessionRecord::ToolResultPruned {
+                    ts,
+                    id: id.clone(),
+                    content: content.clone(),
+                })
+                .await
+            }
+            ContextFact::SystemInjected { text } => {
+                self.write(SessionRecord::InjectedContext {
+                    ts,
+                    text: text.clone(),
+                })
+                .await
+            }
+            ContextFact::Usage { usage } => {
+                self.write(SessionRecord::UsageDelta { ts, usage: *usage })
+                    .await
+            }
+            ContextFact::Stop { reason } => {
+                self.write(SessionRecord::Stop {
+                    ts,
+                    reason: reason.clone(),
+                })
+                .await
+            }
+        }
     }
 
     pub async fn record_agent_event(&mut self, event: &AgentEvent) -> Result<(), SessionError> {
@@ -314,12 +419,16 @@ pub fn records_to_messages(records: &[SessionRecord]) -> Vec<Message> {
             SessionRecord::ToolResult {
                 id,
                 output,
+                model_output,
                 is_error,
                 ..
             } => {
                 pending_tool_results.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
-                    content: output.clone(),
+                    // The bounded form when there was one: reconstructing the
+                    // conversation means reconstructing what the model saw,
+                    // not the richer thing the tool said.
+                    content: model_output.clone().unwrap_or_else(|| output.clone()),
                     is_error: *is_error,
                 });
             }
@@ -334,8 +443,48 @@ pub fn records_to_messages(records: &[SessionRecord]) -> Vec<Message> {
                     content: blocks.clone(),
                 });
             }
+            SessionRecord::Recap { replaced, text, .. } => {
+                // Compaction replaced the oldest `replaced` messages with a
+                // recap. Replay it the same way, or the reconstruction is a
+                // conversation the model never had — a longer one.
+                flush_tool_results(&mut pending_tool_results, &mut messages);
+                let drop_to = (*replaced).min(messages.len());
+                messages.drain(0..drop_to);
+                messages.insert(0, Message::user_text(text.clone()));
+            }
+            SessionRecord::ToolResultPruned { id, content, .. } => {
+                // Applied in place, wherever that result ended up.
+                for message in messages.iter_mut() {
+                    for block in message.content.iter_mut() {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content: existing,
+                            ..
+                        } = block
+                        {
+                            if tool_use_id == id {
+                                *existing = content.clone();
+                            }
+                        }
+                    }
+                }
+                for block in pending_tool_results.iter_mut() {
+                    if let ContentBlock::ToolResult {
+                        tool_use_id,
+                        content: existing,
+                        ..
+                    } = block
+                    {
+                        if tool_use_id == id {
+                            *existing = content.clone();
+                        }
+                    }
+                }
+            }
             _ => {
-                // SessionStart, UsageDelta, Stop — ignored for history reconstruction.
+                // SessionStart, UsageDelta, Stop, InjectedContext — none of
+                // these are message history. InjectedContext rode the system
+                // prompt, which is rebuilt per turn rather than replayed.
             }
         }
     }
@@ -420,12 +569,14 @@ mod tests {
                 ts: "t".into(),
                 id: "a".into(),
                 output: "ra".into(),
+                model_output: None,
                 is_error: false,
             },
             SessionRecord::ToolResult {
                 ts: "t".into(),
                 id: "b".into(),
                 output: "rb".into(),
+                model_output: None,
                 is_error: true,
             },
             SessionRecord::User {
@@ -450,6 +601,7 @@ mod tests {
             ts: "t".into(),
             id: "x".into(),
             output: "out".into(),
+            model_output: None,
             is_error: false,
         }];
         assert_eq!(records_to_messages(&records).len(), 1);
@@ -480,5 +632,198 @@ mod tests {
         std::fs::write(&src, "l1\nl2\nl3\n").unwrap();
         let forked = fork_session(&src, dir.path(), Some(2)).await.unwrap();
         assert_eq!(std::fs::read_to_string(&forked).unwrap(), "l1\nl2\n");
+    }
+}
+
+/// A [`ContextSink`] backed by a [`SessionLog`].
+///
+/// The loop records from inside an async generator while the surfaces still
+/// own the file, so the handle is shared behind a mutex. Writes are
+/// serialized, which is what the log wants anyway: it is an ordered record,
+/// and interleaving two turns' facts would make it unreadable.
+pub struct SessionLogSink {
+    log: tokio::sync::Mutex<SessionLog>,
+    /// Cached so callers can name the file without taking the write lock.
+    path: PathBuf,
+}
+
+impl SessionLogSink {
+    pub fn new(log: SessionLog) -> Self {
+        Self {
+            path: log.path().to_path_buf(),
+            log: tokio::sync::Mutex::new(log),
+        }
+    }
+
+    /// The file being written. Callers index or list it after the session.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+#[async_trait::async_trait]
+impl wingman_core::ContextSink for SessionLogSink {
+    async fn record(&self, fact: ContextFact) {
+        // Best-effort: a session that cannot write its log must still answer
+        // the user. The failure is worth knowing about, so it is logged once
+        // per occurrence rather than silently dropped.
+        if let Err(e) = self.log.lock().await.record_fact(&fact).await {
+            tracing::warn!(target: "wingman::session", "could not record session fact: {e}");
+        }
+    }
+}
+
+/// Stable short hash of a system prompt, for `SessionStart.system_hash`.
+///
+/// Identity, not content: two sessions with the same hash ran under the same
+/// base prompt, and a changed hash explains why an otherwise identical replay
+/// behaves differently. The prompt itself can be long and holds the user's
+/// memories, so the log records a fingerprint rather than a copy.
+pub fn system_hash(prompt: &str) -> String {
+    // FNV-1a: no dependency, and this is an identity check, not a security
+    // boundary.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in prompt.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn tool_result(id: &str, output: &str, model_output: Option<&str>) -> SessionRecord {
+        SessionRecord::ToolResult {
+            ts: "t".into(),
+            id: id.into(),
+            output: output.into(),
+            model_output: model_output.map(str::to_string),
+            is_error: false,
+        }
+    }
+
+    fn contents(messages: &[Message]) -> Vec<String> {
+        messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .map(|b| match b {
+                ContentBlock::Text { text } => text.clone(),
+                ContentBlock::ToolResult { content, .. } => content.clone(),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// The whole point: a resumed conversation must be the one the model had,
+    /// not the richer one the tool produced.
+    #[test]
+    fn a_truncated_result_replays_as_the_model_saw_it() {
+        let records = vec![
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "go".into(),
+            },
+            tool_result("c1", "FULL 4000 LINES", Some("head … elided … tail")),
+        ];
+        let msgs = records_to_messages(&records);
+        let seen = contents(&msgs);
+        assert!(seen.iter().any(|c| c == "head … elided … tail"));
+        assert!(
+            !seen.iter().any(|c| c.contains("FULL 4000 LINES")),
+            "replay handed the model more than it originally had"
+        );
+    }
+
+    #[test]
+    fn a_result_the_model_saw_whole_replays_whole() {
+        let records = vec![tool_result("c1", "short", None)];
+        assert_eq!(contents(&records_to_messages(&records)), vec!["short"]);
+    }
+
+    #[test]
+    fn compaction_replays_as_a_recap_not_the_folded_messages() {
+        let records = vec![
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "first".into(),
+            },
+            SessionRecord::Assistant {
+                ts: "t".into(),
+                blocks: vec![ContentBlock::text("answer one")],
+            },
+            SessionRecord::Recap {
+                ts: "t".into(),
+                replaced: 2,
+                text: "[recap] we discussed one thing".into(),
+            },
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "second".into(),
+            },
+        ];
+        let seen = contents(&records_to_messages(&records));
+        assert_eq!(
+            seen,
+            vec!["[recap] we discussed one thing", "second"],
+            "the folded messages must not come back — the model no longer had them"
+        );
+    }
+
+    #[test]
+    fn a_pruned_result_replays_pruned() {
+        let records = vec![
+            tool_result("c1", "the whole thing", Some("the whole thing")),
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "next".into(),
+            },
+            SessionRecord::ToolResultPruned {
+                ts: "t".into(),
+                id: "c1".into(),
+                content: "head … pruned … tail".into(),
+            },
+        ];
+        let seen = contents(&records_to_messages(&records));
+        assert!(seen.iter().any(|c| c == "head … pruned … tail"));
+        assert!(!seen.iter().any(|c| c == "the whole thing"));
+    }
+
+    #[test]
+    fn injected_context_is_recorded_but_is_not_message_history() {
+        // It rode the system prompt, which is rebuilt per turn rather than
+        // replayed — but a reader asking "why did it do that" can still see it.
+        let records = vec![
+            SessionRecord::InjectedContext {
+                ts: "t".into(),
+                text: "remembered: the build is slow".into(),
+            },
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "go".into(),
+            },
+        ];
+        assert_eq!(contents(&records_to_messages(&records)), vec!["go"]);
+    }
+
+    /// Old logs predate every field and variant added here.
+    #[test]
+    fn a_log_written_before_this_change_still_loads() {
+        let line = r#"{"kind":"tool_result","ts":"t","id":"c1","output":"hi","is_error":false}"#;
+        let rec: SessionRecord = serde_json::from_str(line).expect("old records must still parse");
+        match rec {
+            SessionRecord::ToolResult { model_output, .. } => assert!(model_output.is_none()),
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_system_hash_is_stable_and_distinguishes_prompts() {
+        assert_eq!(
+            system_hash("you are wingman"),
+            system_hash("you are wingman")
+        );
+        assert_ne!(system_hash("you are wingman"), system_hash("you are other"));
     }
 }
