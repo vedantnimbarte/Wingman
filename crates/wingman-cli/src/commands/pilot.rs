@@ -1707,7 +1707,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
             }
             seen.insert(key);
             if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
-                eprintln!("[pilot] daemon: failed to queue candidate: {e}");
+                eprintln!("[pilot] daemon: failed to queue candidate: {e:#}");
             }
             // J2 — auto-dispatch a trusted AutoRun candidate into a real
             // nested pilot run, if the operator opted in. Propose stays
@@ -1753,7 +1753,14 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
                     Ok(code) => {
                         eprintln!("[pilot] daemon: dispatched run exited {code:?}")
                     }
-                    Err(e) => eprintln!("[pilot] daemon: dispatched run failed: {e}"),
+                    // `{e:#}`, not `{e}`. These are anyhow errors carrying a
+                    // context chain, and the bare form prints only the outermost
+                    // link — so a real failure surfaced as
+                    // "dispatched run failed: pipeline run_to_completion",
+                    // which names the step that failed and nothing about why.
+                    // The daemon runs unattended; its log is the only account
+                    // anyone gets.
+                    Err(e) => eprintln!("[pilot] daemon: dispatched run failed: {e:#}"),
                 }
             }
         }
