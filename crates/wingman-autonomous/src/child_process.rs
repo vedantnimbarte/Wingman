@@ -281,6 +281,30 @@ mod unix_impl {
             Ok(()) => Ok(()),
             // ESRCH = no such process group; treat as "already gone".
             Err(Errno::ESRCH) => Ok(()),
+            // EPERM = the group is there but the kernel will not let us
+            // signal it. In practice that means the group is being torn down
+            // underneath us: its leader has died and what remains is a zombie
+            // or a pgid mid-reuse, which macOS reports as EPERM where Linux
+            // usually reports ESRCH.
+            //
+            // Two things can tear a group down concurrently with a
+            // `terminate()`. `kill_all_live_groups` SIGKILLs every registered
+            // group process-wide — that is the Ctrl+C path, and it does not
+            // coordinate with a worker shutting itself down. And the child can
+            // simply exit on its own between the decision to signal and the
+            // signal landing.
+            //
+            // Both mean the same thing to the caller: the process is going
+            // away, which is what was asked for. Signalling the child directly
+            // confirms it rather than failing the terminate. Observed on macOS
+            // CI as `terminate: Platform("EPERM: Operation not permitted")`.
+            Err(Errno::EPERM) => match kill(Pid::from_raw(pid as i32), sig) {
+                Ok(()) => Ok(()),
+                Err(Errno::ESRCH) => Ok(()),
+                Err(e) => Err(SupervisorError::Platform(format!(
+                    "group signal denied (EPERM) and direct signal failed: {e}"
+                ))),
+            },
             Err(e) => Err(SupervisorError::Platform(e.to_string())),
         }
     }
@@ -405,6 +429,17 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+
+    /// `LIVE_GROUPS` is process-wide and `kill_all_live_groups` SIGKILLs every
+    /// group in it. `cargo test` runs these in parallel threads of one
+    /// process, so a test that calls it reaps the *other* test's child, and
+    /// that test's own `terminate()` then finds a group being torn down —
+    /// EPERM on macOS, which is how this suite went flaky.
+    ///
+    /// The registry being global is correct: it is what lets Ctrl+C reap every
+    /// worker. It is the tests that must not overlap.
+    static SPAWN_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     use super::*;
     use std::time::Duration;
 
@@ -412,6 +447,7 @@ mod tests {
     /// `cmd /c ping` on Windows (always present) and `sleep` on Unix.
     #[tokio::test]
     async fn spawn_and_terminate_long_running_command() {
+        let _serial = SPAWN_SERIAL.lock().await;
         #[cfg(windows)]
         let mut sup = {
             let mut sc = SupervisedCommand::new("cmd");
@@ -442,6 +478,7 @@ mod tests {
     /// the CLI's Ctrl+C handler relies on to avoid orphaning workers.
     #[tokio::test]
     async fn registry_tracks_and_kill_all_reaps() {
+        let _serial = SPAWN_SERIAL.lock().await;
         #[cfg(unix)]
         let mut sup = {
             let mut sc = SupervisedCommand::new("sleep");
