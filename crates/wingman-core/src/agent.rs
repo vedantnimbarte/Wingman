@@ -9,7 +9,7 @@
 //! JSON logger) consume the same stream.
 
 use crate::{
-    tokens::{CompactPlan, Compactor, ToolOutputBudget},
+    tokens::{CompactPlan, Compactor, ToolOutputBudget, ToolResultPruner},
     CacheBreakpoint, CompletionRequest, ContentBlock, Message, Provider, ReasoningEffort, Role,
     StopReason, StreamEvent, ToolSpec, Usage,
 };
@@ -162,6 +162,13 @@ pub struct AgentConfig {
     pub cache_conversation: bool,
     /// Truncate large tool outputs before feeding them back to the model.
     pub tool_output_budget: ToolOutputBudget,
+    /// Where to keep the full text of a truncated tool result, so the model
+    /// can read the elided middle instead of losing it. `None` disables
+    /// spilling and truncation stays one-way.
+    pub spill: Option<Arc<crate::spill::SpillStore>>,
+    /// Shrink oversized tool results in older turns before compaction folds
+    /// whole turns away. Runs only under token pressure.
+    pub pruner: ToolResultPruner,
     /// Compaction policy. Compaction runs **before** each request if the
     /// estimated context size crosses `compactor.trigger_tokens`.
     pub compactor: Compactor,
@@ -223,6 +230,8 @@ impl Default for AgentConfig {
             cache_breakpoints: vec![CacheBreakpoint::AfterSystem, CacheBreakpoint::AfterTools],
             cache_conversation: true,
             tool_output_budget: ToolOutputBudget::default(),
+            spill: None,
+            pruner: ToolResultPruner::default(),
             compactor: Compactor::default(),
             learning: None,
             gate: None,
@@ -412,8 +421,26 @@ impl AgentLoop {
             let mut mutated = false;
             let mut gate_attempts: usize = 0;
             for turn in 0..config.max_turns {
+                // Under token pressure, shrink oversized tool results in older
+                // turns *before* considering compaction. The tokens are mostly
+                // in tool output while the value is mostly in what the
+                // assistant concluded from it, so this often gets back under
+                // budget without folding away any reasoning at all.
+                if crate::tokens::estimate_history_tokens(history, config.system.as_deref())
+                    >= config.compactor.trigger_tokens
+                {
+                    let pruned = config.pruner.prune(history);
+                    if pruned > 0 {
+                        tracing::debug!(
+                            target: "wingman::tokens",
+                            pruned,
+                            "pruned oversized tool results before compaction"
+                        );
+                    }
+                }
+
                 // Compaction pass — fold the oldest non-recap span into a single
-                // recap message when we cross the trigger budget.
+                // recap message when we are still over the trigger budget.
                 if let Some(CompactPlan { recap, replaced }) =
                     config.compactor.plan(history, config.system.as_deref())
                 {
@@ -648,7 +675,24 @@ impl AgentLoop {
                     if !outcome.is_error && config.mutating_tools.iter().any(|t| t == &name) {
                         mutated = true;
                     }
-                    let truncated = config.tool_output_budget.trim(&outcome.content);
+                    let mut truncated = config.tool_output_budget.trim(&outcome.content);
+                    // Truncation happened: the middle is now unreachable to the
+                    // model. Write the full text somewhere it can read, and say
+                    // where, so the cap stays a budget rather than a loss.
+                    // Best-effort — a failed spill just leaves plain truncation.
+                    if config.tool_output_budget.would_trim(&outcome.content) {
+                        if let Some(path) = config
+                            .spill
+                            .as_ref()
+                            .and_then(|s| s.save(&name, &outcome.content))
+                        {
+                            let lines = outcome.content.lines().count();
+                            truncated = format!(
+                                "{}\n{truncated}",
+                                crate::spill::locator_line(&path, lines)
+                            );
+                        }
+                    }
                     // UIs see the *full* output so the user can scroll/copy;
                     // the *model* only sees the truncated version below.
                     yield AgentEvent::ToolResult {
@@ -1437,5 +1481,173 @@ mod reasoning_tests {
             crate::tokens::estimate_history_tokens(&with, None)
                 > crate::tokens::estimate_history_tokens(&without, None)
         );
+    }
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::*;
+    use crate::spill::SpillStore;
+    use crate::{ProviderCapabilities, ProviderEventStream};
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct Replay(Mutex<VecDeque<Vec<StreamEvent>>>);
+
+    #[async_trait]
+    impl Provider for Replay {
+        fn id(&self) -> &str {
+            "replay"
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            ProviderCapabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                cache_kind: crate::CacheKind::None,
+                reasoning: false,
+            }
+        }
+        async fn complete(&self, _req: CompletionRequest) -> crate::Result<ProviderEventStream> {
+            let events = self.0.lock().unwrap().pop_front().expect("over-called");
+            Ok(Box::pin(futures::stream::iter(events.into_iter().map(Ok))))
+        }
+    }
+
+    /// Emits `lines` numbered lines, so a test can tell head from tail from
+    /// the elided middle.
+    struct Chatty(usize);
+
+    #[async_trait]
+    impl ToolDispatcher for Chatty {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+        async fn dispatch(&self, _name: &str, _args: serde_json::Value) -> ToolOutcome {
+            ToolOutcome::ok(
+                (0..self.0)
+                    .map(|i| format!("line {i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        }
+    }
+
+    fn one_tool_turn() -> VecDeque<Vec<StreamEvent>> {
+        VecDeque::from(vec![
+            vec![
+                StreamEvent::ToolUse {
+                    block: ContentBlock::ToolUse {
+                        id: "t0".into(),
+                        name: "run_shell".into(),
+                        input: serde_json::json!({}),
+                    },
+                },
+                StreamEvent::Stop {
+                    reason: StopReason::ToolUse,
+                },
+            ],
+            vec![StreamEvent::Stop {
+                reason: StopReason::EndTurn,
+            }],
+        ])
+    }
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "wingman-agent-spill-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    /// Drive one turn and return what the *model* ends up seeing as the tool
+    /// result — which is the whole point: the UI gets the full text either
+    /// way, the model is the one paying for it.
+    async fn model_saw(lines: usize, spill: Option<Arc<SpillStore>>) -> String {
+        let provider = Arc::new(Replay(Mutex::new(one_tool_turn())));
+        let mut agent = AgentLoop::new(
+            provider,
+            Arc::new(Chatty(lines)),
+            AgentConfig {
+                model: "m".into(),
+                tool_output_budget: ToolOutputBudget::new(10),
+                spill,
+                ..Default::default()
+            },
+        );
+        let mut stream = agent.run("go".into());
+        while stream.next().await.is_some() {}
+        drop(stream);
+        agent
+            .history()
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("a tool result should be in history")
+    }
+
+    #[tokio::test]
+    async fn a_truncated_result_hands_the_model_a_path_to_the_rest() {
+        let dir = tmp("hit");
+        let store = Arc::new(SpillStore::new(dir.clone()));
+        let seen = model_saw(500, Some(store)).await;
+
+        // The locator must be the FIRST line: the pruner later keeps a head
+        // and a tail, so a pointer in the middle is what gets discarded.
+        assert!(
+            seen.starts_with("[wingman]"),
+            "locator must lead the result: {}",
+            &seen[..seen.len().min(200)]
+        );
+        assert!(seen.contains("read_file"), "must say how to get the rest");
+
+        // The path it names must exist and hold the complete output — the
+        // claim is only worth anything if the model can act on it.
+        let path: std::path::PathBuf = seen
+            .lines()
+            .next()
+            .unwrap()
+            .split("Full text: ")
+            .nth(1)
+            .unwrap()
+            .split(" — ")
+            .next()
+            .unwrap()
+            .into();
+        let full = std::fs::read_to_string(&path).expect("spill file should exist");
+        assert!(full.contains("line 250"), "the elided middle must be there");
+        assert_eq!(full.lines().count(), 500);
+        // And the model still only paid for the truncated view.
+        assert!(!seen.contains("line 250"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn output_that_fits_the_budget_is_not_spilled() {
+        let dir = tmp("small");
+        let store = Arc::new(SpillStore::new(dir.clone()));
+        let seen = model_saw(3, Some(store)).await;
+        assert!(!seen.contains("[wingman]"));
+        assert!(seen.contains("line 2"));
+        assert!(
+            !dir.exists(),
+            "a session that never overflows should leave no spill directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn without_a_store_truncation_behaves_exactly_as_before() {
+        let seen = model_saw(500, None).await;
+        assert!(!seen.contains("[wingman]"));
+        assert!(seen.contains("elided"));
+        assert!(seen.contains("line 0"));
     }
 }

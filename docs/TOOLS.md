@@ -11,7 +11,11 @@ Tools are registered in `ToolRegistry` (`crates/wingman-tools/src/registry.rs`).
 4. Executes the tool, under the `[tools].tool_timeout_secs` backstop deadline
    unless the tool bounds itself (`Tool::owns_timeout`).
 5. Redacts high-confidence secrets from the output.
-6. Truncates output per `tool_output_max_lines`.
+6. Truncates output per `tool_output_max_lines`. When that actually cuts
+   something, the full text is written to `.wingman/spill/<session>/` and the
+   result is prefixed with a locator line naming the file — so the model can
+   recover the elided middle with `read_file`'s `offset`/`limit` instead of
+   losing it (`[tools].spill_tool_output`).
 7. Writes the audit record, then appends a repeat-guard advisory if this call
    has just reached a `[tools].repeat_thresholds` run length.
 8. Runs post-tool hooks.

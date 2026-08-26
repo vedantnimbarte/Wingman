@@ -11,6 +11,7 @@ pub mod error;
 pub mod message;
 pub mod pricing;
 pub mod provider;
+pub mod spill;
 pub mod stream;
 pub mod tokens;
 pub mod tool;
@@ -27,9 +28,11 @@ pub use provider::{
     complete_text, CacheBreakpoint, CacheKind, CompletionRequest, Provider, ProviderCapabilities,
     ReasoningEffort,
 };
+pub use spill::SpillStore;
 pub use stream::{ProviderEventStream, StopReason, StreamEvent};
 pub use tokens::{
     estimate_history_tokens, estimate_tokens, CompactPlan, Compactor, ToolOutputBudget,
+    ToolResultPruner,
 };
 pub use tool::ToolSpec;
 
