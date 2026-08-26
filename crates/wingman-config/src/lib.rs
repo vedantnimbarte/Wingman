@@ -2895,7 +2895,7 @@ mod tests {
 
             // The trap this test exists for. schemars collapses variants that
             // carry no `///` into one combined branch, and `enumChoices()` in
-            // `ui/src/schema.ts` bails to `undefined` the moment any branch
+            // `panel/src/schema.ts` bails to `undefined` the moment any branch
             // holds more than one value — so a half-documented enum renders as
             // the free-text box this whole change was removing. Every variant
             // needs its own comment, and this is what says so.
