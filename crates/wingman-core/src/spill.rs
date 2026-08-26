@@ -203,8 +203,17 @@ mod tests {
         let path = store
             .save("../../../etc/passwd", "pwned")
             .expect("save should succeed, just not where the name asked");
+
+        // The written file is a direct child of the spill directory, and its
+        // name carries nothing that could have steered it elsewhere.
         assert_eq!(path.parent().unwrap(), dir.as_path());
-        assert!(!std::fs::exists(dir.join("../../../etc/passwd")).unwrap_or(false));
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(!name.contains(".."), "name still traversal-shaped: {name}");
+        assert!(
+            !name.contains('/') && !name.contains('\\'),
+            "name still contains a separator: {name}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "pwned");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
