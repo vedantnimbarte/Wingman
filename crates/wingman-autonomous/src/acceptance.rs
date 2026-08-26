@@ -320,9 +320,33 @@ fn run_grep(pattern: &str, path: &str, cwd: &Path) -> AcceptanceResult {
             return AcceptanceResult::fail(label, format!("read {} failed: {e}", full.display()))
         }
     };
-    // Plain substring match; the planner uses grep checks as cheap
-    // "did the string land in the file?" probes, not full regexes.
-    if let Some(idx) = body.find(pattern) {
+    // A check called `grep` gets grep semantics.
+    //
+    // This was a plain substring match, on the reasoning that planners use it
+    // as a cheap "did the string land in the file?" probe. They do not. A live
+    // run (#34) had the planner emit
+    //
+    //     ^///.*default_max_auto_dispatch_per_cycle|fn default_…
+    //
+    // — anchors, `.*`, alternation — which `str::find` looked for verbatim and
+    // never found. The check could not pass at any point, the task failed, and
+    // the retry ladder spent two more attempts proving the same impossibility.
+    // An acceptance check nothing can satisfy is worse than no check.
+    //
+    // Literal first: it is cheaper and it is what every plan written against
+    // the old behaviour meant, so nothing that passed before can start
+    // failing. Then regex, in multi-line mode, because `^` in a grep pattern
+    // means "start of line" and matching only the start of the file would
+    // honour the syntax while ignoring the intent.
+    let found = body.find(pattern).or_else(|| {
+        regex::RegexBuilder::new(pattern)
+            .multi_line(true)
+            .build()
+            .ok()
+            .and_then(|re| re.find(&body).map(|m| m.start()))
+    });
+
+    if let Some(idx) = found {
         // Surface the matching line so the model knows where it hit.
         let line_start = body[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line_end = body[idx..]
@@ -332,7 +356,17 @@ fn run_grep(pattern: &str, path: &str, cwd: &Path) -> AcceptanceResult {
         let line = &body[line_start..line_end];
         AcceptanceResult::ok(label, line.to_string())
     } else {
-        AcceptanceResult::fail(label, format!("pattern {pattern:?} not found in {path}"))
+        // Say whether the pattern was even usable as a regex. A planner that
+        // wrote a broken one otherwise gets "not found", goes looking for the
+        // text, finds it there, and has no idea why the check disagrees.
+        let note = match regex::Regex::new(pattern) {
+            Ok(_) => String::new(),
+            Err(_) => " (not valid regex either; matched literally)".to_string(),
+        };
+        AcceptanceResult::fail(
+            label,
+            format!("pattern {pattern:?} not found in {path}{note}"),
+        )
     }
 }
 
@@ -447,6 +481,88 @@ mod tests {
         let results = run_acceptance_checks(&checks, dir.path());
         assert!(results[0].ok);
         assert!(results[0].output.contains("--version-only"));
+    }
+
+    /// The pattern that broke a live `auto_dispatch` run (#34), verbatim.
+    ///
+    /// The planner wrote a regex — anchors, `.*`, alternation — into a check
+    /// called `grep`. Substring matching looked for it character-for-character,
+    /// never found it, and the task failed twice more on the retry ladder
+    /// proving the same thing.
+    #[test]
+    fn grep_handles_the_regex_a_planner_actually_writes() {
+        let dir = tempdir().unwrap();
+        let file = "lib.rs";
+        std::fs::write(
+            dir.path().join(file),
+            "some preamble
+             /// Default number of tasks the daemon may auto-dispatch per cycle.
+             fn default_max_auto_dispatch_per_cycle() -> usize {
+    1
+}
+",
+        )
+        .unwrap();
+
+        let checks = vec![Acceptance::Grep {
+            pattern:
+                "^///.*default_max_auto_dispatch_per_cycle|fn default_max_auto_dispatch_per_cycle"
+                    .into(),
+            path: file.into(),
+        }];
+        let results = run_acceptance_checks(&checks, dir.path());
+        assert!(
+            results[0].ok,
+            "a grep check must accept a grep pattern: {}",
+            results[0].output
+        );
+    }
+
+    /// `^` means start of line, as it does in grep. Anchoring to the start of
+    /// the file only would satisfy the syntax and miss the point.
+    #[test]
+    fn grep_anchors_per_line_not_per_file() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("f.txt"),
+            "first line
+/// the doc comment
+",
+        )
+        .unwrap();
+        let checks = vec![Acceptance::Grep {
+            pattern: "^/// the doc".into(),
+            path: "f.txt".into(),
+        }];
+        assert!(run_acceptance_checks(&checks, dir.path())[0].ok);
+    }
+
+    /// Literal patterns keep working, including ones that are not valid regex.
+    /// Nothing that passed before this change may start failing.
+    #[test]
+    fn grep_still_matches_literals_that_are_broken_regex() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("f.rs"),
+            "fn default_intake_dir() -> String {
+",
+        )
+        .unwrap();
+        // `(` unclosed — not a compilable regex, but a real substring.
+        let checks = vec![Acceptance::Grep {
+            pattern: "fn default_intake_dir(".into(),
+            path: "f.rs".into(),
+        }];
+        assert!(run_acceptance_checks(&checks, dir.path())[0].ok);
+
+        // And a genuine miss still says so, and says the pattern was unusable.
+        let miss = vec![Acceptance::Grep {
+            pattern: "fn nonexistent(".into(),
+            path: "f.rs".into(),
+        }];
+        let r = run_acceptance_checks(&miss, dir.path());
+        assert!(!r[0].ok);
+        assert!(r[0].output.contains("not valid regex"), "{}", r[0].output);
     }
 
     #[test]

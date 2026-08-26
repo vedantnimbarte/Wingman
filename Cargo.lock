@@ -4862,6 +4862,7 @@ dependencies = [
  "futures",
  "globset",
  "nix 0.29.0",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
