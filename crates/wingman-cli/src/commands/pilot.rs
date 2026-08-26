@@ -547,7 +547,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         use_real_worktrees: true,
         max_usd: pilot.max_usd,
         max_total_tokens: pilot.max_total_tokens,
-        max_retries_per_task: 1,
+        max_retries_per_task: pilot.max_retries_per_task,
         enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
     };
     let stats_path = wingman_config::global_dir()
@@ -1333,7 +1333,7 @@ pub async fn resume(
         use_real_worktrees: true,
         max_usd: cfg.pilot.max_usd,
         max_total_tokens: cfg.pilot.max_total_tokens,
-        max_retries_per_task: 1,
+        max_retries_per_task: cfg.pilot.max_retries_per_task,
         enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
     };
     let stats_path = wingman_config::global_dir()
