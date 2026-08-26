@@ -169,6 +169,10 @@ pub struct AgentConfig {
     /// Shrink oversized tool results in older turns before compaction folds
     /// whole turns away. Runs only under token pressure.
     pub pruner: ToolResultPruner,
+    /// Where to record what the model actually saw. The loop emits a
+    /// [`ContextFact`](crate::ContextFact) at every point it changes the
+    /// context; `None` records nothing.
+    pub context_sink: Option<Arc<dyn crate::ContextSink>>,
     /// Compaction policy. Compaction runs **before** each request if the
     /// estimated context size crosses `compactor.trigger_tokens`.
     pub compactor: Compactor,
@@ -232,6 +236,7 @@ impl Default for AgentConfig {
             tool_output_budget: ToolOutputBudget::default(),
             spill: None,
             pruner: ToolResultPruner::default(),
+            context_sink: None,
             compactor: Compactor::default(),
             learning: None,
             gate: None,
@@ -334,6 +339,14 @@ impl AgentLoop {
 
     /// Replace the conversation history — used by the TUI `/resume` command to
     /// reload a saved session's messages into a live agent.
+    /// Point the loop at a sink for [`ContextFact`](crate::ContextFact)s.
+    ///
+    /// Set after construction because surfaces open their session log once
+    /// they know where it lives, which is generally after the agent exists.
+    pub fn set_context_sink(&mut self, sink: Arc<dyn crate::ContextSink>) {
+        self.config.context_sink = Some(sink);
+    }
+
     pub fn set_history(&mut self, history: Vec<Message>) {
         self.history = history;
     }
@@ -400,6 +413,11 @@ impl AgentLoop {
         self.provider.capabilities().reasoning
     }
 
+    /// The base system prompt this loop sends, before any per-turn injection.
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.config.system.as_deref()
+    }
+
     pub fn get_model(&self) -> &str {
         &self.config.model
     }
@@ -407,14 +425,21 @@ impl AgentLoop {
     /// Drive a single user turn to completion. The returned stream yields
     /// events live and terminates after a `Stop` event.
     pub fn run(&mut self, user_prompt: String) -> BoxStream<'_, AgentEvent> {
-        self.history.push(Message::user_text(user_prompt));
+        self.history.push(Message::user_text(user_prompt.clone()));
 
         let provider = self.provider.clone();
         let tools = self.tools.clone();
         let config = self.config.clone();
         let history = &mut self.history;
+        let sink = config.context_sink.clone();
 
         let stream = async_stream::stream! {
+            // Record the prompt before anything else: a turn that dies
+            // mid-request should still show what was asked.
+            if let Some(s) = &sink {
+                s.record(crate::ContextFact::UserMessage { text: user_prompt })
+                    .await;
+            }
             let specs = tools.specs();
             // Armed when a mutating tool succeeds this user turn; checked by
             // the verification gate before an EndTurn stop is accepted.
@@ -429,13 +454,19 @@ impl AgentLoop {
                 if crate::tokens::estimate_history_tokens(history, config.system.as_deref())
                     >= config.compactor.trigger_tokens
                 {
-                    let pruned = config.pruner.prune(history);
-                    if pruned > 0 {
+                    let pruned = config.pruner.prune_reporting(history);
+                    if !pruned.is_empty() {
                         tracing::debug!(
                             target: "wingman::tokens",
-                            pruned,
+                            pruned = pruned.len(),
                             "pruned oversized tool results before compaction"
                         );
+                        if let Some(s) = &sink {
+                            for (id, content) in pruned {
+                                s.record(crate::ContextFact::ToolResultPruned { id, content })
+                                    .await;
+                            }
+                        }
                     }
                 }
 
@@ -444,6 +475,22 @@ impl AgentLoop {
                 if let Some(CompactPlan { recap, replaced }) =
                     config.compactor.plan(history, config.system.as_deref())
                 {
+                    if let Some(s) = &sink {
+                        s.record(crate::ContextFact::Compacted {
+                            replaced,
+                            recap: recap
+                                .content
+                                .iter()
+                                .filter_map(|b| match b {
+                                    ContentBlock::Text { text } => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                                .join("
+        "),
+                        })
+                        .await;
+                    }
                     history.splice(0..replaced, std::iter::once(recap));
                 }
 
@@ -452,6 +499,12 @@ impl AgentLoop {
                 let system_for_turn = match (config.system.as_deref(), &config.learning) {
                     (base, Some(hook)) => match hook.before_turn(history).await {
                         Some(extra) if !extra.trim().is_empty() => {
+                            if let Some(s) = &sink {
+                                s.record(crate::ContextFact::SystemInjected {
+                                    text: extra.clone(),
+                                })
+                                .await;
+                            }
                             let mut s = String::new();
                             if let Some(b) = base {
                                 s.push_str(b);
@@ -545,6 +598,9 @@ impl AgentLoop {
                             assistant_blocks.push(block);
                         }
                         StreamEvent::Usage { usage } => {
+                            if let Some(s) = &sink {
+                                s.record(crate::ContextFact::Usage { usage }).await;
+                            }
                             yield AgentEvent::Usage { usage };
                         }
                         StreamEvent::Stop { reason } => {
@@ -559,6 +615,12 @@ impl AgentLoop {
 
                 // Persist the assistant turn.
                 if !assistant_blocks.is_empty() {
+                    if let Some(s) = &sink {
+                        s.record(crate::ContextFact::AssistantMessage {
+                            blocks: assistant_blocks.clone(),
+                        })
+                        .await;
+                    }
                     history.push(Message {
                         role: Role::Assistant,
                         content: assistant_blocks.clone(),
@@ -609,12 +671,19 @@ impl AgentLoop {
                                 && turn + 1 < config.max_turns
                             {
                                 gate_attempts += 1;
-                                history.push(Message::user_text(format!(
+                                let feedback = format!(
                                     "[wingman verify] Turn gate failed after your edits \
                                      ({}). Fix the issues, then end the turn again.\n\n{}",
                                     gate.label(),
                                     report.summary,
-                                )));
+                                );
+                                if let Some(s) = &sink {
+                                    s.record(crate::ContextFact::UserMessage {
+                                        text: feedback.clone(),
+                                    })
+                                    .await;
+                                }
+                                history.push(Message::user_text(feedback));
                                 continue;
                             }
                             // Retries exhausted (or disallowed) and still red:
@@ -626,6 +695,13 @@ impl AgentLoop {
                     }
                     if let Some(hook) = &config.learning {
                         hook.after_stop(history);
+                    }
+                    if let Some(s) = &sink {
+                        s.record(crate::ContextFact::Stop {
+                            reason: serde_json::to_string(&reason)
+                                .unwrap_or_else(|_| "\"unknown\"".into()),
+                        })
+                        .await;
                     }
                     yield AgentEvent::Stop { reason };
                     return;
@@ -693,6 +769,20 @@ impl AgentLoop {
                             );
                         }
                     }
+                    // Record both forms. `full` is the audit trail and what a
+                    // human is shown; `model_view` is what actually went into
+                    // the request. Logging only the full text is how the log
+                    // came to claim the model had seen more than it did.
+                    if let Some(s) = &sink {
+                        s.record(crate::ContextFact::ToolResult {
+                            id: id.clone(),
+                            full: outcome.content.clone(),
+                            model_view: (truncated != outcome.content)
+                                .then(|| truncated.clone()),
+                            is_error: outcome.is_error,
+                        })
+                        .await;
+                    }
                     // UIs see the *full* output so the user can scroll/copy;
                     // the *model* only sees the truncated version below.
                     yield AgentEvent::ToolResult {
@@ -712,6 +802,12 @@ impl AgentLoop {
                 if turn + 1 == config.max_turns {
                     if let Some(hook) = &config.learning {
                         hook.after_stop(history);
+                    }
+                    if let Some(s) = &sink {
+                        s.record(crate::ContextFact::Stop {
+                            reason: "max_turns".into(),
+                        })
+                        .await;
                     }
                     yield AgentEvent::Stop { reason: AgentStop::MaxTurns };
                     return;

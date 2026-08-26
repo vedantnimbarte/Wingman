@@ -163,13 +163,52 @@ Both surfaces feed the same **agent loop** at `crates/wingman-core/src/agent.rs`
 ### `wingman-session`
 **Purpose:** Append-only JSONL session log for reproducibility and recall.
 
+**The invariant: model-visible means logged.**
+
+Everything that reaches a model request must be reconstructable from the log.
+The agent loop is the only place that knows what actually went into a request,
+so it is the only writer: at every point it changes what the model will see it
+emits a `ContextFact` to a `ContextSink`, and `SessionLogSink` writes it down.
+Surfaces open the log and hand it over; they no longer compose records
+themselves.
+
+They used to, and they disagreed. The TUI wrote the prompt text and the
+streamed assistant text and nothing else — no tool calls, no tool results — so
+resuming a TUI session rebuilt a conversation in which the agent had never used
+a tool. Headless recorded more, `serve` recorded differently again.
+
+Consequences worth knowing:
+
+- A **truncated** tool result is logged twice over: `output` is the full text
+  (the audit trail, and what the user was shown) and `model_output` is the
+  bounded form actually sent. `records_to_messages` replays `model_output`,
+  because reconstructing the conversation means reconstructing what the model
+  received — not the richer thing the tool said.
+- **Compaction** and **tool-result pruning** are recorded (`Recap`,
+  `ToolResultPruned`) and replayed, so a resumed session is not silently longer
+  than the one it continues.
+- Per-turn **system-prompt injections** (memory recall, nudges, skill bodies)
+  are recorded as `InjectedContext`. They are not message history and do not
+  replay — the system prompt is rebuilt per turn — but a reader asking "why did
+  it do that" can see them. `SessionStart.system_hash` pins the base prompt they
+  were added to.
+- Adding a new kind of model-visible input means adding a `ContextFact`. That is
+  the point: it is hard to slip something into the model's context without also
+  writing it down. A debug assertion (`debug_assert_reconstructs`) catches the
+  case where someone does.
+
 **Session format (one JSON object per line):**
 ```json
-{"role":"user","content":"explain the agent loop"}
-{"role":"assistant","content":"The agent loop..."}
-{"role":"assistant","tool_calls":[{"id":"tool_abc","name":"read_file","input":{"path":"..."}}]}
-{"role":"user","tool_results":[{"tool_use_id":"tool_abc","content":"..."}]}
+{"kind":"session_start","ts":"…","model":"…","provider":"…","system_hash":"…"}
+{"kind":"user","ts":"…","text":"explain the agent loop"}
+{"kind":"assistant","ts":"…","blocks":[{"type":"text","text":"Let me look…"},
+                                       {"type":"tool_use","id":"t0","name":"read_file","input":{}}]}
+{"kind":"tool_result","ts":"…","id":"t0","output":"<full>","model_output":"<bounded>","is_error":false}
+{"kind":"recap","ts":"…","replaced":8,"text":"[wingman compact] …"}
+{"kind":"stop","ts":"…","reason":"\"end_turn\""}
 ```
+
+Old logs load unchanged: every addition is a new variant or a defaulted field.
 
 **Features:**
 - `wingman session list` — browse recent session files.

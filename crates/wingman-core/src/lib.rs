@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod checkpoint;
+pub mod context_log;
 pub mod error;
 pub mod message;
 pub mod pricing;
@@ -21,6 +22,7 @@ pub use agent::{
     AgentConfig, AgentEvent, AgentLoop, AgentStop, GateReport, LearningHook, NoopLearningHook,
     ToolDispatcher, ToolOutcome, TurnGate,
 };
+pub use context_log::{ContextFact, ContextSink};
 pub use error::{Result, WingmanError};
 pub use message::{ContentBlock, Message, Role};
 pub use pricing::{price_for, Price};

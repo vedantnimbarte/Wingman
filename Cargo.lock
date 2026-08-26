@@ -5073,7 +5073,9 @@ dependencies = [
 name = "wingman-session"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
+ "futures",
  "serde",
  "serde_json",
  "tempfile",

@@ -168,17 +168,32 @@ impl ToolResultPruner {
     /// nothing to do. Without that property this would rewrite the same
     /// results on every turn, churning the history and the cache prefix.
     pub fn prune(&self, history: &mut [Message]) -> usize {
+        self.prune_reporting(history).len()
+    }
+
+    /// As [`prune`](Self::prune), but returns `(tool_use_id, new content)` for
+    /// each result it rewrote.
+    ///
+    /// The caller needs the identity of what changed, not just a count: a
+    /// prune edits what the model will see, and that has to reach the session
+    /// log or the log stops matching the conversation.
+    pub fn prune_reporting(&self, history: &mut [Message]) -> Vec<(String, String)> {
         if !self.is_effective() {
-            return 0;
+            return Vec::new();
         }
         let cutoff = history.len().saturating_sub(self.keep_recent);
-        let mut pruned = 0;
+        let mut pruned = Vec::new();
         for message in &mut history[..cutoff] {
             for block in &mut message.content {
-                if let ContentBlock::ToolResult { content, .. } = block {
+                if let ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    ..
+                } = block
+                {
                     if let Some(shorter) = self.shrink(content) {
-                        *content = shorter;
-                        pruned += 1;
+                        *content = shorter.clone();
+                        pruned.push((tool_use_id.clone(), shorter));
                     }
                 }
             }

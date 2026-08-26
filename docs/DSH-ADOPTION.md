@@ -31,7 +31,7 @@ Effort estimates are rough and use this scale:
 
 | # | Item | Size | Verdict |
 |---|---|---|---|
-| A1 | Event-sourced session log | **L** | Do it, but let P1/P4 force the timing. Diagnostic gap, not corruption. |
+| A1 | Event-sourced session log | **L** | **Done** — the loop is the sole writer; `ContextFact` / `ContextSink`. |
 | A2 | Widen existing traits into named seams | **M**, incremental | Do it opportunistically. |
 | A3 | Full plugin runtime (Cordis-equivalent) | **XL** | **Don't.** Reasoning in §A3. |
 | P1 | Tool-output spill | S–M | **Done** — `[tools].spill_tool_output`. |
@@ -48,7 +48,7 @@ Effort estimates are rough and use this scale:
 | P12 | Code Mode (`run_code` + generated SDK) | L–XL | Prototype behind a flag. Don't lead with it. |
 | E1 | Decision records | S to start | Do it. |
 | E2 | Generated documentation | M | Do it for the drift-prone docs only. |
-| E3 | Runtime invariants | M | Do it alongside A1. |
+| E3 | Runtime invariants | M | **Partly done** — `debug_assert_reconstructs` ships with A1; no general registry. |
 
 ---
 
@@ -111,34 +111,26 @@ Two further specifics found while verifying this:
   log records nothing about the system prompt at all, so the learning hook's
   per-turn system injection is invisible twice over.
 
-### What this does and does not break
+### What this did and did not break
 
-Worth stating precisely, because the scope is narrower than it first looks.
+Worth stating precisely, because the scope turned out to be narrower in one
+direction and much wider in another.
 
-**Not broken.** `session replay` re-runs prompts fresh, and `session fork`
-rebuilds from the full log — which still holds the original messages a
-compaction folded away. A fork taken after a compaction gets the
-*un-compacted* history, which is arguably better than what the parent had.
-These work.
+**Never broken.** `session replay` re-runs prompts fresh, and `session fork`
+rebuilt from the full log. These worked.
 
-**Broken.** You cannot reconstruct what the model actually saw at a given
-turn. That is a diagnostic and audit failure, not a data-corruption one:
+**Broken, and worse than this document first said.** The original entry
+described the log as merely *incomplete* — missing the recap and the injected
+system text. Implementing it surfaced the real fault: **each surface wrote the
+log by hand, from whatever it happened to keep, and they disagreed.** The TUI
+recorded the user prompt and the streamed assistant text and nothing else — no
+tool calls, no tool results — so `/resume` on a TUI session rebuilt a
+conversation in which the agent had never used a tool, and `recall_session`
+indexed transcripts with all tool activity missing. Headless recorded more.
+`serve` recorded differently again.
 
-- The audit trail (`[audit].enabled`) records every tool call but cannot
-  answer "what was in the model's context when it decided that" — which is
-  the question an audit trail exists to answer.
-- Debugging a bad turn means guessing at the recap and the injected system
-  text, because neither was written down.
-
-This is why A1 is sequenced *with the features that need it* rather than as
-urgent remediation — see [Suggested sequencing](#suggested-sequencing).
-
-It also matters for everything in Part 2. Spill (P1) adds a locator the model
-sees. The repeat guard (P2) injects an advisory the model sees. Pruning (P4)
-rewrites a result the model sees. Each of those, under the current design,
-requires deciding *separately* how it interacts with persistence, and each is
-a chance to get it wrong the same way compaction already has. Under the
-invariant, each is one new event variant and the projection handles the rest.
+That is not a diagnostic gap. It is the interactive surface's resume being
+substantively wrong, and it had been true the whole time.
 
 ### What the change looks like
 
@@ -613,12 +605,16 @@ because the locator line sits in the head that pruning always keeps, so the
 full text stays one `read_file` away no matter how far the result is later
 shrunk.
 
-**Third — the architecture. Now due.** A1 (event-sourced log) with E3
-(invariants). P1 and P4 were named as the forcing function and both have now
-landed, each adding model-visible state the log does not record: the spill
-locator line and the pruned tool result. The session log is now behind the
-model's context in three ways rather than one (recap, injected system text,
-and these). A2 falls out incrementally.
+**Third — the architecture. Done.** A1 landed: the agent loop is the sole
+writer, emitting a `ContextFact` at every point it changes what the model
+sees, and `records_to_messages` replays them. E3 ships as the one invariant
+that matters here (`debug_assert_reconstructs`) rather than a general
+registry. A2 falls out incrementally and has not been forced yet.
+
+Known gap left open deliberately: **pilot workers (`--worker-mode`) never open
+a session log at all**, so `wingman session fork` cannot target a worker's
+turns despite the orchestrator recording a session id for exactly that. That
+is a separate pre-existing bug, not part of making an existing log faithful.
 
 **Fourth — capability gaps.** P3 (jobs), then P11 (PTY) on the plumbing P3
 establishes. Trigger for P3 is someone actually hitting the 600s ceiling, not

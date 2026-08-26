@@ -76,15 +76,22 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
                 ts: chrono_rfc3339(),
                 model: selection.model.clone(),
                 provider: selection.provider_id.clone(),
-                system_hash: None,
+                // Identifies the base prompt this session ran under. It was
+                // always `None`, so the log recorded nothing at all about the
+                // system prompt — the per-turn additions now arrive as
+                // `InjectedContext`, and this pins what they were added to.
+                system_hash: agent.system_prompt().map(wingman_session::system_hash),
             })
             .await;
-        let _ = s
-            .write(SessionRecord::User {
-                ts: chrono_rfc3339(),
-                text: opts.prompt.clone(),
-            })
-            .await;
+        // The user prompt is recorded by the agent loop, which is also where
+        // loop-authored user messages (verification-gate feedback) come from.
+        // Writing it here as well would double it.
+    }
+    // Hand the loop the log: it is the only place that knows what actually
+    // went into each request.
+    let session = session.map(|log| std::sync::Arc::new(wingman_session::SessionLogSink::new(log)));
+    if let Some(sink) = &session {
+        agent.set_context_sink(sink.clone());
     }
 
     if !opts.json {
@@ -121,11 +128,6 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let mut budget_warned = false;
 
     while let Some(event) = events.next().await {
-        // Log to session.
-        if let Some(s) = session.as_mut() {
-            let _ = s.record_agent_event(&event).await;
-        }
-
         // Exit code + assistant-text capture, independent of output mode — a
         // mid-stream error or an error stop must fail the process in `--json`
         // mode too (previously it only did in the human-readable branch).
@@ -243,18 +245,6 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     {
         if !opts.json {
             eprintln!("wingman: committed {line}");
-        }
-    }
-
-    // Persist the assistant's reply so the session isn't just a prompt with no
-    // answer — recall_session and /resume both read this back.
-    if let Some(s) = session.as_mut() {
-        if !assistant_text.trim().is_empty() {
-            let _ = s
-                .record_message(&wingman_core::Message::assistant(vec![
-                    wingman_core::ContentBlock::text(assistant_text),
-                ]))
-                .await;
         }
     }
 
