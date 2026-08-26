@@ -15,8 +15,9 @@ pub mod secrets;
 pub mod trust;
 
 pub use paths::{
-    ensure_global_dir, ensure_global_logs_dir, find_project_root, global_config_path,
-    global_credentials_path, global_dir, global_logs_dir, project_dir, ProjectPaths,
+    ensure_global_dir, ensure_global_logs_dir, find_owning_project_root, find_project_root,
+    global_config_path, global_credentials_path, global_dir, global_logs_dir, project_dir,
+    ProjectPaths,
 };
 
 use serde::{Deserialize, Serialize};
