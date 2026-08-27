@@ -47,7 +47,9 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "esbuild src/extension.ts --bundle --platform=node --external:vscode --outfile=dist/extension.js",
-    "watch": "npm run build -- --watch"
+    "watch": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "esbuild src/search.test.ts --bundle --platform=node --outfile=dist/search.test.cjs && node --test dist/search.test.cjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",

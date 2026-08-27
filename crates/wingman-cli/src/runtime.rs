@@ -723,6 +723,31 @@ fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathB
 /// prompt; the rest stay queued for the run after.
 const PENDING_DRAIN_LIMIT: usize = 25;
 
+/// Build the learn handles — memory store, stats db, session index — for one
+/// session.
+///
+/// Every caller that wants the memory / skill / session tools registered must
+/// go through this and pass the result to [`build_registry_with_learn`];
+/// `build_registry` passes `None`, which silently drops `recall_memory`,
+/// `save_memory`, `forget_memory`, `invoke_skill`, `recall_session` and
+/// `read_session` from the registry.
+///
+/// Returns `None` (with a warning) if the store can't be opened, so a broken
+/// `.wingman/` degrades to a session without memory rather than a hard failure.
+pub fn build_learn(paths: &ProjectPaths, session_id: String) -> Option<Arc<LearnHandles>> {
+    let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+    // Give the learn hook the project index so it can inject relevant code
+    // locations per turn (search escalation). Cheap: opens the store, no reindex.
+    let learn_indexer = build_indexer(paths).ok().flatten();
+    match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
+        Ok(h) => Some(Arc::new(h)),
+        Err(e) => {
+            tracing::warn!("disabling learning loop: {e}");
+            None
+        }
+    }
+}
+
 pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
     let embedder = pick_embedder();
     let store = match IndexStore::open(&paths.index_db, embedder.id(), embedder.dim()) {
@@ -1613,17 +1638,7 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let spill = build_spill(cfg, &paths, &session_id);
-    let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
-    // Give the learn hook the project index so it can inject relevant code
-    // locations per turn (search escalation). Cheap: opens the store, no reindex.
-    let learn_indexer = build_indexer(&paths).ok().flatten();
-    let learn = match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
-        Ok(h) => Some(Arc::new(h)),
-        Err(e) => {
-            tracing::warn!("disabling learning loop: {e}");
-            None
-        }
-    };
+    let learn = build_learn(&paths, session_id);
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
 
