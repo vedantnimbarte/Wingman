@@ -56,3 +56,4 @@ pointer. The history of what we believed is the point.
 | [0009](0009-test-docs-rather-than-generate-them.md) | Docs are tested against the code, not generated from it | accepted |
 | [0010](0010-claude-code-hooks-are-imported-not-adopted.md) | Claude Code hooks are imported opt-in, trust-gated, and translated | accepted |
 | [0011](0011-background-jobs.md) | Background jobs are a process table, not a capability seam | accepted |
+| [0012](0012-stdin-instead-of-a-pty.md) | Processes are driven over stdin; no PTY | accepted |

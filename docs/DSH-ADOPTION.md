@@ -44,7 +44,7 @@ Effort estimates are rough and use this scale:
 | P8 | Session search over SQLite FTS | S | **Done** — one line; reused `search_hybrid`. |
 | P9 | Hook bridges (Claude Code / Codex) | M | **Done** (Claude Code) — opt-in, trust-gated, matchers translated. See [0010](decisions/0010-claude-code-hooks-are-imported-not-adopted.md). |
 | P10 | Per-message feedback | M | **Done** — `/feedback good|bad`; stated outcomes beat inferred ones. |
-| P11 | Persistent PTY sessions | L | After P3. |
+| P11 | Persistent PTY sessions | S | **Done differently** — `job_send` drives a process over stdin; no PTY. See [0012](decisions/0012-stdin-instead-of-a-pty.md). |
 | P12 | Code Mode (`run_code` + generated SDK) | L–XL | Prototype behind a flag. Don't lead with it. |
 | E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 8 records backfilled. |
 | E2 | Generated documentation | S | **Done differently** — docs are *tested* against the code, not generated. See [0009](decisions/0009-test-docs-rather-than-generate-them.md). |

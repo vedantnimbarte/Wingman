@@ -48,7 +48,7 @@ pub use forget_memory::ForgetMemory;
 pub use glob_tool::Glob;
 pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
-pub use jobs_tools::{JobList, JobOutput, JobStop};
+pub use jobs_tools::{JobList, JobOutput, JobSend, JobStop};
 pub use list_dir::ListDir;
 pub use lsp_tools::{
     LspCodeAction, LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename,

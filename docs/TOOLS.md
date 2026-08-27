@@ -358,6 +358,28 @@ so a forgotten dev server does not outlive the agent that started it.
 Read what a job has printed so far, plus its state (`running`, `exited(0)`,
 `killed`). Args: `id` (required). Safe to call repeatedly while it runs.
 
+### `job_send`
+
+Write a line to a running job's stdin, so a process can be *driven* across
+tool calls rather than one-shot. Args: `id`, `input` (both required). A
+newline is appended if you omit one — line-buffered programs, which is most of
+them, will not act until they see one.
+
+```
+run_shell(command="python3 -i", background=true)   → job-1
+job_send(id="job-1", input="print(2 + 2)")
+job_output(id="job-1")                             → 4
+```
+
+Sending to a finished job is an error that names the state, rather than a
+silent write into a closed pipe.
+
+Note this is a pipe, not a pseudo-terminal: the child sees `isatty() == false`,
+so REPLs skip their `>>>` prompt and programs skip colour, progress bars, and
+pagers — all of which are noise in a context window. Programs that *require* a
+TTY do not work. See
+[decision 0012](decisions/0012-stdin-instead-of-a-pty.md).
+
 ### `job_stop`
 
 Stop a job and its whole process tree — killing `sh` alone would leave `npm`,
@@ -846,6 +868,7 @@ faster model while the parent session keeps the strongest one. An explicit
 | `list_dir`          | Y    | —     | —     | always     | Directory listing              |
 | `run_shell`         | —    | —     | Y     | mode/list  | Shell execution; `background` starts a job |
 | `job_output`        | Y    | —     | —     | always     | Read a background job's output  |
+| `job_send`          | —    | —     | Y     | mode/list  | Write a line to a job's stdin   |
 | `job_stop`          | —    | —     | Y     | mode/list  | Kill a job and its process tree |
 | `job_list`          | Y    | —     | —     | always     | List this session's jobs        |
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
