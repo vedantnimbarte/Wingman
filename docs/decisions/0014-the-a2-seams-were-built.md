@@ -84,10 +84,61 @@ have produced it.
   because reads genuinely happen in two contexts; pretending otherwise would
   have meant `block_on` inside a blocking closure or moving thousands of small
   reads onto the async runtime to satisfy an interface's shape.
-- **`dyn` dispatch** on file reads and stat writes. Not measured; not expected
-  to matter next to the I/O it wraps, and said plainly rather than assumed
-  away.
+- **`dyn` dispatch** on file reads and stat writes. Measured — see below.
 - Roughly 1,500 lines across three PRs, none of it fixing a reported bug.
+
+## The dispatch cost, measured
+
+This was recorded as unmeasured and has since been measured.
+`crates/wingman-tools/examples/dispatch_cost.rs` is the experiment; run it with
+
+```bash
+cargo run --release --example dispatch_cost -p wingman-tools
+```
+
+Each I/O comparison also times the *same* implementation twice, giving a noise
+floor. A difference smaller than that floor is not a result, and the example
+says so rather than printing a number.
+
+| Measurement | Result |
+|---|---|
+| vtable dispatch (empty method, 50M calls) | **~0.02 ns/call**, sign flips between runs — indistinguishable from zero |
+| `#[async_trait]` boxed future (2M calls) | **52–75 ns/call** — varies with load, never near zero |
+| blocking read, 8 KiB warm (~50,000 ns) | below the noise floor, every run |
+| async read, 8 KiB warm (~80,000 ns) | unresolvable — see below |
+
+**The cost is not what the objection assumed.** Virtual dispatch is free: the
+call sites are monomorphic and the branch predictor gets them right every
+time. What costs anything is `#[async_trait]`, which returns
+`Pin<Box<dyn Future>>` and so heap-allocates once per call. Tens of
+nanoseconds, reproducible, and the one number here that holds still.
+
+Against a ~50,000 ns file read that is **~0.1%** — and the file read is itself
+invisible beside the model round trip that prompted it.
+
+**The async I/O comparison does not resolve, and that is the honest result.**
+Across seven runs it reported "below the noise floor" five times, "+30%" once
+and "+12%" once, on identical code; one run came out *negative*. Raising the
+trial count tightened it without settling it. Tokio routes each read through
+its blocking pool, and that handoff varies more run-to-run than the effect
+being measured.
+
+This is not a gap in the experiment — the two sections agree. One extra boxed
+future is ~60 ns against an ~80,000 ns async read: **0.075%**. A measurement
+whose own noise floor lands between 1% and 13% cannot see 0.075%, so "no
+measurable difference" is precisely what the isolated figure predicts. Had
+section 3 shown a *stable* double-digit penalty, that would have contradicted
+section 4 and something would have needed explaining.
+
+The tempting move was to keep re-running until the numbers looked tidy. The
+noise floor exists so that the example reports "not measurable" instead of
+whichever number a given run happened to produce — the first run of this
+experiment said "+34%", and that figure was nothing but jitter.
+
+Worth knowing beyond these seams: this cost is not new and is not theirs.
+`Tool`, `ToolDispatcher`, `Provider` and `LearningHook` were already
+`#[async_trait]`. A tool call crosses a handful of boxed futures either way,
+and these seams add roughly one more.
 
 ## Decision
 
