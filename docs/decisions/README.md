@@ -57,5 +57,6 @@ pointer. The history of what we believed is the point.
 | [0010](0010-claude-code-hooks-are-imported-not-adopted.md) | Claude Code hooks are imported opt-in, trust-gated, and translated | accepted |
 | [0011](0011-background-jobs.md) | Background jobs are a process table, not a capability seam | accepted |
 | [0012](0012-stdin-instead-of-a-pty.md) | Processes are driven over stdin; no PTY | accepted |
-| [0013](0013-no-speculative-seams.md) | No speculative seams; extract when a second implementation arrives | accepted |
+| [0013](0013-no-speculative-seams.md) | No speculative seams; extract when a second implementation arrives | superseded by 0014 |
+| [0014](0014-the-a2-seams-were-built.md) | The A2 seams were built; what that cost and bought | accepted |
 | [0014](0014-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |

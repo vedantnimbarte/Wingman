@@ -1,6 +1,6 @@
 # 0013 — No speculative seams; extract when a second implementation arrives
 
-**Status:** accepted
+**Status:** superseded by [0014](0014-the-a2-seams-were-built.md)
 **Date:** 2026-08-27
 **Closes:** A2 in [DSH-ADOPTION.md](../DSH-ADOPTION.md)
 
@@ -29,6 +29,11 @@ Revisiting it with the code in front of me, three of the four have no driver:
   *different databases with different schemas* (`learn.db`, the board
   registry, `index.db`, `sessions.db`). They are not duplicated logic, and a
   storage seam would not merge them.
+
+> **Superseded.** The sweep was built anyway, at the maintainer's direction.
+> [0014](0014-the-a2-seams-were-built.md) records what it cost and bought,
+> including where the reasoning below was wrong. The factual claims here still
+> hold; the conclusion drawn from them did not survive contact.
 
 ## Decision
 
