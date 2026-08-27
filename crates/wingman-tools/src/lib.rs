@@ -6,7 +6,9 @@
 //! - [`ToolRegistry`] holds the registered tools and implements
 //!   `wingman_core::ToolDispatcher`, the trait the agent loop calls into.
 
+pub mod child_process;
 mod ctx;
+pub mod jobs;
 mod registry;
 pub mod sandbox;
 

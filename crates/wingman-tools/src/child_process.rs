@@ -91,6 +91,19 @@ impl SupervisedCommand {
         Self { cmd }
     }
 
+    /// Wrap a `Command` that has already been configured.
+    ///
+    /// Background shell jobs need this: `run_shell` builds the command with
+    /// the sandbox wrapper, working directory, and scrubbed environment
+    /// already applied, and that configuration must be carried over rather
+    /// than rebuilt — a second construction path is a second place for the
+    /// containment to be subtly different.
+    ///
+    /// Unlike [`new`](Self::new), stdio is left exactly as the caller set it.
+    pub fn from_command(cmd: Command) -> Self {
+        Self { cmd }
+    }
+
     /// Access the underlying tokio Command for further configuration
     /// (arg(), env(), current_dir(), …).
     pub fn command_mut(&mut self) -> &mut Command {

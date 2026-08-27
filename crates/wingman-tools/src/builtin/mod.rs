@@ -17,6 +17,7 @@ mod lsp_tools;
 mod present_plan;
 mod update_tasks;
 
+mod jobs_tools;
 mod read_file;
 mod read_session;
 mod recall_memory;
@@ -47,6 +48,7 @@ pub use forget_memory::ForgetMemory;
 pub use glob_tool::Glob;
 pub use grep_tool::Grep;
 pub use invoke_skill::InvokeSkill;
+pub use jobs_tools::{JobList, JobOutput, JobStop};
 pub use list_dir::ListDir;
 pub use lsp_tools::{
     LspCodeAction, LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename,
