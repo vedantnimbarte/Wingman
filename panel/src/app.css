@@ -2148,3 +2148,603 @@ textarea.input::placeholder {
     max-width: 100%;
   }
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Second pass.
+
+   Everything below serves screens or affordances that did not exist when the
+   sections above were written: the Changes view, filters, markdown in the
+   transcript, the activity log, and the parts of a dialog that are not
+   visible. The rules the file opens with still hold and are not relaxed
+   anywhere in here — in particular the diff below is deliberately *not*
+   green-and-red, because a removed line is not a failed one.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* ── Assistive-only ─────────────────────────────────────────────────────── */
+
+/* Present to a screen reader, absent to everyone else. Not `display: none`,
+   which removes it from the accessibility tree as well and is the reason the
+   naive version of this announces nothing. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* The first tabbable element on the page, and invisible until it has focus —
+   without it every keyboard navigation starts by walking the whole rail. */
+.skip {
+  position: absolute;
+  top: var(--s-2);
+  left: var(--s-2);
+  z-index: 60;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-1);
+  background: var(--ink);
+  color: var(--paper);
+  font-size: var(--t-sm);
+  font-weight: var(--w-med);
+  text-decoration: none;
+  transform: translateY(-200%);
+  transition: transform var(--fast) var(--ease);
+}
+
+.skip:focus-visible {
+  transform: translateY(0);
+  outline-color: var(--paper);
+}
+
+/* `<main>` takes focus after the skip link, and a focus ring around the entire
+   scroll region is noise rather than information. */
+.shell-main:focus {
+  outline: none;
+}
+
+/* ── Connection banner ──────────────────────────────────────────────────── */
+
+/* The header pill says the stream is down. This says what that means for the
+   page underneath it, which is the part a pill cannot carry. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: var(--s-4) var(--s-5) 0;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--failed-edge);
+  border-radius: var(--r-1);
+  background: var(--failed-wash);
+  font-size: var(--t-sm);
+}
+
+.banner > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Filters ────────────────────────────────────────────────────────────── */
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.filter-search {
+  display: flex;
+  flex: 1 1 14rem;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+  color: var(--faint);
+}
+
+.filter-search .input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* A checkbox and its words behave as one control: the label is the target, so
+   the touch area is the sentence rather than the 13px box. */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-height: 1.5rem;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.check input {
+  accent-color: var(--ink);
+}
+
+/* ── Tabs ───────────────────────────────────────────────────────────────── */
+
+.tabs {
+  display: flex;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+  border-bottom: 1px solid var(--rule);
+}
+
+.tab {
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: var(--r-1) var(--r-1) 0 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+
+.tab:hover {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+/* Selection is weight plus a rule, not a colour: which tab you are on is not
+   an epistemic claim about anything. */
+.tab[aria-selected='true'] {
+  border-bottom-color: var(--ink);
+  color: var(--ink);
+  font-weight: var(--w-med);
+}
+
+/* ── Board additions ────────────────────────────────────────────────────── */
+
+/* The card title is a button now — it opens the card. It has to keep looking
+   exactly like the heading it replaced. */
+button.card-title {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.card-title:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Archived cards are shown only when asked for, and read as set aside rather
+   than as a state — dimming is the whole signal, no hue is spent on it. */
+.card-archived {
+  opacity: 0.62;
+}
+
+.card-archived:hover {
+  opacity: 1;
+}
+
+.detail-tools {
+  margin-top: var(--s-4);
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--rule);
+}
+
+/* ── Runs additions ─────────────────────────────────────────────────────── */
+
+/* Sits inside the gate, above the two buttons, because it is the thing you
+   should have read before pressing one of them. */
+.gate-warn {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border: 1px solid var(--failed-edge);
+  border-radius: var(--r-1);
+  background: var(--failed-wash);
+  font-size: var(--t-sm);
+}
+
+.gate-warn p {
+  margin: 0 0 var(--s-2);
+  font-weight: var(--w-med);
+}
+
+.gate-warn .md-list {
+  margin: 0;
+}
+
+.file-list {
+  margin: 0;
+  padding-left: var(--s-4);
+}
+
+.run-log {
+  margin-top: var(--s-2);
+}
+
+.run-log .rows {
+  max-height: 22rem;
+  overflow: auto;
+  border-top: 1px solid var(--rule);
+}
+
+.log-row {
+  padding: var(--s-1) var(--s-3);
+  font-size: var(--t-sm);
+}
+
+.task-meta-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-0);
+  min-width: 0;
+  font-size: var(--t-sm);
+}
+
+/* ── Sessions additions ─────────────────────────────────────────────────── */
+
+.composer-model {
+  flex: 0 1 10rem;
+  min-width: 6rem;
+  height: var(--control);
+}
+
+/* The hint gives way to the two controls beside it rather than pushing them
+   off the row on a narrow composer. */
+.composer-tools .composer-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fold {
+  align-self: center;
+  margin-bottom: var(--s-3);
+}
+
+/* Only while the reader has scrolled away from the newest text, so it is never
+   in the way of the thing it points at. */
+.jump {
+  position: sticky;
+  bottom: var(--s-3);
+  align-self: center;
+  z-index: 5;
+  box-shadow: var(--shadow-2);
+}
+
+/* Per-turn token counts, on the ledger's axis like every other figure. */
+.usage {
+  margin: 0 0 var(--s-3);
+  text-align: right;
+  font-size: var(--t-xs);
+}
+
+.copyable {
+  position: relative;
+}
+
+/* Rides over the top-right of the block it copies. Revealed on hover or focus
+   so it is not permanently painted over the first line of output. */
+.copy {
+  position: absolute;
+  top: var(--s-2);
+  right: var(--s-2);
+  z-index: 2;
+  gap: var(--s-1);
+  opacity: 0;
+  background: var(--surface);
+}
+
+.copyable:hover .copy,
+.copy:focus-visible {
+  opacity: 1;
+}
+
+/* A pointer-less device never fires hover, so the control would be
+   permanently invisible on the phone this panel is partly built for. */
+@media (hover: none) {
+  .copy {
+    opacity: 1;
+  }
+}
+
+/* ── Markdown ───────────────────────────────────────────────────────────── */
+
+.md > :first-child {
+  margin-top: 0;
+}
+
+.md > :last-child {
+  margin-bottom: 0;
+}
+
+.md-p {
+  margin: 0 0 var(--s-3);
+  line-height: var(--lh-base);
+  overflow-wrap: anywhere;
+}
+
+/* An answer's own headings sit under the message label, so they step down from
+   it rather than competing with the page head. */
+.md-head {
+  margin: var(--s-4) 0 var(--s-2);
+  font-size: var(--t-base);
+  font-weight: var(--w-bold);
+  letter-spacing: -0.01em;
+}
+
+.md-list {
+  margin: 0 0 var(--s-3);
+  padding-left: var(--s-5);
+  line-height: var(--lh-base);
+}
+
+.md-list li {
+  margin-bottom: var(--s-1);
+}
+
+.md-quote {
+  margin: 0 0 var(--s-3);
+  padding-left: var(--s-3);
+  border-left: 2px solid var(--rule-strong);
+  color: var(--muted);
+}
+
+.md-rule {
+  margin: var(--s-4) 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
+.md-block {
+  margin: 0 0 var(--s-3);
+  padding: var(--s-3);
+  overflow: auto;
+  max-height: 30rem;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--sunken);
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
+}
+
+.md-code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--sunken);
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.md a {
+  color: inherit;
+  text-underline-offset: 2px;
+}
+
+/* ── Diff ───────────────────────────────────────────────────────────────── */
+
+/*
+ * Added and removed are told apart by ground and gutter, not by hue.
+ *
+ * Every other diff on the internet is green and red. This one is not, and the
+ * reason is the rule this stylesheet opens with: colour encodes epistemic
+ * status and nothing else. A deleted line is not a failure and an added one is
+ * not proven — spending the two loudest hues on them would mean the palette no
+ * longer answers the only question it exists to answer.
+ *
+ * So: an addition sits on --raised with a plus in the gutter, a deletion on
+ * --sunken in --muted with a minus. That is the same two-channel treatment
+ * every status in the panel already gets, and it reads without a legend.
+ */
+.diff {
+  margin-bottom: var(--s-5);
+  overflow-x: auto;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--surface);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: flex;
+  gap: var(--s-2);
+  padding: 0 var(--s-2);
+  white-space: pre;
+}
+
+.diff-gutter {
+  flex: none;
+  width: 1ch;
+  color: var(--faint);
+  user-select: none;
+}
+
+.diff-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.diff-add {
+  background: var(--raised);
+}
+
+.diff-del {
+  background: var(--sunken);
+  color: var(--muted);
+}
+
+.diff-hunk {
+  padding: var(--s-1) var(--s-2);
+  border-top: 1px solid var(--rule);
+  color: var(--faint);
+}
+
+.diff-meta {
+  color: var(--faint);
+}
+
+/* The file heading the reviewer prints. One per response, because the route
+   takes one file — it is a caption, not a control. */
+.diff-file {
+  margin: 0;
+  padding: var(--s-2);
+  border-top: 1px solid var(--rule-strong);
+  background: var(--raised);
+  color: var(--ink);
+  font-weight: var(--w-bold);
+}
+
+.diff-file:first-child {
+  border-top: 0;
+}
+
+/* ── Insights additions ─────────────────────────────────────────────────── */
+
+/* A bar's label that navigates. Still a label: no button chrome, because the
+   row is a chart row and not a control strip. */
+.bar-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-family: var(--mono);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bar-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* The three verdict classes inside a report block. The .is-* classes already
+   carry the colour; this only stops one span per line from changing how the
+   block lays out. */
+.report span {
+  display: block;
+}
+
+/* ── Config additions ───────────────────────────────────────────────────── */
+
+.config-find {
+  flex: none;
+  margin-bottom: var(--s-2);
+}
+
+.config-find .input {
+  height: 1.75rem;
+  font-size: var(--t-sm);
+}
+
+/* ── Keyboard sheet ─────────────────────────────────────────────────────── */
+
+.keys {
+  padding: var(--s-4);
+}
+
+.keys .row {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.keys .kbd {
+  flex: none;
+}
+
+/* ── Contrast ───────────────────────────────────────────────────────────── */
+
+/*
+ * The palette is tuned to clear AA and several pairs sit just over the line by
+ * design — 4.51:1 for --asserted on its own wash, measured. A reader who has
+ * asked the OS for more contrast is telling us that margin is not enough, so
+ * the hairlines gain weight and the two quietest inks step up one.
+ */
+@media (prefers-contrast: more) {
+  :root {
+    --rule: var(--rule-strong);
+    --faint: var(--muted);
+    --muted: var(--ink);
+  }
+
+  .card,
+  .tile,
+  .state,
+  .diff,
+  .tool {
+    border-color: var(--rule-strong);
+  }
+
+  .pill {
+    border-width: 2px;
+  }
+
+  .card-archived {
+    opacity: 1;
+  }
+}
+
+/* ── Mobile ─────────────────────────────────────────────────────────────── */
+
+@media (max-width: 40rem) {
+  .banner {
+    margin: var(--s-3) var(--s-3) 0;
+    flex-wrap: wrap;
+  }
+
+  /* Four inputs on one row is four slivers on a 375px screen. */
+  .filters {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .filter-search {
+    flex: none;
+  }
+
+  /* The tab strip scrolls rather than wrapping into two rows that move the
+     content down every time one is selected. */
+  .tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .composer-tools {
+    flex-wrap: wrap;
+  }
+
+  .composer-tools .composer-hint {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .composer-model {
+    flex: 1 1 6rem;
+  }
+
+  /* The copy button would sit on top of the first line of a narrow block. */
+  .copy {
+    position: static;
+    opacity: 1;
+    margin: var(--s-2) var(--s-2) 0;
+  }
+
+  .keys .row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--s-1);
+  }
+}

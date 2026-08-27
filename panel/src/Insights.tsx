@@ -6,6 +6,7 @@ import {
   type ContextReport,
   type CostReport,
   type RouteInfo,
+  type RunSummary,
 } from './api'
 import { money } from './Board'
 import { navigate } from './router'
@@ -44,6 +45,7 @@ export function Insights({ project }: { project: string | null }) {
         intro="Real spend, the same volume repriced against other models, and the tokens every turn pays before you have typed anything."
       />
       <Cost project={project} />
+      <RecentSpend project={project} />
       <Context project={project} />
       <Reports project={project} />
     </div>
@@ -72,7 +74,13 @@ function Cost({ project }: { project: string }) {
   }, [load])
 
   if (error)
-    return <Failed title="Could not read cost" detail={error} action={{ label: 'Try again', onClick: () => void load() }} />
+    return (
+      <Failed
+        title="Could not read cost"
+        detail={error}
+        action={{ label: 'Try again', onClick: () => void load() }}
+      />
+    )
   if (!report) return <Loading what="cost" />
 
   if (report.rows.length === 0) {
@@ -100,6 +108,9 @@ function Cost({ project }: { project: string }) {
     null,
   )
 
+  const cacheRead = report.rows.reduce((n, r) => n + r.cache_read_tokens, 0)
+  const cacheWrite = report.rows.reduce((n, r) => n + r.cache_write_tokens, 0)
+
   return (
     <section>
       <span className="eyebrow">Total spend</span>
@@ -120,11 +131,27 @@ function Cost({ project }: { project: string }) {
               <br />
               <span className="muted">
                 {r.input_tokens.toLocaleString()} in · {r.output_tokens.toLocaleString()} out
+                {/* Cache traffic was on the wire from the first release and
+                    rendered nowhere. For anyone using prompt caching it is the
+                    interesting number: a repo that is 80% cache reads is
+                    paying a fraction of what its input count implies. */}
+                {r.cache_read_tokens > 0 && ` · ${r.cache_read_tokens.toLocaleString()} cache read`}
+                {r.cache_write_tokens > 0 &&
+                  ` · ${r.cache_write_tokens.toLocaleString()} cache write`}
               </span>
             </span>
           </div>
         ))}
       </div>
+
+      {(cacheRead > 0 || cacheWrite > 0) && (
+        <p className="section-intro">
+          {cacheRead.toLocaleString()} of those input tokens came from cache
+          {cacheWrite > 0 && `, and ${cacheWrite.toLocaleString()} were written to it`}. Cache reads
+          are billed well below fresh input on every provider that offers them, which is why the
+          totals above and the bill can disagree in your favour.
+        </p>
+      )}
 
       {alternatives.length > 0 && (
         <>
@@ -136,7 +163,14 @@ function Cost({ project }: { project: string }) {
           </p>
           <div className="bars">
             {[
-              { model: report.rows[0]?.key ?? 'this repo', usd: report.total_usd, actual: true },
+              // Named after the model only when there was one. With two in the
+              // rows above, labelling the total with the first one reads as
+              // that model's spend and is off by the other model's.
+              {
+                model: report.rows.length === 1 ? report.rows[0].key : 'this repo',
+                usd: report.total_usd,
+                actual: true,
+              },
               ...alternatives.map((c) => ({
                 model: c.model,
                 usd: c.would_cost_usd,
@@ -168,6 +202,90 @@ function Cost({ project }: { project: string }) {
           )}
         </>
       )}
+    </section>
+  )
+}
+
+/* ── Where it went ─────────────────────────────────────────────────────── */
+
+/** How many runs are priced individually. Named because the cap is stated. */
+const RECENT = 10
+
+/**
+ * Spend, per run, newest first.
+ *
+ * `cost` is a lifetime total by model, which answers "what has this cost" and
+ * not "what cost it" — and the second question is the one that changes what
+ * you do next. There is no server route for a time series, so this reads the
+ * run list and prices the newest few from their own snapshots.
+ *
+ * **The cap is deliberate and stated on screen.** One request per run means
+ * pricing a repo with two hundred runs would be two hundred requests to draw a
+ * bar chart. Ten is enough to see a trend; silently truncating to ten and
+ * calling it "spend by run" would be the dishonest version.
+ */
+function RecentSpend({ project }: { project: string }) {
+  const [rows, setRows] = useState<{ run: RunSummary; usd: number }[] | null>(null)
+  const [totalRuns, setTotalRuns] = useState(0)
+
+  useEffect(() => {
+    let live = true
+    void (async () => {
+      try {
+        const runs = await api.runs(project)
+        if (!live) return
+        setTotalRuns(runs.length)
+        const priced = await Promise.all(
+          runs.slice(0, RECENT).map(async (run) => {
+            try {
+              const state = await api.run(project, run.run_id)
+              return { run, usd: state.totals.usd }
+            } catch {
+              return { run, usd: 0 }
+            }
+          }),
+        )
+        if (live) setRows(priced)
+      } catch {
+        // The section is an extra. Cost above is the report.
+        if (live) setRows([])
+      }
+    })()
+    return () => {
+      live = false
+    }
+  }, [project])
+
+  if (!rows || rows.length === 0) return null
+
+  const ceiling = Math.max(...rows.map((r) => r.usd), 0.0001)
+
+  return (
+    <section>
+      <h2 className="section-head">Recent runs, by spend</h2>
+      <p className="section-intro">
+        {totalRuns > RECENT
+          ? `The newest ${RECENT} of ${totalRuns} runs — each one is a separate read, so this stops at ${RECENT} rather than making a request per run in the repo.`
+          : 'Every run in this repo.'}
+      </p>
+      <div className="bars">
+        {rows.map(({ run, usd }) => (
+          <div key={run.run_id} className="bar-row">
+            <button
+              type="button"
+              className="figure bar-label bar-link truncate"
+              onClick={() => navigate(`/runs/${run.run_id}`)}
+              title={run.goal}
+            >
+              {run.goal}
+            </button>
+            <span className="bar-track">
+              <span className="bar-fill" style={{ width: `${(usd / ceiling) * 100}%` }} />
+            </span>
+            <span className="figure bar-value">{money(usd)}</span>
+          </div>
+        ))}
+      </div>
     </section>
   )
 }
@@ -278,8 +396,19 @@ function Reports({ project }: { project: string }) {
   if (!schema) return null
 
   // Read-only, project-scoped, no path parameter left to fill, and not one of
-  // the surfaces that already has a screen of its own.
-  const own = ['/cost', '/context', '/pilot', '/sessions']
+  // the surfaces that already has a screen of its own — which now includes
+  // diff, explain, review and attest, since Changes gives all four a home with
+  // their arguments attached.
+  const own = [
+    '/cost',
+    '/context',
+    '/pilot',
+    '/sessions',
+    '/diff',
+    '/explain',
+    '/review',
+    '/attest',
+  ]
   const routes = schema.routes.filter(
     (r) =>
       r.method === 'GET' &&
@@ -352,18 +481,54 @@ function Reports({ project }: { project: string }) {
  * The routes promise exactly this: output that parses as JSON comes back as
  * JSON, anything else as `{stdout, stderr, exit}` which "is honest about being
  * text". So this checks which it got instead of assuming.
+ *
+ * Shared with the Changes screen and the Overview's maintenance list, so a
+ * command's output looks the same wherever it is run from.
  */
-function Output({ value }: { value: unknown }) {
+export function Output({ value }: { value: unknown }) {
   if (isTextOutput(value)) {
     return (
       <>
-        {value.exit !== 0 && (
-          <p className="is-failed dot figure">exited {value.exit}</p>
-        )}
-        <pre className="report figure">{value.stdout || '(no output)'}</pre>
+        {value.exit !== 0 && <p className="is-failed dot figure">exited {value.exit}</p>}
+        {value.stdout ? <Report text={value.stdout} /> : <pre className="report figure">(no output)</pre>}
         {value.stderr.trim() && <pre className="report figure is-failed">{value.stderr}</pre>}
       </>
     )
   }
   return <pre className="report figure">{JSON.stringify(value, null, 2)}</pre>
+}
+
+/**
+ * A command's stdout, with its verdicts carrying the palette.
+ *
+ * `doctor` is the report the README brags about — which containment is
+ * actually active on this machine — and it rendered as an undifferentiated
+ * block of terminal text. It already marks each line with a glyph, so this
+ * gives those lines the hue that glyph already means. Nothing is *invented*:
+ * a line with no verdict marker gets no colour, which is the same rule the
+ * rest of the panel follows.
+ */
+function Report({ text }: { text: string }) {
+  return (
+    <pre className="report figure">
+      {text.split('\n').map((line, i) => {
+        const cls = verdict(line)
+        return (
+          <span key={i} className={cls ?? undefined}>
+            {line}
+            {'\n'}
+          </span>
+        )
+      })}
+    </pre>
+  )
+}
+
+/** The three states, from the glyphs the CLI already prints. */
+export function verdict(line: string): string | null {
+  const t = line.trimStart()
+  if (/^[✓✔]/.test(t)) return 'is-proven'
+  if (/^[✗✕✘×]/.test(t)) return 'is-failed'
+  if (/^[⚠!]/.test(t)) return 'is-asserted'
+  return null
 }

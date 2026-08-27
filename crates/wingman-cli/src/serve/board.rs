@@ -99,6 +99,7 @@ pub async fn route(
         ("GET", ["projects"]) => get_projects(sock).await,
         ("POST", ["cards"]) => add_card(req, sock).await,
         ("GET", ["cards", id]) => get_card(id, sock).await,
+        ("PATCH", ["cards", id]) => update_card(id, req, sock).await,
         ("POST", ["cards", id, "dispatch"]) => dispatch_card(state, id, req, sock).await,
         ("POST", ["cards", id, "archive"]) => archive_card(id, req, sock).await,
         ("DELETE", ["cards", id]) => delete_card(id, sock).await,
@@ -386,6 +387,44 @@ async fn archive_card(id: &str, req: &Request, sock: &mut TcpStream) -> std::io:
     .await
 }
 
+#[derive(Deserialize, Default)]
+struct EditBody {
+    title: Option<String>,
+    goal: Option<String>,
+}
+
+/// `PATCH /v1/board/cards/{id}` — correct a card's title or goal.
+///
+/// A card is durable and outlives its runs, so the wording of a goal written
+/// weeks ago is worth being able to fix without deleting the history that goal
+/// produced. Only the keys present in the body are touched — an absent `goal`
+/// leaves the stored one alone rather than clearing it, which is the
+/// difference between an edit form that ships one field and one that silently
+/// wipes the other.
+async fn update_card(id: &str, req: &Request, sock: &mut TcpStream) -> std::io::Result<()> {
+    let body: EditBody = match req.json() {
+        Ok(b) => b,
+        Err(e) => return http::write_err(sock, 400, &e).await,
+    };
+    if body.title.is_none() && body.goal.is_none() {
+        return http::write_err(sock, 400, "nothing to change: send \"title\" or \"goal\"").await;
+    }
+
+    let store = or_fail!(sock, open());
+    let card = or_fail!(sock, store.find_card(id));
+    or_fail!(
+        sock,
+        store.update_card(&card.id, body.title.as_deref(), body.goal.as_deref())
+    );
+    let updated = or_fail!(sock, store.find_card(&card.id));
+    http::write_json(
+        sock,
+        200,
+        &json!({ "id": updated.id, "title": updated.title, "goal": updated.goal }),
+    )
+    .await
+}
+
 /// `DELETE /v1/board/cards/{id}` — forget a card and its dispatch history.
 ///
 /// The runs themselves are untouched: they live in the project's
@@ -413,6 +452,9 @@ pub fn schema() -> Vec<Value> {
                 "returns": "{id, short}" }),
         json!({ "method": "GET", "path": "/v1/board/cards/{card}", "auth": true,
                 "returns": "one card and its dispatch history" }),
+        json!({ "method": "PATCH", "path": "/v1/board/cards/{card}", "auth": true,
+                "body": { "title": "string?", "goal": "string?" },
+                "returns": "the card's new title and goal; absent keys are left alone" }),
         json!({ "method": "POST", "path": "/v1/board/cards/{card}/dispatch", "auth": true,
                 "body": { "again": "bool", "args": "string[] — extra pilot run flags" },
                 "returns": "{run_id, project, pid} — spawned detached" }),
