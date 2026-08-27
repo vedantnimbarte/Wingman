@@ -9,7 +9,12 @@ pub mod acceptance;
 pub mod approval;
 pub mod automerge;
 pub mod checkpoint;
-pub mod child_process;
+/// Cross-platform child-process supervision.
+///
+/// Lives in `wingman-tools` because `run_shell` needs the same tree-kill for
+/// background jobs, and tools cannot depend upward on this crate. Re-exported
+/// here so existing `crate::child_process::…` paths keep working.
+pub use wingman_tools::child_process;
 pub mod concurrency;
 pub mod control;
 pub mod critic;

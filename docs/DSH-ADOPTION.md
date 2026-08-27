@@ -36,7 +36,7 @@ Effort estimates are rough and use this scale:
 | A3 | Full plugin runtime (Cordis-equivalent) | **XL** | **Don't.** Reasoning in §A3. |
 | P1 | Tool-output spill | S–M | **Done** — `[tools].spill_tool_output`. |
 | P2 | Repeat-tool-call guard | S | **Done** — `[tools].repeat_thresholds`. |
-| P3 | Background jobs | M | Do it. |
+| P3 | Background jobs | M | **Done** — `run_shell(background)` + `job_output`/`job_stop`/`job_list`. See [0011](decisions/0011-background-jobs.md). |
 | P4 | Tool-result pruning before compaction | S–M | **Done** — `[tools].prune_threshold_chars`. |
 | P5 | Per-call tool deadlines | S | **Done** — `[tools].tool_timeout_secs`. |
 | P6 | Named tool presets | S | **Done** — `--preset review`, 24 tools → 13. |

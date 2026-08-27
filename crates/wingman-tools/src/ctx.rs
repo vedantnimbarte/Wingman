@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use wingman_config::PermissionMode;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolCtx {
     /// Permission mode, held behind an atomic so a live session (e.g. the
     /// TUI `/mode` picker) can re-gate the running agent's tools without
@@ -28,6 +28,13 @@ pub struct ToolCtx {
     /// agent has presented a plan *and* the user accepted it. Shared like
     /// `mode`, so approving once re-gates every clone.
     plan_approved: Arc<AtomicBool>,
+    /// Background shell jobs for this session.
+    ///
+    /// Shared across clones — deliberately, like `mode`. A subagent inherits
+    /// the parent's `ToolCtx`, so a job it starts belongs to the session
+    /// rather than to a child that is about to disappear; giving children
+    /// their own table would orphan whatever they left running.
+    pub jobs: Arc<crate::jobs::JobTable>,
 }
 
 /// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
@@ -61,6 +68,7 @@ impl ToolCtx {
             allow_network: false,
             shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
+            jobs: Arc::new(crate::jobs::JobTable::new()),
         }
     }
 
@@ -81,6 +89,7 @@ impl ToolCtx {
             allow_network,
             shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
+            jobs: Arc::new(crate::jobs::JobTable::new()),
         }
     }
 

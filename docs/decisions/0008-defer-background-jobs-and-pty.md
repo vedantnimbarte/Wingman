@@ -1,6 +1,6 @@
 # 0008 — Background jobs and persistent PTY wait for the ceiling to bite
 
-**Status:** deferred
+**Status:** superseded by [0011](0011-background-jobs.md) for jobs; PTY still deferred
 **Date:** 2026-08-27
 
 ## Context

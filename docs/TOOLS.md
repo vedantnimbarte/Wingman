@@ -329,6 +329,45 @@ Finished release [optimized] target(s) in 42.5s
 - `git commit --amend`
 - `dd if=/dev/sda`
 
+## Background Jobs
+
+`run_shell` blocks the turn and is capped at 600s, which rules out dev
+servers, watch processes, and cold builds of a large workspace. Passing
+`background: true` starts the command and returns a job id instead of waiting.
+
+A background command goes through exactly the same preparation as a
+foreground one — permission mode, project denylist, OS sandbox, and the
+credential scrub off the child's environment. It is not a less-guarded
+command; it is the same command, not waited on.
+
+```
+run_shell(command="npm run dev", background=true)
+→ started job-1
+```
+
+Output is buffered up to 128 KiB, keeping the **most recent** bytes — a
+build's errors and a server's latest request are both at the end. When
+earlier output is dropped the buffer says so, so a partial log never reads as
+a complete one.
+
+Every job is killed along with its whole process tree when the session ends,
+so a forgotten dev server does not outlive the agent that started it.
+
+### `job_output`
+
+Read what a job has printed so far, plus its state (`running`, `exited(0)`,
+`killed`). Args: `id` (required). Safe to call repeatedly while it runs.
+
+### `job_stop`
+
+Stop a job and its whole process tree — killing `sh` alone would leave `npm`,
+and `npm` would leave `node`. Args: `id` (required). Stopping an
+already-finished job is not an error.
+
+### `job_list`
+
+One line per job: id, state, elapsed time, and the command. No arguments.
+
 ## Web Tools
 
 ### `web_fetch`
@@ -805,7 +844,10 @@ faster model while the parent session keeps the strongest one. An explicit
 | `glob`              | Y    | —     | —     | always     | File discovery                 |
 | `grep`              | Y    | —     | —     | always     | Content search                 |
 | `list_dir`          | Y    | —     | —     | always     | Directory listing              |
-| `run_shell`         | —    | —     | Y     | mode/list  | Shell execution                |
+| `run_shell`         | —    | —     | Y     | mode/list  | Shell execution; `background` starts a job |
+| `job_output`        | Y    | —     | —     | always     | Read a background job's output  |
+| `job_stop`          | —    | —     | Y     | mode/list  | Kill a job and its process tree |
+| `job_list`          | Y    | —     | —     | always     | List this session's jobs        |
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
 | `web_search`        | Y    | —     | —     | always     | DuckDuckGo search (no key)     |
 | `semantic_search`   | Y    | —     | —     | always     | RAG index search               |

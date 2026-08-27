@@ -21,6 +21,9 @@ struct Args {
     cwd: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
+    /// Start it and return a job id instead of waiting.
+    #[serde(default)]
+    background: bool,
 }
 
 /// Say once per process that shell commands are running unconfined, so the
@@ -67,14 +70,17 @@ impl Tool for RunShell {
         ToolSpec {
             name: "run_shell".into(),
             description: "Execute a shell command and return its combined stdout/stderr. Times \
-                          out after 60s by default."
+                          out after 60s by default (max 600). Set `background: true` to start it \
+                          and get a job id back instead of waiting - then use job_output, \
+                          job_stop and job_list."
                 .into(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "cwd": { "type": "string", "description": "Working directory; defaults to project root." },
-                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600 }
+                    "timeout_secs": { "type": "integer", "minimum": 1, "maximum": 600 },
+                    "background": { "type": "boolean", "default": false, "description": "Start the command and return a job id immediately instead of waiting. Use for dev servers, watch processes, and builds longer than the 600s ceiling; collect output with job_output." }
                 },
                 "required": ["command"],
                 "additionalProperties": false
@@ -87,82 +93,25 @@ impl Tool for RunShell {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
         };
-        if !ctx.allows_shell() {
-            return ToolOutcome::err(format!("shell denied under permission mode {}", ctx.mode()));
+        let (cmd, policy) = match prepare(&args, ctx) {
+            Ok(v) => v,
+            Err(e) => return ToolOutcome::err(e),
+        };
+        if args.background {
+            // Same prepared command, so the sandbox policy, denylist and
+            // env scrub applied identically - a background command is not
+            // a less-guarded one.
+            let supervised = crate::child_process::SupervisedCommand::from_command(cmd);
+            return match ctx.jobs.start(&args.command, supervised) {
+                Ok(id) => ToolOutcome::ok(format!(
+                    "started {id}\nCollect output with job_output(id: \"{id}\"); stop it with \
+                     job_stop. It is killed with its whole process tree when the session ends."
+                )),
+                Err(e) => ToolOutcome::err(e),
+            };
         }
-        if ctx.is_shell_denied(&args.command) {
-            return ToolOutcome::err(format!(
-                "shell command denied by project denylist: {}",
-                args.command
-            ));
-        }
-        let cwd = args
-            .cwd
-            .as_deref()
-            .map(|p| ctx.resolve(p))
-            .unwrap_or_else(|| ctx.project_root.clone());
-
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(60).min(600));
-
-        // OS-level containment. The permission modes confine the *file
-        // tools* to the project tree, but a shell command can otherwise read
-        // anything the user can — so `cat ~/.ssh/id_rsa` succeeded in the very
-        // mode where `read_file` on that path was refused. See `crate::sandbox`.
-        let policy = ctx.shell_sandbox.as_str();
-        let sandboxed = if policy == "off" {
-            None
-        } else {
-            crate::sandbox::wrap(&args.command, &ctx.project_root, &std::env::temp_dir())
-        };
-
-        // `required` means "the filesystem is confined", so it gates on
-        // `scopes_filesystem` rather than on any mechanism being present:
-        // the Windows Job Object is real containment but not *that* one, and
-        // accepting it here would silently weaken an opt-in.
-        if policy == "required" && !crate::sandbox::availability().scopes_filesystem() {
-            return ToolOutcome::err(format!(
-                "refusing to run: [tools].shell_sandbox is `required` but no filesystem-scoping sandbox is available on this machine ({}). Install bubblewrap (Linux), use macOS, or set `shell_sandbox = \"auto\"` to accept weaker containment.",
-                crate::sandbox::availability().label()
-            ));
-        }
-
-        let mut cmd = match &sandboxed {
-            Some(argv) => {
-                let mut c = Command::new(&argv[0]);
-                c.args(&argv[1..]);
-                c
-            }
-            None => {
-                if policy == "auto" {
-                    warn_unconfined_once();
-                }
-                if cfg!(windows) {
-                    let mut c = Command::new("cmd.exe");
-                    c.arg("/C").arg(&args.command);
-                    c
-                } else {
-                    let mut c = Command::new("sh");
-                    c.arg("-c").arg(&args.command);
-                    c
-                }
-            }
-        };
-        cmd.current_dir(&cwd);
-        // Don't hand the child our API keys. It has no need for them, and a
-        // shell command is the easiest place for an injected instruction to
-        // read one out of the environment and send it somewhere.
-        for (k, _) in std::env::vars() {
-            let upper = k.to_ascii_uppercase();
-            if upper.ends_with("_API_KEY")
-                || upper.ends_with("_TOKEN")
-                || upper.starts_with("AWS_")
-                || upper == "GITHUB_TOKEN"
-            {
-                cmd.env_remove(k);
-            }
-        }
-
-        let output = match run_captured(cmd, timeout, policy).await {
+        let output = match run_captured(cmd, timeout, &policy).await {
             Ok(o) => o,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -195,6 +144,92 @@ impl Tool for RunShell {
             ToolOutcome::err(body)
         }
     }
+}
+
+/// Everything that has to happen before a shell command may run:
+/// permission mode, the project denylist, cwd resolution, OS-level
+/// containment, and scrubbing credentials out of the child's environment.
+///
+/// Extracted so the foreground and background paths cannot drift apart.
+/// A second copy of this is a second place for the sandbox policy or the
+/// denylist to be subtly wrong, and only one of them would be tested.
+///
+/// Returns the configured command and the resolved sandbox policy.
+fn prepare(args: &Args, ctx: &ToolCtx) -> Result<(Command, String), String> {
+    if !ctx.allows_shell() {
+        return Err(format!("shell denied under permission mode {}", ctx.mode()));
+    }
+    if ctx.is_shell_denied(&args.command) {
+        return Err(format!(
+            "shell command denied by project denylist: {}",
+            args.command
+        ));
+    }
+    let cwd = args
+        .cwd
+        .as_deref()
+        .map(|p| ctx.resolve(p))
+        .unwrap_or_else(|| ctx.project_root.clone());
+
+    // OS-level containment. The permission modes confine the *file
+    // tools* to the project tree, but a shell command can otherwise read
+    // anything the user can — so `cat ~/.ssh/id_rsa` succeeded in the very
+    // mode where `read_file` on that path was refused. See `crate::sandbox`.
+    let policy = ctx.shell_sandbox.as_str();
+    let sandboxed = if policy == "off" {
+        None
+    } else {
+        crate::sandbox::wrap(&args.command, &ctx.project_root, &std::env::temp_dir())
+    };
+
+    // `required` means "the filesystem is confined", so it gates on
+    // `scopes_filesystem` rather than on any mechanism being present:
+    // the Windows Job Object is real containment but not *that* one, and
+    // accepting it here would silently weaken an opt-in.
+    if policy == "required" && !crate::sandbox::availability().scopes_filesystem() {
+        return Err(format!(
+            "refusing to run: [tools].shell_sandbox is `required` but no filesystem-scoping sandbox is available on this machine ({}). Install bubblewrap (Linux), use macOS, or set `shell_sandbox = \"auto\"` to accept weaker containment.",
+            crate::sandbox::availability().label()
+        ));
+    }
+
+    let mut cmd = match &sandboxed {
+        Some(argv) => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+        None => {
+            if policy == "auto" {
+                warn_unconfined_once();
+            }
+            if cfg!(windows) {
+                let mut c = Command::new("cmd.exe");
+                c.arg("/C").arg(&args.command);
+                c
+            } else {
+                let mut c = Command::new("sh");
+                c.arg("-c").arg(&args.command);
+                c
+            }
+        }
+    };
+    cmd.current_dir(&cwd);
+    // Don't hand the child our API keys. It has no need for them, and a
+    // shell command is the easiest place for an injected instruction to
+    // read one out of the environment and send it somewhere.
+    for (k, _) in std::env::vars() {
+        let upper = k.to_ascii_uppercase();
+        if upper.ends_with("_API_KEY")
+            || upper.ends_with("_TOKEN")
+            || upper.starts_with("AWS_")
+            || upper == "GITHUB_TOKEN"
+        {
+            cmd.env_remove(k);
+        }
+    }
+
+    Ok((cmd, policy.to_string()))
 }
 
 /// Spawn, capture, and time out — with whatever post-spawn containment the
