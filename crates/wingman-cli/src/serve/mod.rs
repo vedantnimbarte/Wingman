@@ -29,6 +29,7 @@ mod push;
 mod routes;
 mod sessions;
 mod table;
+mod timeline;
 mod ui;
 
 use std::process::ExitCode;

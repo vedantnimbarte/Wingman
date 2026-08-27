@@ -1924,10 +1924,43 @@ textarea.input::placeholder {
   white-space: nowrap;
 }
 
-/* ── Insights ───────────────────────────────────────────────────────────── */
+/* -- Insights ------------------------------------------------------------ */
 
-/* The one big figure on the page. Cost gets typography, not colour — that is
-   the palette rule, and a green total would read as "good" rather than "spent". */
+/*
+ * The charts.
+ *
+ * Every one of them is drawn in `--ink` and the neutrals. That is not a
+ * limitation worked around -- it is the palette rule holding at the one place
+ * a design usually breaks it, because a chart library's default categorical
+ * ramp would put six meaningless hues next to the three that mean proven,
+ * running and failed. Series are separated by ink density, texture and a
+ * hairline instead, all of which survive greyscale and colour blindness.
+ *
+ * The three status hues appear on exactly one chart here: runs by outcome,
+ * where the thing being charted *is* a verdict.
+ */
+
+/* Each block on the page is a card in everything but border: a hairline under
+   it, and air around it. Six stacked sections with no separation read as one
+   very long section. */
+.panel {
+  padding-bottom: var(--s-6);
+  border-bottom: 1px solid var(--rule);
+}
+
+.panel:last-child {
+  border-bottom: 0;
+}
+
+.panel > .section-head:first-child,
+.panel > .eyebrow:first-child,
+.panel > .chart-bar:first-child .section-head {
+  margin-top: var(--s-5);
+}
+
+/* The one big figure on the page. Cost gets typography, not colour -- that is
+   the palette rule, and a green total would read as "good" rather than
+   "spent". */
 .headline {
   font-family: var(--mono);
   font-variant-numeric: tabular-nums;
@@ -1938,43 +1971,167 @@ textarea.input::placeholder {
   margin: var(--s-2) 0 var(--s-1);
 }
 
-.bars {
+/* A chart's own label, under a section head rather than beside it. Smaller
+   than `.section-head`, or every chart announces itself as a new section. */
+.chart-head {
+  font-size: var(--t-base);
+  font-weight: var(--w-bold);
+  letter-spacing: 0.01em;
+  margin: var(--s-5) 0 var(--s-2);
+}
+
+/* A section head with a control parked on its baseline. */
+.chart-bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-4);
+  flex-wrap: wrap;
+  max-width: 46rem;
+}
+
+.chart-bar .section-intro {
+  margin-bottom: 0;
+}
+
+/* A figure that leads a chart: smaller than the headline, same tabular rail. */
+.chart-figure {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t-lg);
+  font-weight: var(--w-bold);
+  margin: var(--s-4) 0 var(--s-2);
+}
+
+/* -- Stacked bar ---------------------------------------------------------
+ *
+ * One bar, several series. `--tone` is the ink density a component hands in
+ * per segment; the hairline between segments is the surface showing through,
+ * drawn as a shadow so it costs no width and cannot push the last segment out
+ * of the bar. */
+.stack {
+  display: flex;
+  height: 0.875rem;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--sunken);
+  max-width: 46rem;
+}
+
+.stack-seg {
+  --tone: 1;
+  height: 100%;
+  min-width: 2px;
+  background: color-mix(in srgb, var(--ink) calc(var(--tone) * 100%), transparent);
+  box-shadow: 1px 0 0 var(--surface);
+}
+
+.stack-seg:last-child {
+  box-shadow: none;
+}
+
+/* Cache reads are hatched rather than tinted -- the only texture on the page.
+   It means "not fresh input", which is a fact about the tokens, not a series
+   colour standing in for a name. */
+.stack-seg.is-cached {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--ink) 55%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+/* Runs by outcome: the one chart where the status hues are the data. */
+.stack-seg.is-proven {
+  background: var(--proven);
+}
+.stack-seg.is-asserted {
+  background: var(--asserted);
+}
+.stack-seg.is-failed {
+  background: var(--failed);
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-5);
+  margin: var(--s-2) 0 var(--s-3);
+  max-width: 46rem;
+  font-size: var(--t-sm);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  min-width: 0;
+}
+
+.legend-key {
+  --tone: 1;
+  flex: none;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--ink) calc(var(--tone) * 100%), transparent);
+}
+
+.legend-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+
+/* -- The repricing ladder ------------------------------------------------
+ *
+ * The page's signature. Every model on one log axis, with a dashed datum at
+ * what was actually paid: cheaper models stop short of it, dearer ones cross
+ * it, and the crossing is the whole argument.
+ *
+ * The side columns are fixed widths held in variables rather than `minmax`,
+ * because the datum and the axis ticks are positioned with arithmetic against
+ * them -- a track whose left edge only the layout engine knows cannot have a
+ * line drawn through it at a computed percentage. */
+.ladder {
+  --lab: 11.5rem;
+  --val: 4.75rem;
+  --gap: var(--s-3);
+  position: relative;
   display: grid;
   gap: var(--s-1);
+  /* Room above the first row for the datum's tag. */
+  padding-top: var(--s-5);
   margin: var(--s-3) 0 var(--s-4);
   max-width: 46rem;
 }
 
-.bar-row {
+.ladder-row {
   display: grid;
-  grid-template-columns: minmax(8rem, 15rem) 1fr minmax(3.5rem, auto);
-  gap: var(--s-3);
+  grid-template-columns: var(--lab) 1fr var(--val);
+  gap: var(--gap);
   align-items: center;
   font-size: var(--t-sm);
 }
 
-.bar-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.ladder-label {
   color: var(--muted);
 }
 
-.bar-track {
+.ladder-track {
   height: 0.5rem;
   background: var(--raised);
   border-radius: var(--r-pill);
   overflow: hidden;
 }
 
-.bar-fill {
+.ladder-fill {
   display: block;
   height: 100%;
   background: var(--faint);
   border-radius: var(--r-pill);
 }
 
-.bar-value {
+.ladder-value {
   text-align: right;
   font-variant-numeric: tabular-nums;
   color: var(--muted);
@@ -1982,14 +2139,256 @@ textarea.input::placeholder {
 
 /* The row you actually paid for. Marked by weight and a darker fill rather
    than a hue, so it reads as "this one" and not as a verdict. */
-.bar-actual .bar-label,
-.bar-actual .bar-value {
+.ladder-row.is-actual .ladder-label,
+.ladder-row.is-actual .ladder-value {
   font-weight: var(--w-bold);
   color: var(--ink);
 }
 
-.bar-actual .bar-fill {
+.ladder-row.is-actual .ladder-fill {
   background: var(--ink);
+}
+
+/* `--at` is a 0-1 fraction from the log scale. The arithmetic converts it to
+   a position inside the track column, which starts after the label and ends
+   before the value. */
+.ladder-datum {
+  position: absolute;
+  top: var(--s-5);
+  bottom: 2rem;
+  left: calc(
+    var(--lab) + var(--gap) + var(--at) * (100% - var(--lab) - var(--val) - var(--gap) * 2)
+  );
+  border-left: 1px dashed var(--ink);
+  pointer-events: none;
+}
+
+.ladder-datum-tag {
+  position: absolute;
+  top: -1.4rem;
+  left: 0;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+  font-variant-numeric: tabular-nums;
+  background: var(--paper);
+  padding: 0 var(--s-1);
+}
+
+.ladder-axis {
+  position: relative;
+  height: 1.5rem;
+  margin: var(--s-2) calc(var(--val) + var(--gap)) 0 calc(var(--lab) + var(--gap));
+  border-top: 1px solid var(--rule);
+}
+
+.ladder-tick {
+  position: absolute;
+  top: var(--s-2);
+  left: calc(var(--at) * 100%);
+  transform: translateX(-50%);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.ladder-tick::before {
+  content: '';
+  position: absolute;
+  top: calc(var(--s-2) * -1);
+  left: 50%;
+  width: 1px;
+  height: var(--s-1);
+  background: var(--rule-strong);
+}
+
+/* The end ticks anchor inward instead of centring on the axis ends, or the
+   first one hangs into the page gutter once the track runs edge to edge on a
+   phone. Their marks move with them so the label still names the position it
+   is pointing at. */
+.ladder-tick:first-child {
+  transform: none;
+}
+
+.ladder-tick:first-child::before {
+  left: 0;
+}
+
+.ladder-tick:last-child {
+  transform: translateX(-100%);
+}
+
+.ladder-tick:last-child::before {
+  left: 100%;
+}
+
+/* -- Drawn charts --------------------------------------------------------
+ *
+ * SVG only where the shape is a curve CSS cannot draw, and geometry only:
+ * every label lives in HTML beside the chart. Text inside a `viewBox` scales
+ * with the box, so a chart that is legible on a laptop sets 6px type on a
+ * phone. Paths alone stretch to any width, which is why these can take
+ * `preserveAspectRatio="none"` and a non-scaling stroke. */
+.area {
+  display: block;
+  width: 100%;
+  height: 7.5rem;
+  margin: var(--s-2) 0;
+  max-width: 46rem;
+}
+
+.area-fill {
+  fill: var(--ink);
+  opacity: 0.1;
+}
+
+.area-line {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.axis-dates {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  max-width: 46rem;
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--rule);
+  font-size: var(--t-xs);
+}
+
+.axis-peak {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.pareto {
+  display: block;
+  width: 100%;
+  height: 9rem;
+  margin: var(--s-3) 0 var(--s-2);
+  max-width: 46rem;
+}
+
+.pareto-bar {
+  fill: var(--ink);
+  opacity: 0.28;
+}
+
+.pareto-bar:hover {
+  opacity: 0.6;
+}
+
+.pareto-curve {
+  fill: none;
+  stroke: var(--ink);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+}
+
+.pareto-marker {
+  stroke: var(--rule-strong);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+}
+
+/* -- Window switcher -----------------------------------------------------
+ *
+ * Emphasis is the ink surface, not a fourth colour -- the same rule the
+ * primary button follows. */
+.segmented {
+  display: inline-flex;
+  flex: none;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  overflow: hidden;
+}
+
+.segmented-option {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0 var(--s-3);
+  height: var(--control);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    background var(--fast) var(--ease),
+    color var(--fast) var(--ease);
+}
+
+.segmented-option + .segmented-option {
+  border-left: 1px solid var(--rule);
+}
+
+.segmented-option:hover {
+  background: var(--raised);
+  color: var(--ink);
+}
+
+.segmented-option.is-on {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+/* -- Reports -------------------------------------------------------------
+ *
+ * The long tail of CLI commands. They were a list of bare toggles, which gave
+ * a `doctor` report the same weight as one line of a table. As cards they read
+ * as what they are: things you can run, each with what it will tell you. */
+.report-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
+  gap: var(--s-2);
+  margin: var(--s-3) 0 var(--s-4);
+  max-width: 46rem;
+}
+
+.report-card {
+  display: grid;
+  align-content: start;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  text-align: left;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  cursor: pointer;
+  transition:
+    border-color var(--fast) var(--ease),
+    background var(--fast) var(--ease);
+}
+
+.report-card:hover {
+  background: var(--raised);
+  border-color: var(--rule-strong);
+}
+
+.report-card.is-open {
+  border-color: var(--ink);
+}
+
+.report-name {
+  font-weight: var(--w-bold);
+}
+
+.report-about {
+  font-size: var(--t-xs);
+  line-height: var(--lh-snug);
+}
+
+.report-action {
+  font-size: var(--t-xs);
+  color: var(--faint);
 }
 
 .report {
@@ -2138,6 +2537,36 @@ textarea.input::placeholder {
   }
   .bar-value {
     grid-area: value;
+  }
+
+  /* Zeroing the side columns re-points the datum and the axis ticks at a
+     full-width track -- the same arithmetic, different variables. */
+  .ladder {
+    --lab: 0px;
+    --val: 0px;
+    --gap: 0px;
+  }
+
+  .ladder-row {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      'label value'
+      'track track';
+    gap: 0.2rem var(--s-3);
+  }
+
+  .ladder-label {
+    grid-area: label;
+  }
+  .ladder-track {
+    grid-area: track;
+  }
+  .ladder-value {
+    grid-area: value;
+  }
+
+  .report-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .headline {

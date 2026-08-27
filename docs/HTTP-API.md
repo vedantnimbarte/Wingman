@@ -237,6 +237,36 @@ and shows up in `wingman session list` like any other.
 A turn holds one slot of `max_concurrent_turns`; a second turn on the *same*
 session returns `409` while the first is in flight.
 
+### Cost over time
+
+`cost` reports `~/.wingman/usage.json`: a machine-wide running total with no
+timestamps in it, so it cannot answer "what did last week cost" or "what does
+*this* repo cost". Both answers are already on disk — every transcript carries
+`usage_delta` records with a timestamp, and `session_start` names the model
+they were billed at — so this walks `<project>/.wingman/sessions/*.jsonl` and
+prices each delta. It is a native handler rather than a table row because
+there is no subcommand behind it.
+
+| Method | Path | Params | Returns |
+|---|---|---|---|
+| `GET` | `/v1/projects/{p}/cost/timeline` | `days` — window ending today (default 30, max 365) | `{days[], models[], window_usd, total_usd, total_turns, first_day, last_day, sessions, unpriced_turns}` |
+
+Three things it guarantees, because a spend chart that gets them wrong is
+worse than no chart:
+
+- **Days are gap-filled.** A quiet day is a zero in the series, not an
+  absence — plotting three recorded days evenly spaced claims they were
+  consecutive.
+- **It never reads `usage.json`.** That total and this one measure different
+  things, and they will disagree. Whichever you show, label which it is.
+- **Unpriceable turns are counted, not dropped.** A model missing from the
+  pricing table lands in `unpriced_turns`, so a total that is short says so
+  instead of quietly understating the bill.
+
+`first_day`/`last_day` describe the whole history behind the window, so a
+client can say "nothing in the last 30 days, and the last session was in
+February" rather than drawing an empty chart.
+
 ### Reads and admin (table-driven)
 
 Each runs the named subcommand in the project root. Output that parses as JSON
