@@ -1,4 +1,4 @@
-# 0014 — The panel's diff is not green and red
+# 0016 — The panel's diff is not green and red
 
 **Status:** accepted
 **Date:** 2026-08-27

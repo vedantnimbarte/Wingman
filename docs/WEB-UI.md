@@ -388,7 +388,7 @@ epistemic status. So the two sides are told apart by ground and by a gutter
 glyph — an addition on `--raised` with a `+`, a deletion on `--sunken` in
 `--muted` with a `−` — which is the same two-channel treatment every status in
 the panel already gets. See
-[decisions/0014](decisions/0014-the-diff-is-not-green-and-red.md).
+[decisions/0016](decisions/0016-the-diff-is-not-green-and-red.md).
 
 ## Maintenance
 
