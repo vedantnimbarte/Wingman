@@ -57,3 +57,4 @@ pointer. The history of what we believed is the point.
 | [0010](0010-claude-code-hooks-are-imported-not-adopted.md) | Claude Code hooks are imported opt-in, trust-gated, and translated | accepted |
 | [0011](0011-background-jobs.md) | Background jobs are a process table, not a capability seam | accepted |
 | [0012](0012-stdin-instead-of-a-pty.md) | Processes are driven over stdin; no PTY | accepted |
+| [0013](0013-no-speculative-seams.md) | No speculative seams; extract when a second implementation arrives | accepted |

@@ -53,10 +53,9 @@ impl IndexStore {
     /// are recorded on first open; subsequent opens against a different
     /// embedder return [`RagError::DimMismatch`].
     pub fn open(db_path: &Path, embedder_id: &str, dim: usize) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let conn = Connection::open(db_path)?;
+        // Shared open: WAL + a busy timeout, because background indexing
+        // writes this file while the foreground queries it.
+        let conn = crate::sqlite::open(db_path)?;
         Self::init_schema(&conn)?;
 
         let existing_id: Option<String> = conn
@@ -127,7 +126,7 @@ impl IndexStore {
         if !db_path.exists() {
             return Ok(None);
         }
-        let conn = Connection::open(db_path)?;
+        let conn = crate::sqlite::open(db_path)?;
         Self::init_schema(&conn)?;
         let id: Option<String> = conn
             .query_row(

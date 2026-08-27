@@ -113,10 +113,12 @@ impl StatsStore {
     }
 
     pub fn open(path: &Path) -> Result<Self> {
-        if let Some(p) = path.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let conn = Connection::open(path)?;
+        // Shared open: WAL + a busy timeout. `learn.db` is held open by the
+        // agent's learning hook for a whole session while `/feedback` and
+        // `/skill stats` write through their own connections — under the
+        // default journal with no timeout, the second writer fails instantly,
+        // and several call sites discard that error.
+        let conn = wingman_rag::sqlite::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS skill_usage (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,

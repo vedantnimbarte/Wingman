@@ -10,6 +10,9 @@ description = "Persistent, multi-project kanban board over wingman pilot runs."
 [dependencies]
 wingman-autonomous = { workspace = true }
 wingman-config = { workspace = true }
+# For the shared SQLite open (WAL + busy timeout). default-features = false
+# drops fastembed/ONNX and tree-sitter, leaving essentially rusqlite.
+wingman-rag = { workspace = true, default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

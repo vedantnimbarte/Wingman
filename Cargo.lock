@@ -4890,6 +4890,7 @@ dependencies = [
  "tracing",
  "wingman-autonomous",
  "wingman-config",
+ "wingman-rag",
 ]
 
 [[package]]
