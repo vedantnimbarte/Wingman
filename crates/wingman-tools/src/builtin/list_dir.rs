@@ -50,24 +50,20 @@ impl Tool for ListDir {
                 path.display()
             ));
         }
-        let mut rd = match tokio::fs::read_dir(&path).await {
-            Ok(rd) => rd,
+        let read = match ctx.fs.read_dir(&path).await {
+            Ok(entries) => entries,
             Err(e) => return ToolOutcome::err(format!("readdir {}: {e}", path.display())),
         };
         let mut entries: Vec<(bool, String)> = Vec::new();
-        loop {
-            match rd.next_entry().await {
-                Ok(Some(entry)) => {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if !args.hidden && name.starts_with('.') {
-                        continue;
-                    }
-                    let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
-                    entries.push((is_dir, name));
-                }
-                Ok(None) => break,
-                Err(e) => return ToolOutcome::err(format!("iter: {e}")),
+        for entry in read {
+            let name = match entry.path.file_name() {
+                Some(n) => n.to_string_lossy().into_owned(),
+                None => continue,
+            };
+            if !args.hidden && name.starts_with('.') {
+                continue;
             }
+            entries.push((entry.is_dir, name));
         }
         entries.sort_by(|a, b| (!a.0, &a.1).cmp(&(!b.0, &b.1)));
         let out: String = entries

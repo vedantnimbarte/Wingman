@@ -50,7 +50,7 @@ impl Tool for ReadSession {
         }
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolCtx) -> ToolOutcome {
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         let args: Args = match serde_json::from_value(args) {
             Ok(a) => a,
             Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
@@ -68,7 +68,7 @@ impl Tool for ReadSession {
                 ))
             }
         };
-        let text = match tokio::fs::read_to_string(&path).await {
+        let text = match ctx.fs.read_to_string(&path).await {
             Ok(t) => t,
             Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
         };
