@@ -1726,6 +1726,24 @@ pub async fn build_agent_registry_learn(
         registry.register_arc(Arc::new(wingman_tools::builtin::SpawnSubagent::new(runner)));
     }
 
+    // `run_plan` (opt-in, [tools].run_plan). Registered here rather than in
+    // `with_builtins` because it dispatches back through the registry that
+    // owns it, so it needs the `Arc` to exist first. The reference is weak:
+    // holding a strong one would make the registry own a tool that owns the
+    // registry, and neither would ever drop.
+    //
+    // Only the outer registry gets it. Subagents build their own via
+    // `base_registry`, so a plan cannot be reached from inside a subagent,
+    // the same way `spawn_subagent` is kept off them to bound recursion.
+    if cfg.tools.run_plan && !cfg.tools.disabled_tools.iter().any(|t| t == "run_plan") {
+        // Coerce first, then downgrade: unsized coercion keeps the same
+        // allocation, so this weak pointer stays valid as long as `registry`.
+        let as_dispatcher: Arc<dyn wingman_core::ToolDispatcher> = registry.clone();
+        let weak = Arc::downgrade(&as_dispatcher);
+        registry.register_arc(Arc::new(wingman_tools::builtin::RunPlan::new(weak)));
+        tracing::info!(target: "wingman::tools", "run_plan enabled");
+    }
+
     // Compose the system prompt: base + memory index + skills catalog.
     let memory_store = learn
         .as_ref()

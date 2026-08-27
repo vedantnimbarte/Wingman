@@ -154,6 +154,17 @@ pub struct ToolsConfig {
     /// unambiguous token shapes to avoid mangling legitimate content.
     #[serde(default = "default_true")]
     pub redact_output_secrets: bool,
+    /// Offer the `run_plan` tool: let the model chain a few tool calls in one
+    /// round trip, feeding an earlier call's output into a later call's
+    /// arguments. Off by default — it is a prototype, and it changes what a
+    /// single tool call can set in motion.
+    ///
+    /// It does not widen permissions: every call inside a plan is dispatched
+    /// normally and gated by the current mode exactly as it would be alone.
+    /// What it widens is *blast radius per model decision*, which is why this
+    /// is opt-in and why a project config cannot turn it on.
+    #[serde(default)]
+    pub run_plan: bool,
     /// User-defined command tools: extend the agent with a shell command
     /// without recompiling. Each becomes a tool the model can call; the tool
     /// input JSON is passed as `$WINGMAN_TOOL_INPUT` and stdin, and stdout is
@@ -357,6 +368,7 @@ impl Default for ToolsConfig {
             tool_output_max_lines: None,
             disabled_tools: Vec::new(),
             allow_network: false,
+            run_plan: false,
             redact_output_secrets: true,
             custom: Vec::new(),
             tool_timeout_secs: default_tool_timeout(),

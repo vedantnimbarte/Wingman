@@ -895,6 +895,62 @@ faster model while the parent session keeps the strongest one. An explicit
 | `recall_session`    | Y    | —     | —     | always     | Cross-project session search   |
 | `read_session`      | Y    | —     | —     | always     | Fetch full session JSONL       |
 | `spawn_subagent`    | —    | —     | —     | inherited  | Inner agent (depth=1)          |
+| `run_plan`          | —    | —     | —     | per-step   | Chain dependent calls (opt-in) |
+
+## Chained Calls
+
+### `run_plan`
+
+Run a short chain of tool calls in one round trip, feeding an earlier call's
+output into a later call's arguments. **Off by default** — enable with
+`[tools].run_plan = true`.
+
+Reach for it only when a call *depends* on an earlier call's result.
+Independent calls are already batched: the agent loop emits many tool calls per
+assistant message and runs the read-only ones concurrently, so
+`grep` + `glob` + `read_file` in one message is already one round trip and
+already parallel. `run_plan` is slower and more expensive for that case.
+
+What the loop cannot do is issue a call whose arguments are inside another
+call's output, because the model has to see the first result before it can
+write the second call. That is the whole gap this closes.
+
+**Signature:**
+```json
+{
+  "tool": "run_plan",
+  "args": {
+    "steps": [
+      { "tool": "grep", "args": { "pattern": "TurnGate" } },
+      { "tool": "read_file",
+        "args": { "path": "{}" },
+        "for_each": { "step": 0, "capture": "^([^:]+):" } }
+    ]
+  }
+}
+```
+
+`for_each` runs a step once per value found in an earlier step's output:
+`step` is that step's index (0-based) and `capture` is a regex with exactly one
+capture group, applied per line. Distinct captures are used, in first-seen
+order. Inside a `for_each` step, `{}` in any string argument is replaced with
+the current value.
+
+**Limits.** 8 steps, 32 calls per plan, 4000 characters kept per call. Plans
+cannot nest. A step that fails stops the plan; a `for_each` item that fails
+does not stop its siblings.
+
+**Permissions.** A plan does not widen them. Every call inside it is dispatched
+normally, so it passes the same capability gate, hooks, undo checkpoints, audit
+trail and repeat guard as the identical call made on its own — a plan
+containing `write_file` is refused in read-only mode exactly as `write_file`
+would be. What a plan does widen is how much happens per model decision, which
+is why it is opt-in and why a project config cannot enable it.
+
+**Cost.** Its schema is about 430 tokens, roughly 10% of the whole tool list,
+paid on every request. See [DSH-ADOPTION.md](DSH-ADOPTION.md) and
+[decision 0015](decisions/0015-run-plan-not-code-mode.md) for the measurement
+and why it is off by default.
 
 ## Error Handling
 
