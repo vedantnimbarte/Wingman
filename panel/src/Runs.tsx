@@ -888,7 +888,7 @@ export function elapsedSecs(task: Task, runTerminal: boolean, now = Date.now()):
 }
 
 /** The run's state as a glyph, so the pill never depends on hue alone. */
-function runGlyph(status: RunStatus): string {
+export function runGlyph(status: RunStatus): string {
   switch (status) {
     case 'done':
       return '✓'
@@ -902,7 +902,7 @@ function runGlyph(status: RunStatus): string {
   }
 }
 
-function runClass(status: RunStatus): string {
+export function runClass(status: RunStatus): string {
   switch (status) {
     case 'done':
       return 'is-proven'
