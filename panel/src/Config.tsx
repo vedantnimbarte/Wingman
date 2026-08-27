@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useUnsavedWarning } from './a11y'
 import { api, type ConfigSchema, type SchemaNode } from './api'
-import { at, fieldsOf, resolve, toPatch, type Field } from './schema'
+import { at, fieldsOf, optionsFor, resolve, toPatch, type Field } from './schema'
 import { message } from './state'
 import { Failed, Loading, Note, PageHead } from './ui'
 
@@ -402,7 +402,13 @@ function Input({
         />
       )
 
-    case 'enum':
+    case 'enum': {
+      // The value on disk may legally be outside the schema's list — several
+      // of these fields are `String` in Rust precisely because their parsers
+      // accept aliases. `optionsFor` carries an unlisted value in rather than
+      // letting the select fall back to its first option and misreport the
+      // config it is editing.
+      const options = optionsFor(field.choices, value)
       return (
         <select
           id={id}
@@ -412,13 +418,22 @@ function Input({
           onChange={(e) => onChange(e.target.value)}
         >
           {field.nullable && <option value="">— unset —</option>}
-          {field.choices?.map((c) => (
-            <option key={c.value} value={c.value} title={c.description}>
-              {c.value}
+          {options.map((c) => (
+            <option
+              key={c.value}
+              value={c.value}
+              title={
+                c.listed
+                  ? c.description
+                  : 'Set in your config, and accepted by the parser, but not one of the documented values.'
+              }
+            >
+              {c.listed ? c.value : `${c.value} · not a listed value`}
             </option>
           ))}
         </select>
       )
+    }
 
     case 'integer':
     case 'number':
