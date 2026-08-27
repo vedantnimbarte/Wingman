@@ -21,6 +21,7 @@ pub mod hooks;
 pub mod memory;
 pub mod proposal;
 pub mod session_index;
+pub mod skill_stats;
 pub mod staleness;
 pub mod stats;
 

@@ -11,11 +11,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use wingman_core::{ToolOutcome, ToolSpec};
 use wingman_learn::hooks::LearnSignals;
-use wingman_learn::stats::StatsStore;
 
 pub struct InvokeSkill {
     project_root: PathBuf,
-    stats: Arc<StatsStore>,
+    stats: Arc<dyn wingman_learn::skill_stats::SkillStats>,
     signals: Arc<Mutex<LearnSignals>>,
     session_id: String,
 }
@@ -23,7 +22,7 @@ pub struct InvokeSkill {
 impl InvokeSkill {
     pub fn new(
         project_root: PathBuf,
-        stats: Arc<StatsStore>,
+        stats: Arc<dyn wingman_learn::skill_stats::SkillStats>,
         signals: Arc<Mutex<LearnSignals>>,
         session_id: String,
     ) -> Self {
