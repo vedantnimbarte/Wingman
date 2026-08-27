@@ -55,7 +55,7 @@ pub struct LearnSignals {
 pub struct LearnHook {
     cfg: LearnConfig,
     memory: Arc<MemoryStore>,
-    stats: Arc<StatsStore>,
+    stats: Arc<dyn crate::skill_stats::SkillStats>,
     signals: Arc<Mutex<LearnSignals>>,
     /// Cached count of recent user-message indexes we've already consumed
     /// so before_turn doesn't re-process the same turn for outcome scoring.
@@ -70,7 +70,11 @@ pub struct LearnHook {
 }
 
 impl LearnHook {
-    pub fn new(cfg: LearnConfig, memory: Arc<MemoryStore>, stats: Arc<StatsStore>) -> Self {
+    pub fn new(
+        cfg: LearnConfig,
+        memory: Arc<MemoryStore>,
+        stats: Arc<dyn crate::skill_stats::SkillStats>,
+    ) -> Self {
         Self {
             cfg,
             memory,
@@ -97,7 +101,7 @@ impl LearnHook {
         self.memory.clone()
     }
 
-    pub fn stats(&self) -> Arc<StatsStore> {
+    pub fn stats(&self) -> Arc<dyn crate::skill_stats::SkillStats> {
         self.stats.clone()
     }
 
@@ -307,7 +311,7 @@ impl LearningHook for LearnHook {
 pub struct LearnHandles {
     pub hook: Arc<LearnHook>,
     pub memory: Arc<MemoryStore>,
-    pub stats: Arc<StatsStore>,
+    pub stats: Arc<dyn crate::skill_stats::SkillStats>,
     pub signals: Arc<Mutex<LearnSignals>>,
 }
 
