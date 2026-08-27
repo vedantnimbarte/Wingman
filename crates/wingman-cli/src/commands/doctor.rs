@@ -201,6 +201,31 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
         ));
     }
 
+    // Claude Code hooks are never imported silently, so the only way to
+    // discover the option is to be told it applies to you.
+    if !cfg.hooks.import_claude_code {
+        let candidates = [
+            wingman_config::global_dir()
+                .ok()
+                .and_then(|d| d.parent().map(|h| h.join(".claude").join("settings.json"))),
+            Some(paths.root.join(".claude").join("settings.json")),
+        ];
+        let found: Vec<String> = candidates
+            .into_iter()
+            .flatten()
+            .filter(|p| p.exists() && file_declares_hooks(p))
+            .map(|p| p.display().to_string())
+            .collect();
+        if !found.is_empty() {
+            section("claude code");
+            emit(Status::Warn(format!(
+                "found hooks in {} — set [hooks].import_claude_code = true to run them \
+                 here instead of rewriting them (a project file also needs `wingman trust`)",
+                found.join(", ")
+            )));
+        }
+    }
+
     println!();
     if bad == 0 {
         println!("healthy — no blocking problems found.");
@@ -251,4 +276,21 @@ fn tcp_reachable(url: &str) -> bool {
         return false;
     };
     addrs.any(|addr| TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok())
+}
+
+/// Whether a Claude Code settings file actually declares any hooks.
+///
+/// Most `settings.json` files have none, and warning about a file that would
+/// import nothing is noise — the kind that teaches people to ignore warnings.
+fn file_declares_hooks(path: &std::path::Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| {
+            v.get("hooks")
+                .and_then(|h| h.as_object().map(|o| !o.is_empty()))
+        })
+        .unwrap_or(false)
 }

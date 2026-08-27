@@ -54,3 +54,4 @@ pointer. The history of what we believed is the point.
 | [0007](0007-bound-the-read-not-the-result.md) | Attachment and output caps bound the read, not just the result | accepted |
 | [0008](0008-defer-background-jobs-and-pty.md) | Background jobs and persistent PTY wait for the 600s ceiling to actually bite | deferred |
 | [0009](0009-test-docs-rather-than-generate-them.md) | Docs are tested against the code, not generated from it | accepted |
+| [0010](0010-claude-code-hooks-are-imported-not-adopted.md) | Claude Code hooks are imported opt-in, trust-gated, and translated | accepted |

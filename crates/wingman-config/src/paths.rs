@@ -13,7 +13,7 @@
 use crate::ConfigError;
 use std::path::{Path, PathBuf};
 
-fn home() -> Result<PathBuf, ConfigError> {
+pub(crate) fn home() -> Result<PathBuf, ConfigError> {
     Ok(directories::BaseDirs::new()
         .ok_or(ConfigError::NoHome)?
         .home_dir()
