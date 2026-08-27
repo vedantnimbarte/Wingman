@@ -135,7 +135,8 @@ forked, or resumed like any other session:
 wingman session fork <session-id>
 ```
 
-The log goes to the **owning project**, not the worker's worktree. Workers run
+The log goes to the **owning project**, not the worker's worktree
+(decision record: [0006](decisions/0006-two-project-roots.md)). Workers run
 in `<project>/.wingman/worktrees/<name>`, which git marks with a `.git` *file*
 — so ordinary project-root discovery stops there, and a transcript written
 under it would be force-removed with the worktree at cleanup. Worker

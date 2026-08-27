@@ -22,6 +22,12 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Best for: Understanding how components fit together, design decisions, module responsibilities.
   - Read this if: You're extending Wingman, debugging, or understanding the agent loop.
 
+- **[decisions/](decisions/README.md)** — Decision records: why a boundary sits
+  where it does, what was rejected, and what was deferred with its trigger.
+  - Best for: understanding a choice that looks arbitrary from the code.
+  - Read this if: you are about to change something and want to know whether
+    it was decided that way on purpose.
+
 ### Major Subsystems
 
 - **[TREE-SITTER.md](TREE-SITTER.md)** — Language-aware parsing integration (Rust, Python, JavaScript, TypeScript, Go).

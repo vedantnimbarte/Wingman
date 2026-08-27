@@ -56,6 +56,11 @@ starting point.
   each for a reason, and new ones are the cheapest way to keep them.
 - **Explain the why in the commit message.** The diff shows what changed; the
   message should say what was wrong before. See `git log` for the house style.
+- **Write a decision record when the reasoning outlives the diff.** If the
+  boundary looks arbitrary but is load-bearing, if you rejected a plausible
+  alternative, or if you deferred something with a trigger, add a note under
+  [docs/decisions/](docs/decisions/README.md). Not for ordinary fixes — the
+  commit message is still the default, and that README says when each applies.
 - **Match the surrounding code.** Comment density, naming, and error-message
   phrasing are fairly consistent; follow the file you are editing.
 

@@ -164,6 +164,7 @@ Both surfaces feed the same **agent loop** at `crates/wingman-core/src/agent.rs`
 **Purpose:** Append-only JSONL session log for reproducibility and recall.
 
 **The invariant: model-visible means logged.**
+(Decision record: [0002](decisions/0002-loop-owns-the-session-log.md).)
 
 Everything that reaches a model request must be reconstructable from the log.
 The agent loop is the only place that knows what actually went into a request,
