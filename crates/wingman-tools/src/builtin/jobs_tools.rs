@@ -60,6 +60,58 @@ impl Tool for JobOutput {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SendArgs {
+    id: String,
+    input: String,
+}
+
+pub struct JobSend;
+
+#[async_trait]
+impl Tool for JobSend {
+    fn capabilities(&self) -> Capability {
+        // Writing to a running process's stdin can cause it to do anything
+        // the process can do, so this is gated as shell — not as the read
+        // that `job_output` is.
+        Capability::SHELL
+    }
+
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "job_send".into(),
+            description: "Send a line to a running background job's stdin. Use this to drive a \
+                          process across tool calls — answer a prompt, or feed a statement to a \
+                          REPL — then read the result with job_output. A newline is added if you \
+                          do not include one."
+                .into(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Job id, e.g. `job-1`." },
+                    "input": { "type": "string", "description": "Text to write to stdin." }
+                },
+                "required": ["id", "input"],
+                "additionalProperties": false
+            }),
+        }
+    }
+
+    async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        let args: SendArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => return ToolOutcome::err(format!("invalid args: {e}")),
+        };
+        match ctx.jobs.send(&args.id, &args.input).await {
+            Ok(()) => ToolOutcome::ok(format!(
+                "sent to {}. Read what it did with job_output.",
+                args.id
+            )),
+            Err(e) => ToolOutcome::err(e),
+        }
+    }
+}
+
 pub struct JobStop;
 
 #[async_trait]

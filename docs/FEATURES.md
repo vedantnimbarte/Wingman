@@ -95,7 +95,10 @@ Wingman different; this is everything else it does.
 - **Background shell jobs.** `run_shell` blocks the turn and is capped at
   600s, which rules out dev servers, watch processes, and cold builds of a
   large workspace. `background: true` starts the command and returns a job id
-  instead; `job_output`, `job_stop`, and `job_list` control it. Output is
+  instead; `job_output`, `job_send`, `job_stop`, and `job_list` control it — `job_send`
+  writes to the job's stdin, so a REPL or an interactive prompt can be driven
+  across tool calls instead of one-shot. (A pipe, not a pseudo-terminal: no
+  colours, no pagers, no full-screen TUIs — all noise for an agent.) Output is
   buffered to 128 KiB keeping the most recent bytes (and says when it dropped
   earlier ones). A background command goes through the same permission gate,
   denylist, sandbox, and credential scrub as a foreground one, and every job is

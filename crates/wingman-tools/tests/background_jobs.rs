@@ -151,3 +151,111 @@ async fn a_background_job_is_refused_in_read_only_mode() {
         .await;
     assert!(out.is_error, "read-only must refuse a background shell too");
 }
+
+/// The capability P11 was really about: hold a process open and drive it
+/// across several tool calls, rather than one-shot each command.
+///
+/// Asserted through *state*, not output. A child's stdout buffering is its
+/// own business — `findstr` block-buffers on a pipe, `cat` full-buffers — so
+/// a test that waits for echoed text measures the child's libc rather than
+/// this feature. A process that reads two lines exits only after the second
+/// arrives, which is precisely the property being claimed: it was still alive
+/// between two separate tool calls.
+#[tokio::test]
+async fn a_job_stays_alive_between_sends() {
+    let reg = registry();
+    // Two blocking reads, then exit. No variable expansion: on Windows
+    // `%A%` is substituted when the line is parsed, before `set /p` runs.
+    let command = if cfg!(windows) {
+        "set /p A= && set /p B="
+    } else {
+        "read A; read B"
+    };
+    let out = reg
+        .dispatch(
+            "run_shell",
+            json!({ "command": command, "background": true }),
+        )
+        .await;
+    assert!(!out.is_error, "{}", out.content);
+    let id = job_id_from(&out.content).await;
+
+    let state = reg.dispatch("job_output", json!({ "id": id })).await;
+    assert!(state.content.contains("running"), "{}", state.content);
+
+    // One line satisfies the first read; the second still blocks, so the
+    // process must still be alive.
+    let sent = reg
+        .dispatch("job_send", json!({ "id": id, "input": "ALPHA" }))
+        .await;
+    assert!(!sent.is_error, "{}", sent.content);
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let mid = reg.dispatch("job_output", json!({ "id": id })).await;
+    assert!(
+        mid.content.contains("running"),
+        "the job should still be waiting on its second read: {}",
+        mid.content
+    );
+
+    // A separate tool call against the same live process. Only now finishes.
+    let sent = reg
+        .dispatch("job_send", json!({ "id": id, "input": "BETA" }))
+        .await;
+    assert!(!sent.is_error, "{}", sent.content);
+
+    let mut final_state = String::new();
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        final_state = reg
+            .dispatch("job_output", json!({ "id": id }))
+            .await
+            .content;
+        if final_state.contains("exited") {
+            break;
+        }
+    }
+    assert!(
+        final_state.contains("exited"),
+        "the job never consumed the second line: {final_state}"
+    );
+}
+
+#[tokio::test]
+async fn sending_to_a_finished_job_says_so_rather_than_failing_obscurely() {
+    let reg = registry();
+    let out = reg
+        .dispatch(
+            "run_shell",
+            json!({ "command": echo_command(), "background": true }),
+        )
+        .await;
+    let id = job_id_from(&out.content).await;
+
+    // Wait for it to exit.
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let o = reg.dispatch("job_output", json!({ "id": id })).await;
+        if o.content.contains("exited") {
+            break;
+        }
+    }
+    let sent = reg
+        .dispatch("job_send", json!({ "id": id, "input": "too late" }))
+        .await;
+    assert!(sent.is_error);
+    assert!(
+        sent.content.contains("nothing is listening"),
+        "{}",
+        sent.content
+    );
+}
+
+#[tokio::test]
+async fn sending_to_an_unknown_job_is_refused() {
+    let reg = registry();
+    let out = reg
+        .dispatch("job_send", json!({ "id": "job-nope", "input": "x" }))
+        .await;
+    assert!(out.is_error);
+    assert!(out.content.contains("no such job"), "{}", out.content);
+}

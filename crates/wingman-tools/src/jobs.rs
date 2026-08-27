@@ -63,6 +63,10 @@ struct Job {
     output: Arc<Mutex<Tail>>,
     /// Dropping this kills the process tree.
     supervisor: Mutex<Option<Supervisor>>,
+    /// The child's stdin, kept open so the job can be driven across tool
+    /// calls. A tokio mutex because writing is async and a std guard
+    /// cannot be held across an await.
+    stdin: tokio::sync::Mutex<Option<tokio::process::ChildStdin>>,
     started: std::time::Instant,
 }
 
@@ -129,7 +133,11 @@ impl JobTable {
         cmd.command_mut()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null());
+            // Piped rather than null so a job can be *driven*: a REPL, a
+            // migration that asks for confirmation, anything whose next step
+            // depends on what it printed. That is the whole difference
+            // between a job you watch and a session you hold.
+            .stdin(Stdio::piped());
 
         let mut supervisor = cmd.spawn().map_err(|e| format!("spawn failed: {e}"))?;
         // Taking the child is safe: the supervisor kills by process group
@@ -140,6 +148,7 @@ impl JobTable {
             .ok_or_else(|| "child vanished immediately after spawn".to_string())?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let stdin = child.stdin.take();
 
         let id = format!("job-{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
         let state = Arc::new(Mutex::new(JobState::Running));
@@ -178,6 +187,7 @@ impl JobTable {
             state,
             output,
             supervisor: Mutex::new(Some(supervisor)),
+            stdin: tokio::sync::Mutex::new(stdin),
             started: std::time::Instant::now(),
         });
         self.jobs.lock().unwrap().insert(id.clone(), job);
@@ -190,6 +200,47 @@ impl JobTable {
         let text = job.output.lock().unwrap().render();
         let state = job.state.lock().unwrap().clone();
         Some((text, state))
+    }
+
+    /// Write a line to a running job's stdin.
+    ///
+    /// A newline is appended unless the caller already ended with one:
+    /// line-buffered programs — which is most of them, and every REPL —
+    /// will not act on input until they see one, so omitting it produces a
+    /// job that looks hung for no visible reason.
+    pub async fn send(&self, id: &str, text: &str) -> Result<(), String> {
+        let job = self
+            .jobs
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| format!("no such job: {id}"))?;
+        {
+            let state = job.state.lock().unwrap();
+            if *state != JobState::Running {
+                return Err(format!(
+                    "{id} is {} — nothing is listening on its stdin",
+                    state.label()
+                ));
+            }
+        }
+        let mut guard = job.stdin.lock().await;
+        let pipe = guard
+            .as_mut()
+            .ok_or_else(|| format!("{id} has no stdin attached"))?;
+        use tokio::io::AsyncWriteExt;
+        let mut payload = text.to_string();
+        if !payload.ends_with('\n') {
+            payload.push('\n');
+        }
+        pipe.write_all(payload.as_bytes())
+            .await
+            .map_err(|e| format!("writing to {id}: {e}"))?;
+        pipe.flush()
+            .await
+            .map_err(|e| format!("flushing {id}: {e}"))?;
+        Ok(())
     }
 
     /// Stop a job and its whole process tree.
