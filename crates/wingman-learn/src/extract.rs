@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wingman_core::{ContentBlock, Role};
-use wingman_session::{list_sessions, load_session, SessionRecord};
+use wingman_session::{FileSessionStore, SessionRecord, SessionStore};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractedPattern {
@@ -59,12 +59,19 @@ impl Default for ExtractConfig {
 /// Scan all session JSONLs under `sessions_dir`, return repeated tool-call
 /// sequences sorted by frequency (descending).
 pub fn extract_from_dir(sessions_dir: &Path, cfg: &ExtractConfig) -> Vec<ExtractedPattern> {
+    extract_from_store(&FileSessionStore::new(sessions_dir), cfg)
+}
+
+/// As [`extract_from_dir`], against any [`SessionStore`].
+///
+/// The directory form is the thin wrapper now: extraction cares about what is
+/// *in* the sessions, not where they are kept, and a caller with transcripts
+/// already in hand — a test, or anything holding them from elsewhere — should
+/// not have to write them to a temp directory first to be able to scan them.
+pub fn extract_from_store(store: &dyn SessionStore, cfg: &ExtractConfig) -> Vec<ExtractedPattern> {
     let mut per_session: Vec<SessionMeta> = Vec::new();
-    for path in list_sessions(sessions_dir)
-        .into_iter()
-        .take(cfg.session_scan_limit)
-    {
-        if let Ok(records) = load_session(&path) {
+    for id in store.list().into_iter().take(cfg.session_scan_limit) {
+        if let Ok(records) = store.load(&id) {
             let meta = session_meta(&records);
             if !meta.sequence.is_empty() {
                 per_session.push(meta);
@@ -441,5 +448,68 @@ mod tests {
             .map(String::from)
             .collect();
         assert!(common.iter().any(|c| **c == needle));
+    }
+}
+
+#[cfg(test)]
+mod store_seam_tests {
+    use super::*;
+    use wingman_session::MemorySessionStore;
+
+    fn tool_call(name: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "t".into(),
+            name: name.into(),
+            input: serde_json::json!({}),
+        }
+    }
+
+    fn session(tools: &[&str]) -> Vec<SessionRecord> {
+        vec![
+            SessionRecord::User {
+                ts: "t".into(),
+                text: "do the thing".into(),
+            },
+            SessionRecord::Assistant {
+                ts: "t".into(),
+                blocks: tools.iter().map(|t| tool_call(t)).collect(),
+            },
+        ]
+    }
+
+    /// What the seam buys: extraction can be tested on transcripts held in
+    /// memory. Before, this needed a temp directory and real JSONL files
+    /// written to disk, to assert on logic that never cared where they came
+    /// from.
+    #[test]
+    fn patterns_are_extracted_from_sessions_that_were_never_on_disk() {
+        let store = MemorySessionStore::new();
+        // The same three-tool sequence in two separate sessions — that is
+        // what `min_occurrences: 2` is looking for.
+        store.seed("s1", session(&["grep", "read_file", "edit_file"]));
+        store.seed("s2", session(&["grep", "read_file", "edit_file"]));
+        // A third session with a different shape, which should not match.
+        store.seed("s3", session(&["web_search", "web_fetch", "write_file"]));
+
+        let found = extract_from_store(&store, &ExtractConfig::default());
+        assert!(
+            found
+                .iter()
+                .any(|p| p.sequence == vec!["grep", "read_file", "edit_file"]
+                    && p.occurrences == 2),
+            "expected the repeated sequence, got {found:#?}"
+        );
+        assert!(
+            !found
+                .iter()
+                .any(|p| p.sequence.contains(&"web_fetch".to_string())),
+            "a sequence seen once should not be reported"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_yields_nothing() {
+        let store = MemorySessionStore::new();
+        assert!(extract_from_store(&store, &ExtractConfig::default()).is_empty());
     }
 }
