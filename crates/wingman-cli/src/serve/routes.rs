@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, board, pilot, projects, push, sessions, table, ui, ServeState};
+use super::{admin, auth, board, pilot, projects, push, sessions, table, timeline, ui, ServeState};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -120,6 +120,11 @@ async fn project_route(
         }
         ("POST", ["turns"]) => sessions::turn(state, project, None, req, sock).await,
 
+        // Ahead of the table, which owns `cost` itself: a native handler is
+        // the only way to answer "per day", since the CLI's own cost report
+        // reads an untimestamped machine-wide total.
+        ("GET", ["cost", "timeline"]) => timeline::get(project, req, sock).await,
+
         ("POST", ["exec"]) => admin::exec(state, project, req, sock).await,
 
         // The long tail: everything else the CLI can do, as table data.
@@ -226,6 +231,7 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
     if let Some(routes) = doc["routes"].as_array_mut() {
         routes.extend(board::schema());
         routes.extend(sessions::schema());
+        routes.extend(timeline::schema());
         routes.extend(table::schema());
         routes.extend(admin::schema());
     }

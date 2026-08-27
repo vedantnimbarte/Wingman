@@ -401,6 +401,38 @@ export type ContextReport = {
   tools: { name: string; bytes: number; tokens: number }[]
 }
 
+/**
+ * Spend per day for one repo, priced from its session transcripts.
+ *
+ * Not the same measurement as `CostReport`, and the panel says so where it
+ * shows them: `cost` is `~/.wingman/usage.json`, a machine-wide running total
+ * with no timestamps, while this is the sessions in this project. Presenting
+ * either as the other would be a chart that lies.
+ */
+export type CostTimeline = {
+  /** One entry per day in the window, gap-filled — a quiet day is a zero. */
+  days: {
+    date: string
+    usd: number
+    input_tokens: number
+    output_tokens: number
+    cache_read_tokens: number
+    cache_write_tokens: number
+    turns: number
+  }[]
+  models: { model: string; usd: number; turns: number; input_tokens: number; output_tokens: number }[]
+  window_days: number
+  window_usd: number
+  total_usd: number
+  total_turns: number
+  /** The whole history behind the window, so an empty window can say why. */
+  first_day: string | null
+  last_day: string | null
+  sessions: number
+  /** Turns whose model has no price. A short total says it is short. */
+  unpriced_turns: number
+}
+
 /** What a table-driven route returns when its output is not JSON. */
 export type TextOutput = { stdout: string; stderr: string; exit: number }
 
@@ -637,6 +669,11 @@ export const api = {
 
   context: (project: string) =>
     request<ContextReport>(`/v1/projects/${encodeURIComponent(project)}/context`),
+
+  costTimeline: (project: string, days = 30) =>
+    request<CostTimeline>(
+      `/v1/projects/${encodeURIComponent(project)}/cost/timeline?days=${days}`,
+    ),
 
   apiSchema: () => request<ApiSchema>('/v1/schema'),
 
