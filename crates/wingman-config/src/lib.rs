@@ -246,8 +246,8 @@ fn default_prune_threshold() -> usize {
 /// recall — everything needed to understand code, nothing that changes it.
 const PRESET_REVIEW: &[&str] = &[
     "read_file",
-    "glob_tool",
-    "grep_tool",
+    "glob",
+    "grep",
     "list_dir",
     "semantic_search",
     "outline",
@@ -266,8 +266,8 @@ const PRESET_MINIMAL: &[&str] = &[
     "read_file",
     "write_file",
     "edit_file",
-    "glob_tool",
-    "grep_tool",
+    "glob",
+    "grep",
     "list_dir",
     "run_shell",
 ];

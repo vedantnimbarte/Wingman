@@ -578,6 +578,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         auto_approved: effective_tier == wingman_autonomous::approval::ApprovalTier::Auto,
         pr_config: pilot.pr.clone(),
         security_config: pilot.security.clone(),
+        disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&pilot, "per_task_reviewer"),
         run_critic: capability_on(&pilot, "critic"),
         // Resolve through the same provider/model split the manager uses so a
@@ -1370,6 +1371,7 @@ pub async fn resume(
         auto_approved: false,
         pr_config: cfg.pilot.pr.clone(),
         security_config: cfg.pilot.security.clone(),
+        disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&cfg.pilot, "per_task_reviewer"),
         run_critic: capability_on(&cfg.pilot, "critic"),
         // See the run() path: strip the provider prefix so the reviewer model

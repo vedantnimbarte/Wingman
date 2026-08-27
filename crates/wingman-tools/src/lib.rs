@@ -18,7 +18,7 @@ pub mod prefetch;
 
 pub use ctx::ToolCtx;
 pub use filesystem::{FileSystem, MemoryFileSystem, OsFileSystem};
-pub use registry::{run_hook, HookResult, ToolRegistry, ToolRemovals};
+pub use registry::{run_hook, HookResult, ToolRegistry, ToolRemovals, CONDITIONALLY_REGISTERED};
 pub use Capability as ToolCapability;
 
 use async_trait::async_trait;
