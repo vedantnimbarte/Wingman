@@ -32,7 +32,7 @@ Effort estimates are rough and use this scale:
 | # | Item | Size | Verdict |
 |---|---|---|---|
 | A1 | Event-sourced session log | **L** | **Done** — the loop is the sole writer; `ContextFact` / `ContextSink`. |
-| A2 | Widen existing traits into named seams | — | **Closed** — the one justified seam (shell) shipped in P3/P11; the rest have no second implementation. See [0013](decisions/0013-no-speculative-seams.md). |
+| A2 | Widen existing traits into named seams | M | **Done** — `SessionStore`, `SkillStats`, `FileSystem`, each with a second implementation. Cost and benefit in [0014](decisions/0014-the-a2-seams-were-built.md). |
 | A3 | Full plugin runtime (Cordis-equivalent) | **XL** | **Don't.** Reasoning in §A3. |
 | P1 | Tool-output spill | S–M | **Done** — `[tools].spill_tool_output`. |
 | P2 | Repeat-tool-call guard | S | **Done** — `[tools].repeat_thresholds`. |
