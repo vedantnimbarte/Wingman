@@ -428,13 +428,14 @@ text while the model sees the expanded form. It is more complete than the DSH
 feature that prompted the suggestion. The original survey missed it because
 the module is named `attachments`, not `file_reference`.
 
-One real gap remains, and it is *not* covered by the above: **there is no
-size cap.** `@huge.log` inlines the entire file into the prompt, which is a
-context-tax foot-gun inside the feature meant to reduce context. A per-file
-byte cap with a truncation marker is ~5 lines in `expand()`. Not done here
-because it is a different change from the one this entry proposed.
+The one real gap — **no size cap**, so `@huge.log` inlined the entire file —
+is now closed: 64 KiB per file, 256 KiB across a prompt, 3 MiB for an image.
+The bound is on the *read*, not just the result, so an enormous file cannot
+exhaust memory before the request is even built. A truncated attachment names
+its own path, so the agent reads the rest with `read_file` — no spill file
+needed, because unlike tool output the original is already on disk.
 
-**Size: — (nothing to build); the size cap is S.**
+**Size: — (nothing to build); the cap was S, as estimated.**
 
 ## P8. Session search over SQLite FTS
 

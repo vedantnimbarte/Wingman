@@ -101,6 +101,16 @@ Wingman different; this is everything else it does.
   scrolling is enabled.
 - **File-tree sidebar.** `Ctrl+B` toggles a left-side file browser; `j`/`k`
   move, `Tab` descends, `Enter` inserts the path into the composer.
+- **`@file` attachments.** Write `@src/main.rs` in the composer and the file's
+  contents are inlined into the prompt, saving the agent a `read_file` round
+  trip. Image files (`png`/`jpg`/`gif`/`webp`) are base64-encoded for
+  vision-capable providers instead. An unresolvable token is left as literal
+  text with a warning, never silently dropped.
+  Bounded so that the feature meant to save context cannot exhaust it:
+  64 KiB per file, 256 KiB across one prompt, and 3 MiB for an image (which is
+  refused rather than truncated, since a partial image is not a smaller image).
+  A truncated attachment says so and names the path, so the agent can read the
+  rest with `read_file`'s `offset`/`limit`.
 - **Themes.** `tui.theme = "default" | "light" | "mono"`, plus optional
   per-role color overrides under `tui.colors` (`"#rrggbb"` hex or named).
 - **Model fallback.** `router.fallback_models = ["openai/gpt-4.1",
