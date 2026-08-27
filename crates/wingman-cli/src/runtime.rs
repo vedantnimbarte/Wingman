@@ -598,7 +598,7 @@ pub async fn build_registry_with_learn(
 /// the network under an air-gapped config, and its tool calls never reached the
 /// compliance trail. Keeping one builder is what stops those from drifting
 /// apart again.
-fn base_registry(
+pub(crate) fn base_registry(
     ctx: ToolCtx,
     cfg: &Config,
     audit_path: Option<std::path::PathBuf>,
@@ -635,7 +635,7 @@ fn base_registry(
 ///
 /// The sweep still runs, because builtins and learn tools are registered
 /// before this point.
-fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
+pub(crate) fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
     let keep = cfg.tools.preset_keep_list();
     if keep.is_none() && !cfg.tools.preset.is_empty() {
         // Unknown name. Warn and keep every tool rather than starting a
@@ -701,7 +701,7 @@ fn build_spill(
 }
 
 /// The audit-log path implied by config, if auditing is on.
-fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathBuf> {
+pub(crate) fn audit_path_for(cfg: &Config, paths: &ProjectPaths) -> Option<std::path::PathBuf> {
     if !cfg.audit.enabled {
         return None;
     }
