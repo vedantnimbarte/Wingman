@@ -52,7 +52,7 @@ pointer. The history of what we believed is the point.
 | [0005](0005-repeat-guard-counts-denied-calls.md) | The repeat guard counts denied calls and treats exempt tools as transparent | accepted |
 | [0006](0006-two-project-roots.md) | Containment root and owning root are separate questions | accepted |
 | [0007](0007-bound-the-read-not-the-result.md) | Attachment and output caps bound the read, not just the result | accepted |
-| [0008](0008-defer-background-jobs-and-pty.md) | Background jobs and persistent PTY wait for the 600s ceiling to actually bite | deferred |
+| [0008](0008-defer-background-jobs-and-pty.md) | Background jobs and persistent PTY wait for the 600s ceiling to actually bite | superseded by 0011, 0012 |
 | [0009](0009-test-docs-rather-than-generate-them.md) | Docs are tested against the code, not generated from it | accepted |
 | [0010](0010-claude-code-hooks-are-imported-not-adopted.md) | Claude Code hooks are imported opt-in, trust-gated, and translated | accepted |
 | [0011](0011-background-jobs.md) | Background jobs are a process table, not a capability seam | accepted |

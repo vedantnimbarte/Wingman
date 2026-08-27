@@ -32,7 +32,7 @@ Effort estimates are rough and use this scale:
 | # | Item | Size | Verdict |
 |---|---|---|---|
 | A1 | Event-sourced session log | **L** | **Done** — the loop is the sole writer; `ContextFact` / `ContextSink`. |
-| A2 | Widen existing traits into named seams | M | **Done** — `SessionStore`, `SkillStats`, `FileSystem`, each with a second implementation. Cost and benefit in [0014](decisions/0014-the-a2-seams-were-built.md). |
+| A2 | Widen existing traits into named seams | M | **Done** — `SessionStore`, `SkillStats`, `FileSystem`, each with a second implementation. Cost and benefit in [0014](decisions/0014-the-a2-seams-were-built.md), including the measured dispatch overhead. |
 | A3 | Full plugin runtime (Cordis-equivalent) | **XL** | **Don't.** Reasoning in §A3. |
 | P1 | Tool-output spill | S–M | **Done** — `[tools].spill_tool_output`. |
 | P2 | Repeat-tool-call guard | S | **Done** — `[tools].repeat_thresholds`. |
@@ -46,9 +46,14 @@ Effort estimates are rough and use this scale:
 | P10 | Per-message feedback | M | **Done** — `/feedback good|bad`; stated outcomes beat inferred ones. |
 | P11 | Persistent PTY sessions | S | **Done differently** — `job_send` drives a process over stdin; no PTY. See [0012](decisions/0012-stdin-instead-of-a-pty.md). |
 | P12 | Code Mode (`run_code` + generated SDK) | L–XL | **Done differently** — the loop already batches; `run_plan` closes the dependent-chain gap instead. Off by default. See [0015](decisions/0015-run-plan-not-code-mode.md). |
-| E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 8 records backfilled. |
+| E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 16 records: 13 accepted, one *rejected*, two superseded by what replaced them. |
 | E2 | Generated documentation | S | **Done differently** — docs are *tested* against the code, not generated. See [0009](decisions/0009-test-docs-rather-than-generate-them.md). |
 | E3 | Runtime invariants | M | **Partly done** — `debug_assert_reconstructs` ships with A1; no general registry. |
+
+Every row is resolved: shipped, shipped differently with a record saying why, or
+closed with a trigger for reopening it. Four were **not** built as proposed —
+A3, P11, P12 and E2 — and in three of those the measurement or the code
+contradicted the proposal's premise rather than merely its cost.
 
 ---
 
@@ -630,39 +635,84 @@ builds skip.
 
 ---
 
-# Suggested sequencing
+# What landed
 
-**First — independent wins. Done.** P2 (repeat guard), P5 (deadlines),
-P6 (presets), P8 (session search) and the seven missing `TOOLS.md` entries
-landed together; P7 turned out to already exist. E1 (decision records) is
-still open.
+Every row above is resolved. This section records the order it happened in and
+what changed on contact with the code, because in several cases that is the
+more useful output.
 
-**Second — the context work. Done.** P1 (spill) and P4 (pruning) landed
-together. They compose as expected: pruning a *spilled* result is lossless,
-because the locator line sits in the head that pruning always keeps, so the
-full text stays one `read_file` away no matter how far the result is later
-shrunk.
+**First — independent wins.** P2 (repeat guard), P5 (deadlines), P6 (presets),
+P8 (session search) and seven missing `TOOLS.md` entries landed together. P7
+turned out to already exist: the feature was in
+`crates/wingman-tui/src/attachments.rs`, and the review missed it because the
+module is not named after the syntax it implements. What was actually wrong
+there was the absence of a size cap, which is what shipped.
 
-**Third — the architecture. Done.** A1 landed: the agent loop is the sole
-writer, emitting a `ContextFact` at every point it changes what the model
-sees, and `records_to_messages` replays them. E3 ships as the one invariant
-that matters here (`debug_assert_reconstructs`) rather than a general
-registry. A2 falls out incrementally and has not been forced yet.
+**Second — the context work.** P1 (spill) and P4 (pruning) landed together.
+They compose as expected: pruning a *spilled* result is lossless, because the
+locator line sits in the head that pruning always keeps, so the full text stays
+one `read_file` away however far the result is later shrunk.
 
-That gap is now closed too: pilot workers open the log their session id
-already named. It needed the owning project root rather than the discovered
-one — a worker runs inside a git worktree, whose `.git` is a *file*, so the
-obvious `paths.root` is the worktree and a transcript written there is
-force-removed with it at cleanup.
+**Third — the architecture.** A1 landed: the agent loop is the sole writer,
+emitting a `ContextFact` wherever it changes what the model sees, and
+`records_to_messages` replays them. E3 ships as the one invariant that matters
+here (`debug_assert_reconstructs`) rather than a general registry.
 
-**Fourth — capability gaps.** P3 (jobs), then P11 (PTY) on the plumbing P3
-establishes. Trigger for P3 is someone actually hitting the 600s ceiling, not
-a calendar. P9 and P10 slot in wherever they fit.
+A2 was closed unbuilt in [0013](decisions/0013-no-speculative-seams.md), on the
+grounds that a trait with one implementation is indirection nobody asked for.
+The maintainer overrode that, so it was built, and
+[0014](decisions/0014-the-a2-seams-were-built.md) supersedes 0013 with what it
+cost and bought. Two of its three interfaces changed shape during migration
+because a real caller pushed back — which is an argument *for* 0013's instinct
+and against its conclusion, since building the second caller is how you stop
+guessing. The dispatch overhead 0014 recorded as unmeasured has since been
+measured; it is not the vtable but `#[async_trait]`'s boxed future, about 0.1%
+of a single file read.
 
-**Ongoing.** E2 (generated docs) whenever a drift is noticed. P12 landed as
-`run_plan` behind a flag rather than as Code Mode — measuring the loop first
-showed the round trips it was meant to remove were already batched.
+**Fourth — capability gaps.** P3 (jobs) landed, then P11 on top of its
+plumbing — as stdin rather than a PTY
+([0012](decisions/0012-stdin-instead-of-a-pty.md)). P9 (Claude Code hooks) and
+P10 (per-message feedback) followed.
+
+**Last — P12.** Measuring first undercut the premise. The loop already emits
+many tool calls per assistant message and runs read-only ones concurrently, so
+independent work already cost one round trip and an embedded runtime would have
+bought nothing for it. The remaining gap was *dependent* chains, worth one round
+trip rather than N, and it needed a step list rather than a language. It ships
+off by default because its schema costs ~10% of the tool list to carry
+([0015](decisions/0015-run-plan-not-code-mode.md)).
 
 **Not doing:** A3. Revisit only if third-party extensions become a goal, and
 then as a WASM host with an explicit capability model rather than as dynamic
-linking.
+linking. [0001](decisions/0001-no-plugin-architecture.md) records why.
+
+---
+
+# What the review turned up that was not on the list
+
+The most valuable output was not the adopted features. Reading Wingman closely
+enough to compare it against something else surfaced defects that no DSH
+feature would have fixed, because they were places Wingman already disagreed
+with itself.
+
+| Found while doing | Defect |
+|---|---|
+| A1 (session log) | The TUI recorded no tool calls, so `/resume` rebuilt a conversation with the tool results silently missing (`13758fc`). |
+| A1 | Pilot worker session ids named a log file nothing ever created — a worker runs inside a git worktree, whose `.git` is a *file*, so the obvious project root was the worktree and its transcript was force-removed at cleanup (`ba4ff24`). |
+| P7 (`@file`) | An attachment could inline a file of any size into the prompt (`5d09b96`). |
+| E2 (docs vs code) | `TOOLS.md` documented `glob_tool` and `grep_tool`; the tools are named `glob` and `grep`, so following the docs produced `unknown tool`. Tests now assert the docs against the code (`c1d7232`). |
+| P10 (feedback) | Only one of three SQLite stores opened with WAL and a busy timeout, while `/feedback` opens a second connection to `learn.db` during a live session (`97f8a8e`). |
+| P12 / `run_plan` | `[tools].disabled_tools` could not remove any tool registered after the config was read — `spawn_subagent`, `run_plan`, and every MCP tool. Naming one did nothing, silently (`333a48a`). |
+| the above | The pilot worker built its registry by hand instead of through the shared builder, so the unattended path had no audit trail, no per-call deadline, no repeat guard, no custom tools, no `local_only` network removal — and `shell_sandbox` defaulting to `auto`, which ran shell commands unconfined where a configured `required` should have refused (`5f1217d`). |
+
+Two patterns are worth naming, because both will recur:
+
+**Config that is read once and enforced never again.** The `disabled_tools`
+bug was a sweep at a moment in time competing with registrations that happen
+later. The fix was to make it a policy enforced at registration, so timing
+stopped being part of the contract.
+
+**A second builder that drifts from the first.** The worker registry is the
+third instance of this exact shape; `base_registry` exists because of the first
+two. Each time, the copy silently lacked the security-relevant settings, and
+each time nothing failed — it just quietly did less.
