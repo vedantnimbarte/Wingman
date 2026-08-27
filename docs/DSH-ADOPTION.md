@@ -704,6 +704,8 @@ with itself.
 | P10 (feedback) | Only one of three SQLite stores opened with WAL and a busy timeout, while `/feedback` opens a second connection to `learn.db` during a live session (`97f8a8e`). |
 | P12 / `run_plan` | `[tools].disabled_tools` could not remove any tool registered after the config was read — `spawn_subagent`, `run_plan`, and every MCP tool. Naming one did nothing, silently (`333a48a`). |
 | the above | The pilot worker built its registry by hand instead of through the shared builder, so the unattended path had no audit trail, no per-call deadline, no repeat guard, no custom tools, no `local_only` network removal — and `shell_sandbox` defaulting to `auto`, which ran shell commands unconfined where a configured `required` should have refused (`5f1217d`). |
+| sweeping for more of the above | `PRESET_REVIEW` and `PRESET_MINIMAL` kept `glob_tool` and `grep_tool`. Those are the source *files*; the tools are `glob` and `grep`. So `--preset review` — whose whole purpose is reading code — had been shipping without the two search tools, and `--preset minimal` too (`eb49c44`). |
+| the same sweep | The pilot manager's registry ignored `[tools].disabled_tools`, the last place the setting did not reach (`eb49c44`). |
 
 Two patterns are worth naming, because both will recur:
 
@@ -716,3 +718,11 @@ stopped being part of the contract.
 third instance of this exact shape; `base_registry` exists because of the first
 two. Each time, the copy silently lacked the security-relevant settings, and
 each time nothing failed — it just quietly did less.
+
+**A tool named as a string, with nothing checking the name resolves.**
+`TOOLS.md` told readers to call `glob_tool`; the preset keep-lists kept
+`glob_tool`. Both named the source file rather than the tool, and both failed
+silently, because a name that matches nothing is indistinguishable from a tool
+that is simply not registered. Wherever a tool name crosses a boundary as a
+string — docs, config, a keep-list — something on the far side has to assert it
+resolves, since the compiler will not. Both now have that test.
