@@ -31,6 +31,58 @@ pub struct ToolRegistry {
     /// its own `ToolRegistry`, so a child's repetition can never trip its
     /// parent's counter and no per-agent keying is needed here.
     chain: std::sync::Mutex<Option<RepeatChain>>,
+    /// Tools this registry refuses to hold, from `[tools].preset` and
+    /// `[tools].disabled_tools`.
+    ///
+    /// Enforced at registration rather than swept afterwards. A sweep only
+    /// removes what is registered when it runs, and several tools register
+    /// later than that — `spawn_subagent` and `run_plan` after the `Arc`
+    /// exists, every MCP tool when its server connects. Naming those in
+    /// `disabled_tools` used to do nothing at all, silently.
+    removals: ToolRemovals,
+}
+
+/// Which tools a registry will accept.
+///
+/// `keep` is a preset keep-list (`None` keeps everything); `disabled` is the
+/// standing denylist. Denylist wins: a preset says what a session is *for*,
+/// `disabled_tools` says "not this one, ever", and an entry that survived a
+/// keep-list would be the wrong way round.
+#[derive(Debug, Clone, Default)]
+pub struct ToolRemovals {
+    keep: Option<Vec<String>>,
+    disabled: Vec<String>,
+}
+
+impl ToolRemovals {
+    pub fn new(keep: Option<Vec<String>>, disabled: Vec<String>) -> Self {
+        Self { keep, disabled }
+    }
+
+    /// Whether `name` is excluded.
+    pub fn excludes(&self, name: &str) -> bool {
+        if self.disabled.iter().any(|d| d == name) {
+            return true;
+        }
+        match &self.keep {
+            Some(keep) => !keep.iter().any(|p| preset_matches(name, p)),
+            None => false,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.keep.is_none() && self.disabled.is_empty()
+    }
+}
+
+/// Match a tool name against a preset keep-list entry. A trailing `*` matches
+/// by prefix, so `lsp_*` keeps the whole language-server family without the
+/// list going stale each time one is added.
+fn preset_matches(name: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => name == pattern,
+    }
 }
 
 /// Repeat-guard configuration. Empty `thresholds` disables the guard.
@@ -60,7 +112,27 @@ impl ToolRegistry {
             tool_timeout: None,
             repeat: RepeatPolicy::default(),
             chain: std::sync::Mutex::new(None),
+            removals: ToolRemovals::default(),
         }
+    }
+
+    /// Refuse the tools `[tools].preset` and `[tools].disabled_tools` exclude,
+    /// for the whole life of the registry rather than at one moment in its
+    /// construction. Builder-style.
+    pub fn with_tool_removals(mut self, removals: ToolRemovals) -> Self {
+        self.removals = removals;
+        self
+    }
+
+    /// Same, for a registry already built. Used by the session builder, which
+    /// registers builtins before it has parsed the config that removes them.
+    pub fn set_removals(&mut self, removals: ToolRemovals) {
+        self.removals = removals;
+    }
+
+    /// The active removal policy.
+    pub fn removals(&self) -> &ToolRemovals {
+        &self.removals
     }
 
     /// Arm the per-call backstop deadline. `0` disables it. Builder-style.
@@ -264,6 +336,16 @@ impl ToolRegistry {
     /// implementations without dropping live work.
     pub fn register_arc(&self, tool: Arc<dyn Tool>) -> Option<Arc<dyn Tool>> {
         let spec = tool.spec();
+        // The single choke point: `register` delegates here, so one check
+        // covers every path in, whenever it happens.
+        if self.removals.excludes(&spec.name) {
+            tracing::info!(
+                target: "wingman::tools",
+                tool = %spec.name,
+                "not registered: excluded by [tools].preset / [tools].disabled_tools"
+            );
+            return None;
+        }
         self.tools
             .write()
             .unwrap_or_else(|e| e.into_inner())
