@@ -347,7 +347,10 @@ impl SessionLog {
             AgentEvent::Stop { reason } => {
                 self.write(SessionRecord::Stop {
                     ts: now(),
-                    reason: serde_json::to_string(reason).unwrap_or_else(|_| "\"unknown\"".into()),
+                    reason: serde_json::to_value(reason)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_string))
+                        .unwrap_or_else(|| "unknown".into()),
                 })
                 .await
             }
@@ -515,6 +518,7 @@ pub fn session_meta(records: &[SessionRecord]) -> Option<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wingman_core::AgentStop;
 
     /// Write a message and a couple of records, then read the file back and
     /// confirm the log round-trips through JSONL without loss.
@@ -544,6 +548,24 @@ mod tests {
             Some(("anthropic".into(), "claude".into()))
         );
         assert!(matches!(&records[1], SessionRecord::User { text, .. } if text == "hello"));
+    }
+
+    /// The stop reason is stored as the bare variant name, matching what the
+    /// ContextFact::Stop writer records — not a JSON-quoted `"\"end_turn\""`.
+    #[tokio::test]
+    async fn stop_reason_is_written_unquoted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = SessionLog::create(dir.path()).await.unwrap();
+        let path = log.path().to_path_buf();
+        log.record_agent_event(&AgentEvent::Stop {
+            reason: AgentStop::EndTurn,
+        })
+        .await
+        .unwrap();
+        drop(log);
+
+        let records = load_session(&path).unwrap();
+        assert!(matches!(&records[0], SessionRecord::Stop { reason, .. } if reason == "end_turn"));
     }
 
     /// load_session ignores blank lines rather than erroring on them.
