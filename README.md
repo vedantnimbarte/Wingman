@@ -267,6 +267,233 @@ Tailscale, a WireGuard subnet, an SSH tunnel, or a TLS proxy. Full surface in
 
 ---
 
+## How it works
+
+Four views of the same system: what the pieces are, what one turn does, what a
+pilot run does, and how a remote turn reaches the agent. Deeper detail —
+crate-by-crate responsibilities, session-log invariants, threading — is in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+### Architecture
+
+Every surface — TUI, `--print`, `wingman serve`, and each pilot worker — drives
+the same `AgentLoop` in `wingman-core`. Providers, tools, and the permission
+model hang off it as traits, which is why swapping a model or a language server
+changes nothing about the loop.
+
+```mermaid
+flowchart TB
+    U(["You — terminal, phone, CI"])
+
+    subgraph SURF["Surfaces"]
+        TUI["TUI<br/>wingman-tui"]
+        HL["Headless<br/>wingman --print"]
+        SRV["HTTP + SSE + web panel<br/>wingman serve"]
+        PIL["Pilot and board<br/>wingman-autonomous"]
+    end
+
+    CFG["wingman-config<br/>layered config, trust, permission modes"]
+    LOOP["wingman-core :: AgentLoop<br/>compaction, prompt cache, verification gate"]
+    PROV["wingman-providers<br/>Anthropic, OpenAI, ChatGPT, Gemini,<br/>OpenRouter, LiteLLM, LM Studio, vLLM, Ollama"]
+    REG["wingman-tools :: ToolRegistry<br/>capability gate, hooks, redaction, audit, repeat guard"]
+
+    subgraph BACK["Tool backends"]
+        FS["files, shell, glob, grep"]
+        LSPX["wingman-lsp<br/>11 language servers"]
+        RAGX["wingman-rag + wingman-ts<br/>dense + BM25 index, tree-sitter chunking"]
+        MCPX["wingman-mcp<br/>external MCP servers"]
+        SKL["wingman-skills<br/>markdown skill library"]
+        LRN["wingman-learn<br/>memories, skill stats, session recall"]
+    end
+
+    SES["wingman-session<br/>append-only JSONL, one writer: the loop"]
+    DISK[("~/.wingman<br/>project-local .wingman")]
+
+    U --> TUI & HL & SRV & PIL
+    TUI & HL & SRV --> LOOP
+    PIL -->|"spawns wingman --worker-mode per task"| LOOP
+    CFG --> LOOP
+    CFG --> REG
+    LOOP <-->|"Message / StreamEvent"| PROV
+    LOOP -->|"ToolDispatcher"| REG
+    REG --> FS & LSPX & RAGX & MCPX & SKL & LRN
+    LOOP -->|"ContextFact"| SES
+    SES & LRN & RAGX --> DISK
+```
+
+### One turn
+
+`AgentLoop::run` drives a single user turn to completion. Everything the model
+will see is emitted as a `ContextFact` first, so the transcript on disk
+reconstructs the request exactly — that invariant is why the loop is the only
+writer of the session log.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant S as Surface — TUI, --print, serve
+    participant L as AgentLoop
+    participant H as LearningHook
+    participant P as Provider
+    participant R as ToolRegistry
+    participant G as TurnGate
+    participant J as Session JSONL
+
+    You->>S: prompt
+    S->>L: run(prompt)
+    L->>J: ContextFact::UserMessage
+
+    loop until end_turn or max_turns
+        opt over compactor.trigger_tokens
+            L->>L: prune oversized tool results, then fold oldest turns into a recap
+            L->>J: ToolResultPruned / Compacted
+        end
+        L->>H: before_turn(history)
+        H-->>L: memory index, retrieved chunks, nudges, skill bodies
+        L->>P: CompletionRequest — system + history + tool specs + cache breakpoints
+        P-->>S: TextDelta / ThinkingDelta stream
+        P-->>L: ToolUse blocks, Usage, Stop
+
+        alt model asked for tools
+            Note over L,R: the batch runs concurrently only if every call is read-only,<br/>otherwise one at a time so an edit sees the tree the last call left
+            L->>R: dispatch(name, args)
+            R->>R: pre_tool_use hook, capability gate, undo snapshot,<br/>run under a backstop deadline, redact secrets, audit, repeat guard
+            R-->>L: ToolOutcome
+            L->>L: truncate to ToolOutputBudget, spill the full text where the model can read it
+            L->>J: AssistantMessage and tool results
+            Note over L: a successful mutating call arms the gate
+        else no tools left
+            opt gate armed by an edit this turn
+                L->>G: check() — build, affected tests, LSP diagnostics
+                G-->>L: GateReport
+                L-->>S: Verification event
+                alt red, retries left
+                    L->>L: feed the failure back as a user message and keep going
+                else red, retries spent
+                    L-->>S: Stop::GateFailed — non-zero exit
+                end
+            end
+            L->>H: after_stop(history)
+            L->>J: Stop
+            L-->>S: Stop::EndTurn
+        end
+    end
+```
+
+### A pilot run
+
+`wingman pilot run` plans a task DAG, runs each task as its own `wingman`
+subprocess in its own git worktree, and squash-merges the survivors onto one
+integration branch. The orchestrator is a single-writer actor, so run state and
+the JSONL log can never disagree.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor You
+    participant C as wingman pilot run
+    participant PL as Planner
+    participant K as Critic
+    participant O as Orchestrator actor
+    participant ST as RunStore — tasks.jsonl, state.json
+    participant W as Worker — wingman --worker-mode
+    participant RV as Reviewer
+    participant GH as git and gh
+
+    You->>C: pilot run "goal"
+    C->>PL: goal plus repo grounding facts
+    PL-->>C: task DAG
+    C->>K: critique the plan
+    K-->>C: risks above threshold become guardrail tasks
+    C->>O: start run
+    O->>ST: RunStarted and tasks
+
+    loop while tasks remain
+        O->>O: pick eligible tasks — deps met, write-sets disjoint,<br/>concurrency scaled by rate limits, CPU load, budget burn
+        O->>GH: worktree and branch off base_commit
+        O->>W: spawn on that worktree
+        W-->>O: NDJSON AgentEvents — the loop above, inside the worktree
+        O->>ST: tool starts, usage, status transitions
+        W-->>O: acceptance result
+        alt acceptance green
+            O->>RV: review this task's diff
+            RV-->>O: verdict
+            O->>K: independent re-review
+            K-->>O: veto or accept
+        else red or timed out
+            O->>O: retry ladder, bounded by max_retries_per_task, then Blocked
+        end
+    end
+
+    O->>GH: integration branch, git merge --squash per task in topological order
+    alt conflict
+        GH-->>O: halt and emit run.conflict for you to resolve
+    else clean
+        O->>GH: gh pr create, or push plus a compare URL
+        GH-->>You: PR
+        O->>ST: RunDone
+    end
+```
+
+### A remote turn
+
+`wingman serve` keeps no conversation state. A session *is* the JSONL file the
+TUI writes, so a turn started on a phone resumes in the terminal — and each turn
+runs as a child process, because project resolution is process-wide and a
+panicking turn must not take the daemon with it.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CL as Client — wingman --remote, web panel, curl, CI
+    participant D as serve daemon
+    participant A as Auth
+    participant CH as Child — wingman --print --json --resume
+    participant J as Session JSONL in the project
+
+    CL->>D: POST /v1/projects/{project}/turns — bearer token or panel cookie
+    D->>A: constant-time token compare
+    A-->>D: ok
+    D->>D: project must be allowlisted, traversal refused,<br/>requested mode clamped to [serve].max_permission_mode
+    D->>CH: spawn with cwd set to the project
+    CH->>J: replay the transcript, then append this turn
+    CH-->>D: one AgentEvent per stdout line
+    D-->>CL: text/event-stream — the event type names the SSE event, the line is its data
+    Note over CL,J: pilot control is the same shape: a POST appends to control.jsonl,<br/>a GET reads tasks.jsonl and state.json straight off disk
+```
+
+### Config and permissions
+
+Config resolves in layers, but the project layer is split: a cloned repo's
+`.wingman/config.toml` may pick a model and tune the UI, while the keys that
+execute things merge only after `wingman trust` — recorded as a hash of the file
+bytes, so editing a trusted config revokes trust. Enforcement then happens once,
+centrally, in the registry: a tool that forgets to check its own permissions
+fails closed rather than open.
+
+```mermaid
+flowchart TB
+    D1["Built-in defaults"] --> D2["~/.wingman/config.toml"]
+    D2 --> SPLIT{"project .wingman/config.toml"}
+    SPLIT -->|"safe keys — model, TUI, token budgets"| MERGE["Merged config"]
+    SPLIT -->|"hooks, mcp, verify, custom tools, permission_mode"| TRUST{"sha256 matches<br/>~/.wingman/trusted.toml?"}
+    TRUST -->|yes| MERGE
+    TRUST -->|"no — never trusted, or the file changed since"| DROP["Dropped"]
+    MERGE --> ENVP["Resolve ENV_VAR placeholders"]
+    ENVP --> ENVV["WINGMAN_* environment variables"]
+    ENVV --> FLAGS["CLI flags — --mode, --model, --reasoning"]
+    FLAGS --> CTX["ToolCtx — the mode lives in an atomic cell,<br/>so /mode re-gates the running agent"]
+
+    CTX --> GATE{"capability check —<br/>read, write, shell, network"}
+    GATE -->|allowed| RUN["Tool runs"]
+    GATE -->|denied| REF["Refused, not queued —<br/>there are no approval prompts by design"]
+
+    GATE -.->|"never writable in any mode"| NW[".git/ · .wingman/config.toml · .wingman/skills/"]
+```
+
+---
+
 ## Known limits
 
 Pre-1.0. The parts worth knowing before you lean on them:
