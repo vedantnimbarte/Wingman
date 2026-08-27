@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { SchemaNode } from './api'
-import { at, fieldsOf, resolve, toPatch } from './schema'
+import { at, fieldsOf, optionsFor, resolve, toPatch } from './schema'
 
 /**
  * Schema shapes here are copied from what `GET /v1/config/schema` actually
@@ -30,6 +30,19 @@ const defs: Record<string, SchemaNode> = {
     properties: {
       inner: { type: 'object', properties: { leaf: { type: 'string' } } },
     },
+  },
+  // Copied verbatim from `wingman_config::json_schema()`. This is the shape
+  // every `schemars(with = …)` shadow enum produces — nine fields today — and
+  // it is *not* the plain `$ref` above: the field keeps its own description
+  // and default, and the choices sit one `allOf` hop away.
+  ReasoningLevel: {
+    description: 'The four canonical `reasoning` levels, for the schema only.',
+    oneOf: [
+      { type: 'string', enum: ['off'], description: 'No reasoning. The default…' },
+      { type: 'string', enum: ['low'], description: 'A short budget…' },
+      { type: 'string', enum: ['medium'], description: 'Anthropic 16384 thinking tokens…' },
+      { type: 'string', enum: ['high'], description: 'Anthropic 32768 thinking tokens…' },
+    ],
   },
 }
 
@@ -162,5 +175,82 @@ describe('toPatch', () => {
 
   it('is empty when nothing was edited', () => {
     expect(toPatch(new Map())).toEqual({})
+  })
+})
+
+/**
+ * The `String`-typed enums.
+ *
+ * `wingman-config` has nine fields that are `String` in Rust and a choice in
+ * the schema, wired with `schemars(with = …)`. A test over there asserts each
+ * one still references its definition. Nothing asserted this end — that the
+ * panel turns that shape into a dropdown — and the two halves are only useful
+ * together: a schema that offers choices no form reads is the same free-text
+ * box it was before.
+ */
+describe('the schema-only enums', () => {
+  const field = {
+    allOf: [{ $ref: '#/definitions/ReasoningLevel' }],
+    default: 'off',
+    description: 'How hard the model should think before answering.',
+  }
+
+  it('reads a choice through the allOf hop the real schema uses', () => {
+    const [reasoning] = fieldsOf({ type: 'object', properties: { reasoning: field } }, defs)
+    expect(reasoning.kind).toBe('enum')
+    expect(reasoning.choices?.map((c) => c.value)).toEqual(['off', 'low', 'medium', 'high'])
+  })
+
+  it('keeps the field’s own documentation, not the shadow type’s', () => {
+    // The shadow enum's doc comment explains why it exists to a Rust reader.
+    // Putting that in the form's help text would be telling the user about an
+    // implementation detail instead of about the setting.
+    const [reasoning] = fieldsOf({ type: 'object', properties: { reasoning: field } }, defs)
+    expect(reasoning.description).toBe('How hard the model should think before answering.')
+  })
+})
+
+describe('optionsFor', () => {
+  const levels = [
+    { value: 'off', description: 'No reasoning.' },
+    { value: 'low' },
+    { value: 'medium' },
+    { value: 'high' },
+  ]
+
+  it('offers exactly the schema list when the value is one of them', () => {
+    expect(optionsFor(levels, 'medium').map((c) => c.value)).toEqual([
+      'off',
+      'low',
+      'medium',
+      'high',
+    ])
+    expect(optionsFor(levels, 'medium').every((c) => c.listed)).toBe(true)
+  })
+
+  it('carries an accepted alias in rather than letting the select lie', () => {
+    // `ReasoningEffort::parse` takes `med`. A controlled select whose value
+    // matches no option renders its *first* option, so this displayed "off" —
+    // a config that says medium reading as reasoning turned off.
+    const out = optionsFor(levels, 'med')
+    expect(out[0]).toEqual({ value: 'med', listed: false })
+    expect(out.map((c) => c.value)).toEqual(['med', 'off', 'low', 'medium', 'high'])
+  })
+
+  it('does the same for a theme name the resolver would fall back on', () => {
+    // `theme::resolve` accepts any string and falls back to the default, so
+    // the value is legal and the schema still does not list it.
+    const themes = [{ value: 'default' }, { value: 'light' }, { value: 'mono' }]
+    expect(optionsFor(themes, 'solarized')[0]).toEqual({ value: 'solarized', listed: false })
+  })
+
+  it('leaves unset alone — that is the nullable option’s job', () => {
+    expect(optionsFor(levels, '')).toHaveLength(4)
+    expect(optionsFor(levels, undefined)).toHaveLength(4)
+    expect(optionsFor(levels, 3)).toHaveLength(4)
+  })
+
+  it('survives a field the schema gave no choices at all', () => {
+    expect(optionsFor(undefined, 'anything')).toEqual([{ value: 'anything', listed: false }])
   })
 })
