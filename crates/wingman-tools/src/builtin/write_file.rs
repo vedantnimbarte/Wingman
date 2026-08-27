@@ -46,11 +46,11 @@ impl Tool for WriteFile {
             return ToolOutcome::err(ctx.write_denial_reason(&path));
         }
         if let Some(parent) = path.parent() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            if let Err(e) = ctx.fs.create_dir_all(parent).await {
                 return ToolOutcome::err(format!("mkdir {}: {e}", parent.display()));
             }
         }
-        if let Err(e) = tokio::fs::write(&path, &args.content).await {
+        if let Err(e) = ctx.fs.write(&path, args.content.as_bytes()).await {
             return ToolOutcome::err(format!("write {}: {e}", path.display()));
         }
         ToolOutcome::ok(format!(

@@ -104,7 +104,7 @@ impl Tool for ApplyPatch {
                     if !ctx.allows_write(path) {
                         return ToolOutcome::err(ctx.write_denial_reason(path));
                     }
-                    let original = match tokio::fs::read_to_string(path).await {
+                    let original = match ctx.fs.read_to_string(path).await {
                         Ok(s) => s,
                         Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
                     };
@@ -157,22 +157,22 @@ impl Tool for ApplyPatch {
                 Op::Update { path, old, new } => {
                     let original = original.unwrap();
                     let updated = original.replacen(&old, &new, 1);
-                    if let Err(e) = tokio::fs::write(&path, &updated).await {
+                    if let Err(e) = ctx.fs.write(&path, updated.as_bytes()).await {
                         return ToolOutcome::err(format!("write {}: {e}", path.display()));
                     }
                     summary.push_str(&format!("updated {}\n", path.display()));
                 }
                 Op::Add { path, content } => {
                     if let Some(parent) = path.parent() {
-                        let _ = tokio::fs::create_dir_all(parent).await;
+                        let _ = ctx.fs.create_dir_all(parent).await;
                     }
-                    if let Err(e) = tokio::fs::write(&path, &content).await {
+                    if let Err(e) = ctx.fs.write(&path, content.as_bytes()).await {
                         return ToolOutcome::err(format!("write {}: {e}", path.display()));
                     }
                     summary.push_str(&format!("added   {}\n", path.display()));
                 }
                 Op::Delete { path } => {
-                    if let Err(e) = tokio::fs::remove_file(&path).await {
+                    if let Err(e) = ctx.fs.remove_file(&path).await {
                         return ToolOutcome::err(format!("delete {}: {e}", path.display()));
                     }
                     summary.push_str(&format!("deleted {}\n", path.display()));

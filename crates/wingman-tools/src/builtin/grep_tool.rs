@@ -94,6 +94,9 @@ impl Tool for Grep {
         let limit = args.limit.unwrap_or(200) as usize;
 
         let base_for_task = base.clone();
+        // Cloned into the blocking closure: the tree walk reads through
+        // the seam like every other tool, using its blocking flavour.
+        let fs = ctx.fs.clone();
         let matches: Vec<String> = tokio::task::spawn_blocking(move || {
             let mut out: Vec<String> = Vec::new();
             let walker = WalkBuilder::new(&base_for_task).build();
@@ -111,7 +114,7 @@ impl Tool for Grep {
                         continue;
                     }
                 }
-                let Ok(bytes) = std::fs::read(path) else {
+                let Ok(bytes) = fs.read_blocking(path) else {
                     continue;
                 };
                 if bytes.iter().take(8192).any(|&b| b == 0) {

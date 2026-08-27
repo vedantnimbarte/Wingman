@@ -77,9 +77,12 @@ impl Tool for RecallMemory {
                     // Provenance: where this came from + when it was last written,
                     // so the agent can *cite* the memory it acts on (trust in a
                     // compounding asset comes from being able to see its source).
-                    let saved = std::fs::metadata(&m.path)
-                        .and_then(|md| md.modified())
+                    let saved = _ctx
+                        .fs
+                        .metadata(&m.path)
+                        .await
                         .ok()
+                        .and_then(|md| md.modified)
                         .map(fmt_date)
                         .unwrap_or_else(|| "unknown".into());
                     ToolOutcome::ok(format!(

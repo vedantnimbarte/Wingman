@@ -36,7 +36,11 @@ struct PosArgs {
 
 /// Resolve the tool's `(line, character-or-symbol)` into a 0-based LSP
 /// [`Position`]. Reads the file to locate `symbol` when a column isn't given.
-fn resolve_position(abs: &Path, a: &PosArgs) -> Result<Position, String> {
+fn resolve_position(
+    fs: &dyn crate::filesystem::FileSystem,
+    abs: &Path,
+    a: &PosArgs,
+) -> Result<Position, String> {
     let line0 = a.line.saturating_sub(1);
     // Explicit 1-based column wins when present.
     if let Some(col) = a.character {
@@ -49,8 +53,9 @@ fn resolve_position(abs: &Path, a: &PosArgs) -> Result<Position, String> {
         .symbol
         .as_deref()
         .ok_or("provide either `character` (1-based column) or `symbol`")?;
-    let text =
-        std::fs::read_to_string(abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+    let text = fs
+        .read_to_string_blocking(abs)
+        .map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
     let line_text = text
         .lines()
         .nth(line0 as usize)
@@ -196,7 +201,7 @@ impl Tool for LspDefinition {
             Ok(v) => v,
             Err(out) => return out,
         };
-        let pos = match resolve_position(&abs, &a) {
+        let pos = match resolve_position(&*ctx.fs, &abs, &a) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -254,7 +259,7 @@ impl Tool for LspReferences {
             Ok(v) => v,
             Err(out) => return out,
         };
-        let pos = match resolve_position(&abs, &a.pos) {
+        let pos = match resolve_position(&*ctx.fs, &abs, &a.pos) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -295,7 +300,7 @@ impl Tool for LspHover {
             Ok(v) => v,
             Err(out) => return out,
         };
-        let pos = match resolve_position(&abs, &a) {
+        let pos = match resolve_position(&*ctx.fs, &abs, &a) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -449,7 +454,7 @@ impl Tool for LspRename {
             Ok(v) => v,
             Err(out) => return out,
         };
-        let pos = match resolve_position(&abs, &a.pos) {
+        let pos = match resolve_position(&*ctx.fs, &abs, &a.pos) {
             Ok(p) => p,
             Err(e) => return ToolOutcome::err(e),
         };
@@ -573,6 +578,7 @@ impl Tool for LspCodeAction {
         // whole-file source actions.
         let (start, end) = if let Some(line) = a.line {
             let pos = match resolve_position(
+                &*ctx.fs,
                 &abs,
                 &PosArgs {
                     path: a.path.clone(),
@@ -801,7 +807,12 @@ mod tests {
             character: Some(5),
             symbol: None,
         };
-        let p = resolve_position(Path::new("nonexistent"), &args).unwrap();
+        let p = resolve_position(
+            &crate::filesystem::OsFileSystem,
+            Path::new("nonexistent"),
+            &args,
+        )
+        .unwrap();
         assert_eq!(p.line, 2); // 0-based
         assert_eq!(p.character, 4);
     }
@@ -818,7 +829,7 @@ mod tests {
             character: None,
             symbol: Some("compute".into()),
         };
-        let p = resolve_position(&file, &args).unwrap();
+        let p = resolve_position(&crate::filesystem::OsFileSystem, &file, &args).unwrap();
         assert_eq!(p.line, 1);
         // "let value = " is 12 chars → compute starts at col 12 (0-based).
         assert_eq!(p.character, 12);
