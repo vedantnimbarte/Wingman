@@ -3497,34 +3497,67 @@ max_retries_per_task = 1
 mod documented_config_tests {
     use super::*;
 
-    /// The `[tools]` block in docs/CONFIGURATION.md must parse.
-    ///
-    /// `ToolsConfig` is `deny_unknown_fields`, so a key documented under a
-    /// name the struct does not have is not a cosmetic docs bug: a user who
-    /// copies the block gets their whole config rejected.
-    #[test]
-    fn the_documented_tools_block_parses() {
+    /// The example `~/.wingman/config.toml` from docs/CONFIGURATION.md,
+    /// exactly as a user would copy it.
+    fn documented_example() -> String {
         let doc = include_str!("../../../docs/CONFIGURATION.md");
-        let start = doc.find("[tools]").expect("docs must document [tools]");
-        let end = doc[start..]
-            .find("\n[verify]")
-            .map(|i| start + i)
-            .expect("the [tools] block should be followed by [verify]");
-        // Uncomment the presets example so it is exercised too. Line endings
-        // are normalized first: this file is checked out CRLF on Windows, and
-        // the trailing newline matters because the slice ends on a comment
-        // line, which the parser rejects without a terminator.
-        let block = doc[start..end].replace("\r\n", "\n") + "\n";
-        let block = block.replace("# [tools.presets]\n# docs =", "[tools.presets]\ndocs =");
+        let open = doc
+            .find("```toml")
+            .expect("docs must show an example config");
+        let body = &doc[open + "```toml".len()..];
+        let end = body
+            .find("\n```")
+            .expect("the example block must be closed");
+        // Normalize line endings - this file is checked out CRLF on
+        // Windows - and guarantee a trailing newline, since the parser
+        // rejects a block ending on a comment with no terminator.
+        body[..end].replace("\r\n", "\n") + "\n"
+    }
 
+    /// Every documented config key must exist.
+    ///
+    /// The config structs are `deny_unknown_fields`, so a key documented under
+    /// a name the struct does not have is not a cosmetic docs bug: a user who
+    /// copies the example gets their *whole* config rejected, including the
+    /// parts that were fine.
+    ///
+    /// Checks the entire example rather than one section, because that failure
+    /// mode does not care which table the bad key is in.
+    #[test]
+    fn the_documented_example_config_parses() {
+        let block = documented_example();
         let parsed: Config = toml::from_str(&block)
-            .unwrap_or_else(|e| panic!("documented [tools] block does not parse: {e}\n\n{block}"));
-        // Spot-check that the values actually landed, not just that the
-        // parse succeeded on an empty table.
+            .unwrap_or_else(|e| panic!("the documented example config does not parse: {e}"));
+
+        // Spot-check across several sections, so a parse that silently landed
+        // on defaults cannot pass.
+        assert_eq!(parsed.tokens.compact_at_tokens, 120_000);
         assert_eq!(parsed.tools.tool_timeout_secs, 120);
         assert_eq!(parsed.tools.repeat_thresholds, vec![3, 5, 8]);
         assert!(parsed.tools.spill_tool_output);
         assert_eq!(parsed.tools.prune_threshold_chars, 8192);
+        assert!(parsed.verify.affected_tests);
+        assert!(parsed.providers.contains_key("anthropic"));
+        assert!(parsed.mcp.contains_key("filesystem"));
+    }
+
+    /// The commented-out examples have to be valid too — they exist to be
+    /// uncommented, and a broken one is discovered by the user, not by us.
+    #[test]
+    fn the_commented_presets_example_is_valid_when_uncommented() {
+        let block = documented_example().replace(
+            "# [tools.presets]
+# docs =",
+            "[tools.presets]
+docs =",
+        );
+        let parsed: Config = toml::from_str(&block)
+            .unwrap_or_else(|e| panic!("uncommenting the presets example breaks the config: {e}"));
         assert!(parsed.tools.presets.contains_key("docs"));
+        // `[tools.presets]` is a subtable, so every scalar `[tools]` key after
+        // it would be read as part of it. It has to stay last in its section —
+        // this is what catches someone helpfully moving it back up.
+        assert_eq!(parsed.tools.tool_timeout_secs, 120);
+        assert_eq!(parsed.tools.prune_threshold_chars, 8192);
     }
 }

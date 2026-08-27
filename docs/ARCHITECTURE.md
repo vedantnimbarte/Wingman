@@ -127,8 +127,8 @@ Both surfaces feed the same **agent loop** at `crates/wingman-core/src/agent.rs`
 | `write_file`      | Create/overwrite file.                   |
 | `edit_file`       | Exact string replacement in a file.      |
 | `apply_patch`     | Multi-file atomic edit (Update/Add/Del). |
-| `glob_tool`       | Find files by glob pattern.              |
-| `grep_tool`       | Content search (ripgrep semantics).      |
+| `glob`       | Find files by glob pattern.              |
+| `grep`       | Content search (ripgrep semantics).      |
 | `list_dir`        | List directory.                          |
 | `run_shell`       | Execute shell command.                   |
 | `web_fetch`       | Download URL, strip HTML.                |

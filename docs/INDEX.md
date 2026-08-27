@@ -211,7 +211,7 @@ cargo build --release --no-default-features
 
 **"No such file or directory" errors**
 
-Wingman expects absolute paths. Use `glob_tool` or `list_dir` to find files, then pass absolute paths to other tools.
+Wingman expects absolute paths. Use `glob` or `list_dir` to find files, then pass absolute paths to other tools.
 
 **Permission errors**
 

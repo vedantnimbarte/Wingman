@@ -188,14 +188,14 @@ Apply a multi-file edit atomically. Updates, adds, and deletes are all-or-nothin
 
 ## Search & Discovery
 
-### `glob_tool`
+### `glob`
 
 Find files matching a glob pattern.
 
 **Signature:**
 ```json
 {
-  "tool": "glob_tool",
+  "tool": "glob",
   "args": {
     "pattern": "**/*.rs"
   }
@@ -217,19 +217,19 @@ crates/wingman-core/src/lib.rs
 
 **Examples:**
 ```
-glob_tool(pattern="src/**/*.rs")     # all Rust files in src/
-glob_tool(pattern="**/*.{js,ts}")    # JS and TS files
-glob_tool(pattern="test_*.py")       # test files in current dir
+glob(pattern="src/**/*.rs")     # all Rust files in src/
+glob(pattern="**/*.{js,ts}")    # JS and TS files
+glob(pattern="test_*.py")       # test files in current dir
 ```
 
-### `grep_tool`
+### `grep`
 
 Search file contents using ripgrep semantics.
 
 **Signature:**
 ```json
 {
-  "tool": "grep_tool",
+  "tool": "grep",
   "args": {
     "pattern": "async fn.*Result",
     "glob": "**/*.rs",
@@ -257,9 +257,9 @@ crates/wingman-core/src/agent.rs:54-) -> Result<ProviderEventStream> {
 
 **Examples:**
 ```
-grep_tool(pattern="fn main")                      # find main functions
-grep_tool(pattern="TODO|FIXME", glob="**/*.rs")   # all TODOs in Rust files
-grep_tool(pattern="class\\s+\\w+", glob="**/*.py") # class definitions in Python
+grep(pattern="fn main")                      # find main functions
+grep(pattern="TODO|FIXME", glob="**/*.rs")   # all TODOs in Rust files
+grep(pattern="class\\s+\\w+", glob="**/*.py") # class definitions in Python
 ```
 
 ### `list_dir`
@@ -802,8 +802,8 @@ faster model while the parent session keeps the strongest one. An explicit
 | `write_file`        | —    | Y     | —     | mode/tree  | Overwrites; destructive        |
 | `edit_file`         | —    | Y     | —     | mode/tree  | Exact-match safe edit          |
 | `apply_patch`       | —    | Y     | —     | mode/tree  | Atomic multi-file             |
-| `glob_tool`         | Y    | —     | —     | always     | File discovery                 |
-| `grep_tool`         | Y    | —     | —     | always     | Content search                 |
+| `glob`              | Y    | —     | —     | always     | File discovery                 |
+| `grep`              | Y    | —     | —     | always     | Content search                 |
 | `list_dir`          | Y    | —     | —     | always     | Directory listing              |
 | `run_shell`         | —    | —     | Y     | mode/list  | Shell execution                |
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
@@ -836,9 +836,9 @@ faster model while the parent session keeps the strongest one. An explicit
 Most tools return `ToolOutcome { output: String, is_error: bool }`.
 
 **Common error cases:**
-- `read_file` on non-existent file → error, suggestion to `glob_tool` or `list_dir`.
+- `read_file` on non-existent file → error, suggestion to `glob` or `list_dir`.
 - `edit_file` with no match → error, shows first 200 chars of file.
-- `grep_tool` with invalid regex → error, invalid pattern reported.
+- `grep` with invalid regex → error, invalid pattern reported.
 - `run_shell` timeout → error, partial output before timeout.
 - Permission denied → error, explains which mode allows it.
 
@@ -846,8 +846,8 @@ The agent can see errors and typically responds by adjusting the request or usin
 
 ## Performance Tips
 
-1. **Use `glob_tool` before `read_file`** to find the right file.
-2. **Truncation aware** — large files are head/tail truncated per `tool_output_max_lines`. Use `grep_tool` to find relevant sections first.
+1. **Use `glob` before `read_file`** to find the right file.
+2. **Truncation aware** — large files are head/tail truncated per `tool_output_max_lines`. Use `grep` to find relevant sections first.
 3. **Batch reads** — if you need multiple files, read them in sequence; async overhead is minimal.
 4. **RAG first** — for code understanding, use `semantic_search` before grep; embeddings are faster than regex on large codebases.
 5. **Shell commands** — cache output (don't re-run `cargo build` multiple times; save the result and reference it).
