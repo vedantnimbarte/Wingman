@@ -35,6 +35,13 @@ pub struct ToolCtx {
     /// rather than to a child that is about to disappear; giving children
     /// their own table would orphan whatever they left running.
     pub jobs: Arc<crate::jobs::JobTable>,
+    /// How tools read and write files.
+    ///
+    /// Shared across clones like  and . Note this is a tool's
+    /// *content* I/O only — path containment below deliberately consults the
+    /// real filesystem whatever this is set to, because whether a path escapes
+    /// the project is a fact about the real one.
+    pub fs: Arc<dyn crate::filesystem::FileSystem>,
 }
 
 /// Encode/decode `PermissionMode` as a `u8` for the atomic cell. Kept local
@@ -69,6 +76,7 @@ impl ToolCtx {
             shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
+            fs: Arc::new(crate::filesystem::OsFileSystem),
         }
     }
 
@@ -90,6 +98,7 @@ impl ToolCtx {
             shell_sandbox: "auto".into(),
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
+            fs: Arc::new(crate::filesystem::OsFileSystem),
         }
     }
 

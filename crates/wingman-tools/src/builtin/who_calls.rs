@@ -98,6 +98,9 @@ impl Tool for WhoCalls {
         };
 
         let root = ctx.project_root.clone();
+        // Cloned into the blocking closure: the tree walk reads through
+        // the seam like every other tool, using its blocking flavour.
+        let fs = ctx.fs.clone();
         let hits = tokio::task::spawn_blocking(move || -> Vec<String> {
             #[cfg(feature = "treesitter")]
             {
@@ -123,7 +126,7 @@ impl Tool for WhoCalls {
                             continue;
                         }
                     }
-                    let Ok(bytes) = std::fs::read(path) else {
+                    let Ok(bytes) = fs.read_blocking(path) else {
                         continue;
                     };
                     if bytes.iter().take(8192).any(|&b| b == 0) {

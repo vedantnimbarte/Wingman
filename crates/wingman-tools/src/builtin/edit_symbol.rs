@@ -70,7 +70,7 @@ impl Tool for EditSymbol {
                     path.display()
                 ));
             };
-            let original = match tokio::fs::read_to_string(&path).await {
+            let original = match ctx.fs.read_to_string(&path).await {
                 Ok(s) => s,
                 Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
             };
@@ -92,7 +92,7 @@ impl Tool for EditSymbol {
             if updated == original {
                 return ToolOutcome::err("no change after replacement");
             }
-            if let Err(e) = tokio::fs::write(&path, &updated).await {
+            if let Err(e) = ctx.fs.write(&path, updated.as_bytes()).await {
                 return ToolOutcome::err(format!("write {}: {e}", path.display()));
             }
             ToolOutcome::ok(unified_diff(&original, &updated, &args.path))

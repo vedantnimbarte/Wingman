@@ -62,7 +62,7 @@ impl Tool for ReadFile {
                 ctx.mode()
             ));
         }
-        let bytes = match tokio::fs::read(&path).await {
+        let bytes = match ctx.fs.read(&path).await {
             Ok(b) => b,
             Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
         };

@@ -8,6 +8,7 @@
 
 pub mod child_process;
 mod ctx;
+pub mod filesystem;
 pub mod jobs;
 mod registry;
 pub mod sandbox;
@@ -16,6 +17,7 @@ pub mod builtin;
 pub mod prefetch;
 
 pub use ctx::ToolCtx;
+pub use filesystem::{FileSystem, MemoryFileSystem, OsFileSystem};
 pub use registry::{run_hook, HookResult, ToolRegistry};
 pub use Capability as ToolCapability;
 
