@@ -160,6 +160,42 @@ export function at(obj: unknown, path: string[]): unknown {
   return cur
 }
 
+/** One option in a generated `<select>`, and whether the schema named it. */
+export type Choice = { value: string; description?: string; listed: boolean }
+
+/**
+ * The options a select should offer, given what the config actually holds.
+ *
+ * The nine `String`-typed enums in `wingman-config` are strings on purpose:
+ * their parsers accept **more spellings than the schema lists**.
+ * `ReasoningEffort::parse` takes `none`, `false`, `med` and `max` alongside the
+ * four canonical levels; `wingman_tui::theme::resolve` falls back to the
+ * default for any name it does not know rather than failing. The schema
+ * describes the canonical set so a form can offer a choice — that is exactly
+ * what the `schemars(with = …)` shadow enums are for — and the value on disk is
+ * still allowed to be outside it.
+ *
+ * A controlled `<select>` whose value matches no option renders as its *first*
+ * option. So `reasoning = "med"` displayed "off", and a config that said
+ * medium read as reasoning disabled — the form quietly disagreeing with the
+ * file it is editing, which is worse than free text was.
+ *
+ * The current value is carried in as its own option when the schema does not
+ * list it, first so it is the one on screen, and marked so it does not read as
+ * a documented choice. Nothing is filtered out and nothing is rewritten:
+ * picking a listed value is still a deliberate act.
+ */
+export function optionsFor(
+  choices: { value: string; description?: string }[] | undefined,
+  value: unknown,
+): Choice[] {
+  const listed: Choice[] = (choices ?? []).map((c) => ({ ...c, listed: true }))
+  // An empty string is "unset", which `nullable` renders its own option for.
+  if (typeof value !== 'string' || value === '') return listed
+  if (listed.some((c) => c.value === value)) return listed
+  return [{ value, listed: false }, ...listed]
+}
+
 /** Build the nested object a patch needs from a flat map of path → value. */
 export function toPatch(edits: Map<string, unknown>): Record<string, unknown> {
   const root: Record<string, unknown> = {}
