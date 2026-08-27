@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { apply, resolve, scope } from './Board'
 import { classify, path, strip } from './Changes'
-import { verdict } from './Insights'
+import { stripAnsi, verdict } from './output'
 import { clockOf, isIrreversible, summarise } from './Runs'
 import { ago, clock, matching, unquote, usageLine } from './Sessions'
 import type { BoardData, Card, SessionSummary, Task } from './api'
@@ -335,5 +335,30 @@ describe('verdict', () => {
   it('invents nothing for a line that made no claim', () => {
     expect(verdict('providers')).toBeNull()
     expect(verdict('')).toBeNull()
+  })
+})
+
+describe('stripAnsi', () => {
+  it('drops the colour tracing wrote into a pilot log', () => {
+    // Verbatim from `.wingman/autonomous/<run>/pilot.log`: the pilot had a
+    // terminal, so `tracing` coloured a line that a browser would otherwise
+    // render with a literal "[2m" in front of the timestamp.
+    const raw =
+      '\u001b[2m2026-08-21T20:29:50.691356Z\u001b[0m \u001b[32m INFO\u001b[0m worker stopped'
+    expect(stripAnsi(raw)).toBe('2026-08-21T20:29:50.691356Z  INFO worker stopped')
+  })
+
+  it('leaves a log that was never coloured exactly as it is', () => {
+    const plain = '[pilot] driving manager loop (64 ticks max)…\nwingman: pipeline failed'
+    expect(stripAnsi(plain)).toBe(plain)
+  })
+
+  it('does not eat the bracketed prefixes the pilot writes itself', () => {
+    // `[pilot]` and `[2m` differ only by the ESC byte in front of one of them.
+    expect(stripAnsi('[pilot] wrote plan (3 tasks)')).toBe('[pilot] wrote plan (3 tasks)')
+  })
+
+  it('strips cursor and erase sequences, not just colour', () => {
+    expect(stripAnsi('a\u001b[2Kb\u001b[1;31mc')).toBe('abc')
   })
 })

@@ -7,7 +7,8 @@ import { navigate, segments, useRoute } from './router'
 import { Runs } from './Runs'
 import { Config } from './Config'
 import { ago, Sessions } from './Sessions'
-import { Insights, Output } from './Insights'
+import { Insights } from './Insights'
+import { Output } from './output'
 import {
   EventsProvider,
   message,

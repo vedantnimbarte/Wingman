@@ -173,6 +173,7 @@ that root and are rejected if they escape it.
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}` | Full `RunState` snapshot. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/events?tail=n` | Last `n` events from `tasks.jsonl`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/stream` | SSE: events as they are appended. |
+| `GET` | `/v1/projects/{p}/pilot/runs/{run}/log?tail=n` | The orchestrator's own stdout as `{text, total_lines, shown_lines}` (`tail` defaults to 500, max 5000). `events` is what the run *did*; this is what it *said* — the plan it costed, why it asked for approval or did not, and what it exited on. A run that failed while planning emitted no events worth reading and one line here that explains it. Both counts are returned so a client can say "the last 500 of 2,341 lines" rather than presenting a tail as the whole log. Colour is left in: it is the file as written, and stripping ANSI is the reader's job. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/dashboard` | The ASCII dashboard `pilot watch` renders, as text — cheapest possible phone view. |
 
 ### Pilot — control

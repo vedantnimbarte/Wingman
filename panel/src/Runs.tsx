@@ -1,17 +1,21 @@
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import {
   api,
   type Agent,
   type ControlAction,
+  type PilotLog,
   type RunLogEvent,
   type RunState,
   type RunSummary,
   type RunStatus,
+  type SessionRecord,
   type Task,
   type TaskStatus,
 } from './api'
 import { duration, glyph, money, statusClass } from './Board'
+import { Report } from './output'
 import { navigate } from './router'
+import { Transcript } from './Sessions'
 import { message, useEvents } from './state'
 import { Empty, Failed, Icon, Loading, Note, PageHead, Pill } from './ui'
 
@@ -540,32 +544,174 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
         </div>
       )}
 
-      {run.agents.length > 0 && (
-        <>
-          <h2 className="section-head">Workers</h2>
-          <div className="rows">
-            {run.agents.map((a) => (
-              <div key={a.id} className="row">
+      {run.agents.length > 0 && <Workers project={project} agents={run.agents} />}
+
+      <PilotLogView project={project} runId={run.run_id} />
+      <RunLog events={log} live={live} />
+    </div>
+  )
+}
+
+/* ── Workers ───────────────────────────────────────────────────────────── */
+
+/**
+ * Who ran, and what each one actually did.
+ *
+ * A worker's transcript is a session transcript: the orchestrator mints
+ * `pilot-<run>-<agent>` and the worker writes
+ * `<project>/.wingman/sessions/<that>.jsonl` like any other conversation, so
+ * `GET /sessions/{id}` already serves it and `Transcript` already renders it.
+ * The panel knew the id from the first release and never opened it — the one
+ * screen that could show the work showed a name, a model and a figure.
+ *
+ * One at a time. Each transcript is a full conversation with a `<pre>` per
+ * tool result, and fetching four because a run had four workers would pull
+ * megabytes nobody asked to read.
+ */
+function Workers({ project, agents }: { project: string; agents: Agent[] }) {
+  const [open, setOpen] = useState<string | null>(null)
+
+  return (
+    <>
+      <h2 className="section-head">Workers</h2>
+      <p className="section-intro">
+        Open one to read its transcript — every prompt, tool call and result, as the worker saw it.
+      </p>
+      <div className="rows">
+        {agents.map((a) => {
+          const isOpen = open === a.id
+          return (
+            <Fragment key={a.id}>
+              <div className="row">
                 <span className="worker-row">
                   <span className={`dot ${agentClass(a.status)}`} aria-hidden="true" />
-                  <span className="truncate">
+                  <button
+                    type="button"
+                    className="row-link truncate"
+                    aria-expanded={isOpen}
+                    onClick={() => setOpen(isOpen ? null : a.id)}
+                  >
                     {a.name || a.id}
                     <span className="muted"> · {a.role}</span>
                     {a.current_tool && <span className="muted"> · {a.current_tool}</span>}
                     {a.pid != null && <span className="faint"> · pid {a.pid}</span>}
-                  </span>
+                  </button>
                 </span>
                 <span className="figure">
                   <span className="muted">{a.model ?? '—'}</span> {money(a.usd)}
                 </span>
               </div>
-            ))}
-          </div>
-        </>
-      )}
+              {isOpen && <AgentWork project={project} agent={a} />}
+            </Fragment>
+          )
+        })}
+      </div>
+    </>
+  )
+}
 
-      <RunLog events={log} live={live} />
+/**
+ * One worker's transcript, fetched when it is opened.
+ *
+ * A missing transcript is reported as what it is rather than as a failure.
+ * Workers only began opening the log their id already promised in
+ * `fix(pilot): give a worker the session log its id already promised`, so
+ * every run from before that names a file that was never written — and "no
+ * transcript, here is why" is a better answer than a red error.
+ */
+function AgentWork({ project, agent }: { project: string; agent: Agent }) {
+  const [records, setRecords] = useState<SessionRecord[] | null>(null)
+  const [missing, setMissing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!agent.session_id) return
+    let live = true
+    setError(null)
+    setMissing(false)
+    api
+      .session(project, agent.session_id)
+      .then((r) => live && setRecords(r.records))
+      .catch((e: unknown) => {
+        if (!live) return
+        // A 404 is the expected shape of "this run predates worker logs", not
+        // an error the reader can act on.
+        if (/404|no such session/i.test(message(e))) setMissing(true)
+        else setError(message(e))
+      })
+    return () => {
+      live = false
+    }
+  }, [project, agent.session_id])
+
+  if (!agent.session_id)
+    return (
+      <p className="worker-note muted figure">
+        This worker never recorded a session id, so there is no transcript to open.
+      </p>
+    )
+
+  if (missing)
+    return (
+      <p className="worker-note muted figure">
+        No transcript on disk for <span className="identifier">{agent.session_id}</span>. Workers
+        only started writing the log their id promised recently, so runs from before that have
+        events but no conversation. The activity log below still has every tool this run ran.
+      </p>
+    )
+
+  if (error) return <p className="worker-note is-failed dot figure">{error}</p>
+  if (!records) return <Loading what="the transcript" />
+  if (records.length === 0)
+    return <p className="worker-note muted figure">This transcript is empty.</p>
+
+  return (
+    <div className="worker-transcript transcript">
+      <Transcript records={records} />
     </div>
+  )
+}
+
+/* ── Run log ───────────────────────────────────────────────────────────── */
+
+/**
+ * The orchestrator's own stdout.
+ *
+ * `tasks.jsonl` records what the run did; this is what it said — the plan it
+ * costed, why it asked for approval or did not, and what it exited on. Every
+ * failed run on this machine is explained here and nowhere else, which is
+ * exactly the thing a run screen was missing.
+ */
+function PilotLogView({ project, runId }: { project: string; runId: string }) {
+  const [log, setLog] = useState<PilotLog | null>(null)
+
+  useEffect(() => {
+    let live = true
+    api
+      .runLog(project, runId)
+      .then((l) => live && setLog(l))
+      .catch(() => {
+        /* The log is an extra; the plan above is the run. */
+      })
+    return () => {
+      live = false
+    }
+  }, [project, runId])
+
+  if (!log || log.total_lines === 0) return null
+  const truncated = log.shown_lines < log.total_lines
+
+  return (
+    <>
+      <h2 className="section-head">Run log</h2>
+      <p className="section-intro">
+        What the orchestrator printed as it worked.{' '}
+        {truncated
+          ? `The last ${log.shown_lines.toLocaleString()} of ${log.total_lines.toLocaleString()} lines.`
+          : `All ${log.total_lines.toLocaleString()} ${log.total_lines === 1 ? 'line' : 'lines'}.`}
+      </p>
+      <Report text={log.text} />
+    </>
   )
 }
 

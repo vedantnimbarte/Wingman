@@ -146,6 +146,67 @@ pub async fn get_dashboard(
     http::write_text(sock, 200, &text).await
 }
 
+/// How many trailing lines a log request returns by default, and at most.
+///
+/// A pilot log is one run's stdout, so the interesting part is almost always
+/// the end — the plan it settled on, and whatever it died of.
+const LOG_TAIL: usize = 500;
+const LOG_TAIL_MAX: usize = 5000;
+
+/// `GET /v1/projects/{p}/pilot/runs/{run}/log?tail=n`
+///
+/// The orchestrator's own stdout, which `tasks.jsonl` does not contain and
+/// nothing else serves. `events` reports what the run *did* — a task moved,
+/// a tool ran — while this is what it *said*: the plan it estimated, why it
+/// asked for approval or did not, and the error it exited on. A run whose
+/// events stop mid-task and whose status is `failed` is explained here and
+/// nowhere else.
+///
+/// Returns the tail with both counts, so a client can say "the last 500 of
+/// 2,341 lines" instead of presenting a truncated log as a whole one.
+pub async fn get_log(
+    project: &Project,
+    run_id: &str,
+    req: &Request,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    let Some((dir, _)) = load_or_404(project, run_id, sock).await? else {
+        return Ok(());
+    };
+    let path = dir.join("pilot.log");
+    // ponytail: reads the whole log to take its tail. A run's stdout is
+    // bounded by the run, and every one on disk here is well under a
+    // megabyte; seek from the end if a long-running pilot ever makes this
+    // measurable.
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        // A run that has not written a line yet is not an error — a run that
+        // was planned and never started has no log, and the caller wants an
+        // empty log rather than a 500 it has to special-case.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return http::write_err(sock, 500, &format!("reading log: {e}")).await,
+    };
+
+    let tail = req
+        .query_usize("tail")
+        .unwrap_or(LOG_TAIL)
+        .min(LOG_TAIL_MAX);
+    let lines: Vec<&str> = text.lines().collect();
+    let shown = lines.len().min(tail);
+    let body = lines[lines.len() - shown..].join("\n");
+
+    http::write_json(
+        sock,
+        200,
+        &json!({
+            "text": body,
+            "total_lines": lines.len(),
+            "shown_lines": shown,
+        }),
+    )
+    .await
+}
+
 /// `GET /v1/projects/{p}/pilot/runs/{run}/stream?tail=n`
 ///
 /// Replays the last `tail` events, then streams new ones as they are

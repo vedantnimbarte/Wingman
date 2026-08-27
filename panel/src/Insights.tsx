@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   api,
-  isTextOutput,
   type ApiSchema,
   type ContextReport,
   type CostReport,
@@ -11,6 +10,7 @@ import {
 } from './api'
 import { money } from './Board'
 import { areaPath, coverage, cumulative, decadeBounds, linePath, logFraction } from './charts'
+import { Output } from './output'
 import { navigate } from './router'
 import { runClass, runGlyph } from './Runs'
 import { message } from './state'
@@ -844,62 +844,4 @@ function Reports({ project }: { project: string }) {
       )}
     </section>
   )
-}
-
-/**
- * Render whatever a table route returned.
- *
- * The routes promise exactly this: output that parses as JSON comes back as
- * JSON, anything else as `{stdout, stderr, exit}` which "is honest about being
- * text". So this checks which it got instead of assuming.
- *
- * Shared with the Changes screen and the Overview's maintenance list, so a
- * command's output looks the same wherever it is run from.
- */
-export function Output({ value }: { value: unknown }) {
-  if (isTextOutput(value)) {
-    return (
-      <>
-        {value.exit !== 0 && <p className="is-failed dot figure">exited {value.exit}</p>}
-        {value.stdout ? <Report text={value.stdout} /> : <pre className="report figure">(no output)</pre>}
-        {value.stderr.trim() && <pre className="report figure is-failed">{value.stderr}</pre>}
-      </>
-    )
-  }
-  return <pre className="report figure">{JSON.stringify(value, null, 2)}</pre>
-}
-
-/**
- * A command's stdout, with its verdicts carrying the palette.
- *
- * `doctor` is the report the README brags about — which containment is
- * actually active on this machine — and it rendered as an undifferentiated
- * block of terminal text. It already marks each line with a glyph, so this
- * gives those lines the hue that glyph already means. Nothing is *invented*:
- * a line with no verdict marker gets no colour, which is the same rule the
- * rest of the panel follows.
- */
-function Report({ text }: { text: string }) {
-  return (
-    <pre className="report figure">
-      {text.split('\n').map((line, i) => {
-        const cls = verdict(line)
-        return (
-          <span key={i} className={cls ?? undefined}>
-            {line}
-            {'\n'}
-          </span>
-        )
-      })}
-    </pre>
-  )
-}
-
-/** The three states, from the glyphs the CLI already prints. */
-export function verdict(line: string): string | null {
-  const t = line.trimStart()
-  if (/^[✓✔]/.test(t)) return 'is-proven'
-  if (/^[✗✕✘×]/.test(t)) return 'is-failed'
-  if (/^[⚠!]/.test(t)) return 'is-asserted'
-  return null
 }
