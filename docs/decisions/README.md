@@ -59,5 +59,5 @@ pointer. The history of what we believed is the point.
 | [0012](0012-stdin-instead-of-a-pty.md) | Processes are driven over stdin; no PTY | accepted |
 | [0013](0013-no-speculative-seams.md) | No speculative seams; extract when a second implementation arrives | superseded by 0014 |
 | [0014](0014-the-a2-seams-were-built.md) | The A2 seams were built; what that cost and bought | accepted |
-| [0014](0014-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |
 | [0015](0015-run-plan-not-code-mode.md) | `run_plan` instead of Code Mode; the loop already batches | accepted |
+| [0016](0016-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |
