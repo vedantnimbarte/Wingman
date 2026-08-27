@@ -313,6 +313,16 @@ export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
  */
 export type RunLogEvent = { ev: string; t: string; [k: string]: unknown }
 
+/**
+ * The orchestrator's own stdout for one run.
+ *
+ * Distinct from `RunLogEvent[]`, and the difference matters: events are what
+ * the run *did* — a task moved, a tool ran — while this is what it *said*.
+ * A run that failed while planning emitted no events worth reading and one
+ * line here that explains the whole thing.
+ */
+export type PilotLog = { text: string; total_lines: number; shown_lines: number }
+
 /* ── Sessions ─────────────────────────────────────────────────────────────
  *
  * A session is not a server object with a timeout — it is the same
@@ -751,6 +761,11 @@ export const api = {
    * run's SSE stream. Without this the log starts empty on a run that has been
    * going for an hour.
    */
+  runLog: (project: string, runId: string, tail = 500) =>
+    request<PilotLog>(
+      `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/log?tail=${tail}`,
+    ),
+
   runEvents: (project: string, runId: string, tail = 40) =>
     request<{ events: unknown[] }>(
       `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/events?tail=${tail}`,

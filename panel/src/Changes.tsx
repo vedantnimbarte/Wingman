@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, isTextOutput } from './api'
-import { Output } from './Insights'
+import { Output } from './output'
 import { navigate } from './router'
 import { message } from './state'
 import { Failed, Loading, PageHead } from './ui'

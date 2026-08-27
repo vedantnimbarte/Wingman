@@ -244,7 +244,6 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const [prompt, setPrompt] = useState('')
   const [turn, setTurn] = useState<Turn>({ state: 'idle' })
   const [verification, setVerification] = useState<{ passed: boolean; summary: string } | null>(null)
-  const [all, setAll] = useState(false)
   const [pinned, setPinned] = useState(true)
   const [mode, setMode] = useState(() => window.localStorage.getItem(MODE_KEY) ?? '')
   const [model, setModel] = useState(() => window.localStorage.getItem(MODEL_KEY) ?? '')
@@ -341,23 +340,6 @@ function Conversation({ project, id }: { project: string; id: string }) {
 
   const streaming = turn.state === 'streaming'
 
-  // In a live stream `tool_start` and `tool_result` are paired by id as they
-  // arrive. In a transcript they are separate records — the call is a block
-  // inside an assistant message, the result is its own line — so they have to
-  // be rejoined here. Without this every tool renders as still running and its
-  // output is never shown.
-  const results = new Map<string, { output: string; failed: boolean }>()
-  for (const r of records) {
-    if (r.kind === 'tool_result') results.set(r.id, { output: r.output, failed: r.is_error })
-  }
-
-  // A long session is thousands of records, each with a `<pre>` of tool output
-  // — enough to make scrolling stutter and a phone give up. The newest window
-  // renders; the rest is one click away. Not virtualisation: a windowed list
-  // with a fold is twenty lines and has no scroll-anchoring bugs to find.
-  const folded = !all && records.length > WINDOW
-  const visible = folded ? records.slice(-WINDOW) : records
-
   return (
     <div className="view chat">
       <button
@@ -376,15 +358,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
       </header>
 
       <div className="transcript" ref={scroller} onScroll={onScroll}>
-        {folded && (
-          <button type="button" className="button button-quiet fold" onClick={() => setAll(true)}>
-            Show {records.length - WINDOW} earlier records
-          </button>
-        )}
-
-        {visible.map((r, i) => (
-          <Record key={folded ? records.length - WINDOW + i : i} record={r} results={results} />
-        ))}
+        <Transcript records={records} />
 
         {streaming && (
           <div className="msg msg-assistant" aria-live="polite" aria-busy="true">
@@ -554,6 +528,50 @@ export function apply(
 /* ── Transcript rendering ──────────────────────────────────────────────── */
 
 type Results = Map<string, { output: string; failed: boolean }>
+
+/**
+ * A conversation on disk, rendered.
+ *
+ * Exported because a pilot worker's transcript is a session transcript —
+ * the orchestrator mints `pilot-<run>-<agent>` and the worker writes
+ * `<project>/.wingman/sessions/<that>.jsonl` like any other conversation. The
+ * run screen shows what an agent actually did by handing its records to this,
+ * rather than growing a second renderer that would drift from this one the
+ * first time a block type is added.
+ */
+export function Transcript({ records }: { records: SessionRecord[] }) {
+  const [all, setAll] = useState(false)
+
+  // In a live stream `tool_start` and `tool_result` are paired by id as they
+  // arrive. In a transcript they are separate records — the call is a block
+  // inside an assistant message, the result is its own line — so they have to
+  // be rejoined here. Without this every tool renders as still running and its
+  // output is never shown.
+  const results: Results = new Map()
+  for (const r of records) {
+    if (r.kind === 'tool_result') results.set(r.id, { output: r.output, failed: r.is_error })
+  }
+
+  // A long session is thousands of records, each with a `<pre>` of tool output
+  // — enough to make scrolling stutter and a phone give up. The newest window
+  // renders; the rest is one click away. Not virtualisation: a windowed list
+  // with a fold is twenty lines and has no scroll-anchoring bugs to find.
+  const folded = !all && records.length > WINDOW
+  const visible = folded ? records.slice(-WINDOW) : records
+
+  return (
+    <>
+      {folded && (
+        <button type="button" className="button button-quiet fold" onClick={() => setAll(true)}>
+          Show {records.length - WINDOW} earlier records
+        </button>
+      )}
+      {visible.map((r, i) => (
+        <Record key={folded ? records.length - WINDOW + i : i} record={r} results={results} />
+      ))}
+    </>
+  )
+}
 
 function Record({ record, results }: { record: SessionRecord; results: Results }) {
   switch (record.kind) {

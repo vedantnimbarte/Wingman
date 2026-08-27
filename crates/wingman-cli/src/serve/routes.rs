@@ -103,6 +103,7 @@ async fn project_route(
             pilot::get_events(project, run, req, sock).await
         }
         ("GET", ["pilot", "runs", run, "stream"]) => pilot::stream(project, run, req, sock).await,
+        ("GET", ["pilot", "runs", run, "log"]) => pilot::get_log(project, run, req, sock).await,
         ("GET", ["pilot", "runs", run, "dashboard"]) => {
             pilot::get_dashboard(project, run, req, sock).await
         }
@@ -214,6 +215,9 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
             { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/stream", "auth": true,
               "params": { "tail": "replay depth before live events (default 20)" },
               "returns": "text/event-stream; closes with an 'end' event" },
+            { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/log", "auth": true,
+              "params": { "tail": "how many trailing lines (default 500, max 5000)" },
+              "returns": "the orchestrator's own stdout with {text, total_lines, shown_lines}" },
             { "method": "GET", "path": "/v1/projects/{project}/pilot/runs/{run}/dashboard", "auth": true,
               "params": { "width": "columns (default 100)" },
               "returns": "text/plain ASCII dashboard" },
@@ -570,6 +574,60 @@ mod tests {
         )
         .await;
         assert!(resp.starts_with("HTTP/1.1 409"), "{resp}");
+    }
+
+    /// The orchestrator's stdout is the only place a failed run explains
+    /// itself, and it is returned with both counts so a truncated log cannot
+    /// be presented as a whole one.
+    #[tokio::test]
+    async fn the_run_log_returns_its_tail_and_says_how_much_it_kept() {
+        let (_tmp, projects, run_dir) = seed_run("failed", "failed");
+        std::fs::write(
+            run_dir.join("pilot.log"),
+            "[pilot] planning\n[pilot] driving manager loop\nwingman: exceeded max_ticks\n",
+        )
+        .unwrap();
+
+        let all = round_trip_for(
+            projects.clone(),
+            None,
+            &get("/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/log"),
+        )
+        .await;
+        assert!(all.starts_with("HTTP/1.1 200"), "{all}");
+        assert!(all.contains(r#""total_lines":3"#), "{all}");
+        assert!(all.contains(r#""shown_lines":3"#), "{all}");
+        assert!(all.contains("exceeded max_ticks"), "{all}");
+
+        let tail = round_trip_for(
+            projects,
+            None,
+            &get("/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/log?tail=1"),
+        )
+        .await;
+        assert!(tail.contains(r#""shown_lines":1"#), "{tail}");
+        // The tail is the *end* of the log: the last line is what a run died
+        // of, and a tail that returned the first line would be useless.
+        assert!(tail.contains("exceeded max_ticks"), "{tail}");
+        assert!(!tail.contains("planning"), "{tail}");
+        // The total still reports the whole file, so the panel can say how
+        // much it is not showing.
+        assert!(tail.contains(r#""total_lines":3"#), "{tail}");
+    }
+
+    /// A run that was planned and never started has no log. That is an empty
+    /// log, not a 500 the caller has to special-case.
+    #[tokio::test]
+    async fn a_run_with_no_log_yet_is_an_empty_log() {
+        let (_tmp, projects, _) = seed_run("planning", "pending");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &get("/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/log"),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+        assert!(resp.contains(r#""total_lines":0"#), "{resp}");
     }
 
     #[tokio::test]

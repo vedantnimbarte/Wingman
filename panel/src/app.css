@@ -1604,6 +1604,30 @@ textarea.input::placeholder {
   min-width: 0;
 }
 
+/* A worker's transcript, opened inside the run's own list.
+   Inset behind a rule so a conversation reads as belonging to the row above
+   it rather than as the next section of the page, and capped in height
+   because a worker that ran for twenty minutes would otherwise bury the
+   activity log under a thousand tool results. */
+.worker-transcript {
+  gap: var(--s-4);
+  max-height: 34rem;
+  overflow: auto;
+  margin: 0 0 var(--s-3) var(--s-3);
+  padding: var(--s-3) 0 var(--s-3) var(--s-4);
+  border-left: 2px solid var(--rule-strong);
+}
+
+/* Why there is nothing to show, in the row where the transcript would be. */
+.worker-note {
+  margin: 0 0 var(--s-3) var(--s-3);
+  padding: var(--s-2) 0 var(--s-2) var(--s-4);
+  border-left: 2px solid var(--rule);
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+  max-width: 46rem;
+}
+
 /* ── Config ─────────────────────────────────────────────────────────────── */
 
 .config-body {
