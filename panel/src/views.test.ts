@@ -156,6 +156,23 @@ describe('classify', () => {
     const [first] = classify('=== a/b.ts -> a/b.ts (2 hunk(s)) ===')
     expect(first).toEqual({ kind: 'file', text: 'a/b.ts -> a/b.ts (2 hunk(s))' })
   })
+
+  it('does not read a hunk header as a deleted line', () => {
+    // Captured verbatim from `wingman diff` against a real edit: the heading
+    // uses an arrow rather than `->`, the hunk header carries a trailing
+    // comment, and — the trap — it *starts with three hyphens*. Checked after
+    // the `-` prefix it would classify as a deletion on every hunk in every
+    // file.
+    const real = [
+      '=== panel/src/theme.ts → panel/src/theme.ts (1 hunk(s)) ===',
+      '',
+      '--- hunk 1/1 @ -42,3 +42,5 ---  // fn nextTheme',
+      ' }',
+      `${esc}[32m+${esc}[0m`,
+      `${esc}[32m+/* temporary probe */${esc}[0m`,
+    ].join('\n')
+    expect(classify(real).map((l) => l.kind)).toEqual(['file', 'same', 'hunk', 'same', 'add', 'add'])
+  })
 })
 
 describe('path', () => {
