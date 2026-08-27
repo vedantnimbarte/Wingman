@@ -1202,6 +1202,7 @@ mod documentation_drift_tests {
         "read_session",
         "spawn_subagent",
         "task_complete",
+        "run_plan",
     ];
 
     fn documented_tool_names() -> Vec<String> {

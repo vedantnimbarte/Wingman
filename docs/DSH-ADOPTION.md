@@ -45,7 +45,7 @@ Effort estimates are rough and use this scale:
 | P9 | Hook bridges (Claude Code / Codex) | M | **Done** (Claude Code) — opt-in, trust-gated, matchers translated. See [0010](decisions/0010-claude-code-hooks-are-imported-not-adopted.md). |
 | P10 | Per-message feedback | M | **Done** — `/feedback good|bad`; stated outcomes beat inferred ones. |
 | P11 | Persistent PTY sessions | S | **Done differently** — `job_send` drives a process over stdin; no PTY. See [0012](decisions/0012-stdin-instead-of-a-pty.md). |
-| P12 | Code Mode (`run_code` + generated SDK) | L–XL | Prototype behind a flag. Don't lead with it. |
+| P12 | Code Mode (`run_code` + generated SDK) | L–XL | **Done differently** — the loop already batches; `run_plan` closes the dependent-chain gap instead. Off by default. See [0015](decisions/0015-run-plan-not-code-mode.md). |
 | E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 8 records backfilled. |
 | E2 | Generated documentation | S | **Done differently** — docs are *tested* against the code, not generated. See [0009](decisions/0009-test-docs-rather-than-generate-them.md). |
 | E3 | Runtime invariants | M | **Partly done** — `debug_assert_reconstructs` ships with A1; no general registry. |
@@ -529,6 +529,43 @@ measure the token delta against the same tasks, and only then decide.
 
 **Size: L–XL.**
 
+### Measured, and the answer changed
+
+Doing what this section said — measure before deciding — undercut the section's
+own premise.
+
+**Wingman's loop already batches.** It emits many tool calls per assistant
+message and runs read-only ones *concurrently*
+(`AgentConfig::parallel_safe_tools`, 15 tools, dispatched through
+`futures::buffered`). Independent work already costs one round trip, so a
+language runtime buys nothing for it — which is most of what "multi-step work"
+means in practice.
+
+What the loop cannot express is a **dependent** chain: call 2's arguments are
+inside call 1's output, and the model must see the first result to write the
+second. That gap is real, and it is worth exactly **one** round trip — not N —
+because the fan-out half is already batched:
+
+| | without | with |
+|---|---|---|
+| grep, then read each hit | 3 requests | 2 requests |
+
+So the claim that this is "the largest available win" does not survive contact
+with the loop as built. What shipped instead is `run_plan`: a step list with
+one substitution rule, closing that gap without an interpreter. No arithmetic,
+no conditionals, no unbounded loops, and no sandbox-escape surface — every call
+re-enters `ToolDispatcher::dispatch`, so it is gated exactly as the same call
+would be alone.
+
+It is **off by default**, for measured reasons: its schema costs ~430 tokens
+(9.9% of the whole tool list) on every request, and what it saves is mostly
+latency — the conversation prefix is re-sent either way and, with prompt
+caching on, is a cache read. `cargo run --example plan_cost -p wingman-tools`
+prints the arithmetic. See [0015](decisions/0015-run-plan-not-code-mode.md).
+
+A real Code Mode would still need a real justification. The one offered here
+was that multi-step work costs N round trips; in Wingman it does not.
+
 ---
 
 # Part 3 — Engineering process
@@ -622,8 +659,9 @@ force-removed with it at cleanup.
 establishes. Trigger for P3 is someone actually hitting the 600s ceiling, not
 a calendar. P9 and P10 slot in wherever they fit.
 
-**Ongoing.** E2 (generated docs) whenever a drift is noticed. P12 (Code Mode)
-as a flagged experiment, not a roadmap commitment.
+**Ongoing.** E2 (generated docs) whenever a drift is noticed. P12 landed as
+`run_plan` behind a flag rather than as Code Mode — measuring the loop first
+showed the round trips it was meant to remove were already batched.
 
 **Not doing:** A3. Revisit only if third-party extensions become a goal, and
 then as a WASM host with an explicit capability model rather than as dynamic

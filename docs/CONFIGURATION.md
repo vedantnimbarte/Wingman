@@ -41,6 +41,16 @@ show_token_usage = true
 allow_network = false
 redact_output_secrets = true   # redact secret tokens in tool output (default on)
 
+# Offer `run_plan`: let the model chain a few tool calls in one round trip,
+# feeding an earlier call's output into a later call's arguments. Off by
+# default. It does NOT widen permissions — every call in a plan is gated
+# exactly as it would be alone — but it does widen how much happens per model
+# decision, and its schema costs ~430 tokens (~10% of the tool list) on every
+# request. Independent calls are already batched and parallel without it, so
+# turn this on only if dependent chains (grep, then read what it matched) are
+# common in your work. A project config cannot enable it.
+run_plan = false
+
 # Backstop deadline for one tool call. Without it a wedged language server or
 # an unresponsive MCP server hangs the turn with no upper bound. Tools that
 # bound themselves — run_shell, custom command tools, spawn_subagent — opt
