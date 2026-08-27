@@ -44,10 +44,23 @@ pub enum ManagerError {
 /// (`list_dir`, `read_file`, `grep_tool`). The manager runs in read-only
 /// permission mode — its writes only happen through its orchestrator
 /// commands, never via filesystem tools.
+/// `disabled_tools` is honoured; `[tools].preset` deliberately is not.
+///
+/// A preset says what an interactive *session* is for, and none of them list
+/// the orchestration tools — so applying a keep-list here would strip the
+/// manager's own control plane and break every run started with `--preset`.
+/// `disabled_tools` is the other kind of statement: "not this one, ever",
+/// which should hold wherever the tool could otherwise be reached.
+///
+/// In practice that means the three inspection tools. The orchestration tools
+/// are this crate's own and are not things a user would name — but they are
+/// checked below anyway, because a config that removed one would otherwise
+/// produce a manager that cannot dispatch work and no explanation why.
 pub fn build_manager_registry(
     handle: OrchestratorHandle,
     cwd: std::path::PathBuf,
     project_root: std::path::PathBuf,
+    disabled_tools: &[String],
 ) -> Arc<ToolRegistry> {
     let ctx = ToolCtx::new_with_config(
         wingman_config::PermissionMode::ReadOnly,
@@ -56,7 +69,10 @@ pub fn build_manager_registry(
         Vec::new(),
         false,
     );
-    let mut reg = ToolRegistry::new(ctx);
+    let mut reg = ToolRegistry::new(ctx).with_tool_removals(wingman_tools::ToolRemovals::new(
+        None,
+        disabled_tools.to_vec(),
+    ));
     // Read-only inspection.
     reg.register(builtin::ListDir);
     reg.register(builtin::ReadFile);
@@ -68,6 +84,21 @@ pub fn build_manager_registry(
     reg.register(crate::tools::FinalizeTask::new(handle.clone()));
     reg.register(crate::tools::AbortTask::new(handle.clone()));
     reg.register(crate::tools::MessageAgent::new(handle));
+
+    // Say so rather than starting a run that cannot dispatch anything.
+    let names = reg.tool_names();
+    let missing: Vec<&str> = ["add_task", "assign_task", "finalize_task"]
+        .into_iter()
+        .filter(|t| !names.iter().any(|n| n == t))
+        .collect();
+    if !missing.is_empty() {
+        tracing::warn!(
+            target: "wingman::pilot",
+            missing = %missing.join(", "),
+            "[tools].disabled_tools removed orchestration tools the manager needs;              this run will not be able to dispatch work"
+        );
+    }
+
     Arc::new(reg)
 }
 
@@ -348,6 +379,49 @@ pub fn run_succeeded(state: &RunState) -> bool {
 mod tests {
     use super::*;
     use crate::model::{Role, Task};
+
+    /// The manager builds its own registry, so it was the last place
+    /// `[tools].disabled_tools` did not reach. A standing "not this one, ever"
+    /// should hold in the pilot especially — it is the least supervised place
+    /// the tool could be reached from.
+    ///
+    /// `[tools].preset` is deliberately *not* applied here: no preset lists
+    /// the orchestration tools, so a keep-list would strip the manager's own
+    /// control plane and break every run started with `--preset`.
+    #[tokio::test]
+    async fn the_manager_registry_honors_disabled_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = crate::store::RunStore::create(dir.path(), "r1", "goal", "base", "branch")
+            .await
+            .expect("store");
+        let spawner: crate::orchestrator::WorkerSpawner =
+            Arc::new(|_ctx| Box::pin(async { Err(OrchestratorError::Shutdown) }));
+        let (handle, join) = crate::orchestrator::spawn(
+            store,
+            crate::orchestrator::OrchestratorConfig::default(),
+            spawner,
+        );
+
+        let reg = build_manager_registry(
+            handle.clone(),
+            dir.path().to_path_buf(),
+            dir.path().to_path_buf(),
+            &["grep".to_string()],
+        );
+        let names = reg.tool_names();
+
+        assert!(
+            !names.iter().any(|n| n == "grep"),
+            "disabled_tools was ignored by the manager registry: {names:?}"
+        );
+        // The rest of its toolset is intact — this is a denylist, not a reason
+        // to hand the manager an empty registry.
+        assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
+        assert!(names.iter().any(|n| n == "add_task"), "{names:?}");
+
+        handle.shutdown().await;
+        let _ = join.await;
+    }
 
     fn task(id: &str, status: TaskStatus, deps: &[&str]) -> Task {
         let mut t = Task::new(id, Role::Developer, id);

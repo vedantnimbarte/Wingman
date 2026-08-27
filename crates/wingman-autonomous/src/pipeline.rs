@@ -76,6 +76,10 @@ pub struct PipelineInputs {
     pub pr_config: wingman_config::PilotPrConfig,
     /// Security-pass config (R6): block severity, license allowlist.
     pub security_config: wingman_config::PilotSecurityConfig,
+    /// `[tools].disabled_tools`, applied to the manager's own registry.
+    /// A standing "not this one, ever" should hold in the pilot too, which is
+    /// the least supervised place it could otherwise be reached.
+    pub disabled_tools: Vec<String>,
     /// E7 — run a per-task reviewer agent after the run. Off by default.
     pub run_reviewer: bool,
     /// J10 — run a critic agent before the auto-merge gate. Off by default.
@@ -230,7 +234,12 @@ pub async fn run_to_completion(
     // build_manager; the per-tick state block is injected by
     // drive_to_completion.
     let cwd = std::env::current_dir().unwrap_or_else(|_| project_root.clone());
-    let registry = build_manager_registry(handle.clone(), cwd, project_root.clone());
+    let registry = build_manager_registry(
+        handle.clone(),
+        cwd,
+        project_root.clone(),
+        &inputs.disabled_tools,
+    );
     let mut agent = build_manager(inputs.provider, inputs.manager_model, registry, None);
 
     let manager_usage = match drive_to_completion(&mut agent, &handle, inputs.max_ticks).await {
@@ -1851,6 +1860,7 @@ mod tests {
             auto_approved: false,
             pr_config: wingman_config::PilotPrConfig::default(),
             security_config: wingman_config::PilotSecurityConfig::default(),
+            disabled_tools: Vec::new(),
             run_reviewer: false,
             run_critic: false,
             reviewer_model: "stub".into(),

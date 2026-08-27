@@ -101,6 +101,26 @@ struct RepeatChain {
     count: u32,
 }
 
+/// Tools that ship but are **not** registered by [`ToolRegistry::with_builtins`]
+/// — they need a dependency the registry cannot build for itself (a semantic
+/// index, learning handles, a subagent runner) or sit behind a config flag.
+///
+/// Kept here rather than in each test that needs it: two tests already assert
+/// against this set (documentation coverage and preset keep-lists), and a
+/// second copy would drift the moment a conditional tool is added.
+pub const CONDITIONALLY_REGISTERED: &[&str] = &[
+    "semantic_search",
+    "save_memory",
+    "recall_memory",
+    "forget_memory",
+    "invoke_skill",
+    "recall_session",
+    "read_session",
+    "spawn_subagent",
+    "task_complete",
+    "run_plan",
+];
+
 impl ToolRegistry {
     pub fn new(ctx: ToolCtx) -> Self {
         Self {
@@ -1265,27 +1285,7 @@ mod documentation_drift_tests {
     use crate::ToolCtx;
     use wingman_config::PermissionMode;
 
-    /// Tools registered somewhere other than `with_builtins` — behind a
-    /// config flag, a learning handle, or the pilot worker path — that must
-    /// still be documented.
-    ///
-    /// Listed explicitly because constructing their real dependencies (an
-    /// index, memory handles, a subagent runner) inside a docs test would be
-    /// a lot of scaffolding to assert one string. The cost is that a NEW
-    /// conditional tool has to be added here; the forward check below covers
-    /// everything unconditional, which is where the drift actually happened.
-    const CONDITIONALLY_REGISTERED: &[&str] = &[
-        "semantic_search",
-        "save_memory",
-        "recall_memory",
-        "forget_memory",
-        "invoke_skill",
-        "recall_session",
-        "read_session",
-        "spawn_subagent",
-        "task_complete",
-        "run_plan",
-    ];
+    use super::CONDITIONALLY_REGISTERED;
 
     fn documented_tool_names() -> Vec<String> {
         let reg = ToolRegistry::new(ToolCtx::new(
