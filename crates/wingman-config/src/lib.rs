@@ -10,6 +10,7 @@
 //! Per the plan: global `~/.wingman/` holds config/creds/model cache; per-project
 //! `.wingman/` holds session log overrides and the repo index.
 
+pub mod claude_hooks;
 mod paths;
 pub mod secrets;
 pub mod trust;
@@ -664,6 +665,20 @@ pub struct HooksConfig {
     /// If `block: true` and the hook exits non-zero, the prompt is rejected.
     #[serde(default)]
     pub user_prompt_submit: Vec<Hook>,
+    /// Also run hooks from an existing Claude Code `settings.json`, so you do
+    /// not have to rewrite a working hooks block to try Wingman.
+    ///
+    /// Off by default. Hooks execute shell commands, and running another
+    /// tool's configuration because it happened to be on disk is a surprise
+    /// with an arbitrary blast radius. `wingman doctor` says when an
+    /// importable file is present, so opting in is discoverable.
+    ///
+    /// `~/.claude/settings.json` is yours and is imported as-is. A
+    /// project-level `.claude/settings.json` is part of whatever repository
+    /// you cloned and is imported only after `wingman trust` on that file —
+    /// the same rule `<project>/.wingman/config.toml` already follows.
+    #[serde(default)]
+    pub import_claude_code: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1220,7 +1235,63 @@ impl Config {
 
         cfg.apply_env(std::env::vars())?;
         cfg.resolve_env_placeholders();
+        cfg.import_claude_code_hooks(project_path);
         Ok(cfg)
+    }
+
+    /// Fold in hooks from an existing Claude Code `settings.json`, when
+    /// `[hooks].import_claude_code` asks for it.
+    ///
+    /// Done after the trust-gated merge, and gated again per file: the flag
+    /// itself lives in `[hooks]`, which an untrusted project config cannot
+    /// set, and a project-level `.claude/settings.json` is separately checked
+    /// against `wingman trust`. Turning the feature on is therefore always the
+    /// user's decision, and so is trusting each repository that ships hooks.
+    fn import_claude_code_hooks(&mut self, project_config: Option<&Path>) {
+        if !self.hooks.import_claude_code {
+            return;
+        }
+        let mut report = claude_hooks::ImportReport::default();
+        if let Ok(home) = paths::home() {
+            let r = claude_hooks::import_file(
+                &home.join(".claude").join("settings.json"),
+                false,
+                &mut self.hooks,
+            );
+            report.imported += r.imported;
+            report.untranslated.extend(r.untranslated);
+        }
+        // `<project>/.wingman/config.toml` -> `<project>/.claude/settings.json`
+        if let Some(root) = project_config
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+        {
+            let r = claude_hooks::import_file(
+                &root.join(".claude").join("settings.json"),
+                true,
+                &mut self.hooks,
+            );
+            report.imported += r.imported;
+            report.untranslated.extend(r.untranslated);
+        }
+        if report.imported > 0 {
+            tracing::info!(
+                target: "wingman::hooks",
+                count = report.imported,
+                "imported Claude Code hooks"
+            );
+        }
+        if !report.untranslated.is_empty() {
+            // These almost certainly never fire, which is the one failure the
+            // name translation exists to prevent. Say so rather than let the
+            // user believe an imported hook is running.
+            tracing::warn!(
+                target: "wingman::hooks",
+                "could not translate these Claude Code matchers, so the hooks using them \
+                 will probably never match a Wingman tool: {}",
+                report.untranslated.join(", ")
+            );
+        }
     }
 
     /// Apply `WINGMAN_*` environment variables.

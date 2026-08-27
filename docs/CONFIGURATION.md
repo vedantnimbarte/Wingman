@@ -85,6 +85,20 @@ prune_threshold_chars = 8192
 # [tools.presets]
 # docs = ["read_file", "write_file", "glob", "grep", "lsp_*"]
 
+# Also run hooks from an existing Claude Code settings.json, so you do not
+# have to rewrite a working hooks block to try Wingman. Off by default: hooks
+# execute shell commands, and running another tool's config because it happens
+# to be on disk is a surprise. `wingman doctor` says when an importable file
+# is present.
+#
+# ~/.claude/settings.json is yours and imports as-is. A project-level
+# .claude/settings.json is part of the repo you cloned, so it imports only
+# after `wingman trust` on that file — the same rule .wingman/config.toml
+# follows. Matchers are translated (Bash -> run_shell, Edit -> edit_file, …);
+# anything untranslatable is reported rather than left to silently never fire.
+[hooks]
+import_claude_code = false
+
 # Verification gate (runs after edits): compile check + affected tests + LSP
 # diagnostics, and optional headless-browser visual check.
 [verify]

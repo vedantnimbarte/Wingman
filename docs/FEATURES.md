@@ -83,6 +83,15 @@ Wingman different; this is everything else it does.
   that exits non-zero refuses the tool call (`pre_tool_use`) or the prompt
   (`user_prompt_submit`); `stop` is advisory, since the turn is already
   over. Hook failures are always logged, whether or not they block.
+- **Claude Code hook import.** `[hooks].import_claude_code = true` runs the
+  hooks from an existing Claude Code `settings.json`, so arriving from Claude
+  Code doesn't mean rewriting a working hooks block. Matchers are translated
+  (`Bash` → `run_shell`, `Edit` → `edit_file`, …) rather than copied, since a
+  verbatim matcher would import cleanly and then never fire; anything
+  untranslatable is reported. Off by default — hooks run shell commands — and
+  a project-level `.claude/settings.json` needs `wingman trust` just as
+  `.wingman/config.toml` does. `wingman doctor` says when an importable file
+  is present.
 - **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a
