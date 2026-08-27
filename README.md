@@ -166,8 +166,8 @@ grant — enforced centrally, not per-tool.
 | `auto-edit` | Write inside the project tree; shell auto-allowed, subject to the denylist. |
 | `yolo` | No guardrails. Per-session only, never persisted. |
 
-`.git/`, `.wingman/config.toml`, and `.wingman/skills/` are never writable, in
-any mode. A cloned repo's `.wingman/config.toml` may pick a model and tune the
+`.git/`, `.wingman/config.toml`, `.wingman/skills/`, and `.wingman/trusted.toml`
+are never writable, in any mode. A cloned repo's `.wingman/config.toml` may pick a model and tune the
 UI but not run commands — `[hooks]`, `[mcp]`, `[verify]`, `[providers]`, and
 `permission_mode` are ignored until you run `wingman trust` in that repo, and
 trust lapses whenever the file changes.
@@ -489,7 +489,7 @@ flowchart TB
     GATE -->|allowed| RUN["Tool runs"]
     GATE -->|denied| REF["Refused, not queued —<br/>there are no approval prompts by design"]
 
-    GATE -.->|"never writable in any mode"| NW[".git/ · .wingman/config.toml · .wingman/skills/"]
+    GATE -.->|"never writable in any mode"| NW[".git/ · .wingman/config.toml<br/>.wingman/skills/ · .wingman/trusted.toml"]
 ```
 
 ---
