@@ -3,6 +3,7 @@ import {
   api,
   type Agent,
   type ControlAction,
+  type RunLogEvent,
   type RunState,
   type RunSummary,
   type RunStatus,
@@ -44,7 +45,8 @@ export function Runs({ project, runId }: { project: string | null; runId: string
 function RunList({ project }: { project: string }) {
   const [runs, setRuns] = useState<RunSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const { recent } = useEvents()
+  const [starting, setStarting] = useState(false)
+  const { tick } = useEvents()
 
   const load = useCallback(async () => {
     try {
@@ -60,12 +62,22 @@ function RunList({ project }: { project: string }) {
   }, [load])
 
   // `/v1/events` carries run transitions across every project, so a run
-  // starting or finishing anywhere is the signal to re-read this list.
+  // starting or finishing anywhere is the signal to re-read this list. On the
+  // monotonic counter rather than the buffer length, which stops changing.
   useEffect(() => {
-    if (recent.length) void load()
-  }, [recent.length, load])
+    if (tick) void load()
+  }, [tick, load])
 
-  if (error) return <div className="view"><Failed title="Could not list runs" detail={error} action={{ label: 'Try again', onClick: () => void load() }} /></div>
+  if (error)
+    return (
+      <div className="view">
+        <Failed
+          title="Could not list runs"
+          detail={error}
+          action={{ label: 'Try again', onClick: () => void load() }}
+        />
+      </div>
+    )
   if (!runs) return <Loading what="runs" />
 
   return (
@@ -81,19 +93,36 @@ function RunList({ project }: { project: string }) {
           </>
         }
         actions={
-          <button type="button" className="button" onClick={() => navigate('/board')}>
-            Go to the board
-          </button>
+          <>
+            <button type="button" className="button" onClick={() => navigate('/board')}>
+              Go to the board
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              onClick={() => setStarting(true)}
+            >
+              New run
+            </button>
+          </>
         }
       />
+
+      {starting && (
+        <StartRun
+          project={project}
+          onClose={() => setStarting(false)}
+          onStarted={(id) => navigate(`/runs/${id}`)}
+        />
+      )}
 
       {runs.length === 0 ? (
         <Empty
           title="No runs yet"
-          action={{ label: 'Dispatch a card', onClick: () => navigate('/board') }}
+          action={{ label: 'Start one', onClick: () => setStarting(true) }}
         >
-          A run starts when you dispatch a card from the board, or from a terminal with{' '}
-          <code>wingman pilot run "&hellip;"</code>.
+          A run starts from a goal here, by dispatching a card from the board, or from a terminal
+          with <code>wingman pilot run "&hellip;"</code>.
         </Empty>
       ) : (
         <div className="rows">
@@ -122,6 +151,128 @@ function RunList({ project }: { project: string }) {
   )
 }
 
+/**
+ * Start a run from a goal.
+ *
+ * The board's Dispatch was the only way to start work from the panel, so
+ * anything not worth filing a card for meant going back to a terminal — which
+ * is the trip this whole surface exists to avoid.
+ *
+ * **Plan-only is the default and the gate is on.** `--yes` skips the approval
+ * that makes the plan gate worth having, and a checkbox that spends money
+ * unattended should be the one you tick deliberately, not the one you forget
+ * to untick.
+ */
+function StartRun({
+  project,
+  onClose,
+  onStarted,
+}: {
+  project: string
+  onClose: () => void
+  onStarted: (runId: string) => void
+}) {
+  const [goal, setGoal] = useState('')
+  const [model, setModel] = useState('')
+  const [planOnly, setPlanOnly] = useState(false)
+  const [yes, setYes] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      const { run_id } = await api.startRun(project, {
+        goal: goal.trim(),
+        yes,
+        plan_only: planOnly,
+        model: model.trim() || undefined,
+      })
+      onStarted(run_id)
+    } catch (err) {
+      setError(message(err))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <form className="add-card" onSubmit={submit}>
+      <label>
+        <span className="eyebrow">Goal — the prompt pilot plans against</span>
+        <textarea
+          className="input config-area"
+          rows={3}
+          autoFocus
+          value={goal}
+          onChange={(e) => setGoal(e.target.value)}
+          placeholder="Add SSE keepalives to the events route and cover them with a test"
+        />
+      </label>
+
+      <div className="add-row">
+        <label className="add-grow">
+          <span className="eyebrow">Model (optional)</span>
+          <input
+            className="input"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="whatever the config says"
+            spellCheck={false}
+          />
+        </label>
+      </div>
+
+      <div className="filters">
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={planOnly}
+            onChange={(e) => setPlanOnly(e.target.checked)}
+          />
+          plan only — stop after planning, execute nothing
+        </label>
+        <label className="check">
+          <input
+            type="checkbox"
+            checked={yes}
+            onChange={(e) => setYes(e.target.checked)}
+            disabled={planOnly}
+          />
+          skip the approval gate
+        </label>
+      </div>
+
+      {yes && !planOnly && (
+        <Note tone="is-asserted">
+          This run will plan and then start executing without asking. It spends real money against
+          your key.
+        </Note>
+      )}
+
+      {error && (
+        <Note tone="is-failed" role="alert">
+          {error}
+        </Note>
+      )}
+
+      <div className="actions">
+        <button
+          type="submit"
+          className="button button-primary"
+          disabled={busy || goal.trim() === ''}
+        >
+          {busy ? 'Starting…' : 'Start run'}
+        </button>
+        <button type="button" className="button button-quiet" onClick={onClose}>
+          Cancel
+        </button>
+      </div>
+    </form>
+  )
+}
+
 /* ── Detail ────────────────────────────────────────────────────────────── */
 
 function RunDetail({ project, runId }: { project: string; runId: string }) {
@@ -131,6 +282,7 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [sent, setSent] = useState<string | null>(null)
+  const [log, setLog] = useState<RunLogEvent[]>([])
 
   const load = useCallback(async () => {
     try {
@@ -145,17 +297,43 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
     void load()
   }, [load])
 
+  // The backlog, once. Without it the log opens empty on a run that has been
+  // going for an hour, which reads as "nothing has happened".
+  useEffect(() => {
+    let alive = true
+    api
+      .runEvents(project, runId, 60)
+      .then((r) => alive && setLog(r.events.filter(isLogEvent)))
+      .catch(() => {
+        /* The log is a courtesy. The snapshot below is the run. */
+      })
+    return () => {
+      alive = false
+    }
+  }, [project, runId])
+
   // Refetch the snapshot on every stream event rather than applying events to
   // local state. `state.json` is written atomically after each event and is a
   // small local read, so this stays authoritative — applying events by hand
   // would be a second reducer to keep in step with the orchestrator's.
+  //
+  // The event itself is still kept, but only for the log: what it says has
+  // already been folded into the snapshot by the time it is rendered.
   useEffect(() => {
     const src = new EventSource(
       `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/stream?tail=0`,
     )
     src.onopen = () => setLive(true)
     src.onerror = () => setLive(false)
-    src.onmessage = () => void load()
+    src.onmessage = (m: MessageEvent<string>) => {
+      try {
+        const parsed: unknown = JSON.parse(m.data)
+        if (isLogEvent(parsed)) setLog((prev) => [...prev, parsed].slice(-200))
+      } catch {
+        /* Not JSON. The snapshot refetch below is what matters. */
+      }
+      void load()
+    }
     // The server closes the stream with an `end` event once the run is
     // terminal. Nothing more is coming, so stop reporting a live link.
     src.addEventListener('end', () => {
@@ -186,11 +364,21 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
     }
   }
 
-  if (error) return <div className="view"><Failed title="Could not load the run" detail={error} action={{ label: 'Back to runs', onClick: () => navigate('/runs') }} /></div>
+  if (error)
+    return (
+      <div className="view">
+        <Failed
+          title="Could not load the run"
+          detail={error}
+          action={{ label: 'Back to runs', onClick: () => navigate('/runs') }}
+        />
+      </div>
+    )
   if (!run) return <Loading what="the run" />
 
   const gated = run.status === 'awaiting_approval'
   const terminal = run.status === 'done' || run.status === 'failed' || run.status === 'aborted'
+  const irreversible = run.tasks.filter((t) => isIrreversible(t))
 
   return (
     <div className="view">
@@ -239,6 +427,10 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
           <span className="muted">Branch</span>
           <span className="figure">{run.integration_branch}</span>
         </div>
+        <div className="row row-wrap">
+          <span className="muted">Base commit</span>
+          <span className="figure identifier">{run.base_commit || '—'}</span>
+        </div>
         {run.pr_url && (
           <div className="row">
             <span className="muted">Pull request</span>
@@ -254,6 +446,31 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
             Pilot planned {run.tasks.length} {run.tasks.length === 1 ? 'task' : 'tasks'} and will not
             start until the plan is approved. Read it below, then decide.
           </p>
+
+          {/* The one fact the gate was missing. Pilot classifies every task's
+              reversibility and says why; approving a plan without seeing which
+              parts cannot be undone is approving the wrong thing carefully. */}
+          {irreversible.length > 0 && (
+            <div className="gate-warn">
+              <p className="is-failed dot">
+                {irreversible.length === 1
+                  ? '1 task is not cleanly reversible:'
+                  : `${irreversible.length} tasks are not cleanly reversible:`}
+              </p>
+              <ul className="md-list">
+                {irreversible.map((t) => (
+                  <li key={t.id}>
+                    <span className="figure muted">{t.id}</span> {t.title}
+                    <span className="muted">
+                      {' — '}
+                      {t.reversibility_reason ?? t.reversibility}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="actions">
             <button
               type="button"
@@ -335,6 +552,7 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
                     {a.name || a.id}
                     <span className="muted"> · {a.role}</span>
                     {a.current_tool && <span className="muted"> · {a.current_tool}</span>}
+                    {a.pid != null && <span className="faint"> · pid {a.pid}</span>}
                   </span>
                 </span>
                 <span className="figure">
@@ -345,9 +563,98 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
           </div>
         </>
       )}
+
+      <RunLog events={log} live={live} />
     </div>
   )
 }
+
+/* ── Live log ──────────────────────────────────────────────────────────── */
+
+/**
+ * What the run has actually been doing.
+ *
+ * The detail view held this stream from the first release and threw every
+ * event away, using it only as a signal to refetch — so a run that was quietly
+ * retrying the same tool for ten minutes looked identical to one making
+ * progress. Folded away by default: it is the working-out, not the state.
+ */
+function RunLog({ events, live }: { events: RunLogEvent[]; live: boolean }) {
+  if (events.length === 0) return null
+  return (
+    <>
+      <h2 className="section-head">Activity</h2>
+      <details className="tool run-log">
+        <summary>
+          <span className={`glyph ${live ? 'is-asserted' : 'muted'}`}>{live ? '◐' : '·'}</span>
+          <span className="figure">
+            {events.length === 200 ? 'last 200 events' : `${events.length} events`}
+          </span>
+        </summary>
+        <div className="rows">
+          {[...events].reverse().map((e, i) => (
+            <div key={`${e.t}-${i}`} className="row log-row">
+              <span className="truncate">{summarise(e)}</span>
+              <span className="figure faint">{clockOf(e.t)}</span>
+            </div>
+          ))}
+        </div>
+      </details>
+    </>
+  )
+}
+
+/** Anything with the two keys serde guarantees on every variant. */
+export function isLogEvent(v: unknown): v is RunLogEvent {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    typeof (v as RunLogEvent).ev === 'string' &&
+    typeof (v as RunLogEvent).t === 'string'
+  )
+}
+
+/**
+ * One line of prose per event.
+ *
+ * Reads fields defensively rather than switching on a mirrored union: the
+ * variants are Rust's, they gain fields, and a log line is not worth a type
+ * that has to be re-derived every time one does. An unrecognised `ev` still
+ * renders — as itself, which is more useful than being dropped.
+ */
+export function summarise(e: RunLogEvent): string {
+  const s = (k: string): string => (typeof e[k] === 'string' ? (e[k] as string) : '')
+  switch (e.ev) {
+    case 'run.start':
+      return `run started — ${s('goal')}`
+    case 'task.create':
+      return `planned ${s('id')} — ${s('title')}`
+    case 'task.assign':
+      return `${s('id')} assigned to ${s('agent')}`
+    case 'task.status':
+      return `${s('id')} → ${s('status')}`
+    case 'task.tool':
+      return `${s('id')} ran ${s('tool')}${e.ok === false ? ' (failed)' : ''}${
+        s('file') ? ` on ${s('file')}` : ''
+      }`
+    case 'task.commit':
+      return `${s('id')} committed ${s('sha').slice(0, 8)}`
+    case 'agent.spawn':
+      return `spawned ${s('agent')} (${s('role')})`
+    case 'agent.status':
+      return `${s('agent')} → ${s('status')}`
+    default:
+      return `${e.ev}${s('id') ? ` ${s('id')}` : ''}`
+  }
+}
+
+/** `2026-08-21T20:05:11Z` → `20:05:11`. The date is the run's, not the line's. */
+export function clockOf(t: string): string {
+  const at = t.indexOf('T')
+  return at === -1 ? t : t.slice(at + 1, at + 9)
+}
+
+/* ── One task ──────────────────────────────────────────────────────────── */
 
 function TaskRow({
   task,
@@ -365,7 +672,7 @@ function TaskRow({
   onControl: (action: ControlAction, body: { task?: string }) => void
 }) {
   const [open, setOpen] = useState(false)
-  const elapsed = elapsedSecs(task, terminal)
+  const elapsed = useElapsed(task, terminal)
 
   // Only offer what the server will accept: retry is for a task that has
   // stopped without finishing, abort for one still moving. Rendering a button
@@ -381,6 +688,11 @@ function TaskRow({
             {glyph(task.status)}
           </span>
           <span className="figure muted">{task.id}</span> {task.title}
+          {isIrreversible(task) && (
+            <span className="badge figure is-failed" title={task.reversibility_reason ?? undefined}>
+              {task.reversibility}
+            </span>
+          )}
         </button>
 
         <span className="task-meta muted">
@@ -396,19 +708,41 @@ function TaskRow({
             <Field label="Status" value={task.status} cls={statusClass(task.status)} />
             <Field label="Elapsed" value={elapsed != null ? duration(elapsed) : null} />
             <Field label="Model" value={agent?.model ?? null} />
+            <Field label="Reversibility" value={task.reversibility} />
+            <Field label="Why" value={task.reversibility_reason} />
             <Field label="Worktree" value={task.worktree} />
             <Field
               label="Declared writes"
               value={task.writes.length ? task.writes.join(', ') : null}
             />
             <Field
-              label="Commits"
-              value={task.commits.length ? String(task.commits.length) : null}
+              label="Acceptance"
+              value={task.acceptance.length ? `${task.acceptance.length} check(s)` : null}
             />
+            {/* The count was all this said. The shas are what someone actually
+                wants — they are what you paste into `git show`. */}
+            {task.commits.length > 0 && (
+              <>
+                <dt className="eyebrow">Commits</dt>
+                <dd className="figure identifier">
+                  {task.commits.map((c) => c.slice(0, 8)).join(' ')}
+                </dd>
+              </>
+            )}
             <Field label="Transcript" value={agent?.session_id ?? null} />
+            <Field label="Spawned" value={agent?.spawned_at ?? null} />
             {task.outcome && <Field label="Outcome" value={task.outcome.summary} />}
             {task.outcome?.files_changed.length ? (
-              <Field label="Files changed" value={task.outcome.files_changed.join(', ')} />
+              <>
+                <dt className="eyebrow">Files changed</dt>
+                <dd className="figure">
+                  <ul className="file-list">
+                    {task.outcome.files_changed.map((f) => (
+                      <li key={f}>{f}</li>
+                    ))}
+                  </ul>
+                </dd>
+              </>
             ) : null}
           </dl>
         )}
@@ -456,6 +790,12 @@ function Field({ label, value, cls }: { label: string; value: string | null; cls
 
 /* ── Derivation ────────────────────────────────────────────────────────── */
 
+/** Pilot's own classification. Anything but `reversible` is worth flagging. */
+export function isIrreversible(task: Task): boolean {
+  const r = (task.reversibility ?? '').toLowerCase()
+  return r !== '' && r !== 'reversible'
+}
+
 /**
  * Order tasks so a dependency always precedes what needs it, and report how
  * deep each sits — the indentation is the DAG.
@@ -492,6 +832,28 @@ export function ordered(tasks: Task[]): { task: Task; depth: number }[] {
   return tasks
     .map((task) => ({ task, depth: depth.get(task.id) ?? 0 }))
     .sort((a, b) => a.depth - b.depth || a.task.id.localeCompare(b.task.id))
+}
+
+/**
+ * Elapsed, and actually counting.
+ *
+ * `elapsedSecs` was correct and rendered once — a running task's clock only
+ * moved when an unrelated event forced a re-render, so it advanced in jumps of
+ * whatever the run happened to be doing. The interval exists only while there
+ * is something to count: a finished task, or a task on a finished run, has a
+ * fixed number and does not earn a timer.
+ */
+function useElapsed(task: Task, terminal: boolean): number | null {
+  const ticking = Boolean(task.started_at) && !task.ended_at && !terminal
+  const [now, setNow] = useState(() => Date.now())
+
+  useEffect(() => {
+    if (!ticking) return
+    const id = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(id)
+  }, [ticking])
+
+  return elapsedSecs(task, terminal, now)
 }
 
 /**

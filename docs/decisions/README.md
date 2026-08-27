@@ -58,3 +58,4 @@ pointer. The history of what we believed is the point.
 | [0011](0011-background-jobs.md) | Background jobs are a process table, not a capability seam | accepted |
 | [0012](0012-stdin-instead-of-a-pty.md) | Processes are driven over stdin; no PTY | accepted |
 | [0013](0013-no-speculative-seams.md) | No speculative seams; extract when a second implementation arrives | accepted |
+| [0014](0014-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |

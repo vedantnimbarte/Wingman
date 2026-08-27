@@ -2,7 +2,40 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- `viewport-fit=cover` so the rail and the composer reach the edge on a
+         notched phone, which is the device this panel exists for. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Wingman's control panel: the board, live pilot runs, sessions, config and cost." />
+
+    <!--
+      The favicon is the wing mark inlined as a data URI rather than a fourth
+      file. `crates/wingman-cli/build.rs` embeds exactly three assets by name —
+      index.html, app.js, app.css — so a real .ico or .svg would mean a new
+      embed, a new MIME arm in serve::ui, and a fourth thing to keep in step,
+      for one 200-byte path. `currentColor` is no use in a favicon, so the two
+      themes are two links and the browser picks with `media`.
+    -->
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='%2314161b' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+      media="(prefers-color-scheme: light)"
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='%23e9ecf2' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+      media="(prefers-color-scheme: dark)"
+    />
+    <link
+      rel="apple-touch-icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%23fbfbfc'/%3E%3Cpath fill='%2314161b' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+    />
+
+    <!-- Paints the phone's browser chrome to match `--paper`, so the panel
+         does not sit in a white bar in a dark room. -->
+    <meta name="theme-color" content="#fbfbfc" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0c0e12" media="(prefers-color-scheme: dark)" />
+    <meta name="mobile-web-app-capable" content="yes" />
+
     <title>Wingman</title>
   </head>
   <body>

@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { copyText } from './a11y'
 import {
   api,
   ApiError,
@@ -7,6 +8,7 @@ import {
   type SessionSummary,
   type TurnEvent,
 } from './api'
+import { Markdown } from './markdown'
 import { navigate } from './router'
 import { message } from './state'
 import { Empty, Failed, Icon, Loading, Note, PageHead } from './ui'
@@ -45,6 +47,7 @@ function SessionList({ project }: { project: string }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
+  const [q, setQ] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -78,6 +81,8 @@ function SessionList({ project }: { project: string }) {
     }
   }
 
+  const shown = useMemo(() => matching(sessions ?? [], q), [sessions, q])
+
   if (error)
     return (
       <div className="view">
@@ -97,9 +102,9 @@ function SessionList({ project }: { project: string }) {
         title={sessions.length === 1 ? '1 session' : `${sessions.length} sessions`}
         intro={
           <>
-            Transcripts in <code>.wingman/sessions/</code>. A conversation started here is a normal
-            session file — it shows up in <code>wingman session list</code> and resumes from a
-            terminal.
+            Transcripts in <code>.wingman/sessions/</code>, most recently written first. A
+            conversation started here is a normal session file — it shows up in{' '}
+            <code>wingman session list</code> and resumes from a terminal.
           </>
         }
         actions={
@@ -115,6 +120,27 @@ function SessionList({ project }: { project: string }) {
 
       {note && <Note>{note}</Note>}
 
+      {sessions.length > 0 && (
+        <div className="filters">
+          <label className="filter-search">
+            <Icon name="search" size={14} />
+            <input
+              className="input"
+              type="search"
+              placeholder="Filter by first prompt, id or model"
+              aria-label="Filter sessions"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+            />
+          </label>
+          {shown.length !== sessions.length && (
+            <span className="faint figure">
+              {shown.length} of {sessions.length}
+            </span>
+          )}
+        </div>
+      )}
+
       {sessions.length === 0 ? (
         <Empty
           title="No conversations yet"
@@ -123,9 +149,13 @@ function SessionList({ project }: { project: string }) {
           A conversation here writes the same transcript a terminal session does, so you can start
           on one and finish on the other.
         </Empty>
+      ) : shown.length === 0 ? (
+        <Empty title="Nothing matches" action={{ label: 'Clear', onClick: () => setQ('') }}>
+          No transcript here mentions “{q.trim()}” in its first prompt, its id or its model.
+        </Empty>
       ) : (
         <div className="rows">
-          {sessions.map((s) => (
+          {shown.map((s) => (
             <div key={s.session_id} className="row">
               <button
                 type="button"
@@ -137,6 +167,7 @@ function SessionList({ project }: { project: string }) {
                   <span className="identifier">{s.session_id}</span>
                   {s.model && ` · ${s.model}`}
                   {` · ${s.turns} ${s.turns === 1 ? 'turn' : 'turns'}`}
+                  {s.mtime ? ` · ${ago(s.mtime)}` : ''}
                 </span>
               </button>
               <button
@@ -155,6 +186,30 @@ function SessionList({ project }: { project: string }) {
   )
 }
 
+/** Substring over the three things a session is actually recognised by. */
+export function matching(sessions: SessionSummary[], q: string): SessionSummary[] {
+  const needle = q.trim().toLowerCase()
+  if (!needle) return sessions
+  return sessions.filter((s) =>
+    `${s.first_prompt ?? ''} ${s.session_id} ${s.model ?? ''}`.toLowerCase().includes(needle),
+  )
+}
+
+/**
+ * Coarse relative time. "3 days ago" is what someone scanning a list needs;
+ * the exact stamp is in the transcript and nobody reads it from a row.
+ */
+export function ago(unixSecs: number, now = Date.now()): string {
+  const secs = Math.max(0, Math.floor(now / 1000) - unixSecs)
+  if (secs < 90) return 'just now'
+  const mins = Math.round(secs / 60)
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  const days = Math.round(hours / 24)
+  return days === 1 ? 'yesterday' : `${days}d ago`
+}
+
 /* ── Conversation ──────────────────────────────────────────────────────── */
 
 /** What the composer is doing. `live` carries the text streamed so far. */
@@ -165,6 +220,23 @@ export type Turn =
 
 export type ToolCall = { id: string; name: string; output?: string; failed?: boolean }
 
+/**
+ * A permission mode a turn may ask for.
+ *
+ * The server clamps to `[serve].max_permission_mode` and refuses anything
+ * above it with a `403`, so this can only ever ask for *less* — which is the
+ * useful direction. The composer previously sent neither this nor a model and
+ * said so in its hint, which described the ceiling as if it were the only
+ * choice available.
+ */
+const MODES = ['read-only', 'plan', 'auto-edit'] as const
+
+const MODE_KEY = 'wingman.turn.mode'
+const MODEL_KEY = 'wingman.turn.model'
+
+/** How many transcript records render before the "show earlier" fold. */
+const WINDOW = 150
+
 function Conversation({ project, id }: { project: string; id: string }) {
   const isNew = id === 'new'
   const [records, setRecords] = useState<SessionRecord[] | null>(isNew ? [] : null)
@@ -172,8 +244,13 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const [prompt, setPrompt] = useState('')
   const [turn, setTurn] = useState<Turn>({ state: 'idle' })
   const [verification, setVerification] = useState<{ passed: boolean; summary: string } | null>(null)
+  const [all, setAll] = useState(false)
+  const [pinned, setPinned] = useState(true)
+  const [mode, setMode] = useState(() => window.localStorage.getItem(MODE_KEY) ?? '')
+  const [model, setModel] = useState(() => window.localStorage.getItem(MODEL_KEY) ?? '')
   const abort = useRef<AbortController | null>(null)
   const foot = useRef<HTMLDivElement | null>(null)
+  const scroller = useRef<HTMLDivElement | null>(null)
 
   const load = useCallback(async () => {
     if (isNew) return
@@ -189,12 +266,22 @@ function Conversation({ project, id }: { project: string; id: string }) {
     void load()
   }, [load])
 
-  // Keep the newest text in view while a turn streams.
+  // Keep the newest text in view while a turn streams — unless the reader has
+  // scrolled up, in which case yanking them back to the bottom every 40ms is
+  // the single most hostile thing a streaming view can do.
   useEffect(() => {
-    foot.current?.scrollIntoView({ block: 'end' })
-  }, [turn])
+    if (pinned) foot.current?.scrollIntoView({ block: 'end' })
+  }, [turn, pinned])
 
   useEffect(() => () => abort.current?.abort(), [])
+
+  function onScroll() {
+    const el = scroller.current
+    if (!el) return
+    // 40px of slack: an exact comparison unpins on the sub-pixel rounding a
+    // smooth scroll lands on.
+    setPinned(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
+  }
 
   async function send() {
     const text = prompt.trim()
@@ -214,13 +301,14 @@ function Conversation({ project, id }: { project: string; id: string }) {
     setPrompt('')
     setVerification(null)
     setTurn({ state: 'streaming', text: '', thinking: '', tools: [] })
+    setPinned(true)
     abort.current = new AbortController()
 
     try {
       await api.turn(
         project,
         target,
-        { prompt: text },
+        { prompt: text, mode: mode || undefined, model: model.trim() || undefined },
         (e) => apply(e, setTurn, setVerification),
         abort.current.signal,
       )
@@ -263,6 +351,13 @@ function Conversation({ project, id }: { project: string; id: string }) {
     if (r.kind === 'tool_result') results.set(r.id, { output: r.output, failed: r.is_error })
   }
 
+  // A long session is thousands of records, each with a `<pre>` of tool output
+  // — enough to make scrolling stutter and a phone give up. The newest window
+  // renders; the rest is one click away. Not virtualisation: a windowed list
+  // with a fold is twenty lines and has no scroll-anchoring bugs to find.
+  const folded = !all && records.length > WINDOW
+  const visible = folded ? records.slice(-WINDOW) : records
+
   return (
     <div className="view chat">
       <button
@@ -280,13 +375,19 @@ function Conversation({ project, id }: { project: string; id: string }) {
         </div>
       </header>
 
-      <div className="transcript">
-        {records.map((r, i) => (
-          <Record key={i} record={r} results={results} />
+      <div className="transcript" ref={scroller} onScroll={onScroll}>
+        {folded && (
+          <button type="button" className="button button-quiet fold" onClick={() => setAll(true)}>
+            Show {records.length - WINDOW} earlier records
+          </button>
+        )}
+
+        {visible.map((r, i) => (
+          <Record key={folded ? records.length - WINDOW + i : i} record={r} results={results} />
         ))}
 
         {streaming && (
-          <div className="msg msg-assistant">
+          <div className="msg msg-assistant" aria-live="polite" aria-busy="true">
             <span className="eyebrow">Assistant</span>
             {turn.thinking && (
               <details className="thinking">
@@ -297,6 +398,9 @@ function Conversation({ project, id }: { project: string; id: string }) {
             {turn.tools.map((t) => (
               <ToolLine key={t.id} tool={t} />
             ))}
+            {/* Plain text while it streams: re-parsing markdown on every delta
+                makes a half-written fence flicker between code and prose. The
+                re-read after the turn renders it properly, once. */}
             <p className="msg-text">
               {turn.text}
               <span className="caret" aria-hidden="true" />
@@ -318,6 +422,20 @@ function Conversation({ project, id }: { project: string; id: string }) {
 
         <div ref={foot} />
       </div>
+
+      {!pinned && (
+        <button
+          type="button"
+          className="button button-sm jump"
+          onClick={() => {
+            setPinned(true)
+            foot.current?.scrollIntoView({ block: 'end', behavior: 'smooth' })
+          }}
+        >
+          <Icon name="down" size={14} />
+          Newest
+        </button>
+      )}
 
       <form
         className="composer"
@@ -343,9 +461,42 @@ function Conversation({ project, id }: { project: string; id: string }) {
           }}
         />
         <div className="composer-tools">
-          <span className="composer-hint">
-            Enter sends · Shift+Enter for a newline · runs in {project} at the server's ceiling
-          </span>
+          <select
+            className="select"
+            aria-label="Permission mode for this turn"
+            title="The server clamps this to its ceiling — a turn can ask for less, never more."
+            value={mode}
+            disabled={streaming}
+            onChange={(e) => {
+              setMode(e.target.value)
+              if (e.target.value) window.localStorage.setItem(MODE_KEY, e.target.value)
+              else window.localStorage.removeItem(MODE_KEY)
+            }}
+          >
+            <option value="">server's ceiling</option>
+            {MODES.map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </select>
+
+          <input
+            className="input composer-model"
+            placeholder="model"
+            aria-label="Model for this turn"
+            spellCheck={false}
+            value={model}
+            disabled={streaming}
+            onChange={(e) => {
+              setModel(e.target.value)
+              if (e.target.value.trim()) window.localStorage.setItem(MODEL_KEY, e.target.value)
+              else window.localStorage.removeItem(MODEL_KEY)
+            }}
+          />
+
+          <span className="composer-hint">Enter sends · Shift+Enter for a newline · {project}</span>
+
           {streaming && (
             <button
               type="button"
@@ -410,13 +561,16 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
       return (
         <p className="eyebrow msg-start">
           {record.provider} · <span className="identifier figure">{record.model}</span>
+          <span className="faint"> · {clock(record.ts)}</span>
         </p>
       )
 
     case 'user':
       return (
         <div className="msg msg-user">
-          <span className="eyebrow">You</span>
+          <span className="eyebrow">
+            You <span className="faint">{clock(record.ts)}</span>
+          </span>
           <p className="msg-text">{record.text}</p>
         </div>
       )
@@ -424,7 +578,9 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
     case 'assistant':
       return (
         <div className="msg msg-assistant">
-          <span className="eyebrow">Assistant</span>
+          <span className="eyebrow">
+            Assistant <span className="faint">{clock(record.ts)}</span>
+          </span>
           {record.blocks.map((b, i) => (
             <Block key={i} block={b} results={results} />
           ))}
@@ -435,20 +591,93 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
     case 'tool_result':
       return null
 
-    case 'usage_delta':
-      return null
+    // What the turn cost, on the ledger axis like every other figure in the
+    // panel. These records were read and dropped, which meant the one screen
+    // where tokens are actually spent was the one screen that never showed
+    // them.
+    case 'usage_delta': {
+      const line = usageLine(record.usage)
+      return line ? <p className="usage figure faint">{line}</p> : null
+    }
 
-    case 'stop':
-      return record.reason === 'end_turn' ? null : (
-        <p className="eyebrow msg-start is-asserted">stopped: {record.reason}</p>
+    case 'stop': {
+      const reason = unquote(record.reason)
+      return reason === 'end_turn' ? null : (
+        <p className="eyebrow msg-start is-asserted">stopped: {reason}</p>
       )
+    }
   }
+}
+
+/**
+ * Token counts as one line, from whichever keys this provider actually used.
+ *
+ * The map is `Record<string, number>` on the wire because providers disagree
+ * about names, so this reads the ones that exist rather than assuming a shape.
+ * Cache reads are called out separately: a turn that was 90% cache is a
+ * different fact from one that was not, and the totals hide it.
+ */
+export function usageLine(usage: Record<string, number>): string | null {
+  const pick = (...keys: string[]): number => {
+    for (const k of keys) if (typeof usage[k] === 'number') return usage[k]
+    return 0
+  }
+  const input = pick('input_tokens', 'prompt_tokens', 'input')
+  const output = pick('output_tokens', 'completion_tokens', 'output')
+  const cached = pick('cache_read_input_tokens', 'cache_read_tokens', 'cached_tokens')
+  if (!input && !output && !cached) return null
+
+  const parts = [`${input.toLocaleString()} in`, `${output.toLocaleString()} out`]
+  if (cached) parts.push(`${cached.toLocaleString()} cached`)
+  return parts.join(' · ')
+}
+
+/**
+ * A stop reason, with the quotes the writer left on it.
+ *
+ * `record_agent_event` stores the reason as `serde_json::to_string(reason)`,
+ * which JSON-encodes the enum into a *string literal* — so the field holds
+ * `"end_turn"`, quote characters and all, and is then JSON-encoded a second
+ * time by the record. The sibling writer (`ContextFact::Stop`) stores the bare
+ * name. The panel read the bare form, so every ordinary turn ever written by
+ * the first path rendered a spurious `stopped: "end_turn"` line under it.
+ *
+ * Tolerating both is not optional even if the writer is fixed: the transcripts
+ * already on disk keep whichever form wrote them, and this view's whole premise
+ * is that the file is the state.
+ */
+export function unquote(reason: string): string {
+  return reason.replace(/^"(.*)"$/s, '$1')
+}
+
+/**
+ * `2026-08-21T20:05:11Z` → `20:05`.
+ *
+ * Sessions also carry `epoch:1787755228` — the older stamp, still on disk in
+ * every transcript written before the switch, and the reason the first message
+ * of an old conversation showed no time at all.
+ */
+export function clock(ts: string): string {
+  if (ts.startsWith('epoch:')) {
+    const secs = Number(ts.slice(6))
+    if (!Number.isFinite(secs)) return ''
+    const d = new Date(secs * 1000)
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  }
+  const at = ts.indexOf('T')
+  return at === -1 ? '' : ts.slice(at + 1, at + 6)
+}
+
+function pad(n: number): string {
+  return String(n).padStart(2, '0')
 }
 
 function Block({ block, results }: { block: ContentBlock; results: Results }) {
   switch (block.type) {
     case 'text':
-      return <p className="msg-text">{block.text}</p>
+      // The one change that made this view worth reading: an answer with a
+      // fenced code block used to arrive as literal backticks in a paragraph.
+      return <Markdown text={block.text} />
     case 'tool_use': {
       const done = results.get(block.id)
       return (
@@ -486,9 +715,45 @@ function ToolLine({ tool, input }: { tool: ToolCall; input?: unknown }) {
         </span>
         <span className="figure">{tool.name}</span>
       </summary>
-      {input !== undefined && <pre className="figure">{stringify(input)}</pre>}
-      {tool.output !== undefined && <pre className="figure">{clamp(tool.output)}</pre>}
+      {input !== undefined && <Copyable text={stringify(input)} />}
+      {tool.output !== undefined && <Copyable text={clamp(tool.output)} full={tool.output} />}
     </details>
+  )
+}
+
+/**
+ * A block of output with a copy button.
+ *
+ * `full` is the uncut text where the display is clamped: what someone wants on
+ * the clipboard is the whole stack trace, not the first 4000 characters of it
+ * followed by "… 12000 more".
+ *
+ * The button reports failure rather than going quiet. `navigator.clipboard` is
+ * unavailable on a plain-HTTP non-loopback origin — which is exactly the
+ * phone-on-the-LAN case this panel is built for — and a control that silently
+ * does nothing there is worse than one that says why.
+ */
+function Copyable({ text, full }: { text: string; full?: string }) {
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle')
+
+  return (
+    <div className="copyable">
+      <button
+        type="button"
+        className="button button-quiet button-sm copy"
+        onClick={() =>
+          void copyText(full ?? text).then((ok) => {
+            setState(ok ? 'done' : 'failed')
+            window.setTimeout(() => setState('idle'), 1600)
+          })
+        }
+        title={state === 'failed' ? 'The browser refused clipboard access' : 'Copy'}
+      >
+        <Icon name={state === 'done' ? 'check' : 'copy'} size={14} />
+        {state === 'failed' ? 'blocked' : state === 'done' ? 'copied' : 'copy'}
+      </button>
+      <pre className="figure">{text}</pre>
+    </div>
   )
 }
 
