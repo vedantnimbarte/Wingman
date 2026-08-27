@@ -128,7 +128,10 @@ fn main() {
     println!("1. dispatch floor — empty method, {CALLS} calls");
     println!("   static           : {static_ns:>10.3} ns/call");
     println!("   dyn              : {dyn_ns:>10.3} ns/call");
-    println!("   difference       : {:>10.3} ns/call\n", dyn_ns - static_ns);
+    println!(
+        "   difference       : {:>10.3} ns/call\n",
+        dyn_ns - static_ns
+    );
 
     // ---- shared fixture ---------------------------------------------------
     let dir = std::env::temp_dir().join("wingman-dispatch-cost");
@@ -262,7 +265,10 @@ fn main() {
         println!("4. async dispatch floor — trivial method, {ACALLS} calls");
         println!("   plain async fn   : {plain_ns:>10.3} ns/call");
         println!("   #[async_trait]   : {boxed_ns:>10.3} ns/call  (boxes the future)");
-        println!("   difference       : {:>10.3} ns/call", boxed_ns - plain_ns);
+        println!(
+            "   difference       : {:>10.3} ns/call",
+            boxed_ns - plain_ns
+        );
         println!();
         // Scale it against the read measured above rather than a constant, so
         // the ratio stays honest on a machine whose I/O is faster or slower.
