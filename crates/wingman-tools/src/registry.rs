@@ -1172,3 +1172,85 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod documentation_drift_tests {
+    use super::*;
+    use crate::ToolCtx;
+    use wingman_config::PermissionMode;
+
+    /// Tools registered somewhere other than `with_builtins` — behind a
+    /// config flag, a learning handle, or the pilot worker path — that must
+    /// still be documented.
+    ///
+    /// Listed explicitly because constructing their real dependencies (an
+    /// index, memory handles, a subagent runner) inside a docs test would be
+    /// a lot of scaffolding to assert one string. The cost is that a NEW
+    /// conditional tool has to be added here; the forward check below covers
+    /// everything unconditional, which is where the drift actually happened.
+    const CONDITIONALLY_REGISTERED: &[&str] = &[
+        "semantic_search",
+        "save_memory",
+        "recall_memory",
+        "forget_memory",
+        "invoke_skill",
+        "recall_session",
+        "read_session",
+        "spawn_subagent",
+        "task_complete",
+    ];
+
+    fn documented_tool_names() -> Vec<String> {
+        let reg = ToolRegistry::new(ToolCtx::new(
+            PermissionMode::ReadOnly,
+            std::env::temp_dir(),
+            std::env::temp_dir(),
+        ))
+        .with_builtins();
+        let mut names = reg.tool_names();
+        names.extend(CONDITIONALLY_REGISTERED.iter().map(|s| s.to_string()));
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Every tool the agent can call has a section in docs/TOOLS.md.
+    ///
+    /// This doc had drifted by seven tools — `ask_user`, `edit_symbol`,
+    /// `outline`, `update_tasks` and the whole `lsp_*` family shipped
+    /// undocumented. Drift is one-directional and invisible: tools get added,
+    /// the doc does not, and nobody notices because nothing fails.
+    ///
+    /// Asserted rather than generated on purpose. TOOLS.md is mostly prose —
+    /// when to reach for a tool, what it costs, how it fails — and generating
+    /// it would replace explanation with a schema dump. A test keeps the
+    /// enumeration honest and leaves the writing alone.
+    #[test]
+    fn every_tool_has_a_documented_section() {
+        let doc = include_str!("../../../docs/TOOLS.md");
+        let missing: Vec<String> = documented_tool_names()
+            .into_iter()
+            .filter(|name| !doc.contains(&format!("### `{name}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these tools ship undocumented - add a `### `name`` section to \
+             docs/TOOLS.md for each: {missing:?}"
+        );
+    }
+
+    /// …and a row in the summary table, which is what most readers scan.
+    #[test]
+    fn every_tool_has_a_summary_table_row() {
+        let doc = include_str!("../../../docs/TOOLS.md");
+        let missing: Vec<String> = documented_tool_names()
+            .into_iter()
+            .filter(|name| !doc.contains(&format!("| `{name}`")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these tools have a section but no summary-table row in \
+             docs/TOOLS.md: {missing:?}"
+        );
+    }
+}

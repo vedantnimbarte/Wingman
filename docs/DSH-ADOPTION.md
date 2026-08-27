@@ -47,7 +47,7 @@ Effort estimates are rough and use this scale:
 | P11 | Persistent PTY sessions | L | After P3. |
 | P12 | Code Mode (`run_code` + generated SDK) | L–XL | Prototype behind a flag. Don't lead with it. |
 | E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 8 records backfilled. |
-| E2 | Generated documentation | M | Do it for the drift-prone docs only. |
+| E2 | Generated documentation | S | **Done differently** — docs are *tested* against the code, not generated. See [0009](decisions/0009-test-docs-rather-than-generate-them.md). |
 | E3 | Runtime invariants | M | **Partly done** — `debug_assert_reconstructs` ships with A1; no general registry. |
 
 ---

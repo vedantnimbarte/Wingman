@@ -131,7 +131,7 @@ Wingman different; this is everything else it does.
 - **Local model auto-discovery.** `wingman discover` probes localhost
   Ollama / LM Studio / vLLM and prints available models.
 - **Skill auto-extraction.** `wingman skill extract` scans recent session
-  JSONLs for repeated tool-call sequences (e.g. `grep_tool → read_file →
+  JSONLs for repeated tool-call sequences (e.g. `grep → read_file →
   edit_file`) and writes draft skill markdown files under
   `~/.wingman/skills/proposed/` for you to review.
 - **Tree-sitter powered code understanding.** Deep language-aware parsing

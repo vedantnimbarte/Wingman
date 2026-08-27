@@ -83,7 +83,7 @@ prune_threshold_chars = 8192
 # subtable LAST in [tools]: every scalar key after it would be read as part
 # of it, not as a [tools] key.
 # [tools.presets]
-# docs = ["read_file", "write_file", "glob_tool", "grep_tool", "lsp_*"]
+# docs = ["read_file", "write_file", "glob", "grep", "lsp_*"]
 
 # Verification gate (runs after edits): compile check + affected tests + LSP
 # diagnostics, and optional headless-browser visual check.
