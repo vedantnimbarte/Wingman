@@ -31,6 +31,20 @@ fn sessions_dir(project: &Project) -> std::path::PathBuf {
     project.root.join(".wingman").join("sessions")
 }
 
+/// Last-write time of a transcript, as Unix seconds.
+///
+/// Zero when the file is unreadable rather than an error: a session list that
+/// refuses to render because one entry has odd permissions is worse than one
+/// entry sorting to the bottom.
+fn mtime_secs(path: &std::path::Path) -> i64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// `POST /v1/projects/{p}/sessions` — mint an id.
 ///
 /// No file is written yet: an empty session is just an id, and creating a log
@@ -74,8 +88,13 @@ pub async fn list(project: &Project, sock: &mut TcpStream) -> std::io::Result<()
             "model": model,
             "provider": provider,
             "turns": turns,
+            "mtime": mtime_secs(&path),
         }));
     }
+    // Newest first. `list_sessions` returns directory order, which is neither
+    // stable across platforms nor meaningful — and "which conversation was I
+    // just in" is the only question a session list is ever opened to answer.
+    out.sort_by(|a, b| b["mtime"].as_i64().cmp(&a["mtime"].as_i64()));
     http::write_json(sock, 200, &json!({ "sessions": out })).await
 }
 
@@ -254,7 +273,7 @@ pub fn schema() -> Vec<Value> {
         json!({ "method": "POST", "path": "/v1/projects/{project}/sessions", "auth": true,
                 "returns": "{session_id} — mints an id; the first turn creates the log" }),
         json!({ "method": "GET", "path": "/v1/projects/{project}/sessions", "auth": true,
-                "returns": "sessions with first prompt, model, turn count" }),
+                "returns": "sessions with first prompt, model, turn count, mtime; newest first" }),
         json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}", "auth": true,
                 "returns": "full transcript as SessionRecord[]" }),
         json!({ "method": "DELETE", "path": "/v1/projects/{project}/sessions/{id}", "auth": true }),

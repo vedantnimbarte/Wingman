@@ -59,6 +59,46 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
+/**
+ * A table-driven route, where a non-zero exit is a **result** rather than a
+ * transport failure.
+ *
+ * `serve::table::execute` answers `500` whenever the subcommand exits
+ * non-zero, carrying the command's own `{stdout, stderr, exit}` in the body.
+ * That is the normal outcome for several of them — `attest` exits 1 when the
+ * posture it reports is not clean, `doctor` exits 1 on an unhealthy machine —
+ * so treating the status alone as the verdict threw the report away and put
+ * "500 Internal Server Error" on screen instead of the answer the user asked
+ * for. The body is what the route promised; if it is there, it is returned.
+ *
+ * Anything that is not that shape still throws, so a `401` still reaches the
+ * sign-in flow and a genuine failure still reads as one.
+ */
+async function command(path: string, init?: RequestInit): Promise<unknown> {
+  let res: Response
+  try {
+    res = await fetch(path, { credentials: 'same-origin', ...init })
+  } catch {
+    throw new ApiError(0, 'No answer from the daemon. Is `wingman serve` running?')
+  }
+
+  if (res.status === 204) return undefined
+
+  let body: unknown = null
+  try {
+    body = await res.json()
+  } catch {
+    // Not JSON at all. Fall through to the status line below.
+  }
+
+  if (isTextOutput(body)) return body
+  if (!res.ok) {
+    const named = body as { error?: string } | null
+    throw new ApiError(res.status, named?.error ?? `${res.status} ${res.statusText}`)
+  }
+  return body
+}
+
 /** Prefer the server's own `{"error": ...}` message over a status code. */
 async function errorText(res: Response): Promise<string> {
   try {
@@ -159,6 +199,30 @@ export type Badge = {
 
 export type BoardProject = { id: string; name: string; root: string; missing: boolean }
 
+/** One dispatch of a card. The history that makes "this took three attempts" answerable. */
+export type Dispatch = {
+  run_id: string
+  project: string
+  started_at: string | null
+  ended_at: string | null
+}
+
+/** `GET /v1/board/cards/{card}` — the durable card, plus every run it has spawned. */
+export type CardDetail = {
+  card: {
+    id: string
+    short: string
+    title: string
+    goal: string
+    notes: string | null
+    labels: string[]
+    archived: boolean
+    project: string
+    created_at: string
+  }
+  dispatches: Dispatch[]
+}
+
 export type BoardData = {
   columns: { id: ColumnId; title: string }[]
   cards: Card[]
@@ -238,6 +302,17 @@ export type RunState = {
 
 export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
 
+/**
+ * One line of a run's `tasks.jsonl`.
+ *
+ * Serde tags the enum with `ev` and every variant carries an RFC-3339 `t`, so
+ * those two are all a renderer can rely on — the rest is per-variant and read
+ * defensively. The alternative is a discriminated union that has to be
+ * re-derived from `wingman_autonomous::Event` every time a variant gains a
+ * field, for a log line.
+ */
+export type RunLogEvent = { ev: string; t: string; [k: string]: unknown }
+
 /* ── Sessions ─────────────────────────────────────────────────────────────
  *
  * A session is not a server object with a timeout — it is the same
@@ -252,6 +327,8 @@ export type SessionSummary = {
   model: string | null
   provider: string | null
   turns: number
+  /** Last write, Unix seconds. The server sorts on it; this is for display. */
+  mtime: number
 }
 
 /** A block inside an assistant message. Mirrors `wingman_core::ContentBlock`. */
@@ -504,10 +581,42 @@ export const api = {
 
   signOut: () => request<void>('/v1/ui/session', { method: 'DELETE' }),
 
-  board: (project?: string) =>
-    request<BoardData>(`/v1/board${project ? `?project=${encodeURIComponent(project)}` : ''}`),
+  /**
+   * `archived` asks the server to append archived cards, which come back in
+   * Backlog with no roll-up — they have no run left to derive one from.
+   */
+  board: (opts: { project?: string; archived?: boolean } = {}) => {
+    const q = new URLSearchParams()
+    if (opts.project) q.set('project', opts.project)
+    if (opts.archived) q.set('archived', '1')
+    const query = q.toString()
+    return request<BoardData>(`/v1/board${query ? `?${query}` : ''}`)
+  },
 
-  addCard: (body: { project: string; title: string; goal?: string; labels?: string[] }) =>
+  card: (id: string) => request<CardDetail>(`/v1/board/cards/${encodeURIComponent(id)}`),
+
+  /** Only the keys sent are changed — an absent `goal` is left alone, not cleared. */
+  updateCard: (id: string, body: { title?: string; goal?: string }) =>
+    request<{ id: string; title: string; goal: string }>(
+      `/v1/board/cards/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  /** Forgets the card and its dispatch history. The runs on disk are untouched. */
+  deleteCard: (id: string) =>
+    request<void>(`/v1/board/cards/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  addCard: (body: {
+    project: string
+    title: string
+    goal?: string
+    notes?: string
+    labels?: string[]
+  }) =>
     request<{ id: string; short: string }>('/v1/board/cards', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -539,7 +648,7 @@ export const api = {
    * it once it can see which it got.
    */
   report: (project: string, tail: string) =>
-    request<unknown>(`/v1/projects/${encodeURIComponent(project)}/${tail}`),
+    command(`/v1/projects/${encodeURIComponent(project)}/${tail}`),
 
   sessions: (project: string) =>
     request<{ sessions: SessionSummary[] }>(
@@ -580,6 +689,45 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     }),
+
+  /**
+   * Start a pilot run without a card.
+   *
+   * Returns as soon as the child is spawned, so the caller gets a `run_id` for
+   * a run that has not planned anything yet — which is exactly what the run
+   * detail view is built to watch.
+   */
+  startRun: (
+    project: string,
+    body: { goal: string; yes?: boolean; plan_only?: boolean; model?: string },
+  ) =>
+    request<{ run_id: string }>(`/v1/projects/${encodeURIComponent(project)}/pilot/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * The tail of a run's `tasks.jsonl`.
+   *
+   * Read once when the detail view opens; everything after it arrives on the
+   * run's SSE stream. Without this the log starts empty on a run that has been
+   * going for an hour.
+   */
+  runEvents: (project: string, runId: string, tail = 40) =>
+    request<{ events: unknown[] }>(
+      `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/events?tail=${tail}`,
+    ),
+
+  /**
+   * Run one of the table-driven **write** routes — checkpoint, rewind,
+   * reindex, memory sync, trust, schedule.
+   *
+   * Separate from `report` only by method: these do something, and a caller
+   * that cannot tell them apart would offer them as if they were reads.
+   */
+  action: (project: string, tail: string) =>
+    command(`/v1/projects/${encodeURIComponent(project)}/${tail}`, { method: 'POST' }),
 
   runs: (project: string) =>
     request<{ runs: RunSummary[] }>(`/v1/projects/${encodeURIComponent(project)}/pilot/runs`).then(

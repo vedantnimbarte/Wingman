@@ -202,6 +202,7 @@ the column, roll-up and badges are the same derivation `wingman board` renders.
 | `GET` | `/v1/board/projects` | The board's registry, each with whether its directory still exists. |
 | `POST` | `/v1/board/cards` | `{"project":"…","title":"…","goal":"…?","notes":"…?","labels":[]}` → `{id, short}`. |
 | `GET` | `/v1/board/cards/{card}` | One card and its dispatch history. `{card}` is an id or a unique prefix. |
+| `PATCH` | `/v1/board/cards/{card}` | `{"title":"…?","goal":"…?"}`. Only the keys present are changed — an absent `goal` is left alone, not cleared. A card is durable and outlives its runs, so correcting a badly worded goal must not mean deleting the history that wording produced. |
 | `POST` | `/v1/board/cards/{card}/dispatch` | `{"again":bool,"args":[]}` → `{run_id, project, pid}`, spawned detached. |
 | `POST` | `/v1/board/cards/{card}/archive` | `{"restore":bool}` to unarchive instead. |
 | `DELETE` | `/v1/board/cards/{card}` | Forgets the card and its dispatch history. The runs on disk are untouched. |
@@ -227,7 +228,7 @@ and shows up in `wingman session list` like any other.
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | `POST` | `/v1/projects/{p}/sessions` | `{"model":"…","mode":"…"}` | `{"session_id":"…"}` |
-| `GET` | `/v1/projects/{p}/sessions` | — | Sessions with id, first prompt, model, turn count, mtime. |
+| `GET` | `/v1/projects/{p}/sessions` | — | Sessions with id, first prompt, model, turn count and `mtime` (Unix seconds), **newest first**. Directory order is neither stable across platforms nor meaningful, and "which conversation was I just in" is the only question a session list is opened to answer. |
 | `GET` | `/v1/projects/{p}/sessions/{id}` | — | Full transcript as `SessionRecord[]`. |
 | `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream of `wingman_core::AgentEvent`: `text_delta`, `thinking_delta`, `tool_start`, `tool_result`, `usage`, `turn_complete`, `verification`, `stop`, `error`. The event name is the payload's own `type`, so this list is the enum. Resumes the session history. |
 | `POST` | `/v1/projects/{p}/turns` | same | One-shot turn, no session continuity. |

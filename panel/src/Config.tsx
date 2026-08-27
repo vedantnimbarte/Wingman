@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useUnsavedWarning } from './a11y'
 import { api, type ConfigSchema, type SchemaNode } from './api'
 import { at, fieldsOf, resolve, toPatch, type Field } from './schema'
 import { message } from './state'
@@ -31,6 +32,13 @@ export function Config() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
+  const [query, setQuery] = useState('')
+  const [preview, setPreview] = useState(false)
+
+  // Twenty-one sections and a floating save bar meant twelve pending edits
+  // could leave with the tab and take no notice. The panel routes in-page, so
+  // this covers the half the browser gives a hook for and nothing more.
+  useUnsavedWarning(edits.size > 0)
 
   const load = useCallback(async () => {
     try {
@@ -145,18 +153,36 @@ export function Config() {
 
       <div className="config-body">
         <nav className="config-nav" aria-label="Config sections">
-          {all.map((s) => (
-            <button
-              key={s}
-              type="button"
-              className="nav-item"
-              aria-current={s === active ? 'page' : undefined}
-              onClick={() => setSection(s)}
-            >
-              {s}
-              {meta.readonly_sections.includes(s) && <span className="muted"> · read-only</span>}
-            </button>
-          ))}
+          {/* Twenty-one sections in a list with no way to narrow it. ⌘K
+              deliberately does not reach config fields — it never acts on
+              something you cannot see — so the filter belongs here, next to
+              what it filters. */}
+          <label className="filter-search config-find">
+            <input
+              className="input"
+              type="search"
+              placeholder="Find a section"
+              aria-label="Find a config section"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
+          {all
+            .filter((s) => s.toLowerCase().includes(query.trim().toLowerCase()))
+            .map((s) => (
+              <button
+                key={s}
+                type="button"
+                className="nav-item"
+                aria-current={s === active ? 'page' : undefined}
+                onClick={() => setSection(s)}
+              >
+                {s}
+                {meta.readonly_sections.includes(s) && (
+                  <span className="muted"> · read-only</span>
+                )}
+              </button>
+            ))}
         </nav>
 
         <section className="config-fields">
@@ -173,6 +199,12 @@ export function Config() {
 
           {fields.length === 0 ? (
             <FreeForm
+              // Keyed on the section. Without it React reuses the instance
+              // between two form-less sections, and `useState` keeps the text
+              // it was seeded with — so switching from `[hooks]` to `[mcp]`
+              // left you editing one section's JSON under the other's
+              // heading, and saving wrote it there.
+              key={active}
               value={at(current, [active])}
               node={resolved}
               readOnly={readOnly}
@@ -215,6 +247,17 @@ export function Config() {
           )}
         </span>
         {edits.size > 0 && (
+          <button
+            type="button"
+            className="button button-quiet"
+            aria-expanded={preview}
+            onClick={() => setPreview((p) => !p)}
+            title="Exactly what a save would send"
+          >
+            {preview ? 'Hide' : 'Preview'}
+          </button>
+        )}
+        {edits.size > 0 && (
           <button type="button" className="button button-quiet" onClick={() => setEdits(new Map())}>
             Discard
           </button>
@@ -232,6 +275,21 @@ export function Config() {
               : `Save ${edits.size} change${edits.size === 1 ? '' : 's'}`}
         </button>
       </div>
+
+      {/* The patch itself, before it is sent. `PATCH` deep-merges and the file
+          is edited as a TOML document, so a save is a one-line diff — but
+          which line is not obvious from a form with a hundred inputs, and the
+          only way to check used to be to save and read the file. */}
+      {preview && edits.size > 0 && (
+        <>
+          <h3 className="section-head">This save sends</h3>
+          <p className="section-intro">
+            Merged into <code className="figure">{meta.writes_to}</code>. Keys not listed here are
+            not touched.
+          </p>
+          <pre className="report figure">{JSON.stringify(toPatch(edits), null, 2)}</pre>
+        </>
+      )}
     </div>
   )
 }
