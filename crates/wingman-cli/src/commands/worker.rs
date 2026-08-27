@@ -27,7 +27,7 @@ use wingman_autonomous::model::{Acceptance, Role, Task};
 use wingman_autonomous::role::load_role_prompt_with_lessons;
 use wingman_config::{Config, PermissionMode, ProjectPaths};
 use wingman_core::{AgentConfig, AgentEvent, AgentLoop, Compactor, ToolOutputBudget};
-use wingman_tools::{ToolCtx, ToolRegistry};
+use wingman_tools::ToolCtx;
 
 use crate::runtime;
 
@@ -67,10 +67,30 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
         .with_context(|| format!("building provider {}", selection.provider_id))?;
 
-    // Build a minimal tool registry: full builtins so the worker can read
-    // / edit / run, plus our terminal `task_complete` tool. We bypass
-    // `build_agent_and_registry` because we don't want the TUI-flavoured
-    // system prompt; workers get a role-specific system prompt instead.
+    // The worker gets the *same* registry the interactive session gets, plus
+    // its two control tools. It used to build one by hand, so everything
+    // `base_registry` applies was simply absent here:
+    //
+    //   - the audit trail (none: unattended runs left no compliance record)
+    //   - the per-call deadline (none: a wedged tool hung the worker)
+    //   - the repeat guard (off)
+    //   - custom tools from `[tools.custom]`
+    //   - the `local_only` network-tool removal
+    //   - `[tools].preset` / `[tools].disabled_tools`
+    //   - `[tools].shell_sandbox`, which the ctx defaulted to "auto" — so a
+    //     configured `required` ran commands unconfined instead of refusing
+    //
+    // (Secret redaction was already on, because the registry defaults it on;
+    // what changes is that it now follows the config knob like everywhere
+    // else.)
+    //
+    // This is the same drift that once hit `spawn_subagent`, and it matters
+    // more here: "not this tool, ever" and "this box is air-gapped" were being
+    // ignored precisely where nobody is watching. One builder is what stops it
+    // happening a third time.
+    //
+    // The system prompt stays the worker's own — that is what this function
+    // legitimately does differently, and it is not the registry's concern.
     let cwd = std::env::current_dir().unwrap_or_default();
     let paths = ProjectPaths::discover(&cwd);
     let ctx = ToolCtx::new_with_config(
@@ -79,13 +99,24 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         paths.root.clone(),
         cfg.tools.shell_denylist.clone(),
         cfg.tools.allow_network,
-    );
-    let registry = ToolRegistry::new(ctx)
-        .with_builtins()
-        .with_hooks(cfg.hooks.clone());
+    )
+    .with_shell_sandbox(cfg.tools.shell_sandbox.clone());
+    let mut registry = runtime::base_registry(ctx, &cfg, runtime::audit_path_for(&cfg, &paths));
+    runtime::apply_tool_removals(&mut registry, &cfg);
     let registry = Arc::new(registry);
     registry.register_arc(Arc::new(wingman_tools::builtin::TaskComplete));
     registry.register_arc(Arc::new(wingman_autonomous::tools::RunAcceptance));
+
+    // The removals now bind these two as well, and a worker without them
+    // cannot report its result — it would run the whole task and then fail in
+    // a way that looks like a model problem. Say so up front instead.
+    for required in ["task_complete", "run_acceptance"] {
+        if !registry.tool_names().iter().any(|n| n == required) {
+            anyhow::bail!(
+                "`{required}` is excluded by [tools].disabled_tools or [tools].preset, but the                  pilot worker cannot report a result without it. Remove it from that list, or                  narrow the setting to the tools you meant."
+            );
+        }
+    }
 
     let system = compose_worker_system_prompt(&role, &task);
     let user_prompt = compose_worker_user_prompt(&task);
@@ -445,6 +476,68 @@ fn parse_role(s: &str) -> Result<Role> {
 mod tests {
     use super::*;
     use wingman_core::LearningHook;
+
+    /// The worker is the unattended path, so `[tools].disabled_tools` matters
+    /// more there, not less. It used to build its registry by hand and never
+    /// apply removals at all, so naming a tool did nothing — the same shape of
+    /// bug as `spawn_subagent`, but with nobody watching the session.
+    ///
+    /// Pinned against `runtime::base_registry` + `apply_tool_removals`, which
+    /// is the fix: one builder, so this cannot drift apart again.
+    #[test]
+    fn the_worker_registry_honors_disabled_tools() {
+        let mut cfg = Config::default();
+        cfg.tools.disabled_tools = vec!["run_shell".into()];
+
+        let tmp = std::env::temp_dir();
+        let ctx = ToolCtx::new_with_config(
+            PermissionMode::AutoEdit,
+            tmp.clone(),
+            tmp,
+            cfg.tools.shell_denylist.clone(),
+            cfg.tools.allow_network,
+        );
+        let mut reg = runtime::base_registry(ctx, &cfg, None);
+        runtime::apply_tool_removals(&mut reg, &cfg);
+
+        assert!(
+            !reg.tool_names().iter().any(|n| n == "run_shell"),
+            "disabled_tools was ignored in the worker path: {:?}",
+            reg.tool_names()
+        );
+        // The rest of the toolset is untouched — this is a denylist, not a
+        // reason to start the worker with nothing.
+        assert!(reg.tool_names().iter().any(|n| n == "read_file"));
+    }
+
+    /// A worker that cannot call `task_complete` runs the whole task and then
+    /// fails in a way that reads as a model problem. Now that removals bind
+    /// the control tools too, that has to be caught up front.
+    #[test]
+    fn removing_a_control_tool_is_detectable_before_the_run() {
+        let mut cfg = Config::default();
+        cfg.tools.disabled_tools = vec!["task_complete".into()];
+
+        let tmp = std::env::temp_dir();
+        let ctx = ToolCtx::new_with_config(
+            PermissionMode::AutoEdit,
+            tmp.clone(),
+            tmp,
+            cfg.tools.shell_denylist.clone(),
+            cfg.tools.allow_network,
+        );
+        let mut reg = runtime::base_registry(ctx, &cfg, None);
+        runtime::apply_tool_removals(&mut reg, &cfg);
+        let reg = std::sync::Arc::new(reg);
+        reg.register_arc(std::sync::Arc::new(wingman_tools::builtin::TaskComplete));
+
+        // The registry refuses it, which is what `run` turns into a startup
+        // error rather than a mystery at the end of the task.
+        assert!(
+            !reg.tool_names().iter().any(|n| n == "task_complete"),
+            "an excluded control tool was registered anyway"
+        );
+    }
 
     #[tokio::test]
     async fn ipc_injector_drains_pending_once() {
