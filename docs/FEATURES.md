@@ -7,10 +7,12 @@ Wingman different; this is everything else it does.
   frontmatter under `~/.wingman/memory/` and `<project>/.wingman/memory/` —
   files you can read, edit, and delete, not an opaque store. Plus skill usage
   stats, cross-session semantic recall through the RAG pipeline, and
-  quiet-session nudges to persist something worth keeping. Note the outcome
-  "scoring" behind skill stats is a phrase heuristic over your replies, not a
-  learned signal; treat the numbers as a rough tally. See
-  [LEARNING-LOOP.md](LEARNING-LOOP.md).
+  quiet-session nudges to persist something worth keeping. Rate an answer with
+  `/feedback good|bad [note]` and that rating scores the skill outright — the
+  `rated=` column in `/skill stats` counts those. Anything unrated falls back
+  to a phrase heuristic over your replies, which scores any non-correction as
+  success, so read a high `ok=` with `rated=0` as a rough tally rather than a
+  signal. See [LEARNING-LOOP.md](LEARNING-LOOP.md).
 - **73+ providers, one shape.** Anthropic is the reference implementation
   (streaming, tool use, explicit prompt caching). A single OpenAI-compatible
   adapter covers OpenAI, OpenRouter, LM Studio, vLLM, LiteLLM, and Ollama.

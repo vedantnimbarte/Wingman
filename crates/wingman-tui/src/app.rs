@@ -156,7 +156,14 @@ pub async fn run(agent: Option<AgentLoop>, ctx: AppCtx) -> Result<()> {
     }
     // Clone the shutdown indexer out before `ctx` moves into the loop.
     let session_indexer = ctx.session_indexer.clone();
-    let res = run_inner(&mut terminal, &mut agent, ctx).await;
+    // Names the feedback rows this session writes, so a rating can be traced
+    // back to the conversation that prompted it.
+    let session_id = session
+        .as_ref()
+        .and_then(|s| s.path().file_stem().and_then(|n| n.to_str()))
+        .unwrap_or("interactive")
+        .to_string();
+    let res = run_inner(&mut terminal, &mut agent, ctx, session_id).await;
     restore_terminal(&mut terminal)?;
     // Index this session now so it's recallable next time without waiting for a
     // startup backfill. Best-effort; only runs if the session index is live.
@@ -205,7 +212,10 @@ enum Cmd {
     Pr(String),
     Skills,
     SkillsNew(String),
-    SkillsInstall { source: String, project: bool },
+    SkillsInstall {
+        source: String,
+        project: bool,
+    },
     Skill(String),
     Mcp,
     Export(String),
@@ -215,8 +225,10 @@ enum Cmd {
     Memory(String),     // "" = list, "forget <name>" = delete
     Recall(String),     // query for cross-session search
     SkillStats(String), // "" = all skills, "<name>" = one skill
-    Learn(String),      // "status" | "on" | "off"
-    Find(String),       // search transcript
+    /// Explicit rating of the last answer: good/bad plus an optional note.
+    Feedback(String),
+    Learn(String), // "status" | "on" | "off"
+    Find(String),  // search transcript
     FindNext,
     FindPrev,
     FindClear,
@@ -296,6 +308,7 @@ fn parse_slash(line: &str) -> Cmd {
                 _ => Cmd::Skills,
             }
         }
+        "/feedback" | "/rate" => Cmd::Feedback(arg.to_string()),
         "/skill" if !arg.is_empty() => {
             if let Some(rest) = arg.strip_prefix("stats") {
                 Cmd::SkillStats(rest.trim().to_string())
@@ -450,6 +463,7 @@ async fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: &mut Option<AgentLoop>,
     ctx: AppCtx,
+    session_id_for_feedback: String,
 ) -> Result<()> {
     let mut ui = UiState {
         transcript: Transcript::default(),
@@ -484,7 +498,15 @@ async fn run_inner(
         }
 
         // Idle: wait for a user input event.
-        let next_action = idle_step(&mut events, &mut ui, terminal, agent, &ctx).await?;
+        let next_action = idle_step(
+            &mut events,
+            &mut ui,
+            terminal,
+            agent,
+            &ctx,
+            &session_id_for_feedback,
+        )
+        .await?;
         match next_action {
             IdleAction::Quit => {
                 // Flush lifetime usage one last time on the way out.
@@ -660,6 +682,7 @@ async fn idle_step(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: &mut Option<AgentLoop>,
     ctx: &AppCtx,
+    session_id_for_feedback: &str,
 ) -> Result<IdleAction> {
     let builder = &ctx.builder;
     let logout_runner = &ctx.logout_runner;
@@ -1175,6 +1198,60 @@ async fn idle_step(
                                     ));
                                 }
                             }
+                            Cmd::Feedback(arg) => {
+                                let (word, note) = match arg.split_once(char::is_whitespace) {
+                                    Some((w, rest)) => (w, Some(rest.trim())),
+                                    None => (arg.as_str(), None),
+                                };
+                                let note = note.filter(|n| !n.is_empty());
+                                let Some(rating) = wingman_learn::stats::Rating::parse(word) else {
+                                    ui.transcript.push(TranscriptItem::System(
+                                        "usage: /feedback good|bad [note] — rates the last answer \
+                                         so skill stats learn from what you actually thought"
+                                            .into(),
+                                    ));
+                                    draw(terminal, ui)?;
+                                    continue;
+                                };
+                                match wingman_learn::stats::StatsStore::open_default() {
+                                    Ok(stats) => {
+                                        // A rating refers to what you just saw.
+                                        // Half an hour is generous for that and
+                                        // still short enough that it cannot
+                                        // land on yesterday's work.
+                                        let applied = stats.apply_feedback(
+                                            session_id_for_feedback,
+                                            rating,
+                                            note,
+                                            chrono::Duration::minutes(30),
+                                        );
+                                        let msg = match applied {
+                                            Ok(wingman_learn::stats::FeedbackApplied::ScoredSkill {
+                                                skill_name,
+                                            }) => format!(
+                                                "recorded {} — scored skill '{skill_name}' from \
+                                                 what you said, not the phrase heuristic",
+                                                rating.as_str()
+                                            ),
+                                            Ok(wingman_learn::stats::FeedbackApplied::RecordedOnly) => {
+                                                format!(
+                                                    "recorded {} — no recent skill invocation to \
+                                                     attach it to",
+                                                    rating.as_str()
+                                                )
+                                            }
+                                            Err(e) => format!("/feedback: {e}"),
+                                        };
+                                        ui.transcript.push(TranscriptItem::System(msg));
+                                    }
+                                    Err(e) => {
+                                        ui.transcript.push(TranscriptItem::Error(format!(
+                                            "/feedback: open learn.db: {e}"
+                                        )));
+                                    }
+                                }
+                                draw(terminal, ui)?;
+                            }
                             Cmd::SkillStats(name) => {
                                 let stats = match wingman_learn::stats::StatsStore::open_default() {
                                     Ok(s) => s,
@@ -1200,12 +1277,19 @@ async fn idle_step(
                                             } else {
                                                 ""
                                             };
+                                            // `rated` is the count the user
+                                            // stated outright. The rest was
+                                            // inferred by a phrase heuristic
+                                            // that scores any non-correction
+                                            // as success, so a high ok= with
+                                            // rated=0 means very little.
                                             out.push_str(&format!(
-                                                "  {:<28} ok={:<4} corrected={:<4} unclear={:<4} ({pct}% corrected){flag}\n",
+                                                "  {:<28} ok={:<4} corrected={:<4} unclear={:<4} rated={:<4} ({pct}% corrected){flag}\n",
                                                 r.skill_name,
                                                 r.success,
                                                 r.corrected,
                                                 r.unclear,
+                                                r.explicit,
                                             ));
                                         }
                                     }
@@ -1895,6 +1979,7 @@ fn help_text() -> String {
          /skill <name>               queue a skill for the next prompt\n  \
          /skills new <name>          create a new skill in $EDITOR\n  \
          /skill stats [name]         skill usage and outcome counts\n  \
+         /feedback good|bad [note]   rate the last answer (beats the guess)\n  \
          /memory                     list saved memories (use 'forget <name>' to delete)\n  \
          /recall <query>             search across past sessions\n  \
          /learn [status|reset]       self-learning loop dashboard\n  \
