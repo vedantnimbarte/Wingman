@@ -44,6 +44,51 @@ impl Outcome {
     }
 }
 
+/// What [`StatsStore::apply_feedback`] managed to attach a rating to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeedbackApplied {
+    /// The rating scored a recent skill invocation, replacing whatever the
+    /// heuristic had guessed for it.
+    ScoredSkill { skill_name: String },
+    /// Recorded on its own — no recent skill invocation to attach it to.
+    RecordedOnly,
+}
+
+/// What the user said about a turn, as opposed to what we guessed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Rating {
+    Good,
+    Bad,
+}
+
+impl Rating {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Good => "good",
+            Self::Bad => "bad",
+        }
+    }
+
+    /// Parse a user-typed rating. Accepts the obvious synonyms because this
+    /// arrives from someone typing quickly in a TUI, not from a config file.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "good" | "up" | "yes" | "y" | "+" | "👍" => Some(Self::Good),
+            "bad" | "down" | "no" | "n" | "-" | "👎" => Some(Self::Bad),
+            _ => None,
+        }
+    }
+
+    /// The skill outcome this rating implies.
+    pub fn outcome(self) -> Outcome {
+        match self {
+            Self::Good => Outcome::Success,
+            Self::Bad => Outcome::Corrected,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SkillUsageRow {
     pub id: i64,
@@ -97,8 +142,31 @@ impl StatsStore {
                 ts          TEXT NOT NULL,
                 passed      INTEGER NOT NULL
              );
-             CREATE INDEX IF NOT EXISTS idx_routing_repo ON routing_outcome(repo);",
+             CREATE INDEX IF NOT EXISTS idx_routing_repo ON routing_outcome(repo);
+
+             CREATE TABLE IF NOT EXISTS feedback (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id  TEXT NOT NULL,
+                ts          TEXT NOT NULL,
+                rating      TEXT NOT NULL,
+                note        TEXT,
+                skill_row   INTEGER
+             );
+             CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback(ts);",
         )?;
+        // Added after the table shipped, so existing databases need it
+        // grafted on. SQLite has no `ADD COLUMN IF NOT EXISTS`, and the only
+        // way to ask is to try — a duplicate-column error means a previous
+        // run already did it, which is success, not failure.
+        if let Err(e) = conn.execute(
+            "ALTER TABLE skill_usage ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
+            [],
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
             path: path.to_path_buf(),
@@ -122,13 +190,130 @@ impl StatsStore {
         Ok(conn.last_insert_rowid())
     }
 
+    /// Set an outcome the heuristic inferred.
+    ///
+    /// Never overwrites one the user stated (`explicit = 1`). Without that
+    /// guard, rating a turn and then simply carrying on would silently
+    /// replace the rating: the deferred scorer fires on the next user message
+    /// and would score the same row from whatever was typed next.
     pub fn set_outcome(&self, id: i64, outcome: Outcome, signal: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE skill_usage SET outcome = ?1, signal = ?2 WHERE id = ?3",
+            "UPDATE skill_usage SET outcome = ?1, signal = ?2 \
+             WHERE id = ?3 AND explicit = 0",
             params![outcome.as_str(), signal, id],
         )?;
         Ok(())
+    }
+
+    /// Set an outcome the user stated, rather than one inferred from what
+    /// they happened to type next.
+    ///
+    /// Marked `explicit` so the two can be told apart. They are not the same
+    /// evidence: the heuristic scores *any* reply that does not look like a
+    /// correction as success, so "thanks" and an unrelated follow-up question
+    /// both count. Averaging that together with a real thumbs-down would
+    /// launder the one signal that is actually worth something.
+    pub fn set_outcome_explicit(
+        &self,
+        id: i64,
+        outcome: Outcome,
+        note: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE skill_usage SET outcome = ?1, signal = ?2, explicit = 1 WHERE id = ?3",
+            params![outcome.as_str(), note, id],
+        )?;
+        Ok(())
+    }
+
+    /// Record one piece of user feedback.
+    ///
+    /// Kept even when it resolves no skill row: "that answer was wrong" is
+    /// worth having whether or not a skill happened to be involved, and a
+    /// rating with nothing to attach to is still a dated record of what the
+    /// user thought.
+    pub fn record_feedback(
+        &self,
+        session_id: &str,
+        rating: Rating,
+        note: Option<&str>,
+        skill_row: Option<i64>,
+    ) -> Result<i64> {
+        let ts = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO feedback(session_id, ts, rating, note, skill_row) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, ts, rating.as_str(), note, skill_row],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Apply a rating the user stated outright, attaching it to the skill
+    /// invocation it plausibly refers to.
+    ///
+    /// The target is resolved from the database rather than from in-memory
+    /// state: `/feedback` is a slash command that never reaches the agent
+    /// loop, so the loop's pending-row bookkeeping is not available to it, and
+    /// a query works from any surface and survives a restart.
+    ///
+    /// "Plausibly refers to" is the most recent invocation not already rated,
+    /// within `within`. A rating given long after the fact should not silently
+    /// land on an unrelated skill, so an old row is left alone and the rating
+    /// is recorded on its own.
+    ///
+    /// Rows already scored by the heuristic are still eligible — that is the
+    /// point. What the user says beats what was inferred from what they
+    /// happened to type next.
+    pub fn apply_feedback(
+        &self,
+        session_id: &str,
+        rating: Rating,
+        note: Option<&str>,
+        within: chrono::Duration,
+    ) -> Result<FeedbackApplied> {
+        let cutoff = (Utc::now() - within).to_rfc3339();
+        let target: Option<(i64, String)> = {
+            let conn = self.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT id, skill_name FROM skill_usage \
+                 WHERE explicit = 0 AND ts >= ?1 ORDER BY ts DESC, id DESC LIMIT 1",
+                params![cutoff],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+        };
+        let row_id = target.as_ref().map(|(id, _)| *id);
+        self.record_feedback(session_id, rating, note, row_id)?;
+        match target {
+            Some((id, skill_name)) => {
+                self.set_outcome_explicit(id, rating.outcome(), note)?;
+                Ok(FeedbackApplied::ScoredSkill { skill_name })
+            }
+            None => Ok(FeedbackApplied::RecordedOnly),
+        }
+    }
+
+    /// The skill name on one usage row, for naming what a rating just scored.
+    pub fn skill_name_of(&self, id: i64) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let name = conn
+            .query_row(
+                "SELECT skill_name FROM skill_usage WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(name)
+    }
+
+    /// How many ratings the user has given, total.
+    pub fn feedback_count(&self) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM feedback", [], |r| r.get(0))?;
+        Ok(n as u32)
     }
 
     /// Manually log a final outcome without first calling `record_invoke`.
@@ -184,7 +369,8 @@ impl StatsStore {
                     SUM(CASE WHEN outcome = 'success'   THEN 1 ELSE 0 END), \
                     SUM(CASE WHEN outcome = 'corrected' THEN 1 ELSE 0 END), \
                     SUM(CASE WHEN outcome = 'unclear'   THEN 1 ELSE 0 END), \
-                    COUNT(*) \
+                    COUNT(*), \
+                    SUM(CASE WHEN explicit = 1 THEN 1 ELSE 0 END) \
              FROM skill_usage GROUP BY skill_name ORDER BY skill_name",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -194,6 +380,7 @@ impl StatsStore {
                 corrected: r.get::<_, i64>(2)? as u32,
                 unclear: r.get::<_, i64>(3)? as u32,
                 total: r.get::<_, i64>(4)? as u32,
+                explicit: r.get::<_, i64>(5)? as u32,
             })
         })?;
         let mut out = Vec::new();
@@ -305,6 +492,13 @@ pub struct SkillSummary {
     pub corrected: u32,
     pub unclear: u32,
     pub total: u32,
+    /// How many of these outcomes the user stated outright, rather than the
+    /// phrase heuristic inferring them.
+    ///
+    /// Reported separately because the two are not comparable evidence: the
+    /// heuristic scores any reply that does not look like a correction as
+    /// success, so a high success rate with `explicit == 0` means very little.
+    pub explicit: u32,
 }
 
 /// Aggregated routing outcomes for one (task_class, model) pair.
@@ -388,6 +582,136 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ))
+    }
+
+    /// The whole point: what the user says beats what was inferred from what
+    /// they happened to type next.
+    #[test]
+    fn an_explicit_rating_survives_the_heuristic() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        let id = store.record_invoke("code-reviewer", "sess-1").unwrap();
+
+        store
+            .apply_feedback(
+                "sess-1",
+                Rating::Bad,
+                Some("missed the bug"),
+                chrono::Duration::minutes(30),
+            )
+            .unwrap();
+        assert_eq!(
+            store.recent("code-reviewer", 5).unwrap()[0].outcome,
+            Outcome::Corrected
+        );
+
+        // The deferred scorer fires on the next user message and would
+        // otherwise score this same row from whatever was typed next.
+        store
+            .set_outcome(id, Outcome::Success, Some("heuristic"))
+            .unwrap();
+        let rows = store.recent("code-reviewer", 5).unwrap();
+        assert_eq!(
+            rows[0].outcome,
+            Outcome::Corrected,
+            "the heuristic overwrote what the user stated"
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn feedback_scores_the_most_recent_unrated_invocation() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        store.record_invoke("older", "sess-1").unwrap();
+        store.record_invoke("newest", "sess-1").unwrap();
+
+        let applied = store
+            .apply_feedback("sess-1", Rating::Good, None, chrono::Duration::minutes(30))
+            .unwrap();
+        match applied {
+            FeedbackApplied::ScoredSkill { skill_name } => assert_eq!(skill_name, "newest"),
+            other => panic!("expected the newest invocation, got {other:?}"),
+        }
+        // The older one is untouched - a rating refers to what you just saw.
+        assert_eq!(
+            store.recent("older", 5).unwrap()[0].outcome,
+            Outcome::Unclear
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// A rating given long after the fact must not land on an unrelated skill.
+    #[test]
+    fn stale_invocations_are_out_of_reach() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        store.record_invoke("yesterdays-work", "sess-1").unwrap();
+
+        let applied = store
+            .apply_feedback("sess-1", Rating::Bad, None, chrono::Duration::zero())
+            .unwrap();
+        assert_eq!(applied, FeedbackApplied::RecordedOnly);
+        assert_eq!(
+            store.recent("yesterdays-work", 5).unwrap()[0].outcome,
+            Outcome::Unclear
+        );
+        // Still recorded, though - the opinion is worth keeping either way.
+        assert_eq!(store.feedback_count().unwrap(), 1);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn a_second_rating_does_not_re_score_the_same_row() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        store.record_invoke("skill-a", "sess-1").unwrap();
+        let first = store
+            .apply_feedback("sess-1", Rating::Good, None, chrono::Duration::minutes(30))
+            .unwrap();
+        assert!(matches!(first, FeedbackApplied::ScoredSkill { .. }));
+        // Already rated, so it is no longer a candidate.
+        let second = store
+            .apply_feedback("sess-1", Rating::Bad, None, chrono::Duration::minutes(30))
+            .unwrap();
+        assert_eq!(second, FeedbackApplied::RecordedOnly);
+        assert_eq!(
+            store.recent("skill-a", 5).unwrap()[0].outcome,
+            Outcome::Success
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn summary_separates_stated_outcomes_from_inferred_ones() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        let inferred = store.record_invoke("skill-a", "sess-1").unwrap();
+        store
+            .set_outcome(inferred, Outcome::Success, Some("guess"))
+            .unwrap();
+        store.record_invoke("skill-a", "sess-1").unwrap();
+        store
+            .apply_feedback("sess-1", Rating::Good, None, chrono::Duration::minutes(30))
+            .unwrap();
+
+        let sum = store.summary().unwrap();
+        let row = sum.iter().find(|r| r.skill_name == "skill-a").unwrap();
+        assert_eq!(row.success, 2);
+        assert_eq!(row.explicit, 1, "only one of these was stated by the user");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn ratings_parse_the_words_people_actually_type() {
+        for good in ["good", "up", "yes", "y", "+", "GOOD"] {
+            assert_eq!(Rating::parse(good), Some(Rating::Good), "{good}");
+        }
+        for bad in ["bad", "down", "no", "n", "-"] {
+            assert_eq!(Rating::parse(bad), Some(Rating::Bad), "{bad}");
+        }
+        assert_eq!(Rating::parse("maybe"), None);
+        assert_eq!(Rating::parse(""), None);
     }
 
     #[test]

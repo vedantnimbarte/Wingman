@@ -43,7 +43,7 @@ Effort estimates are rough and use this scale:
 | P7 | `@file` references in the composer | — | **Already existed.** See note below. |
 | P8 | Session search over SQLite FTS | S | **Done** — one line; reused `search_hybrid`. |
 | P9 | Hook bridges (Claude Code / Codex) | M | Adoption play, not a capability. |
-| P10 | Per-message feedback | M | Replaces an admitted heuristic. |
+| P10 | Per-message feedback | M | **Done** — `/feedback good|bad`; stated outcomes beat inferred ones. |
 | P11 | Persistent PTY sessions | L | After P3. |
 | P12 | Code Mode (`run_code` + generated SDK) | L–XL | Prototype behind a flag. Don't lead with it. |
 | E1 | Decision records | S to start | **Done** — [docs/decisions/](decisions/README.md), 8 records backfilled. |

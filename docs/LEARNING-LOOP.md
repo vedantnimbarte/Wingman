@@ -180,6 +180,34 @@ The `LearnHook` trait is implemented by `LearnHook` in `crates/wingman-learn/src
 - Check if user is saving/recalling memory or invoking skills.
 - Emit `"turn_outcome"` event.
 
+### Stated outcomes beat inferred ones
+
+The heuristic above scores any reply that does not look like a correction as
+**success** — so "thanks", and an unrelated follow-up question, both count.
+That is enough to spot a skill that is repeatedly corrected, and not much more.
+
+`/feedback good|bad [note]` records what you actually thought. It attaches to
+the most recent skill invocation not already rated, within the last 30
+minutes, and marks it `explicit` so the two kinds of evidence stay
+distinguishable:
+
+```
+/feedback bad missed the null case
+recorded bad — scored skill 'code-reviewer' from what you said, not the phrase heuristic
+```
+
+`/skill stats` reports them separately. `rated=` counts outcomes you stated;
+the rest were guessed, so a high `ok=` with `rated=0` means very little.
+
+Two properties worth knowing:
+
+- **A rating is never overwritten by the heuristic.** The deferred scorer runs
+  on your next message and would otherwise re-score the same row from whatever
+  you happened to type next.
+- **A rating with nothing to attach to is still kept.** "That was wrong" is
+  worth recording whether or not a skill was involved; it lands in the
+  `feedback` table without a skill row.
+
 **4. `on_session_end()`**
 - Chunk the full transcript.
 - Embed chunks (async background task).
