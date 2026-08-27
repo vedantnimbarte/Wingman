@@ -321,7 +321,7 @@ function line(text: string): DiffLine {
  * one is `--muted` on `--sunken`.
  *
  * The reasoning is recorded in
- * `docs/decisions/0014-the-diff-is-not-green-and-red.md`, because "make the
+ * `docs/decisions/0016-the-diff-is-not-green-and-red.md`, because "make the
  * diff green" is a change someone will otherwise propose as a fix.
  */
 function Diff({ text, stderr }: { text: string; stderr: string }) {

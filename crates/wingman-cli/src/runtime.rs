@@ -21,7 +21,7 @@ use wingman_providers::{
 use wingman_rag::HashEmbedder;
 use wingman_rag::{Embedder, IndexStore, Indexer};
 use wingman_skills::Skill;
-use wingman_tools::{ToolCtx, ToolRegistry};
+use wingman_tools::{ToolCtx, ToolRegistry, ToolRemovals};
 
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -625,30 +625,19 @@ fn base_registry(
     reg
 }
 
-/// Honor `[tools].preset` and `[tools].disabled_tools`. Applied after
-/// registration so both also remove builtins.
+/// Honor `[tools].preset` and `[tools].disabled_tools`.
 ///
-/// Preset first, then the denylist: a preset says what this session is *for*,
-/// and `disabled_tools` is the project's standing "not this one, ever". A
-/// denylist entry that survived a keep-list would be the wrong way round.
+/// Latches the policy onto the registry rather than sweeping once. The sweep
+/// alone was a bug: it removed what was registered *at that moment*, and
+/// several tools register later — `spawn_subagent` and `run_plan` after the
+/// `Arc` exists, every MCP tool when its server connects. Naming any of those
+/// in `disabled_tools` did nothing, with no error to say so.
+///
+/// The sweep still runs, because builtins and learn tools are registered
+/// before this point.
 fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
-    if let Some(keep) = cfg.tools.preset_keep_list() {
-        let dropped: Vec<String> = reg
-            .tool_names()
-            .into_iter()
-            .filter(|name| !keep.iter().any(|pattern| preset_matches(name, pattern)))
-            .collect();
-        for name in &dropped {
-            reg.unregister(name);
-        }
-        tracing::info!(
-            target: "wingman::tools",
-            preset = %cfg.tools.preset,
-            kept = reg.tool_names().len(),
-            dropped = dropped.len(),
-            "tool preset applied"
-        );
-    } else if !cfg.tools.preset.is_empty() {
+    let keep = cfg.tools.preset_keep_list();
+    if keep.is_none() && !cfg.tools.preset.is_empty() {
         // Unknown name. Warn and keep every tool rather than starting a
         // session with an empty toolset, which is what a silently-empty
         // keep-list would produce.
@@ -659,22 +648,32 @@ fn apply_tool_removals(reg: &mut ToolRegistry, cfg: &Config) {
             cfg.tools.known_presets().join(", ")
         );
     }
-
-    for name in &cfg.tools.disabled_tools {
-        if reg.unregister(name).is_some() {
-            tracing::info!(target: "wingman::tools", tool = %name, "disabled via config");
-        }
+    let removals = ToolRemovals::new(keep, cfg.tools.disabled_tools.clone());
+    if removals.is_empty() {
+        return;
     }
-}
 
-/// Match a tool name against a preset keep-list entry. A trailing `*` matches
-/// by prefix, so `lsp_*` keeps the whole language-server family without the
-/// list going stale each time one is added.
-fn preset_matches(name: &str, pattern: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) => name.starts_with(prefix),
-        None => name == pattern,
+    let dropped: Vec<String> = reg
+        .tool_names()
+        .into_iter()
+        .filter(|name| removals.excludes(name))
+        .collect();
+    for name in &dropped {
+        reg.unregister(name);
     }
+
+    // From here on the registry refuses them itself, however late they arrive.
+    reg.set_removals(removals);
+
+    // Name them. "3 tools dropped" is not enough to debug a tool that has
+    // gone missing, which is the question this log exists to answer.
+    tracing::info!(
+        target: "wingman::tools",
+        preset = %cfg.tools.preset,
+        kept = reg.tool_names().len(),
+        dropped = %dropped.join(", "),
+        "tool removals applied"
+    );
 }
 
 /// The spill store for this session, if spilling is on.
@@ -1735,7 +1734,9 @@ pub async fn build_agent_registry_learn(
     // Only the outer registry gets it. Subagents build their own via
     // `base_registry`, so a plan cannot be reached from inside a subagent,
     // the same way `spawn_subagent` is kept off them to bound recursion.
-    if cfg.tools.run_plan && !cfg.tools.disabled_tools.iter().any(|t| t == "run_plan") {
+    // `disabled_tools` no longer needs checking here: the registry refuses
+    // an excluded name at registration, whenever it happens.
+    if cfg.tools.run_plan {
         // Coerce first, then downgrade: unsized coercion keeps the same
         // allocation, so this weak pointer stays valid as long as `registry`.
         let as_dispatcher: Arc<dyn wingman_core::ToolDispatcher> = registry.clone();

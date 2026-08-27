@@ -112,12 +112,16 @@ reason it shipped behind a flag.
 A real Code Mode still needs a real justification. The one offered was that
 multi-step work costs N round trips, and in Wingman it does not.
 
-## A related bug, not fixed here
+## A related bug, since fixed
 
-`disabled_tools` cannot remove `spawn_subagent`: `apply_tool_removals` runs
-inside `build_registry_with_learn`, and `spawn_subagent` is registered *after*
-that, once the `Arc` exists. Naming it in `disabled_tools` silently does
-nothing. `run_plan` registers at the same point and would have inherited the
-same hole, so it checks `disabled_tools` itself. The `spawn_subagent` case is
-left alone deliberately — it is out of scope for P12 and worth fixing where
-the removal logic lives, not with a second one-off check.
+Writing this turned up that `disabled_tools` could not remove
+`spawn_subagent`: `apply_tool_removals` ran inside `build_registry_with_learn`,
+and `spawn_subagent` was registered *after* it, once the `Arc` existed. Naming
+it did nothing, silently. `run_plan` registers at the same point, so it
+originally carried its own `disabled_tools` check to avoid widening the hole.
+
+That check is gone. The removals are now a policy the registry enforces at
+registration (`ToolRegistry::with_tool_removals`), rather than a sweep of
+whatever happened to be registered when the config was read — so the timing
+that caused the bug no longer matters. `spawn_subagent`, `run_plan` and every
+MCP tool are covered by the same guard.
