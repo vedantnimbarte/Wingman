@@ -13,6 +13,7 @@
 mod chunker;
 mod embedder;
 mod indexer;
+pub mod sqlite;
 mod store;
 mod watcher;
 

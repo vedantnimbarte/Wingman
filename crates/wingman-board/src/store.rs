@@ -7,9 +7,12 @@
 //! `state.json`, which stays the single source of truth.
 //!
 //! Follows the `wingman-learn` `StatsStore` precedent (`Connection` behind a
-//! `Mutex`, `CREATE TABLE IF NOT EXISTS`), with two additions it needs and
-//! `learn.db` does not: WAL and a busy timeout, because the board TUI is a
-//! long-lived reader while `pilot` commands write the registry concurrently.
+//! `Mutex`, `CREATE TABLE IF NOT EXISTS`). It opens through
+//! `wingman_rag::sqlite`, which sets WAL and a busy timeout because the board
+//! TUI is a long-lived reader while `pilot` commands write the registry
+//! concurrently. This store needed those first; they now live in one place, so
+//! `learn.db` and the index databases — which have the same problem — get them
+//! too.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -66,12 +69,10 @@ impl BoardStore {
                 source,
             })?;
         }
-        let conn = Connection::open(path)?;
-        // WAL lets the TUI read while a `pilot` command writes the registry.
-        // `journal_mode` returns a row, so it cannot go through execute_batch
-        // on every open without tripping "Execute returned results".
-        let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Shared open: WAL lets the TUI read while a `pilot` command writes
+        // the registry. This store had these pragmas first; they now live in
+        // one place so the other databases get them too.
+        let conn = wingman_rag::sqlite::open(path)?;
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         conn.execute_batch(SCHEMA)?;
         let store = Self {
