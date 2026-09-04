@@ -191,6 +191,11 @@ pub enum Command {
     /// discovered models.
     #[command(display_order = 34)]
     Discover,
+    /// Start the desktop notification popup: a small always-on-top window that
+    /// shows plan-approval gates, questions and failures, and lets you answer
+    /// them in place. See `docs/NOTIFIER.md`.
+    #[command(display_order = 35)]
+    Notify,
     /// Health check: config, provider credentials, local servers, the semantic
     /// index, language servers on PATH, and git/gh tooling.
     #[command(display_order = 3)]
@@ -1103,6 +1108,7 @@ pub async fn run() -> Result<ExitCode> {
         }
         Some(Command::Logout { provider }) => commands::login::logout(provider).await,
         Some(Command::Discover) => commands::discover::run().await,
+        Some(Command::Notify) => commands::notify::run(),
         Some(Command::Doctor) => commands::doctor::run(load_config()?).await,
         Some(Command::Attest) => commands::attest::run(load_config()?).await,
         Some(Command::Context { json }) => commands::context::run(load_config()?, json).await,
