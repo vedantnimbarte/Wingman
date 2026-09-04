@@ -61,3 +61,5 @@ pointer. The history of what we believed is the point.
 | [0014](0014-the-a2-seams-were-built.md) | The A2 seams were built; what that cost and bought | accepted |
 | [0015](0015-run-plan-not-code-mode.md) | `run_plan` instead of Code Mode; the loop already batches | accepted |
 | [0016](0016-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |
+| [0017](0017-notifications-are-a-file-inbox.md) | Desktop notifications are a file inbox, and approvals bypass it | accepted |
+| [0018](0018-the-notifier-is-not-a-workspace-member.md) | The desktop notifier is excluded from the workspace | accepted |

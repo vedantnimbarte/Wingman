@@ -37,7 +37,12 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > `*.md` requests into `[pilot.daemon].intake_dir` and the
 > daemon ingests them with per-author trust — no in-process listener needed.
 > **Notification** delivery is wired via `[pilot.notifications.webhooks]`
-> (channel → URL; Slack incoming-webhook shape; terminal fallback). **Mid-run
+> (channel → URL; Slack incoming-webhook shape; terminal fallback), and the
+> `desktop` channel is real once `[pilot.notifications].desktop_inbox = true`:
+> it writes cards the `wingman notify` popup renders, with Approve/Veto on the
+> plan gate. Off by default. Note `progress` routes to `digest`, so turning it
+> on surfaces failures and gates but not successful completions — set
+> `progress = "desktop"` for those. See [NOTIFIER.md](NOTIFIER.md). **Mid-run
 > steering** works — `pilot tell` / `pilot ask` (and the `pivot`/`clarify` IPC
 > underneath) inject into the worker's next turn, and `ask` waits for the
 > worker's reply. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)

@@ -67,6 +67,14 @@ repeat_thresholds = [3, 5, 8]
 # launder it. Trailing `*` matches by prefix.
 repeat_exempt = ["update_tasks", "task_complete"]
 
+# Seconds `ask_user` waits for an answer from the Wingman desktop popup when
+# it is running. 0 (default) keeps the tool's long-standing behaviour: with no
+# interactive terminal it returns "proceed with your best judgment" at once.
+# One key is both the switch and the deadline, so they cannot drift apart. A
+# headless run is never blocked longer than this, and if the popup is not
+# running the question is not routed to it at all. See docs/NOTIFIER.md.
+ask_user_desktop_timeout_secs = 0
+
 # Restrict the session to a named tool preset (or pass `--preset`). Every
 # tool's schema is billed on every request, so a session that only reads code
 # pays for write_file and run_shell on every turn. Built-ins: "review"
