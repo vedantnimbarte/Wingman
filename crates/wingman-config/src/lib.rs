@@ -11,6 +11,7 @@
 //! `.wingman/` holds session log overrides and the repo index.
 
 pub mod claude_hooks;
+pub mod inbox;
 mod paths;
 pub mod secrets;
 pub mod trust;
@@ -141,6 +142,16 @@ pub struct ToolsConfig {
     /// Comma-separated list of tools to disable for this project.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+    /// Seconds `ask_user` waits for an answer from the Wingman desktop app.
+    ///
+    /// `0` (default) keeps the behaviour this tool has always had: with no
+    /// interactive terminal it returns the "proceed with your best judgment"
+    /// note immediately. Set it non-zero to route questions to the desktop
+    /// popup instead — one key is both the switch and the deadline, so the two
+    /// cannot drift apart. A headless run is never blocked longer than this,
+    /// and if the app is not running the question is not routed at all.
+    #[serde(default)]
+    pub ask_user_desktop_timeout_secs: u64,
     /// Allow `web_fetch`/`web_search` in read-only/plan mode too. Off by
     /// default: network egress is otherwise gated to auto-edit/yolo so it
     /// can't be used as a data-exfiltration channel. Set true if you want
@@ -367,6 +378,7 @@ impl Default for ToolsConfig {
             shell_denylist: Vec::new(),
             tool_output_max_lines: None,
             disabled_tools: Vec::new(),
+            ask_user_desktop_timeout_secs: 0,
             allow_network: false,
             run_plan: false,
             redact_output_secrets: true,
@@ -2806,6 +2818,16 @@ pub struct PilotNotificationsConfig {
     /// can come from the environment.
     #[serde(default)]
     pub webhooks: BTreeMap<String, String>,
+    /// Write notifications routed to the `desktop` channel into
+    /// `~/.wingman/notifications.jsonl`, where the Wingman desktop app renders
+    /// them as popups you can approve, answer or dismiss in place.
+    ///
+    /// Off by default: without the app running the file is written and never
+    /// read. Note that `progress` defaults to `digest`, so turning this on
+    /// surfaces *failures* but not successful completions — set
+    /// `progress = "desktop"` as well if you want those too.
+    #[serde(default)]
+    pub desktop_inbox: bool,
 }
 
 impl Default for PilotNotificationsConfig {
@@ -2817,6 +2839,7 @@ impl Default for PilotNotificationsConfig {
             info: "suppress".into(),
             digest_cron: "0 9 * * *".into(),
             webhooks: BTreeMap::new(),
+            desktop_inbox: false,
         }
     }
 }
