@@ -353,6 +353,27 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         .await
         .context("opening run store")?;
 
+    // `info` routes to `suppress` by default, so this needs both
+    // `desktop_inbox = true` and `info = "desktop"` — opt-in twice, which is
+    // right for the least actionable thing here. You started the run; being
+    // told so is a notification for your own keystroke.
+    if let Some(dir) = wingman_autonomous::notify::desktop_target(
+        wingman_autonomous::notify::NotificationSeverity::Info,
+        &pilot.notifications,
+    ) {
+        let _ = wingman_config::inbox::append_to(
+            &dir,
+            &wingman_config::inbox::Notification {
+                project: project
+                    .root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned()),
+                run_dir: Some(run_path.display().to_string()),
+                ..wingman_config::inbox::Notification::now("info", "Run started", &goal)
+            },
+        );
+    }
+
     // The planner is a one-shot completion. The provider lives behind an
     // Arc<dyn Provider>; ProviderLlm borrows it via the trait.
     let llm = ProviderLlm {
@@ -432,6 +453,29 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         effective_tier, report.estimated_usd, report.reason
     );
 
+    // How long the gate will wait, when `control.jsonl` is what releases it.
+    //
+    // `None` means a desktop Approve would be a dead button: the hard gate with
+    // a TTY blocks on stdin and never reads the control file, and the last arm
+    // refuses outright. The card is still worth showing in those cases — it
+    // just says where to go rather than offering to decide. Keep this in step
+    // with the `approve` match below.
+    let gate_secs = match effective_tier {
+        wingman_autonomous::approval::ApprovalTier::Auto => None,
+        wingman_autonomous::approval::ApprovalTier::NotifyOnly => {
+            Some(pilot.approval.notify_only_window_secs)
+        }
+        wingman_autonomous::approval::ApprovalTier::Hard => {
+            if std::io::stdin().is_terminal() {
+                None
+            } else if opts.await_approval || detached_child {
+                Some(opts.approval_timeout_secs)
+            } else {
+                None
+            }
+        }
+    };
+
     // Surface the gate in state.json so `pilot watch` shows AwaitingApproval
     // and `pilot approve` / `pilot veto` have something to act on.
     if !matches!(
@@ -444,6 +488,56 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
                 status: wingman_autonomous::RunStatus::AwaitingApproval,
             })
             .await;
+
+        // R5 `decision`: the first thing that has ever emitted this severity.
+        // The buttons carry the literal `ControlCommand`, so the desktop app
+        // appends to `control.jsonl` — the file `wait_for_approval` and
+        // `run_notify_window` are already tailing — and this side of the gate
+        // needs no new wait path at all.
+        if let Some(dir) = wingman_autonomous::notify::desktop_target(
+            wingman_autonomous::notify::NotificationSeverity::Decision,
+            &pilot.notifications,
+        ) {
+            use wingman_autonomous::control::ControlCommand;
+            use wingman_config::inbox::{Action, Notification};
+
+            let button = |id: &str, label: &str, cmd: ControlCommand| Action {
+                id: id.into(),
+                label: label.into(),
+                control: serde_json::to_value(cmd).ok(),
+            };
+            let card = Notification {
+                project: project
+                    .root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned()),
+                run_dir: Some(run_path.display().to_string()),
+                expires_at: gate_secs.map(|s| wingman_config::inbox::now_secs().saturating_add(s)),
+                actions: match gate_secs {
+                    Some(_) => vec![
+                        button("approve", "Approve", ControlCommand::Approve),
+                        button("veto", "Veto", ControlCommand::Veto),
+                    ],
+                    None => Vec::new(),
+                },
+                ..Notification::now(
+                    "decision",
+                    format!("Plan awaiting approval — {} tasks", plan.len()),
+                    if gate_secs.is_some() {
+                        format!(
+                            "{goal}\n\nest. ${:.2} — {}",
+                            report.estimated_usd, report.reason
+                        )
+                    } else {
+                        format!(
+                            "{goal}\n\nest. ${:.2} — {}\n\nWaiting for you in the terminal.",
+                            report.estimated_usd, report.reason
+                        )
+                    },
+                )
+            };
+            let _ = wingman_config::inbox::append_to(&dir, &card);
+        }
     }
 
     let approve = match effective_tier {
@@ -549,6 +643,10 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         max_total_tokens: pilot.max_total_tokens,
         max_retries_per_task: pilot.max_retries_per_task,
         enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
+        desktop_inbox: wingman_autonomous::notify::desktop_target(
+            wingman_autonomous::notify::NotificationSeverity::Escalation,
+            &pilot.notifications,
+        ),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
@@ -740,6 +838,22 @@ fn report_run_outcome(
             wingman_autonomous::reporting::render_run_complete(state),
         )
     };
+    // The card the `desktop` channel writes, when the inbox is on. Informational
+    // by design: a run that is already over has nothing left to decide, so the
+    // buttons that would fit here would all be "open the run", which the card
+    // itself is.
+    let inbox_dir = wingman_autonomous::notify::desktop_dir(cfg);
+    let card = wingman_config::inbox::Notification {
+        project: project_root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned()),
+        ..wingman_config::inbox::Notification::now(
+            severity.as_str(),
+            if failed { "Run failed" } else { "Run finished" },
+            &body,
+        )
+    };
+
     match route(severity, cfg) {
         RoutingDecision::Immediate(channels) => {
             // Terminal delivery is always the desktop/terminal channel.
@@ -754,6 +868,7 @@ fn report_run_outcome(
                 &channels,
                 &cfg.webhooks,
                 &body,
+                inbox_dir.as_deref().map(|d| (d, &card)),
             );
             for ch in &report.delivered {
                 eprintln!("[pilot]    → delivered to '{ch}'");
@@ -1336,6 +1451,10 @@ pub async fn resume(
         max_total_tokens: cfg.pilot.max_total_tokens,
         max_retries_per_task: cfg.pilot.max_retries_per_task,
         enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
+        desktop_inbox: wingman_autonomous::notify::desktop_target(
+            wingman_autonomous::notify::NotificationSeverity::Escalation,
+            &cfg.pilot.notifications,
+        ),
     };
     let stats_path = wingman_config::global_dir()
         .ok()

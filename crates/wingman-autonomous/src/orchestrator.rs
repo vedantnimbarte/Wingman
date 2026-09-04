@@ -377,6 +377,12 @@ pub struct OrchestratorConfig {
     /// bouncing the task back for rework. Default false so the gate is
     /// opt-in (copilot+ turns it on via the `checkpoint_hygiene` capability).
     pub enforce_checkpoint_hygiene: bool,
+    /// Where to write desktop notification cards for failures, or `None` to
+    /// write none. The caller resolves this through
+    /// [`crate::notify::desktop_target`] so routing and the on/off switch stay
+    /// in one place; `None` skips spawning the watchdog entirely, exactly as a
+    /// zero budget skips the budget watchdog.
+    pub desktop_inbox: Option<PathBuf>,
 }
 
 impl Default for OrchestratorConfig {
@@ -392,6 +398,7 @@ impl Default for OrchestratorConfig {
             max_total_tokens: 20_000_000,
             max_retries_per_task: 3,
             enforce_checkpoint_hygiene: false,
+            desktop_inbox: None,
         }
     }
 }
@@ -440,7 +447,32 @@ pub fn spawn_full(
     let handle = OrchestratorHandle { tx: tx.clone() };
     let budget_rx = store.subscribe();
     let retry_rx = store.subscribe();
+    let notify_rx = store.subscribe();
     let store = Arc::new(Mutex::new(store));
+
+    // Failure watchdog: one subscriber rather than an emit at each of the ten-
+    // plus places that write `TaskStatus::Failed`. The broadcast channel is
+    // already there, and a call site added later is covered without anyone
+    // remembering to.
+    //
+    // It is also the only thing that reports a run killed by deadlock or the
+    // tick budget: `pipeline` marks that run Failed and then returns `Err`, so
+    // the CLI's end-of-run report never gets to speak.
+    if let Some(dir) = cfg.desktop_inbox.clone() {
+        tokio::spawn(notify_watchdog(
+            notify_rx,
+            store.clone(),
+            dir,
+            cfg.project_root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned()),
+            crate::run_dir(&cfg.project_root, &cfg.run_id)
+                .display()
+                .to_string(),
+        ));
+    } else {
+        drop(notify_rx);
+    }
 
     // Budget watchdog: subscribes to the store's broadcast channel and
     // aborts every in-flight task the moment totals.usd crosses max_usd.
@@ -484,6 +516,79 @@ pub fn spawn_full(
 
     let join = tokio::spawn(run_actor(store, cfg, spawner, splitter, reviewer, rx));
     (handle, join)
+}
+
+/// Background task: writes one desktop card per task failure, and one when the
+/// run itself ends badly. Runs until the broadcast channel closes.
+///
+/// Cards are informational — no buttons. A retry button would be free
+/// (`{"cmd":"retry_task","id":…}` is already a `ControlCommand`) but the retry
+/// ladder is retrying the task by itself, and a human racing it is a new
+/// failure mode rather than a feature.
+///
+/// `RunStatus::Done` is deliberately absent: the CLI's end-of-run report owns
+/// completion and renders a far better body than anything available here.
+async fn notify_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    store: Arc<Mutex<RunStore>>,
+    dir: PathBuf,
+    project: Option<String>,
+    run_dir: String,
+) {
+    use wingman_config::inbox::{append_to, Notification};
+
+    loop {
+        let (title, body) = match events.recv().await {
+            Ok(Event::TaskStatus {
+                id,
+                status: TaskStatus::Failed,
+                outcome,
+                ..
+            }) => {
+                // The task's title reads better on a card than `t3` does.
+                let label = {
+                    let s = store.lock().await;
+                    s.state()
+                        .tasks
+                        .iter()
+                        .find(|t| t.id == id)
+                        .map(|t| t.title.clone())
+                };
+                (
+                    format!("Task failed — {}", label.unwrap_or_else(|| id.clone())),
+                    outcome.map(|o| o.summary).unwrap_or_default(),
+                )
+            }
+            Ok(Event::RunStatusEv {
+                status: status @ (RunStatus::Failed | RunStatus::Aborted),
+                ..
+            }) => (
+                format!(
+                    "Run {}",
+                    if status == RunStatus::Aborted {
+                        "aborted"
+                    } else {
+                        "failed"
+                    }
+                ),
+                String::new(),
+            ),
+            Ok(_) => continue,
+            // A lagged receiver has missed events, not lost the channel. Keep
+            // going: a dropped failure card is better than a silent watchdog.
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(_) => return,
+        };
+
+        let _ = append_to(
+            &dir,
+            &Notification {
+                project: project.clone(),
+                run_dir: Some(run_dir.clone()),
+                ..Notification::now("escalation", title, body)
+            },
+        );
+    }
 }
 
 /// Background task: aborts every in-flight task when totals.usd crosses
@@ -1923,6 +2028,7 @@ mod tests {
             max_total_tokens: 0,     // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
             enforce_checkpoint_hygiene: false,
+            desktop_inbox: None,
         }
     }
 
@@ -1938,6 +2044,106 @@ mod tests {
             reversibility: Default::default(),
             reversibility_reason: None,
         }
+    }
+
+    /// The failure watchdog is the only thing that reports a run killed by
+    /// deadlock or the tick budget — `pipeline` marks that run Failed and then
+    /// returns `Err`, so the CLI's end-of-run report never runs. It must card
+    /// failures and stay quiet about everything else.
+    #[tokio::test]
+    async fn the_failure_watchdog_cards_failures_and_ignores_progress() {
+        use crate::model::TaskOutcome;
+
+        let dir = tempdir().unwrap();
+        let inbox = tempdir().unwrap();
+        let mut store = RunStore::create(
+            dir.path().join(".wingman/autonomous/nw-run"),
+            "nw-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/nw-run",
+        )
+        .await
+        .unwrap();
+
+        let events = store.subscribe();
+        store
+            .append(Event::TaskCreate {
+                t: RunStore::now(),
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "Wire the parser".into(),
+                goal: String::new(),
+                deps: Vec::new(),
+                writes: Vec::new(),
+                acceptance: Vec::<Acceptance>::new(),
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            })
+            .await
+            .unwrap();
+
+        let store = Arc::new(Mutex::new(store));
+        let watchdog = tokio::spawn(notify_watchdog(
+            events,
+            store.clone(),
+            inbox.path().to_path_buf(),
+            Some("repo".into()),
+            "/p/.wingman/autonomous/nw-run".into(),
+        ));
+
+        {
+            let mut s = store.lock().await;
+            for status in [TaskStatus::InProgress, TaskStatus::Done] {
+                s.append(Event::TaskStatus {
+                    t: RunStore::now(),
+                    id: "t1".into(),
+                    status,
+                    outcome: None,
+                })
+                .await
+                .unwrap();
+            }
+            s.append(Event::TaskStatus {
+                t: RunStore::now(),
+                id: "t1".into(),
+                status: TaskStatus::Failed,
+                outcome: Some(TaskOutcome {
+                    summary: "cargo test failed".into(),
+                    files_changed: Vec::new(),
+                }),
+            })
+            .await
+            .unwrap();
+            s.append(Event::RunStatusEv {
+                t: RunStore::now(),
+                status: RunStatus::Failed,
+            })
+            .await
+            .unwrap();
+        }
+
+        // The watchdog holds a store handle, so the channel never closes and
+        // there is nothing to join on — wait for the cards instead.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let cards = loop {
+            let c = wingman_config::inbox::read_open(inbox.path());
+            if c.len() >= 2 || std::time::Instant::now() > deadline {
+                break c;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        watchdog.abort();
+
+        assert_eq!(cards.len(), 2, "in-progress and done must not card");
+        assert_eq!(cards[0].title, "Task failed — Wire the parser");
+        assert_eq!(cards[0].body, "cargo test failed");
+        assert_eq!(cards[0].severity, "escalation");
+        assert!(
+            cards[0].actions.is_empty(),
+            "failures are informational; the retry ladder is already retrying"
+        );
+        assert_eq!(cards[1].title, "Run failed");
     }
 
     async fn wait_for_review(handle: &OrchestratorHandle, task_id: &str) {
