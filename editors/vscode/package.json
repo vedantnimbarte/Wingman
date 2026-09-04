@@ -52,7 +52,7 @@
     "test": "esbuild src/search.test.ts --bundle --platform=node --outfile=dist/search.test.cjs && node --test dist/search.test.cjs"
   },
   "devDependencies": {
-    "@types/node": "^26.3.0",
+    "@types/node": "^26.4.1",
     "@types/vscode": "^1.85.0",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2"
