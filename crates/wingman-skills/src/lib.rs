@@ -89,11 +89,11 @@ fn portable_skill_dirs(project_root: &Path) -> Vec<PathBuf> {
         project_root.join(".agents").join("skills"),
         project_root.join(".claude").join("skills"),
     ];
-    if let Ok(home) = wingman_config::ensure_global_dir() {
-        if let Some(parent) = home.parent() {
-            dirs.push(parent.join(".claude").join("skills"));
-            dirs.push(parent.join(".agents").join("skills"));
-        }
+    // The user's real home, not `global_dir().parent()`: these are other
+    // tools' directories, and they do not move when `WINGMAN_HOME` does.
+    if let Ok(home) = wingman_config::user_home() {
+        dirs.push(home.join(".claude").join("skills"));
+        dirs.push(home.join(".agents").join("skills"));
     }
     dirs
 }

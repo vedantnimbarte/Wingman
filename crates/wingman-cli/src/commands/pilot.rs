@@ -2018,11 +2018,8 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
             ExitCode::from(1)
         });
     }
-    let home = wingman_config::global_dir()
-        .ok()
-        .and_then(|d| d.parent().map(|p| p.to_path_buf()))
-        .or_else(dirs_home)
-        .ok_or_else(|| anyhow!("cannot resolve home directory for pack install"))?;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for pack install: {e}"))?;
     let runner = wingman_autonomous::pr::SystemCommandRunner;
     let mut failures = 0;
     for r in &refs {
@@ -2044,14 +2041,6 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
-}
-
-/// Best-effort home dir from `$HOME` / `%USERPROFILE%` without pulling in the
-/// `dirs` crate.
-fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(std::path::PathBuf::from)
 }
 
 /// R4 — eval / regression harness + CI gate.
