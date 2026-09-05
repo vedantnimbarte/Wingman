@@ -100,7 +100,7 @@ irm https://raw.githubusercontent.com/vedantnimbarte/Wingman/main/scripts/instal
 Downloads the `wingman` binary for your platform from the latest
 [release](https://github.com/vedantnimbarte/Wingman/releases) and puts it on
 your `PATH` (default `~/.local/bin`; override with `WINGMAN_INSTALL_DIR`, pin a
-tag with `VERSION=v0.1.0`).
+tag with `VERSION=v0.3.0`).
 
 Prebuilt targets: Linux x86_64/aarch64 (glibc ≥ 2.38 — Ubuntu 24.04+, Debian
 13+, Fedora 39+), macOS Apple silicon, Windows x86_64. On anything else, build
@@ -264,6 +264,51 @@ authority than `[serve].max_permission_mode`, and a stolen token reaches only
 the repos you listed. **Wingman does not terminate TLS** — put it behind
 Tailscale, a WireGuard subnet, an SSH tunnel, or a TLS proxy. Full surface in
 [docs/HTTP-API.md](docs/HTTP-API.md).
+
+---
+
+## The web panel
+
+`wingman serve` also hosts a browser control panel at the same address — no
+separate deploy, no second process. It is compiled into the binary, so the
+version you are running is the version you are looking at.
+
+```bash
+wingman serve                    # then open http://127.0.0.1:8787
+```
+
+Board, live pilot runs with the plan gate and per-task control, chat sessions
+that stream token by token, per-worker transcripts of what a run actually did,
+spend charted by day, and every diff a run produced.
+
+The config screen is generated from the Rust structs: add a field with a doc
+comment and it appears in the panel, documented, with nobody editing the UI.
+The panel authenticates with an `HttpOnly` cookie rather than putting a bearer
+token in page script. Details in [docs/WEB-UI.md](docs/WEB-UI.md).
+
+---
+
+## Desktop notifications
+
+An agent that needs a decision should be able to ask for one without you
+watching a terminal. A small popup in the corner of the screen carries the
+question and takes the answer:
+
+- a plan waiting at the approval gate — **Approve** / **Veto**
+- a question from the `ask_user` tool, with the suggested answers and a box
+- a run that failed, with **Abort run** while it is still going
+
+The channel is a file inbox under `~/.wingman/`, which is what lets it reach
+you from a detached `pilot run`, its workers, the TUI, or a `serve` child
+alike — none of which share a terminal. Approving from a card writes the run's
+own `control.jsonl`, the file the run is already waiting on, so the popup never
+needs to know what a control command means. The web panel draws the same cards
+from the same inbox, and is the surface that reaches a phone.
+
+Off unless you ask for it — `[pilot.notifications].desktop_inbox` and
+`[tools].ask_user_desktop_timeout_secs`. The popup is a separate binary built or
+installed from the checkout, and its installer is unsigned. Both are covered in
+[docs/NOTIFIER.md](docs/NOTIFIER.md).
 
 ---
 
@@ -548,6 +593,7 @@ scope.
 | [EXTENDING.md](docs/EXTENDING.md) | Hooks, slash commands, custom tools |
 | [HTTP-API.md](docs/HTTP-API.md) | The `wingman serve` API and `--remote` |
 | [WEB-UI.md](docs/WEB-UI.md) | The browser control panel `wingman serve` hosts |
+| [NOTIFIER.md](docs/NOTIFIER.md) | Desktop notifications and the popup |
 | [SDK.md](docs/SDK.md) | Embed `wingman-core`, or drive it over MCP or HTTP |
 | [INDEX.md](docs/INDEX.md) | Navigation guide for all docs |
 
