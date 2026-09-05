@@ -412,10 +412,23 @@ that act on data**. It navigates, scopes, themes and signs out. What it must
 never grow is a "dispatch" or an "approve" that fires against something you
 cannot see.
 
-**Notifications are off until asked for.** When on, a run that stops for plan
-approval — or one that ends badly — raises a desktop notification, from the same
-`/v1/events` signal `[serve.push]` sends to a webhook. Nothing else is
-notifiable: `run.started` is something you did.
+**Notifications are actionable cards, in the bottom-right corner.** They come
+from `GET /v1/notifications` — the same inbox the desktop popup reads — so a
+plan gate, a failure, and a question from `ask_user` all land here with the
+buttons that answer them. Approving from a card writes the run's own
+`control.jsonl`, which is the file the run is already waiting on.
+
+The panel used to decide for itself what was worth interrupting someone for,
+raising browser notifications off `/v1/events` with a filter of its own. That
+was a second notification system with a second source, and the two disagreed —
+a question is not a run transition, so it reached the popup and never reached
+here. One inbox now, routed by one `[pilot.notifications]`.
+
+**Browser notifications are still off until asked for.** When on, a card that is
+waiting on a person also rings — an in-page card cannot reach a backgrounded
+tab. A card that only reports something does not: that is the noise the old
+filter existed to avoid, kept as a property of the card rather than of the event
+behind it.
 
 Both overlays are real dialogs now — focus moves in, Tab stays inside, Escape
 closes, and focus returns to whatever opened them. There is a skip link, a

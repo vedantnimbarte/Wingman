@@ -165,6 +165,24 @@ that root and are rejected if they escape it.
 | `GET` | `/v1/projects` | Allowlisted projects: `id`, `root`, git branch, whether `indexd` is live, index age. |
 | `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`). Same detector outbound push uses, so the stream and a webhook cannot disagree. |
 
+### Notifications
+
+Global, not project-scoped: the inbox lives in `~/.wingman/` because the
+processes that write to it — a detached `pilot run`, its workers, a TUI, a
+`serve` child — span projects. Same file the desktop popup reads, so what the
+panel shows and what the popup shows cannot disagree. See `docs/NOTIFIER.md`.
+
+| Method | Path | Body | Effect |
+|---|---|---|---|
+| `GET` | `/v1/notifications` | — | `{"notifications":[…]}` — the open cards, oldest first. Answered, expired, and over-a-day-old ones are already filtered out. |
+| `POST` | `/v1/notifications/{id}/reply` | `{"action":"…","text":"…"}`, both optional | Answer one card. Both absent is a dismissal, which still records a reply so the card does not come back. `404` if the card is not open, so a client stops showing something it could not act on. |
+
+A button carrying a control command routes to the run's `control.jsonl` instead
+of the replies file — the server decides which from the card, so a client never
+has to know the `ControlCommand` vocabulary. The response says which happened:
+`{"answered":"…","via":"reply"|"control"}`. A card naming a directory that is
+not a pilot run is refused with `409`.
+
 ### Pilot — read
 
 | Method | Path | Returns |
