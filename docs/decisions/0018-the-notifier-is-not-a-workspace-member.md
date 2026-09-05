@@ -71,3 +71,7 @@ structs and byte-offset tailing are copied instead, and `directories` supplies
   and macOS notarization were roughly half the total effort for a feature whose
   value is fully delivered by "the binary exists and you run it". Revisit when
   someone asks for a double-click installer.
+  **That trigger fired — bundling is superseded by
+  [0019](0019-the-notifier-ships-an-unsigned-installer.md).** The rest of this
+  record still stands: the notifier is still outside the workspace, and it is
+  still unsigned, for the reasons above.

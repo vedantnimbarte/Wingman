@@ -20,13 +20,38 @@ const BIN: &str = if cfg!(windows) {
     "wingman-notify"
 };
 
-/// Where the notifier ought to be: beside `wingman` itself.
+/// Where the notifier might be, best first.
 ///
-/// Resolved from `current_exe` rather than `PATH` so a locally built binary
-/// launches its own sibling instead of an older installed one.
-fn beside_this_exe() -> Option<PathBuf> {
-    let path = std::env::current_exe().ok()?.parent()?.join(BIN);
-    path.is_file().then_some(path)
+/// A sibling of `wingman` itself comes first, resolved from `current_exe`
+/// rather than `PATH`, so someone with a checkout launches the binary they just
+/// built rather than an older installed one. The rest are where the bundler
+/// puts it (decision 0019) — without them `wingman notify` cannot find a copy
+/// the user double-clicked an installer for, which is most of the point of
+/// having an installer.
+fn candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+    {
+        out.push(dir.join(BIN));
+    }
+    // NSIS, `installMode: currentUser`.
+    #[cfg(windows)]
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        out.push(PathBuf::from(local).join("Wingman Notify").join(BIN));
+    }
+    #[cfg(target_os = "macos")]
+    out.push(PathBuf::from("/Applications/Wingman Notify.app/Contents/MacOS").join(BIN));
+    // `.deb` and AppImage both land on `PATH`; this is the prefix the deb uses,
+    // checked directly because the caller wants a path to report, not a lookup.
+    #[cfg(target_os = "linux")]
+    out.push(PathBuf::from("/usr/bin").join(BIN));
+    out
+}
+
+fn find_notifier() -> Option<PathBuf> {
+    candidates().into_iter().find(|p| p.is_file())
 }
 
 pub fn run() -> Result<ExitCode> {
@@ -46,11 +71,13 @@ pub fn run() -> Result<ExitCode> {
         Err(e) => eprintln!("[notify] could not compact the inbox: {e}"),
     }
 
-    let bin = beside_this_exe().ok_or_else(|| {
+    let bin = find_notifier().ok_or_else(|| {
         anyhow!(
             "{BIN} not found next to the wingman binary.\n\
-             It ships as a separate download; build it from source with:\n\
-             \n    cargo build --release --manifest-path desktop/notifier/Cargo.toml\n"
+             Build it and put it here:\n\
+             \n    cargo build --release --manifest-path desktop/notifier/Cargo.toml\n\
+             \nor install it (unsigned -- see docs/NOTIFIER.md):\n\
+             \n    npm --prefix desktop/notifier run bundle\n"
         )
     })?;
 
@@ -138,6 +165,33 @@ fn hints(cfg: Option<&wingman_config::Config>) -> Vec<String> {
 mod tests {
     use super::*;
     use wingman_config::Config;
+
+    #[test]
+    fn a_sibling_binary_is_preferred_over_an_installed_one() {
+        let c = candidates();
+        assert!(!c.is_empty());
+        // The checkout wins: whoever has one is running what they just built.
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(c[0].parent().unwrap(), exe.parent().unwrap());
+        assert!(c.iter().all(|p| p.file_name() == Some(BIN.as_ref())));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_installer_location_is_searched_too() {
+        // Without this the installer from 0019 produces something
+        // `wingman notify` cannot find.
+        //
+        // Reads `LOCALAPPDATA` rather than setting it: it is always present on
+        // Windows, and `set_var` mutates state shared with every other test in
+        // this binary while they run in parallel.
+        let c = candidates();
+        assert!(
+            c.iter()
+                .any(|p| p.to_string_lossy().contains("Wingman Notify")),
+            "{c:?}"
+        );
+    }
 
     fn cfg(desktop: bool, progress: &str, ask: u64) -> Config {
         let mut c = Config::default();

@@ -63,3 +63,4 @@ pointer. The history of what we believed is the point.
 | [0016](0016-the-diff-is-not-green-and-red.md) | The panel's diff is told apart by ground and gutter, not by hue | accepted |
 | [0017](0017-notifications-are-a-file-inbox.md) | Desktop notifications are a file inbox, and approvals bypass it | accepted |
 | [0018](0018-the-notifier-is-not-a-workspace-member.md) | The desktop notifier is excluded from the workspace | accepted |
+| [0019](0019-the-notifier-ships-an-unsigned-installer.md) | The notifier ships an installer, and it is unsigned | accepted |

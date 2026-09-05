@@ -24,13 +24,28 @@ that stops being true.
 ## Running it
 
 The popup is a separate binary, `wingman-notify`, and is not part of the default
-install. Build it from a clone:
+install. Either build it and put it next to `wingman`:
 
 ```bash
 cargo build --release --manifest-path desktop/notifier/Cargo.toml
 ```
 
-Put the binary next to `wingman`, then:
+...or build an installer and double-click it
+([0019](decisions/0019-the-notifier-ships-an-unsigned-installer.md)):
+
+```bash
+npm --prefix desktop/notifier install     # once, pins the Tauri CLI
+npm --prefix desktop/notifier run bundle
+# → desktop/notifier/target/release/bundle/nsis/Wingman Notify_<version>_x64-setup.exe
+```
+
+**The installer is not signed.** Windows shows "Windows protected your PC" on
+first run — *More info → Run anyway*. A code-signing certificate is weeks of
+procurement and the tool is one you build from your own checkout, so the warning
+is the honest trade rather than an oversight. It installs per-user, so it never
+asks for admin.
+
+Either way, then:
 
 ```bash
 wingman notify
@@ -202,8 +217,10 @@ that would pass the flag for them.
   failure mode.
 - **Autostart on login.** Three mechanisms, three uninstall stories, and a
   deleted binary auto-launching after uninstall.
-- **Installers and code signing.** See
-  [0018](decisions/0018-the-notifier-is-not-a-workspace-member.md).
+- **Code signing.** The installer exists now
+  ([0019](decisions/0019-the-notifier-ships-an-unsigned-installer.md)) but is
+  unsigned, and is not built by `release.yml`. Both are worth revisiting the day
+  the popup is offered to someone who did not build it themselves.
 - **`tell` as a card button.** The mechanism is free — a button carries a
   literal `ControlCommand` — but a message to a task needs a task id the card
   does not carry, and the panel's run view already has that control next to the
