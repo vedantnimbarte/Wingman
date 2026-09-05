@@ -23,29 +23,36 @@ that stops being true.
 
 ## Running it
 
-The popup is a separate binary, `wingman-notify`, and is not part of the default
-install. Either build it and put it next to `wingman`:
+The popup is a separate binary, `wingman-notify`, and is not part of the `wingman`
+download. Three ways to get one.
+
+**From a release.** Every release carries an installer per platform, named
+`wingman-notify-<target>.<exe|dmg|deb|AppImage>` beside the CLI archives. (v0.3.0
+predates that job, so it has none.)
+
+**Build the binary** and put it next to `wingman`, which is where
+`wingman notify` looks first:
 
 ```bash
 cargo build --release --manifest-path desktop/notifier/Cargo.toml
 ```
 
-...or build an installer and double-click it
+**Build an installer** yourself
 ([0019](decisions/0019-the-notifier-ships-an-unsigned-installer.md)):
 
 ```bash
 npm --prefix desktop/notifier install     # once, pins the Tauri CLI
 npm --prefix desktop/notifier run bundle
-# → desktop/notifier/target/release/bundle/nsis/Wingman Notify_<version>_x64-setup.exe
 ```
 
-**The installer is not signed.** Windows shows "Windows protected your PC" on
-first run — *More info → Run anyway*. A code-signing certificate is weeks of
-procurement and the tool is one you build from your own checkout, so the warning
-is the honest trade rather than an oversight. It installs per-user, so it never
-asks for admin.
+**The installers are not signed.** Windows shows "Windows protected your PC" on
+first run — *More info → Run anyway* — and macOS Gatekeeper is stricter still
+about an unsigned `.dmg` that arrived over the internet. A certificate is weeks
+of procurement, so this is a stated cost rather than an oversight; it is also
+the thing most worth revisiting now that releases hand the popup to people who
+did not build it. The Windows installer is per-user and never asks for admin.
 
-Either way, then:
+However you got it, then:
 
 ```bash
 wingman notify
@@ -217,10 +224,12 @@ that would pass the flag for them.
   failure mode.
 - **Autostart on login.** Three mechanisms, three uninstall stories, and a
   deleted binary auto-launching after uninstall.
-- **Code signing.** The installer exists now
-  ([0019](decisions/0019-the-notifier-ships-an-unsigned-installer.md)) but is
-  unsigned, and is not built by `release.yml`. Both are worth revisiting the day
-  the popup is offered to someone who did not build it themselves.
+- **Code signing.** Installers are built and attached to releases now
+  ([0019](decisions/0019-the-notifier-ships-an-unsigned-installer.md)), but they
+  are unsigned: Windows shows SmartScreen, and macOS Gatekeeper is stricter
+  still about an unsigned `.dmg` from the internet. Worth revisiting now that
+  the popup reaches people who did not build it themselves — which is exactly
+  the condition that record names.
 - **`tell` as a card button.** The mechanism is free — a button carries a
   literal `ControlCommand` — but a message to a task needs a task id the card
   does not carry, and the panel's run view already has that control next to the

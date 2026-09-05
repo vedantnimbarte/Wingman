@@ -93,3 +93,101 @@ jobs:
           archive: wingman-$target
           checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # The desktop notifier (decision 0019). It is a separate cargo workspace with
+  # its own frontend, so it cannot ride `upload-rust-binary-action` alongside
+  # the CLI: the bundle is produced by the Tauri CLI, not by cargo, and the
+  # artifact is an installer rather than an archived binary.
+  #
+  # `continue-on-error` is the load-bearing part. The CLI binaries above are
+  # what `install.sh` serves; a bundler that breaks — a webkit dependency
+  # renamed, an AppImage tool that will not fetch — must never withhold them.
+  # A failed leg means that platform has no installer on the release, which is
+  # exactly where it was before this job existed.
+  notifier-bundle:
+    needs: create-release
+    name: notifier ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # Apple silicon only, for the same reason as the CLI matrix: the
+          # Intel runners starve in the queue.
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      # Only Linux needs the webview headers; Windows has WebView2 in-box and
+      # macOS has WKWebView. Same list the `desktop-notifier` CI job installs.
+      - name: System webview libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+      # Both npm projects: the CLI lives beside tauri.conf.json, and the
+      # frontend it builds via `beforeBuildCommand` is its own project under ui/.
+      - name: Install the Tauri CLI and the UI
+        run: |
+          npm --prefix desktop/notifier ci
+          npm --prefix desktop/notifier/ui ci
+      # Soft failure on purpose. `tauri build` walks its target list in order,
+      # so on Linux the `.deb` is already on disk by the time the AppImage step
+      # runs; letting a non-zero exit stop the job here would throw away a
+      # bundle that built fine. The upload step below fails loudly if *nothing*
+      # was produced, which is the case that actually means something broke.
+      - name: Bundle
+        continue-on-error: true
+        run: npm --prefix desktop/notifier run bundle
+      # Tauri names its output after the product and version — "Wingman
+      # Notify_0.3.0_x64-setup.exe" — which percent-encodes in a download URL
+      # and does not say which target it is for. Rename to the CLI's
+      # convention so the assets read as one set, and checksum them the same
+      # way `upload-rust-binary-action` does.
+      - name: Rename, checksum and upload
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          found=0
+          # -print0 and a null-delimited read: the source names contain spaces.
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *.exe|*.dmg|*.deb|*.AppImage) ;;
+              *) continue ;;
+            esac
+            ext="${f##*.}"
+            cp "$f" "$out/wingman-notify-$TARGET.$ext"
+            found=$((found + 1))
+          done < <(find desktop/notifier/target/release/bundle -type f -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "no bundle produced for $TARGET" >&2
+            exit 1
+          fi
+          cd "$out"
+          # macOS ships `shasum`, not `sha256sum`.
+          sha() {
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$1"
+            else
+              shasum -a 256 "$1"
+            fi
+          }
+          for f in *; do
+            sha "$f" > "$f.sha256"
+          done
+          gh release upload "${GITHUB_REF_NAME}" ./* --clobber --repo "$GITHUB_REPOSITORY"
