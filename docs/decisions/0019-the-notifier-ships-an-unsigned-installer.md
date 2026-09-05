@@ -55,11 +55,23 @@ Signing is the thing to revisit when the notifier is offered to anyone who did
 not build it themselves. For a tool you install from your own checkout, the
 warning is noise; for a download link, it is a wall.
 
-**It is not wired into `release.yml`.** The release workflow builds and ships the
-CLI binaries; adding a per-platform Tauri bundle to it is a separate change with
-its own matrix and its own failure modes. Until then `npm --prefix
-desktop/notifier run bundle` is how an installer gets made, and that is what the
-docs say. Revisit when the notifier is meant to appear on a release page.
+**~~It is not wired into `release.yml`.~~** *That trigger fired after v0.3.0
+shipped without an installer while notifications were its headline feature.* The
+`notifier-bundle` job now builds one per platform and uploads it beside the CLI
+archives.
+
+Two things about that job are deliberate. It is `continue-on-error`, because the
+CLI binaries are what `install.sh` serves and a bundler that breaks — a webkit
+package renamed, an AppImage tool that will not fetch — must never withhold
+them; a failed leg leaves that platform exactly where it was before the job
+existed. And the bundle *step* is soft-failing too, because `tauri build` walks
+its target list in order: on Linux the `.deb` is already on disk when the
+AppImage runs, so a non-zero exit there would throw away a bundle that built
+fine. The upload step fails loudly only when nothing at all was produced.
+
+Assets are renamed to `wingman-notify-<target>.<ext>` — Tauri names its output
+after the product and version ("Wingman Notify_0.3.0_x64-setup.exe"), which
+percent-encodes in a download URL and does not say which target it is for.
 
 **CI does not build the bundle.** The `desktop-notifier` job compiles and tests
 the crate, which is what catches the mistakes that matter. Bundling adds minutes
