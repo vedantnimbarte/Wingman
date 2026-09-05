@@ -18,6 +18,19 @@ license = "Apache-2.0"
 repository = "https://github.com/vedantnimbarte/Wingman"
 description = "Desktop notification popups for wingman"
 
+# Tauri's dev/production switch, and it is not the cargo profile: without
+# `custom-protocol` the binary serves its window from `devUrl` — the Vite dev
+# server on :1421 — instead of the assets `generate_context!` embedded. A build
+# without it shows `ERR_CONNECTION_REFUSED` in a window that then never calls
+# `resize`, so the popup stays hidden forever and looks like it did nothing.
+#
+# The `tauri build` CLI passes this flag itself. Nothing here uses that CLI —
+# `wingman notify` and CI both run plain `cargo build` — so it has to be on by
+# default, and `--no-default-features` is what selects the dev-server build.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

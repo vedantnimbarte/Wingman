@@ -115,8 +115,29 @@ pub fn alive_path(dir: &Path) -> PathBuf {
     dir.join(ALIVE_FILE)
 }
 
-/// `~/.wingman/`.
+/// Relocates the global directory. A copy of `wingman_config::HOME_ENV` —
+/// this is a separate cargo workspace and cannot import it, the same split the
+/// wire format above already lives with. `home_env_matches_the_config_crate`
+/// pins the two together.
+pub const HOME_ENV: &str = "WINGMAN_HOME";
+
+/// `~/.wingman/`, or [`HOME_ENV`] when it names an absolute path.
+///
+/// The launcher (`wingman notify`) resolves the same variable before deciding
+/// whether a popup is already running and before compacting the inbox. If this
+/// did not honour it too, the two would read different files and the app would
+/// sit watching an inbox nobody writes to.
+///
+/// A relative value is ignored rather than refused: `wingman notify` already
+/// refuses it with a message, and a GUI with no console has nowhere to complain
+/// — falling back to the real home is the safer of the two silent options.
 pub fn global_dir() -> Option<PathBuf> {
+    if let Some(raw) = std::env::var_os(HOME_ENV) {
+        let path = PathBuf::from(raw);
+        if !path.to_string_lossy().trim().is_empty() && path.is_absolute() {
+            return Some(path);
+        }
+    }
     Some(directories::BaseDirs::new()?.home_dir().join(".wingman"))
 }
 
@@ -206,4 +227,57 @@ mod tests {
         // No deadline means informational: it never goes stale on its own.
         assert!(Notification::default().open_at(now));
     }
+
+    #[test]
+    fn home_env_matches_the_config_crate() {
+        // Read the real declaration rather than trusting a copied string: the
+        // launcher resolves this variable and the app has to agree, or the two
+        // read different inboxes. Same trick as the UI's tokens.test.ts.
+        let src = include_str!("../../../crates/wingman-config/src/paths.rs");
+        let declared = src
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("pub const HOME_ENV: &str = "))
+            .expect("wingman-config declares HOME_ENV");
+        assert_eq!(declared.trim_end_matches(';').trim_matches('"'), HOME_ENV);
+    }
+
+    #[test]
+    fn an_absolute_home_env_wins_and_anything_else_falls_back() {
+        // `global_dir` reads the process environment, so drive the rule rather
+        // than the function — an env var cannot be varied under parallel tests.
+        let pick = |raw: &str| {
+            let p = PathBuf::from(raw);
+            (!p.to_string_lossy().trim().is_empty() && p.is_absolute()).then_some(p)
+        };
+        let abs = if cfg!(windows) { "C:/wm" } else { "/tmp/wm" };
+        assert_eq!(pick(abs), Some(PathBuf::from(abs)));
+        assert_eq!(pick(""), None, "empty means unset");
+        assert_eq!(pick("  "), None, "blank means unset");
+        assert_eq!(pick("rel/ative"), None, "relative falls back to the home");
+    }
+
+
+    #[test]
+    fn the_default_build_serves_its_own_assets() {
+        // `custom-protocol` is Tauri's dev/production switch. Without it the
+        // binary loads `devUrl` instead of the embedded assets, so a build with
+        // no Vite server listening shows ERR_CONNECTION_REFUSED in a window
+        // that never mounts, never calls `resize`, and therefore never appears.
+        // Nothing else here can catch that: every other test exercises the file
+        // tailing rather than the webview.
+        //
+        // Reading the manifest rather than `cfg!` on purpose — the flag is
+        // *meant* to be absent under `--no-default-features`, so the invariant
+        // is what `default` declares, not how this test happens to be compiled.
+        let manifest = include_str!("../Cargo.toml");
+        let default = manifest
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("default = "))
+            .expect("a [features] default list");
+        assert!(
+            default.contains("custom-protocol"),
+            "`custom-protocol` must stay in the default features, found: {default}"
+        );
+    }
+
 }

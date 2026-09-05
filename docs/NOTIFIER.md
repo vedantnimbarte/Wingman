@@ -178,6 +178,23 @@ npm --prefix desktop/notifier/ui test
 cargo test --manifest-path desktop/notifier/Cargo.toml
 ```
 
+To run the **app** against that dev server rather than its embedded copy, build
+without default features:
+
+```bash
+npm --prefix desktop/notifier/ui run dev          # must be up first, on :1421
+cargo run --no-default-features --manifest-path desktop/notifier/Cargo.toml
+```
+
+That flag is the whole dev/production switch, and it is not the cargo profile.
+`custom-protocol` is what makes the binary serve the assets
+`generate_context!` embedded; without it the window loads `devUrl` instead, and
+with no dev server listening it fills with `ERR_CONNECTION_REFUSED` — a page
+that never mounts, so it never calls `resize`, so the window stays hidden and
+the popup looks like it simply did nothing. It is on by default here because
+`wingman notify` and CI both build with plain `cargo`, never the `tauri` CLI
+that would pass the flag for them.
+
 ## Not doing
 
 - **A retry button on failure cards.** `{"cmd":"retry_task"}` would work for
