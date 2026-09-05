@@ -309,15 +309,9 @@ pub fn enqueue_pending(session_path: &std::path::Path) -> Result<()> {
 
 /// [`enqueue_pending`] against an explicit queue file.
 pub fn enqueue_pending_at(queue: &std::path::Path, session_path: &std::path::Path) -> Result<()> {
-    use std::io::Write;
-    let path = queue.to_path_buf();
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| crate::LearnError::Other(format!("open {}: {e}", path.display())))?;
-    writeln!(f, "{}", session_path.display())
-        .map_err(|e| crate::LearnError::Other(format!("write {}: {e}", path.display())))?;
+    // Any wingman process may enqueue, so this is a genuinely shared file.
+    wingman_config::append_line(queue, &session_path.display().to_string())
+        .map_err(|e| crate::LearnError::Other(format!("write {}: {e}", queue.display())))?;
     Ok(())
 }
 

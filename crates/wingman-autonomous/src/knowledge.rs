@@ -18,8 +18,8 @@
 //! tolerant JSONL pattern.
 
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Write};
+use std::fs;
+use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -110,12 +110,8 @@ pub fn knowledge_dir(project_root: &Path) -> PathBuf {
 }
 
 pub fn append_decision(path: &Path, rec: &DecisionRecord) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     let line = serde_json::to_string(rec).map_err(io::Error::other)?;
-    writeln!(f, "{line}")
+    wingman_config::append_line(path, &line)
 }
 
 pub fn load_decisions(path: &Path) -> io::Result<Vec<DecisionRecord>> {

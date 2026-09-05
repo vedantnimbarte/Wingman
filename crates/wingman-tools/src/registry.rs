@@ -220,17 +220,11 @@ impl ToolRegistry {
             "input": input,
             "is_error": is_error,
         });
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        use std::io::Write;
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
-            let _ = writeln!(f, "{record}");
-        }
+        // Concurrent subagents dispatch tools at the same time, so this is a
+        // genuinely shared file; an audit log with two records on one line is
+        // an audit log that will not parse. Errors stay ignored — auditing must
+        // never fail a tool call.
+        let _ = wingman_config::append_line(path, &record.to_string());
     }
 
     /// Record one dispatched call against the repeat chain and return an

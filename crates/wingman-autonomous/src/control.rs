@@ -69,13 +69,12 @@ impl ControlCommand {
 }
 
 /// Append a command to the run's control file, creating it if needed.
+///
+/// Several processes write here — `pilot approve` from a terminal, the HTTP
+/// API, the desktop popup's buttons — so the line and its newline have to
+/// leave as one write. See [`wingman_config::append_line`].
 pub fn append(run_dir: &Path, cmd: &ControlCommand) -> std::io::Result<()> {
-    use std::io::Write;
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(control_path(run_dir))?;
-    writeln!(f, "{}", cmd.encode())
+    wingman_config::append_line(&control_path(run_dir), &cmd.encode())
 }
 
 /// Tails the control file, remembering how far it has consumed so each

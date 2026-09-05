@@ -898,15 +898,8 @@ fn report_run_outcome(
 
 /// Append one digested notification line for a later `flush`.
 fn append_digest_line(path: &std::path::Path, severity: &str, body: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
     let line = serde_json::json!({ "severity": severity, "body": body });
-    writeln!(f, "{line}")
+    wingman_config::append_line(path, &line.to_string())
 }
 
 /// Resolve whether a pilot capability is on: an explicit
@@ -2268,21 +2261,13 @@ fn append_daemon_queue(
     cand: &wingman_autonomous::daemon::Candidate,
     action: wingman_autonomous::daemon::DaemonAction,
 ) -> Result<()> {
-    use std::io::Write;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
     let line = serde_json::json!({
         "source": cand.source,
         "title": cand.title,
         "score": cand.score(),
         "action": format!("{action:?}"),
     });
-    writeln!(f, "{line}")?;
+    wingman_config::append_line(path, &line.to_string())?;
     Ok(())
 }
 
