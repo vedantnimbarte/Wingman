@@ -265,4 +265,39 @@ mod tests {
         store.seed("s", vec![user("second")]);
         assert_eq!(store.load("s").unwrap().len(), 1);
     }
+
+    /// A record is on disk by the time `append` returns.
+    ///
+    /// The store opens a fresh log per append and drops it, so anything left
+    /// buffered lands after the *next* handle's write — which is how a line
+    /// ends up torn rather than merely late.
+    #[tokio::test]
+    async fn a_record_is_on_disk_when_append_returns() {
+        let dir = std::env::temp_dir().join(format!(
+            "wingman-durable-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = FileSessionStore::new(&dir);
+
+        store.append("s1", user("hello")).await.unwrap();
+        let path = dir.join("s1.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.ends_with('\n'),
+            "the newline must land with the record, not after the next one: {text:?}"
+        );
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+
+        store.append("s1", user("again")).await.unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2, "{text:?}");
+        // The real symptom: two records concatenated onto one line parse as
+        // "trailing characters".
+        assert_eq!(store.load("s1").unwrap().len(), 2);
+    }
 }
