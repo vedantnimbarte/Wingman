@@ -593,6 +593,14 @@ Not for routine choices the agent can make itself. When no interactive
 surface is available it returns a note saying so, and the agent is expected
 to proceed on its best judgment and state the assumption.
 
+Three routes, tried in order: the desktop popup when
+`[tools].ask_user_desktop_timeout_secs` is non-zero *and* it is running; then
+stdin when it is an interactive terminal; then the note. The popup comes first
+because the TUI holds the terminal in raw mode, where a stdin read would fight
+crossterm for keystrokes. On timeout the note is returned unchanged, so a
+headless run is never blocked longer than that many seconds. See
+[NOTIFIER.md](NOTIFIER.md).
+
 ### `present_plan`
 
 Create a structured plan block. Required before edits in `plan` mode.

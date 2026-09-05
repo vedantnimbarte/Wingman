@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    // Only the token-drift test needs these: it reads the panel's stylesheet off
+    // disk. The panel itself keeps `types: []`, having no such test.
+    "types": ["node"]
+  },
+  "include": ["src", "vite.config.ts"]
+}

@@ -30,3 +30,12 @@ editors/vscode/dist/
 # these still builds.
 panel/node_modules/
 panel/dist/
+
+# Desktop notifier build artifacts. It is a detached cargo workspace with its
+# own target dir (docs/decisions/0018), so `/target` above does not cover it.
+desktop/notifier/target/
+# `tauri-build` regenerates gen/schemas on every build; it is ~300KB of
+# JSON referenced only by an editor `$schema` hint in capabilities/.
+desktop/notifier/gen/
+desktop/notifier/ui/node_modules/
+desktop/notifier/ui/dist/

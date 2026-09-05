@@ -19,6 +19,15 @@ members = [
     "crates/wingman-board",
 ]
 
+# `desktop/notifier` is a Tauri app with its own `[workspace]` table and its own
+# Cargo.lock — the arrangement `editors/vscode` already has for npm. Excluded
+# rather than made a member because `--workspace` ignores `default-members`:
+# `matrix-test`, `msrv` and the *required* `audit` job would then all need
+# libwebkit2gtk on the runner, and every advisory anywhere in the webview tree
+# would turn a required gate red. Build it with `--manifest-path`.
+# See docs/decisions/0018-the-notifier-is-not-a-workspace-member.md.
+exclude = ["desktop/notifier"]
+
 [workspace.package]
 version = "0.2.0"
 edition = "2021"

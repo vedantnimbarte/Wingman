@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wingman Notify",
+  "version": "0.2.0",
+  "identifier": "dev.wingman.notify",
+  "build": {
+    "frontendDist": "ui/dist",
+    "devUrl": "http://localhost:1421",
+    "beforeDevCommand": "npm --prefix ui run dev",
+    "beforeBuildCommand": "npm --prefix ui run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "label": "stack",
+        "width": 380,
+        "height": 120,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visible": false,
+        "title": "Wingman"
+      }
+    ]
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon.png"
+    ]
+  }
+}

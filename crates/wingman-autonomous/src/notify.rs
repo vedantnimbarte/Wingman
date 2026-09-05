@@ -80,6 +80,39 @@ fn route_channels(channels: &[String]) -> RoutingDecision {
     }
 }
 
+/// Where desktop cards are written, or `None` when the inbox is switched off
+/// (or there is no home directory to write into).
+///
+/// One helper rather than `cfg.desktop_inbox && …` repeated at each emission
+/// site: the switch and the path resolution belong together, and a site that
+/// checks only one of them is the bug this shape prevents.
+pub fn desktop_dir(config: &PilotNotificationsConfig) -> Option<std::path::PathBuf> {
+    if !config.desktop_inbox {
+        return None;
+    }
+    wingman_config::global_dir().ok()
+}
+
+/// The inbox directory a card of this severity should be written to, or `None`
+/// when it should not be written at all.
+///
+/// Answers both halves of the question at once — is `desktop` a routed channel
+/// for this severity, and is the inbox switched on — so an emission site cannot
+/// honour one and forget the other. Call sites that go through
+/// [`deliver_to_channels`] use [`desktop_dir`] instead; that function does its
+/// own routing.
+pub fn desktop_target(
+    severity: NotificationSeverity,
+    config: &PilotNotificationsConfig,
+) -> Option<std::path::PathBuf> {
+    match route(severity, config) {
+        RoutingDecision::Immediate(channels) if channels.iter().any(|c| c == "desktop") => {
+            desktop_dir(config)
+        }
+        _ => None,
+    }
+}
+
 /// Route a notification of the given severity per config.
 pub fn route(severity: NotificationSeverity, config: &PilotNotificationsConfig) -> RoutingDecision {
     match severity {
@@ -189,17 +222,36 @@ pub struct DeliveryReport {
 }
 
 /// J3 delivery: for each routed `channel`, POST `body` to its configured
-/// webhook (`webhooks[channel]`). `desktop`/`terminal` are skipped (the
-/// caller prints those). Channels with no endpoint land in `unconfigured`.
+/// webhook (`webhooks[channel]`). Channels with no endpoint land in
+/// `unconfigured`.
+///
+/// `terminal` is always skipped — the caller prints that one. `desktop` is
+/// written to the notification inbox in the given directory when `desktop` is
+/// `Some`, which is how `[pilot.notifications].desktop_inbox` reaches here;
+/// passing `None` keeps the long-standing behaviour of skipping it so the
+/// caller's `eprintln!` is the only delivery.
+///
+/// The inbox directory is a parameter rather than `global_dir()` read in here
+/// so this stays testable without writing to the developer's real home.
 pub fn deliver_to_channels(
     runner: &dyn CommandRunner,
     channels: &[String],
     webhooks: &std::collections::BTreeMap<String, String>,
     body: &str,
+    desktop: Option<(&Path, &wingman_config::inbox::Notification)>,
 ) -> DeliveryReport {
     let mut report = DeliveryReport::default();
     for ch in channels {
-        if matches!(ch.as_str(), "desktop" | "terminal") {
+        if ch == "terminal" {
+            continue;
+        }
+        if ch == "desktop" {
+            if let Some((dir, n)) = desktop {
+                match wingman_config::inbox::append_to(dir, n) {
+                    Ok(()) => report.delivered.push(ch.clone()),
+                    Err(e) => report.failed.push((ch.clone(), e.to_string())),
+                }
+            }
             continue;
         }
         match webhooks.get(ch) {
@@ -322,12 +374,12 @@ mod tests {
         webhooks.insert("slack".to_string(), "https://hooks.slack.com/x".to_string());
         webhooks.insert("empty".to_string(), "  ".to_string()); // blank → unconfigured
         let channels = vec![
-            "desktop".into(), // skipped (terminal)
+            "desktop".into(), // skipped: no inbox passed
             "slack".into(),   // delivered
             "email".into(),   // no entry → unconfigured
             "empty".into(),   // blank entry → unconfigured
         ];
-        let report = deliver_to_channels(&runner, &channels, &webhooks, "run done");
+        let report = deliver_to_channels(&runner, &channels, &webhooks, "run done", None);
         assert_eq!(report.delivered, vec!["slack".to_string()]);
         assert_eq!(
             report.unconfigured,
@@ -336,6 +388,41 @@ mod tests {
         assert!(report.failed.is_empty());
         // Exactly one webhook POST (slack); desktop/email/empty didn't POST.
         assert_eq!(runner.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_desktop_channel_writes_the_inbox_only_when_it_is_enabled() {
+        use wingman_config::inbox;
+
+        let runner = RecordingCurl {
+            calls: Mutex::new(Vec::new()),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let channels = vec!["desktop".to_string()];
+        let webhooks = std::collections::BTreeMap::new();
+        let n = inbox::Notification::now("escalation", "Run failed", "3 tasks did not finish");
+
+        // Off (`desktop_inbox = false`): skipped entirely, as it has always
+        // been — the caller's terminal print is the whole delivery.
+        let off = deliver_to_channels(&runner, &channels, &webhooks, "b", None);
+        assert_eq!(
+            off,
+            DeliveryReport::default(),
+            "nothing routed, nothing said"
+        );
+        assert!(!inbox::inbox_path(dir.path()).exists());
+
+        // On: one card, and reported as delivered rather than unconfigured —
+        // `desktop` has no webhook and must not be blamed for lacking one.
+        let on = deliver_to_channels(&runner, &channels, &webhooks, "b", Some((dir.path(), &n)));
+        assert_eq!(on.delivered, vec!["desktop".to_string()]);
+        assert!(on.unconfigured.is_empty());
+        let open = inbox::read_open(dir.path());
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].title, "Run failed");
+
+        // Either way this channel never POSTs.
+        assert!(runner.calls.lock().unwrap().is_empty());
     }
 
     #[test]

@@ -206,6 +206,47 @@ jobs:
       - name: Assert the bundle is embedded
         run: cargo test -p wingman-cli --bins -- --ignored ui_bundle_is_embedded
 
+  # Build and test the desktop notification popup.
+  #
+  # It lives in its own detached cargo workspace (see
+  # docs/decisions/0018-the-notifier-is-not-a-workspace-member.md), so it needs
+  # its own `--manifest-path` and the system webview libraries.
+  #
+  # Informational, like the vscode job and unlike web-ui: a separate ecosystem
+  # should not block Rust PRs, and there is no silent-degradation trap to catch
+  # here. `web-ui` has to be required because `build.rs` deliberately falls back
+  # to a placeholder page when `panel/dist` is missing, so a broken build still
+  # ships green; Tauri's `frontendDist` has no such fallback and fails loudly.
+  notifier:
+    name: desktop-notifier
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: desktop/notifier
+      - name: System webview libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev             libayatana-appindicator3-dev librsvg2-dev patchelf
+      - name: Install deps
+        working-directory: desktop/notifier/ui
+        run: npm ci
+      - name: Unit tests
+        working-directory: desktop/notifier/ui
+        run: npm test
+      - name: Type-check and build
+        working-directory: desktop/notifier/ui
+        run: npm run build
+      - name: Clippy (deny warnings)
+        run: cargo clippy --manifest-path desktop/notifier/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path desktop/notifier/Cargo.toml
+
   # License + duplicate-dependency + source policy via cargo-deny. Advisories
   # are checked by the `audit` job above, which is required; this one stays
   # informational until `multiple-versions` flips to "deny" (pending the

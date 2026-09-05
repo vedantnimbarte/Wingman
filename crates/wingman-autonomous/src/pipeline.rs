@@ -1852,6 +1852,7 @@ mod tests {
                 max_total_tokens: 0,
                 max_retries_per_task: 0,
                 enforce_checkpoint_hygiene: false,
+                desktop_inbox: None,
             },
             max_ticks: 32,
             tier: wingman_config::PilotTier::Copilot,

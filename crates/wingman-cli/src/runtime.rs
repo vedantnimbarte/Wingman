@@ -603,6 +603,11 @@ pub(crate) fn base_registry(
     cfg: &Config,
     audit_path: Option<std::path::PathBuf>,
 ) -> ToolRegistry {
+    // Applied here rather than at each `ToolCtx` construction site: this
+    // builder is the one thing every `ask_user`-capable registry passes
+    // through, and a setting applied per-caller is how `disabled_tools`
+    // shipped broken twice.
+    let ctx = ctx.with_ask_timeout(cfg.tools.ask_user_desktop_timeout_secs);
     let reg = ToolRegistry::new(ctx)
         .with_builtins()
         .with_hooks(cfg.hooks.clone())

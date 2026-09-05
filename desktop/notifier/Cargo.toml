@@ -1,0 +1,35 @@
+# Detached from the root workspace on purpose — see
+# docs/decisions/0018-the-notifier-is-not-a-workspace-member.md. The empty
+# `[workspace]` table below is what roots this crate independently; the root
+# manifest also lists it under `exclude`.
+#
+# It deliberately does not depend on `wingman-config`, which would drag
+# `keyring` (and libsecret/D-Bus on Linux) into a binary whose whole point is
+# being cheap to build. The ~90 lines of wire format and tailing it needs are
+# copied instead, pinned on both sides by an identical shape assertion.
+[workspace]
+
+[package]
+name = "wingman-notify"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.88"
+license = "Apache-2.0"
+repository = "https://github.com/vedantnimbarte/Wingman"
+description = "Desktop notification popups for wingman"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "5"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true

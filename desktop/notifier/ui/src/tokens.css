@@ -1,0 +1,262 @@
+/*
+ * Copied from `panel/src/app.css`'s token block, not imported from it: a
+ * cross-project import would couple two build outputs and punch through the
+ * panel's `types: []` boundary for the sake of sixty lines. `tokens.test.ts`
+ * reads both files and fails if they drift.
+ *
+ * The rule the panel states and this inherits:
+ *
+ *   Colour encodes epistemic status, and nothing else.
+ *
+ * `--failed` is a failure, `--asserted` is something waiting on you and not yet
+ * settled, `--proven` is finished work. None of the three is ever decoration,
+ * and there is no fourth hue competing with them.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --paper: #fbfbfc;
+  --surface: #ffffff;
+  --raised: #f2f3f6;
+  --sunken: #f6f7f9;
+
+  --ink: #14161b;
+  --muted: #5f6879;
+  --faint: #666e7d;
+
+  --rule: #e5e7ec;
+  --rule-strong: #d2d7e0;
+
+  --proven: #0b7a5a;
+  --asserted: #a85f0b;
+  --failed: #b03a2e;
+
+  --proven-wash: color-mix(in srgb, var(--proven) 6%, var(--surface));
+  --asserted-wash: color-mix(in srgb, var(--asserted) 6%, var(--surface));
+  --failed-wash: color-mix(in srgb, var(--failed) 6%, var(--surface));
+  --proven-edge: color-mix(in srgb, var(--proven) 26%, transparent);
+  --asserted-edge: color-mix(in srgb, var(--asserted) 28%, transparent);
+  --failed-edge: color-mix(in srgb, var(--failed) 26%, transparent);
+
+  --shadow-1: 0 1px 2px rgb(17 20 27 / 5%);
+  --shadow-2: 0 1px 2px rgb(17 20 27 / 4%), 0 8px 20px -8px rgb(17 20 27 / 12%);
+  --shadow-3: 0 2px 6px rgb(17 20 27 / 6%), 0 28px 64px -16px rgb(17 20 27 / 24%);
+
+  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
+    sans-serif;
+  --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0c0e12;
+    --surface: #14171d;
+    --raised: #1c2027;
+    --sunken: #0f1217;
+
+    --ink: #e9ecf2;
+    --muted: #949cab;
+    --faint: #818b9d;
+
+    --rule: #232830;
+    --rule-strong: #333a45;
+
+    --proven: #3fb68b;
+    --asserted: #e0a458;
+    --failed: #e0705f;
+
+    --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+    --shadow-2: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 20px -8px rgb(0 0 0 / 55%);
+    --shadow-3: 0 2px 6px rgb(0 0 0 / 35%), 0 28px 64px -16px rgb(0 0 0 / 65%);
+  }
+}
+
+/* ── Window ─────────────────────────────────────────────────────────────
+ *
+ * The window is transparent and frameless: the cards are the only thing
+ * painted, and the gaps between them are desktop. So nothing here may set a
+ * background on `html` or `body`, or the popup becomes a grey rectangle.
+ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  overflow: hidden;
+  font-family: var(--sans);
+  font-size: 13px;
+  color: var(--ink);
+  /* The window itself is `focus: false` and must not look focusable. */
+  user-select: none;
+  cursor: default;
+}
+
+#stack {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 4px;
+}
+
+/* ── Card ───────────────────────────────────────────────────────────────── */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-3);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: rise 140ms ease-out;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    animation: none;
+  }
+}
+
+.card.failed {
+  border-left-color: var(--failed);
+  background: var(--failed-wash);
+}
+.card.asserted {
+  border-left-color: var(--asserted);
+  background: var(--asserted-wash);
+}
+.card.proven {
+  border-left-color: var(--proven);
+  background: var(--proven-wash);
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.title {
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project {
+  font-family: var(--mono);
+  font-size: 0.75rem;
+  color: var(--faint);
+  flex-shrink: 0;
+}
+
+.body {
+  color: var(--muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* Six lines is enough to judge a plan or read a failure summary. The whole
+     report is in the terminal; this is the interruption, not the record. */
+  display: -webkit-box;
+  -webkit-line-clamp: 6;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+button {
+  font: inherit;
+  font-weight: 500;
+  border: 1px solid var(--rule-strong);
+  background: var(--raised);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--faint);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 1px;
+}
+
+/* The primary action is solid ink, never a colour — the three hues mean
+   status, and an accent here would be a fourth thing competing with them. */
+button.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+button.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--faint);
+  padding: 4px 6px;
+}
+
+button.quiet:hover {
+  color: var(--ink);
+  border-color: var(--rule);
+}
+
+button.chip[aria-pressed='true'] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+input[type='text'] {
+  font: inherit;
+  flex: 1;
+  min-width: 0;
+  background: var(--sunken);
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--ink);
+  user-select: text;
+  cursor: text;
+}
+
+input[type='text']:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -1px;
+}
+
+.more {
+  align-self: center;
+  font-size: 0.75rem;
+  color: var(--faint);
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 2px 10px;
+  box-shadow: var(--shadow-1);
+  cursor: pointer;
+}

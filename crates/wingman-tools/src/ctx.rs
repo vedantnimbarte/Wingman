@@ -23,6 +23,10 @@ pub struct ToolCtx {
     /// `[tools].shell_sandbox`: `auto` | `off` | `required`. See
     /// [`crate::sandbox`].
     pub shell_sandbox: String,
+    /// `[tools].ask_user_desktop_timeout_secs`: how long `ask_user` waits for
+    /// an answer from the desktop app. `0` (the default) keeps the tool's
+    /// original behaviour and never touches the inbox.
+    pub ask_user_desktop_timeout_secs: u64,
     /// Has the user approved a plan this session? Only meaningful in
     /// [`PermissionMode::Plan`], where writes and shell stay denied until the
     /// agent has presented a plan *and* the user accepted it. Shared like
@@ -74,6 +78,7 @@ impl ToolCtx {
             extra_denylist: Vec::new(),
             allow_network: false,
             shell_sandbox: "auto".into(),
+            ask_user_desktop_timeout_secs: 0,
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
             fs: Arc::new(crate::filesystem::OsFileSystem),
@@ -96,6 +101,7 @@ impl ToolCtx {
             extra_denylist,
             allow_network,
             shell_sandbox: "auto".into(),
+            ask_user_desktop_timeout_secs: 0,
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
             fs: Arc::new(crate::filesystem::OsFileSystem),
@@ -123,6 +129,14 @@ impl ToolCtx {
     /// Set the shell-sandbox policy (`[tools].shell_sandbox`). Builder-style.
     pub fn with_shell_sandbox(mut self, policy: impl Into<String>) -> Self {
         self.shell_sandbox = policy.into();
+        self
+    }
+
+    /// Set how long `ask_user` waits on the desktop app
+    /// (`[tools].ask_user_desktop_timeout_secs`). Builder-style rather than a
+    /// sixth positional argument to `new_with_config`, which has eight callers.
+    pub fn with_ask_timeout(mut self, secs: u64) -> Self {
+        self.ask_user_desktop_timeout_secs = secs;
         self
     }
 
