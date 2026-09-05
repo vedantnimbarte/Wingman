@@ -518,13 +518,41 @@ pub fn spawn_full(
     (handle, join)
 }
 
-/// Background task: writes one desktop card per task failure, and one when the
-/// run itself ends badly. Runs until the broadcast channel closes.
+/// How long a failure waits for company before its card is written.
 ///
-/// Cards are informational — no buttons. A retry button would be free
-/// (`{"cmd":"retry_task","id":…}` is already a `ControlCommand`) but the retry
-/// ladder is retrying the task by itself, and a human racing it is a new
-/// failure mode rather than a feature.
+/// A run that trips a shared dependency fails several tasks within a beat of
+/// each other, and the orchestrator then marks the run itself failed. Writing
+/// a card per event produced a stack of four saying the same thing. Three
+/// seconds is well under the time it takes to look at the screen, so a batch
+/// still feels immediate.
+const COALESCE: Duration = Duration::from_secs(3);
+
+/// One thing worth reporting, before it is merged with whatever arrives next.
+enum Bad {
+    /// A task failed: its title, and whatever the outcome said.
+    Task(String, String),
+    /// The run itself ended badly: `failed` or `aborted`.
+    Run(&'static str),
+}
+
+/// Background task: writes desktop cards for task failures and for a run that
+/// ends badly. Runs until the broadcast channel closes.
+///
+/// Failures inside one [`COALESCE`] window become a single card. That is worth
+/// more than it sounds: the common shape is one broken dependency failing three
+/// tasks and then the run, which used to be four cards that had to be dismissed
+/// one at a time.
+///
+/// A card for a run that is still going carries one button: abort. When the
+/// retry ladder is grinding on something that is not going to work, stopping it
+/// is the whole of what a human wants, and the card already holds the `run_dir`
+/// the command needs. It is deliberately the only one:
+///
+///   - **Retry** would be free (`{"cmd":"retry_task","id":…}` is already a
+///     `ControlCommand`) but the ladder is retrying the task by itself, and a
+///     human racing it is a new failure mode rather than a feature.
+///   - **Abort on a run that already ended** is a button that does nothing, so
+///     a batch carrying a run outcome gets no buttons at all.
 ///
 /// `RunStatus::Done` is deliberately absent: the CLI's end-of-run report owns
 /// completion and renders a far better body than anything available here.
@@ -538,7 +566,53 @@ async fn notify_watchdog(
     use wingman_config::inbox::{append_to, Notification};
 
     loop {
-        let (title, body) = match events.recv().await {
+        // Block for the first one, then take whatever follows it closely.
+        let Some(first) = next_bad(&mut events, &store).await else {
+            return;
+        };
+        let mut batch = vec![first];
+        let deadline = tokio::time::Instant::now() + COALESCE;
+        loop {
+            match tokio::time::timeout_at(deadline, next_bad(&mut events, &store)).await {
+                Ok(Some(b)) => batch.push(b),
+                // Channel closed: write what we have rather than dropping it.
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        let (title, body) = render(&batch);
+        // Only while the run is still going: a batch carrying its outcome is a
+        // report, and an abort button on it would do nothing.
+        let over = batch.iter().any(|b| matches!(b, Bad::Run(_)));
+        let actions = if over {
+            Vec::new()
+        } else {
+            vec![wingman_config::inbox::Action {
+                id: "abort".into(),
+                label: "Abort run".into(),
+                control: serde_json::to_value(crate::control::ControlCommand::AbortRun).ok(),
+            }]
+        };
+        let _ = append_to(
+            &dir,
+            &Notification {
+                project: project.clone(),
+                run_dir: Some(run_dir.clone()),
+                actions,
+                ..Notification::now("escalation", title, body)
+            },
+        );
+    }
+}
+
+/// The next event worth a card, or `None` once the channel is gone.
+async fn next_bad(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    store: &Arc<Mutex<RunStore>>,
+) -> Option<Bad> {
+    loop {
+        match events.recv().await {
             Ok(Event::TaskStatus {
                 id,
                 status: TaskStatus::Failed,
@@ -554,40 +628,72 @@ async fn notify_watchdog(
                         .find(|t| t.id == id)
                         .map(|t| t.title.clone())
                 };
-                (
-                    format!("Task failed — {}", label.unwrap_or_else(|| id.clone())),
+                return Some(Bad::Task(
+                    label.unwrap_or(id),
                     outcome.map(|o| o.summary).unwrap_or_default(),
-                )
+                ));
             }
             Ok(Event::RunStatusEv {
-                status: status @ (RunStatus::Failed | RunStatus::Aborted),
+                status: RunStatus::Failed,
                 ..
-            }) => (
-                format!(
-                    "Run {}",
-                    if status == RunStatus::Aborted {
-                        "aborted"
-                    } else {
-                        "failed"
-                    }
-                ),
-                String::new(),
-            ),
+            }) => return Some(Bad::Run("failed")),
+            Ok(Event::RunStatusEv {
+                status: RunStatus::Aborted,
+                ..
+            }) => return Some(Bad::Run("aborted")),
             Ok(_) => continue,
             // A lagged receiver has missed events, not lost the channel. Keep
             // going: a dropped failure card is better than a silent watchdog.
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(_) => return,
-        };
+            Err(_) => return None,
+        }
+    }
+}
 
-        let _ = append_to(
-            &dir,
-            &Notification {
-                project: project.clone(),
-                run_dir: Some(run_dir.clone()),
-                ..Notification::now("escalation", title, body)
-            },
-        );
+/// Title and body for one batch.
+///
+/// The run outcome wins the title when it is in the batch — "run failed" is
+/// what the reader needs first, and the tasks that caused it belong in the
+/// body underneath it.
+fn render(batch: &[Bad]) -> (String, String) {
+    let run = batch.iter().find_map(|b| match b {
+        Bad::Run(word) => Some(*word),
+        _ => None,
+    });
+    let tasks: Vec<(&String, &String)> = batch
+        .iter()
+        .filter_map(|b| match b {
+            Bad::Task(label, summary) => Some((label, summary)),
+            _ => None,
+        })
+        .collect();
+
+    match (run, tasks.as_slice()) {
+        // A run failure on its own, or with the tasks that explain it.
+        (Some(word), []) => (format!("Run {word}"), String::new()),
+        (Some(word), many) => (
+            format!("Run {word} — {} task(s) did not finish", many.len()),
+            many.iter()
+                .map(|(label, _)| format!("• {label}"))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                ),
+        ),
+        // One task, and room to say what went wrong with it.
+        (None, [(label, summary)]) => (format!("Task failed — {label}"), (*summary).clone()),
+        // Several: the list is more use than any one summary.
+        (None, many) => (
+            format!("{} tasks failed", many.len()),
+            many.iter()
+                .map(|(label, _)| format!("• {label}"))
+                .collect::<Vec<_>>()
+                .join(
+                    "
+",
+                ),
+        ),
     }
 }
 
@@ -2051,7 +2157,7 @@ mod tests {
     /// returns `Err`, so the CLI's end-of-run report never runs. It must card
     /// failures and stay quiet about everything else.
     #[tokio::test]
-    async fn the_failure_watchdog_cards_failures_and_ignores_progress() {
+    async fn the_failure_watchdog_merges_a_run_failure_with_its_tasks() {
         use crate::model::TaskOutcome;
 
         let dir = tempdir().unwrap();
@@ -2124,26 +2230,96 @@ mod tests {
         }
 
         // The watchdog holds a store handle, so the channel never closes and
-        // there is nothing to join on — wait for the cards instead.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        // there is nothing to join on — wait for the card instead. It arrives a
+        // COALESCE window after the last failure, not immediately.
+        let deadline = std::time::Instant::now() + COALESCE + Duration::from_secs(5);
         let cards = loop {
             let c = wingman_config::inbox::read_open(inbox.path());
-            if c.len() >= 2 || std::time::Instant::now() > deadline {
+            if !c.is_empty() || std::time::Instant::now() > deadline {
                 break c;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         };
         watchdog.abort();
 
-        assert_eq!(cards.len(), 2, "in-progress and done must not card");
-        assert_eq!(cards[0].title, "Task failed — Wire the parser");
-        assert_eq!(cards[0].body, "cargo test failed");
+        // One card, not three: the two progress transitions do not card at all,
+        // and the task failure merges with the run failure that followed it.
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        assert_eq!(cards[0].title, "Run failed — 1 task(s) did not finish");
+        assert!(
+            cards[0].body.contains("• Wire the parser"),
+            "{}",
+            cards[0].body
+        );
         assert_eq!(cards[0].severity, "escalation");
         assert!(
             cards[0].actions.is_empty(),
-            "failures are informational; the retry ladder is already retrying"
+            "the run is over; an abort button would do nothing"
         );
-        assert_eq!(cards[1].title, "Run failed");
+    }
+
+    #[tokio::test]
+    async fn a_failure_in_a_live_run_offers_to_abort_it() {
+        use crate::model::TaskOutcome;
+
+        let dir = tempdir().unwrap();
+        let inbox = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/ab-run"),
+            "ab-run",
+            "g",
+            "deadbeef",
+            "wingman/auto/ab-run",
+        )
+        .await
+        .unwrap();
+        let events = store.subscribe();
+        let store = Arc::new(Mutex::new(store));
+        let watchdog = tokio::spawn(notify_watchdog(
+            events,
+            store.clone(),
+            inbox.path().to_path_buf(),
+            None,
+            "/p/.wingman/autonomous/ab-run".into(),
+        ));
+
+        // A task fails and the run keeps going — the case where stopping it is
+        // the thing a human actually wants to do.
+        store
+            .lock()
+            .await
+            .append(Event::TaskStatus {
+                t: RunStore::now(),
+                id: "t9".into(),
+                status: TaskStatus::Failed,
+                outcome: Some(TaskOutcome {
+                    summary: "flaky".into(),
+                    files_changed: Vec::new(),
+                }),
+            })
+            .await
+            .unwrap();
+
+        let deadline = std::time::Instant::now() + COALESCE + Duration::from_secs(5);
+        let cards = loop {
+            let c = wingman_config::inbox::read_open(inbox.path());
+            if !c.is_empty() || std::time::Instant::now() > deadline {
+                break c;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        watchdog.abort();
+
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let actions = &cards[0].actions;
+        assert_eq!(actions.len(), 1, "{actions:?}");
+        assert_eq!(actions[0].id, "abort");
+        // The button carries the command verbatim, so the popup and the panel
+        // both write it without knowing the vocabulary.
+        assert_eq!(
+            actions[0].control,
+            Some(serde_json::json!({ "cmd": "abort_run" }))
+        );
     }
 
     async fn wait_for_review(handle: &OrchestratorHandle, task_id: &str) {
@@ -3697,5 +3873,47 @@ mod tests {
         );
         handle.shutdown().await;
         let _ = join.await;
+    }
+
+    /* ── Failure cards ─────────────────────────────────────────────────── */
+
+    fn task(label: &str, summary: &str) -> Bad {
+        Bad::Task(label.into(), summary.into())
+    }
+
+    #[test]
+    fn a_lone_task_failure_keeps_its_summary() {
+        let (title, body) = render(&[task("build the parser", "cargo test failed on 3 cases")]);
+        assert_eq!(title, "Task failed — build the parser");
+        assert_eq!(body, "cargo test failed on 3 cases");
+    }
+
+    #[test]
+    fn several_failures_become_one_card_listing_them() {
+        // The shape this exists for: one broken dependency taking three tasks
+        // down, which used to be three cards to dismiss separately.
+        let (title, body) = render(&[
+            task("parser", "boom"),
+            task("lexer", "boom"),
+            task("printer", "boom"),
+        ]);
+        assert_eq!(title, "3 tasks failed");
+        assert!(body.contains("• parser"));
+        assert!(body.contains("• lexer"));
+        assert!(body.contains("• printer"));
+    }
+
+    #[test]
+    fn the_run_outcome_wins_the_title_and_its_tasks_go_underneath() {
+        let (title, body) = render(&[task("parser", "boom"), Bad::Run("failed")]);
+        assert_eq!(title, "Run failed — 1 task(s) did not finish");
+        assert!(body.contains("• parser"));
+    }
+
+    #[test]
+    fn a_run_that_fails_alone_says_only_that() {
+        let (title, body) = render(&[Bad::Run("aborted")]);
+        assert_eq!(title, "Run aborted");
+        assert!(body.is_empty());
     }
 }
