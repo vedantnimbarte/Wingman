@@ -3201,3 +3201,132 @@ button.card-title:hover {
     gap: var(--s-1);
   }
 }
+
+
+/* ── Notifications ─────────────────────────────────────────────────────────
+ *
+ * The corner stack, rendering the same inbox the desktop popup does. It is an
+ * overlay above every view, so it owns the top of the z scale — the skip link
+ * at 60 is the only thing that outranked it, and a card must not cover that.
+ *
+ * The stack itself does not take pointer events; the cards do. An empty stack
+ * is unmounted rather than hidden, but the rule matters while one is mid-fade.
+ */
+
+.notif-stack {
+  position: fixed;
+  right: var(--s-4);
+  bottom: var(--s-4);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  width: min(23rem, calc(100vw - var(--s-6)));
+  pointer-events: none;
+}
+
+.notif {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--rule-strong);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: notif-in var(--fast) var(--ease);
+}
+
+/* Colour encodes epistemic status and nothing else. A card carries its
+   severity on the left edge and a wash, never on the text. */
+.notif.failed {
+  border-left-color: var(--failed);
+  background: var(--failed-wash);
+}
+
+.notif.asserted {
+  border-left-color: var(--asserted);
+  background: var(--asserted-wash);
+}
+
+.notif.proven {
+  border-left-color: var(--proven);
+  background: var(--proven-wash);
+}
+
+@keyframes notif-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--s-2));
+  }
+}
+
+.notif-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+}
+
+.notif-title {
+  flex: 1;
+  font-weight: var(--w-bold);
+  line-height: var(--lh-snug);
+}
+
+.notif-project {
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: var(--t-xs);
+}
+
+/* Aligned with the title's first line rather than centred in the row, which
+   is what a baseline-aligned flex head does to a taller control. */
+.notif-x {
+  align-self: flex-start;
+  min-width: auto;
+  padding-inline: var(--s-1);
+}
+
+.notif-body {
+  color: var(--muted);
+  line-height: var(--lh-base);
+  /* Bodies carry newlines — the bullet list on a coalesced failure, the blank
+     line before a plan's estimate. The popup's stylesheet has had this since
+     the start; the panel collapsing them onto one line was exactly the kind of
+     drift between the two surfaces this work exists to remove. */
+  white-space: pre-wrap;
+  /* A body is a question or a failure, and both can be long. Cap it rather
+     than letting one card push the rest of the stack off screen. */
+  max-height: 9rem;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+
+.notif-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.notif-row .input {
+  flex: 1 1 8rem;
+  min-width: 0;
+}
+
+/* A suggestion that has been clicked into the box, still editable. */
+.notif-chip[aria-pressed='true'] {
+  border-color: var(--rule-strong);
+  background: var(--raised);
+}
+
+@media (max-width: 40rem) {
+  .notif-stack {
+    right: var(--s-2);
+    left: var(--s-2);
+    bottom: var(--s-2);
+    width: auto;
+  }
+}

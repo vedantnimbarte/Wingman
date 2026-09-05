@@ -300,6 +300,35 @@ export type RunState = {
   pr_url: string | null
 }
 
+
+/* ── Notifications ─────────────────────────────────────────────────────────
+ *
+ * The actionable cards the desktop popup shows, served from the same inbox.
+ * Named `WingmanNotification` because `Notification` is the DOM class, which
+ * this module also uses.
+ */
+
+export type NotificationAction = {
+  id: string
+  label: string
+  /** Present when the button is a run control (approve/veto/abort). */
+  control?: unknown
+}
+
+export type WingmanNotification = {
+  id: string
+  /** `escalation` | `decision` | `progress` | `info`. */
+  severity: string
+  title: string
+  body?: string
+  project?: string | null
+  run_dir?: string | null
+  created_at: number
+  expires_at?: number | null
+  actions?: NotificationAction[]
+  free_text?: boolean
+}
+
 export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
 
 /**
@@ -800,6 +829,28 @@ export const api = {
   control: (project: string, runId: string, action: ControlAction, body: { task?: string } = {}) =>
     request<unknown>(
       `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/${action}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  notifications: () =>
+    request<{ notifications: WingmanNotification[] }>('/v1/notifications').then(
+      (r) => r.notifications ?? [],
+    ),
+
+  /**
+   * Answer one card. Both fields absent is a dismissal, which still records a
+   * reply so the card does not come back.
+   *
+   * A button carrying a control command routes to the run instead of the
+   * replies file; the server decides which, so the page does not have to.
+   */
+  answerNotification: (id: string, body: { action?: string | null; text?: string | null }) =>
+    request<{ answered: string; via: 'reply' | 'control' }>(
+      `/v1/notifications/${encodeURIComponent(id)}/reply`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

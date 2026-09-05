@@ -23,6 +23,7 @@ pub mod auth;
 mod board;
 mod child;
 mod http;
+mod notifications;
 mod pilot;
 pub mod projects;
 mod push;

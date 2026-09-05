@@ -12,7 +12,10 @@ use tokio::net::TcpStream;
 
 use super::http::{self, Request};
 use super::projects::Project;
-use super::{admin, auth, board, pilot, projects, push, sessions, table, timeline, ui, ServeState};
+use super::{
+    admin, auth, board, notifications, pilot, projects, push, sessions, table, timeline, ui,
+    ServeState,
+};
 
 /// Handle one connection start to finish.
 pub async fn handle(state: Arc<ServeState>, mut sock: TcpStream) -> std::io::Result<()> {
@@ -70,6 +73,10 @@ async fn dispatch(
         ("GET", ["v1", "config"]) => admin::get_config(state, sock).await,
         ("GET", ["v1", "config", "schema"]) => admin::get_config_schema(sock).await,
         ("GET", ["v1", "events"]) => events(state, sock).await,
+        // Global rather than project-scoped: the inbox lives in the global
+        // dir because the processes that write to it span projects.
+        ("GET", ["v1", "notifications"]) => notifications::list(sock).await,
+        ("POST", ["v1", "notifications", id, "reply"]) => notifications::reply(id, req, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
 
         // The board is global — one store spanning every project — so it sits
@@ -201,6 +208,11 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
               "returns": "allowlisted projects with branch and index state" },
             { "method": "GET", "path": "/v1/events", "auth": true,
               "returns": "text/event-stream of run transitions across every project" },
+            { "method": "GET", "path": "/v1/notifications", "auth": true,
+              "returns": "open actionable cards — the inbox the desktop popup reads" },
+            { "method": "POST", "path": "/v1/notifications/{id}/reply", "auth": true,
+              "body": { "action": "string?", "text": "string?" },
+              "returns": "{answered, via} — via is \"control\" when the button carries a run command, else \"reply\"; both fields absent dismisses" },
 
             { "method": "GET", "path": "/v1/projects/{project}/pilot/runs", "auth": true,
               "returns": "run summaries, most recent first" },
