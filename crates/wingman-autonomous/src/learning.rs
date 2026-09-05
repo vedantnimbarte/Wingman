@@ -198,12 +198,8 @@ pub fn stats_path(home: &Path) -> PathBuf {
 
 /// Append one record. Creates the file (and parent dir) if missing.
 pub fn append_stat(path: &Path, rec: &StatRecord) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut f = OpenOptions::new().create(true).append(true).open(path)?;
     let line = serde_json::to_string(rec).map_err(io::Error::other)?;
-    writeln!(f, "{line}")
+    wingman_config::append_line(path, &line)
 }
 
 /// Load all records, tolerating blank/corrupt lines (skips them). Returns

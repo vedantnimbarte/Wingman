@@ -141,9 +141,10 @@ impl RunStore {
                     parsed_any = true;
                 }
                 Err(source) => {
-                    // A torn final line is the expected result of a crash /
-                    // Ctrl+C mid-append (append writes the body and the newline
-                    // as separate syscalls). Tolerate it so the run stays
+                    // A torn final line is the expected result of a crash or
+                    // Ctrl+C mid-append: the line goes out as one write, but a
+                    // process killed between the write and the flush can still
+                    // leave a partial one behind. Tolerate it so the run stays
                     // resumable — the lost event was never durably committed
                     // anyway. Require a valid prefix first, so a wholly-garbage
                     // log is still rejected as corruption rather than silently
@@ -247,8 +248,14 @@ impl RunStore {
     /// be rebuilt by `load`.
     pub async fn append(&mut self, event: Event) -> Result<(), StoreError> {
         let line = serde_json::to_string(&event)?;
-        self.log.write_all(line.as_bytes()).await?;
-        self.log.write_all(b"\n").await?;
+        // One write for the line and its newline. This store holds the only
+        // handle on `tasks.jsonl` so nothing races it today, but the two-write
+        // shape is what tore `wingman-session`, and the rule is cheaper to keep
+        // than to re-derive. See `wingman_config::append_line`.
+        let mut buf = String::with_capacity(line.len() + 1);
+        buf.push_str(&line);
+        buf.push('\n');
+        self.log.write_all(buf.as_bytes()).await?;
         self.log.flush().await?;
 
         apply(&mut self.state, &event);

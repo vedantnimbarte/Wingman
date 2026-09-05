@@ -2221,6 +2221,39 @@ fn read_raw(path: &Path) -> Result<toml::Table, ConfigError> {
 /// a moment where it exists group/world-readable. On Windows it inherits the
 /// parent directory ACL (the user profile), which is the platform norm; there
 /// is no portable equivalent of the Unix mode bits.
+/// Append one line to a line-oriented file, with **one** write syscall.
+///
+/// Not `writeln!`: that goes through `write_fmt`, which issues a separate write
+/// for the body and for the newline. Two writes mean another appender — or the
+/// same process on a second handle — can land a line between them, and the
+/// reader then sees two records concatenated onto one line. That is not
+/// theoretical: it took `coverage` red on `wingman-session`, whose
+/// `SessionLog::write` had exactly this shape.
+///
+/// With a single `write_all` the append is atomic: on POSIX, `O_APPEND` seeks
+/// and writes atomically with respect to other writers, and Rust's
+/// `append(true)` asks Win32 for `FILE_APPEND_DATA` without `FILE_WRITE_DATA`,
+/// which is the documented atomic-append mode. (Not true over NFS, which has no
+/// atomic append — not worth engineering around for local state files.)
+///
+/// `line` must not contain the trailing newline; this adds it. Parent
+/// directories are created.
+pub fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let mut buf = String::with_capacity(line.len() + 1);
+    buf.push_str(line);
+    buf.push('\n');
+    f.write_all(buf.as_bytes())
+}
+
 pub fn write_private(path: &Path, text: &str) -> Result<(), ConfigError> {
     use std::io::Write as _;
 
@@ -2881,6 +2914,45 @@ pub fn json_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── append_line ───────────────────────────────────────────────────── */
+
+    #[test]
+    fn append_line_adds_the_newline_and_creates_parents() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("nested").join("log.jsonl");
+        append_line(&p, "{\"a\":1}").unwrap();
+        append_line(&p, "{\"a\":2}").unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert_eq!(text, "{\"a\":1}\n{\"a\":2}\n");
+    }
+
+    #[test]
+    fn append_line_is_atomic_under_concurrency() {
+        // The property the whole helper exists for. `writeln!` fails this:
+        // it issues the body and the newline as separate writes, so another
+        // appender lands between them and two records share a line.
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("log.jsonl");
+        std::thread::scope(|s| {
+            for t in 0..8 {
+                let p = p.clone();
+                s.spawn(move || {
+                    for i in 0..64 {
+                        append_line(&p, &format!("{{\"t\":{t},\"i\":{i}}}")).unwrap();
+                    }
+                });
+            }
+        });
+
+        let text = std::fs::read_to_string(&p).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 8 * 64, "a line was lost or merged");
+        for l in lines {
+            serde_json::from_str::<serde_json::Value>(l)
+                .unwrap_or_else(|e| panic!("torn line {l:?}: {e}"));
+        }
+    }
 
     #[test]
     fn no_preset_keeps_every_tool() {

@@ -238,41 +238,35 @@ fn global() -> std::io::Result<PathBuf> {
     crate::global_dir().map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-/// Append one line, with **one** write syscall.
+/// Append one line, creating the file 0600 on unix.
 ///
-/// Not `writeln!`: that goes through `write_fmt`, which issues a separate write
-/// for the body and for the newline — `wingman_autonomous::store` already
-/// tolerates a torn final line for exactly that reason. A per-run control file
-/// gets away with it because one process appends at a time; this file is
-/// written by a detached run, its workers, a TUI and a `serve` child at once.
-///
-/// With a single `write_all` the append is atomic: on POSIX, `O_APPEND` seeks
-/// and writes atomically with respect to other writers, and Rust's
-/// `append(true)` asks Win32 for `FILE_APPEND_DATA` without `FILE_WRITE_DATA`,
-/// which is the documented atomic-append mode. (Not true over NFS, which has no
-/// atomic append — not worth engineering around for a local notification file.)
+/// The write discipline is [`crate::append_line`]'s — one syscall for the line
+/// and its newline, because this file is written by a detached run, its
+/// workers, a TUI and a `serve` child at once. What is specific here is the
+/// *mode*: a second local user must not be able to inject a notification
+/// carrying an attacker-chosen `run_dir`, and there must be no window where the
+/// file exists world-writable. So the file is created private first, and only
+/// then appended to; `create_new` means an existing file keeps whatever mode it
+/// already had rather than being reopened for a chmod race.
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).append(true);
-    // 0600 at creation rather than chmod after: a second local user must not be
-    // able to inject a notification carrying an attacker-chosen `run_dir`, and
-    // there must be no window where the file exists world-writable. Same
-    // reasoning as `write_private`.
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
     }
-    let mut f = opts.open(path)?;
-    let mut buf = String::with_capacity(line.len() + 1);
-    buf.push_str(line);
-    buf.push('\n');
-    f.write_all(buf.as_bytes())
+    crate::append_line(path, line)
 }
 
 /// Append a notification to the inbox in `dir`.
