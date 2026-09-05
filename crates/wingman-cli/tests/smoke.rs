@@ -350,3 +350,76 @@ impl Drop for Scratch {
 }
 
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/* ── WINGMAN_HOME ──────────────────────────────────────────────────────────
+ *
+ * The override exists so a whole install can be pointed at a scratch
+ * directory. These run the real binary, which is the only way to prove it:
+ * the value is resolved once per process, so an in-process test cannot vary
+ * it — and a test that could would be racing every other test's environment.
+ */
+
+#[test]
+fn wingman_home_relocates_the_global_directory() {
+    let scratch = Scratch::new();
+    let out = wingman()
+        .env(wingman_config::HOME_ENV, &scratch.dir)
+        .args(["config", "paths"])
+        .output()
+        .expect("run config paths");
+
+    assert!(out.status.success(), "config paths should exit 0");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let want = scratch.dir.join("config.toml");
+    assert!(
+        text.contains(&want.display().to_string()),
+        "global config should resolve under WINGMAN_HOME.\nwant: {}\ngot:\n{text}",
+        want.display()
+    );
+}
+
+#[test]
+fn without_wingman_home_the_global_directory_is_unchanged() {
+    // The default has to keep working, or every existing install moves.
+    let out = wingman()
+        .env_remove(wingman_config::HOME_ENV)
+        .args(["config", "paths"])
+        .output()
+        .expect("run config paths");
+
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let want = wingman_config::user_home()
+        .expect("a home directory")
+        .join(".wingman")
+        .join("config.toml");
+    assert!(
+        text.contains(&want.display().to_string()),
+        "want: {}\ngot:\n{text}",
+        want.display()
+    );
+}
+
+#[test]
+fn a_relative_wingman_home_is_refused_by_name() {
+    // Resolving it against the cwd would bind the global dir to whatever
+    // directory happened to be current at first use. The refusal has to name
+    // the variable, or it is unfindable.
+    let out = wingman()
+        .env(wingman_config::HOME_ENV, ".wingman-scratch")
+        .args(["config", "paths"])
+        .output()
+        .expect("run config paths");
+
+    assert!(
+        !out.status.success(),
+        "a relative WINGMAN_HOME must not run"
+    );
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("WINGMAN_HOME"), "must name the var: {text}");
+    assert!(text.contains("absolute"), "must say why: {text}");
+}

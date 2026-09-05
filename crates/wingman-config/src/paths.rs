@@ -12,17 +12,94 @@
 
 use crate::ConfigError;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-pub(crate) fn home() -> Result<PathBuf, ConfigError> {
+/// Relocates the global directory. Named and shaped after `CARGO_HOME` and
+/// `RUSTUP_HOME`: it **is** the directory, not the home to hang `.wingman` off.
+pub const HOME_ENV: &str = "WINGMAN_HOME";
+
+/// The user's actual home directory, whatever [`HOME_ENV`] says.
+///
+/// This is for other tools' dotfiles — `~/.claude/skills`, a skill pack's
+/// install root — which live beside the global dir today but are not part of
+/// it. Callers used to reach them with `global_dir().parent()`, which worked
+/// only because the global dir was always `~/.wingman`; with the override that
+/// coincidence would point them at a scratch directory's parent.
+///
+/// Use [`global_dir`] for anything that belongs to Wingman.
+pub fn user_home() -> Result<PathBuf, ConfigError> {
     Ok(directories::BaseDirs::new()
         .ok_or(ConfigError::NoHome)?
         .home_dir()
         .to_path_buf())
 }
 
-/// Returns `~/.wingman/`. Pure path computation — does **not** create.
+/// Resolve [`HOME_ENV`] once, keeping the outcome — error included.
+///
+/// Read once rather than per call for a reason beyond the syscall: a process
+/// whose global directory moved underneath it would write credentials to one
+/// place and read them from another. `std::env::set_var` is also unsound to
+/// race in a threaded program, and this crate is used from one.
+///
+/// Tests do not set this. Everything that needs a temporary global dir takes
+/// one as a parameter — `inbox::append_to`, `read_open`, `ReplyReader::at_end_in`
+/// — which works under parallel tests, as an env var never could.
+/// `Err` carries `(value, reason)` rather than a `ConfigError`, which is not
+/// `Clone` — it holds the toml crate's errors, and making it clonable to cache
+/// one bad env var would be the tail wagging the dog.
+fn resolved_override() -> &'static Result<Option<PathBuf>, (String, String)> {
+    static RESOLVED: OnceLock<Result<Option<PathBuf>, (String, String)>> = OnceLock::new();
+    RESOLVED.get_or_init(|| validate_home(std::env::var_os(HOME_ENV).as_deref()))
+}
+
+/// The rules, separated from the environment so both outcomes are testable.
+///
+/// An env var cannot be varied inside a parallel test binary — `set_var` is
+/// unsound to race and [`resolved_override`] caches — so the logic has to be
+/// reachable without one.
+fn validate_home(raw: Option<&std::ffi::OsStr>) -> Result<Option<PathBuf>, (String, String)> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    if path.to_string_lossy().trim().is_empty() {
+        // An empty value is how a shell spells "unset" by accident
+        // (`WINGMAN_HOME=$UNSET wingman …`), and rooting the whole global
+        // directory at "" would be a spectacular way to honour it.
+        return Ok(None);
+    }
+    if path.is_relative() {
+        // Resolving this against the current directory would bind the global
+        // dir to whichever cwd happened to be current at first use — and
+        // project resolution here already moves the process cwd. A refusal at
+        // startup beats a config directory that moves underneath the process.
+        return Err((
+            path.display().to_string(),
+            "must be an absolute path".to_string(),
+        ));
+    }
+    Ok(Some(path))
+}
+
+/// Returns `~/.wingman/`, or [`HOME_ENV`] when it is set. Pure path
+/// computation — does **not** create.
+///
+/// The override exists so a whole Wingman install can be pointed at a scratch
+/// directory: running `serve` against throwaway config and credentials, a
+/// sandboxed agent, or two versions side by side. It deliberately does not move
+/// `~/.claude/settings.json`, which the Claude Code hook import reads — that is
+/// another tool's directory, and relocating it from *our* env var would be
+/// presumptuous.
 pub fn global_dir() -> Result<PathBuf, ConfigError> {
-    Ok(home()?.join(".wingman"))
+    match resolved_override() {
+        Ok(Some(dir)) => Ok(dir.clone()),
+        Ok(None) => Ok(user_home()?.join(".wingman")),
+        Err((value, reason)) => Err(ConfigError::BadEnv {
+            name: HOME_ENV.to_string(),
+            value: value.clone(),
+            reason: reason.clone(),
+        }),
+    }
 }
 
 /// Returns `~/.wingman/`, creating it on demand.
@@ -86,7 +163,7 @@ pub fn find_project_root(start: &Path) -> PathBuf {
             current = parent.to_path_buf();
         }
     }
-    let home_dir = home().ok();
+    let home_dir = user_home().ok();
     let mut cursor: &Path = &current;
     loop {
         let is_home = home_dir.as_deref() == Some(cursor);
@@ -207,5 +284,51 @@ mod tests {
         let found = find_project_root(&nested);
         assert_eq!(found, tmp);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /* ── WINGMAN_HOME ──────────────────────────────────────────────────── */
+
+    fn v(s: &str) -> Result<Option<PathBuf>, (String, String)> {
+        validate_home(Some(std::ffi::OsStr::new(s)))
+    }
+
+    #[test]
+    fn an_absolute_override_is_taken_as_the_global_dir_itself() {
+        // `CARGO_HOME` semantics: the value *is* the directory, with no
+        // `.wingman` appended to it.
+        let dir = if cfg!(windows) { r"C:\wm" } else { "/tmp/wm" };
+        assert_eq!(v(dir).unwrap(), Some(PathBuf::from(dir)));
+    }
+
+    #[test]
+    fn unset_and_empty_both_mean_the_real_home() {
+        assert_eq!(validate_home(None).unwrap(), None);
+        // `WINGMAN_HOME=$UNSET wingman …` — a shell spelling "unset" by
+        // accident must not root the global directory at "".
+        assert_eq!(v("").unwrap(), None);
+        assert_eq!(v("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn a_relative_override_is_refused_rather_than_resolved() {
+        // Silently binding this to the first cwd would be worse than refusing:
+        // project resolution moves the process cwd, so the global dir would
+        // depend on call order.
+        let (value, reason) = v(".wingman-test").unwrap_err();
+        assert_eq!(value, ".wingman-test");
+        assert!(reason.contains("absolute"), "{reason}");
+    }
+
+    #[test]
+    fn the_error_names_the_variable_so_it_can_be_found() {
+        // It surfaces as a ConfigError, which is what the user actually reads.
+        let e = ConfigError::BadEnv {
+            name: HOME_ENV.to_string(),
+            value: "rel".into(),
+            reason: "must be an absolute path".into(),
+        };
+        let text = e.to_string();
+        assert!(text.contains("WINGMAN_HOME"), "{text}");
+        assert!(text.contains("absolute"), "{text}");
     }
 }

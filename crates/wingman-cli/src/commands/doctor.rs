@@ -205,9 +205,9 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     // discover the option is to be told it applies to you.
     if !cfg.hooks.import_claude_code {
         let candidates = [
-            wingman_config::global_dir()
+            wingman_config::user_home()
                 .ok()
-                .and_then(|d| d.parent().map(|h| h.join(".claude").join("settings.json"))),
+                .map(|h| h.join(".claude").join("settings.json")),
             Some(paths.root.join(".claude").join("settings.json")),
         ];
         let found: Vec<String> = candidates

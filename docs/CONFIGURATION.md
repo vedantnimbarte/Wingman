@@ -204,6 +204,7 @@ file = true
 
 | Variable                            | Effect                                                              |
 | ----------------------------------- | ------------------------------------------------------------------- |
+| `WINGMAN_HOME`                      | The global directory itself, replacing `~/.wingman`. Absolute only. |
 | `WINGMAN_MODEL`                     | Overrides `default_model`. Same syntax as `--model`.                |
 | `WINGMAN_PROVIDER`                  | Overrides `default_provider`.                                       |
 | `WINGMAN_PERMISSION_MODE`           | `read-only` \| `auto-edit` \| `yolo`.                               |
@@ -218,6 +219,31 @@ file = true
 
 Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
 is resolved against the environment at load time.
+
+### `WINGMAN_HOME`
+
+Named and shaped after `CARGO_HOME` and `RUSTUP_HOME`: the value **is** the
+directory, with no `.wingman` appended to it.
+
+```bash
+WINGMAN_HOME=/tmp/wm-scratch wingman serve
+```
+
+It moves the whole global directory — config, credentials, logs, memory, the
+notification inbox — so an install can be pointed at a scratch directory for a
+throwaway `serve`, a sandboxed agent, or two versions side by side.
+
+Three things about it are deliberate:
+
+- **It must be absolute.** A relative value is refused at startup rather than
+  resolved. Project discovery moves the process's working directory, so a
+  relative path would bind the global directory to whichever directory happened
+  to be current at first use — a config file that moves is worse than a refusal.
+- **It is read once per process.** A global directory that moved mid-run would
+  write credentials to one place and read them from another.
+- **It does not move other tools' directories.** `~/.claude/settings.json` and
+  `~/.claude/skills` are still read from the real home. They belong to another
+  tool, and relocating them from a Wingman variable would be presumptuous.
 
 ## Reasoning
 
@@ -338,7 +364,7 @@ still `curl`. The shell denylist remains a convenience, not a boundary.
 └── target/                 # build output (gitignored)
 ```
 
-On the user's machine:
+On the user's machine (or wherever `WINGMAN_HOME` points):
 
 ```
 ~/.wingman/
