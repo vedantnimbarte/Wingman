@@ -49,6 +49,14 @@ updates:
       interval: weekly
     open-pull-requests-limit: 3
 
+  # The Tauri CLI, pinned where tauri.conf.json lives (decision 0019). Separate
+  # from the UI project above because the CLI has to run from this directory.
+  - package-ecosystem: npm
+    directory: "/desktop/notifier"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
   # The VS Code extension has its own npm toolchain.
   - package-ecosystem: npm
     directory: "/editors/vscode"

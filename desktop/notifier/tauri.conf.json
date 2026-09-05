@@ -32,10 +32,25 @@
     ]
   },
   "bundle": {
-    "active": false,
+    "active": true,
+    "targets": [
+      "nsis",
+      "deb",
+      "appimage",
+      "dmg"
+    ],
     "icon": [
       "icons/icon.ico",
       "icons/icon.png"
-    ]
+    ],
+    "shortDescription": "Wingman notification popups",
+    "longDescription": "Actionable desktop notifications for Wingman: plan approvals, agent questions, and run failures, answered from the popup.",
+    "publisher": "Wingman",
+    "category": "DeveloperTool",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }

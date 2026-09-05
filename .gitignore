@@ -38,4 +38,6 @@ desktop/notifier/target/
 # JSON referenced only by an editor `$schema` hint in capabilities/.
 desktop/notifier/gen/
 desktop/notifier/ui/node_modules/
+# The Tauri CLI, pinned for bundling (decision 0019).
+desktop/notifier/node_modules/
 desktop/notifier/ui/dist/
