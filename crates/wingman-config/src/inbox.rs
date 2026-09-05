@@ -54,6 +54,18 @@ const ALIVE_WINDOW: Duration = Duration::from_secs(30);
 /// wall of stale cards.
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
+/// Inbox size past which [`compact_if_large`] is worth the risk it carries.
+/// At roughly 200 bytes a line this is ~50k notifications, which no honest week
+/// produces — so a file that reaches it is one nobody has compacted in a very
+/// long time, not one under active load.
+const COMPACT_BYTES: u64 = 10 * 1024 * 1024;
+
+/// How many reply lines survive a compaction. Every reply refers to a
+/// notification the same pass just dropped, so none are load-bearing — but a
+/// [`ReplyReader`] may be mid-wait on an answer written seconds ago, and an
+/// unpolled answer is necessarily among the most recent lines.
+const KEEP_REPLIES: usize = 256;
+
 /// One thing worth interrupting someone for.
 ///
 /// Field order is the wire order, and `encoding_is_the_documented_shape` pins
@@ -303,10 +315,9 @@ fn answered(dir: &Path) -> HashSet<String> {
 /// window, rotate-then-recreate loses whatever is still held on the old fd —
 /// and there is nothing on this channel worth that.
 ///
-// ponytail: both files grow forever. ~200 bytes a line and a few dozen lines on
-// a heavy day, and readers are O(1) via byte offset, so this is a disk-space
-// ceiling rather than a correctness or latency one. Add a size-triggered
-// rewrite (temp-and-rename, as `store::snapshot` does) if one passes ~10 MB.
+/// Both files would otherwise grow forever; [`compact_if_large`] is the
+/// size-triggered rewrite that bounds them, and the desktop app calls it at
+/// startup.
 pub fn read_open(dir: &Path) -> Vec<Notification> {
     let Ok(bytes) = std::fs::read(inbox_path(dir)) else {
         return Vec::new();
@@ -388,9 +399,10 @@ impl ReplyReader {
     ///
     /// Shrinkage is detected by length alone, exactly as `ControlReader` does,
     /// so a file truncated and regrown to the *same* byte count reads as "no
-    /// change". Nothing truncates this file by design — the branch is there so a
-    /// hand-deleted file cannot wedge the reader forever — and the next append
-    /// moves the length past the stale offset anyway.
+    /// change". [`compact`] is the one thing that shrinks it, and re-reading
+    /// from the top is what makes that safe: a reader mid-wait re-sees the kept
+    /// tail, which is where its own answer would be. Re-delivering another
+    /// notification's reply is harmless — every caller filters by its own id.
     pub fn poll(&mut self) -> Vec<Reply> {
         let Ok(bytes) = std::fs::read(&self.path) else {
             return Vec::new();
@@ -409,6 +421,111 @@ impl ReplyReader {
             .filter_map(Reply::parse)
             .collect()
     }
+}
+
+/* ── Compaction ───────────────────────────────────────────────────────── */
+
+/// Replace `path` with `body`, but only if it is still `expect_len` bytes.
+///
+/// Every trim scheme races a concurrent appender: lines written between the
+/// read and the rename land in the file that gets unlinked. The length check
+/// does not close that window — nothing portable does, short of a lock — it
+/// narrows it to the gap between the last stat and the rename, and turns the
+/// common case (an appender that wrote while we built the replacement) into a
+/// skip. A skipped compaction costs nothing; the next startup retries.
+fn rewrite(path: &Path, body: &str, expect_len: u64) -> std::io::Result<bool> {
+    let current = || std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if current() != expect_len {
+        return Ok(false);
+    }
+    let tmp = path.with_extension("compacting");
+    crate::write_private(&tmp, body).map_err(|e| std::io::Error::other(e.to_string()))?;
+    // As late as possible, because building the replacement above takes time.
+    if current() != expect_len {
+        let _ = std::fs::remove_file(&tmp);
+        return Ok(false);
+    }
+    // `rename` replaces an existing file on both platforms, and Rust opens with
+    // `FILE_SHARE_DELETE` on Windows, so an appender holding the old handle does
+    // not block this. It just keeps writing to the file we unlinked — the race
+    // the length checks narrow.
+    match std::fs::rename(&tmp, path) {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// [`compact`], but only once the inbox has passed [`COMPACT_BYTES`].
+///
+/// This is the form callers want: compaction trades a small chance of dropping
+/// a notification against unbounded growth, and that trade is only worth making
+/// on a file that has actually grown.
+pub fn compact_if_large(dir: &Path) -> std::io::Result<bool> {
+    let len = match std::fs::metadata(inbox_path(dir)) {
+        Ok(m) => m.len(),
+        Err(_) => return Ok(false),
+    };
+    if len < COMPACT_BYTES {
+        return Ok(false);
+    }
+    compact(dir)
+}
+
+/// [`compact_if_large`] against `~/.wingman/`.
+pub fn compact_if_large_global() -> std::io::Result<bool> {
+    compact_if_large(&global()?)
+}
+
+/// Rewrite both files, keeping only what can still matter: the notifications
+/// [`read_open`] would return, and the tail of the replies.
+///
+/// The inbox goes first. A reader landing between the two rewrites sees an
+/// inbox with the answered ones already gone and a replies file that still
+/// mentions them, which is consistent; the other order would briefly resurrect
+/// an answered notification as open.
+///
+/// Returns whether it rewrote. `false` means the inbox changed underneath and
+/// the attempt was abandoned, not that anything failed.
+pub fn compact(dir: &Path) -> std::io::Result<bool> {
+    let inbox = inbox_path(dir);
+    let Ok(bytes) = std::fs::read(&inbox) else {
+        return Ok(false);
+    };
+    let len = bytes.len() as u64;
+    let done = answered(dir);
+    let now = now_secs();
+    let mut kept = String::new();
+    for n in String::from_utf8_lossy(&bytes)
+        .lines()
+        .filter_map(Notification::parse)
+        .filter(|n| n.open_at(now) && !done.contains(&n.id))
+    {
+        kept.push_str(&n.encode());
+        kept.push('\n');
+    }
+    if !rewrite(&inbox, &kept, len)? {
+        return Ok(false);
+    }
+
+    // Best-effort: the inbox is the file that grows, and a replies file left
+    // long is only wasted bytes.
+    let replies = replies_path(dir);
+    if let Ok(rbytes) = std::fs::read(&replies) {
+        let rlen = rbytes.len() as u64;
+        let text = String::from_utf8_lossy(&rbytes);
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        if lines.len() > KEEP_REPLIES {
+            let tail = lines[lines.len() - KEEP_REPLIES..].join(
+                "
+",
+            );
+            let _ = rewrite(&replies, &format!("{tail}\n"), rlen);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -641,5 +758,131 @@ mod tests {
         };
         assert_eq!(r.answer(), Some("sqlite"), "blank text falls back");
         assert_eq!(reply("a").answer(), None);
+    }
+
+    /* ── Compaction ───────────────────────────────────────────────────── */
+
+    #[test]
+    fn compaction_keeps_the_open_and_drops_the_answered() {
+        let d = tempdir().unwrap();
+        let dir = d.path();
+        for id in ["a", "b", "c"] {
+            append_to(dir, &note(id)).unwrap();
+        }
+        // `b` gets answered, so it is no longer worth keeping.
+        append_reply_to(
+            dir,
+            &Reply {
+                id: "b".into(),
+                text: Some("yes".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(compact(dir).unwrap());
+
+        let open: Vec<String> = read_open(dir).into_iter().map(|n| n.id).collect();
+        assert_eq!(open, vec!["a".to_string(), "c".to_string()]);
+        // And the answered one is gone from the file, not merely filtered.
+        let raw = std::fs::read_to_string(inbox_path(dir)).unwrap();
+        assert!(!raw.contains("\"b\""), "{raw}");
+    }
+
+    #[test]
+    fn compaction_drops_the_expired() {
+        let d = tempdir().unwrap();
+        let dir = d.path();
+        append_to(dir, &note("live")).unwrap();
+        append_to(
+            dir,
+            &Notification {
+                expires_at: Some(now_secs().saturating_sub(1)),
+                ..note("stale")
+            },
+        )
+        .unwrap();
+
+        assert!(compact(dir).unwrap());
+        let raw = std::fs::read_to_string(inbox_path(dir)).unwrap();
+        assert!(raw.contains("live"));
+        assert!(!raw.contains("stale"), "{raw}");
+    }
+
+    #[test]
+    fn compaction_is_abandoned_when_the_inbox_changed_underneath() {
+        let d = tempdir().unwrap();
+        let dir = d.path();
+        append_to(dir, &note("a")).unwrap();
+
+        // Stand in for a concurrent appender: `rewrite` is told to expect a
+        // length the file no longer has, which is what a racing writer produces.
+        let wrong = std::fs::metadata(inbox_path(dir)).unwrap().len() + 1;
+        assert!(!rewrite(&inbox_path(dir), "", wrong).unwrap());
+
+        // Nothing was touched, and no temp file was left behind.
+        assert_eq!(read_open(dir).len(), 1);
+        assert!(!inbox_path(dir).with_extension("compacting").exists());
+    }
+
+    #[test]
+    fn compaction_keeps_a_tail_of_replies_so_a_waiting_reader_is_not_robbed() {
+        let d = tempdir().unwrap();
+        let dir = d.path();
+        append_to(dir, &note("open")).unwrap();
+        for i in 0..(KEEP_REPLIES + 50) {
+            append_reply_to(
+                dir,
+                &Reply {
+                    id: format!("old-{i}"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // A reader that started before the newest answer landed.
+        let mut reader = ReplyReader::at_end_in(dir);
+        append_reply_to(
+            dir,
+            &Reply {
+                id: "mine".into(),
+                text: Some("42".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(compact(dir).unwrap());
+
+        // Shrunk, but the answer this reader is waiting on survived and still
+        // reaches it — that is what the kept tail is for.
+        let lines = std::fs::read_to_string(replies_path(dir)).unwrap();
+        assert_eq!(lines.lines().count(), KEEP_REPLIES);
+        let seen = reader.poll();
+        assert!(
+            seen.iter()
+                .any(|r| r.id == "mine" && r.answer() == Some("42")),
+            "the waiting reader lost its answer"
+        );
+    }
+
+    #[test]
+    fn compaction_only_runs_once_the_inbox_is_large() {
+        let d = tempdir().unwrap();
+        let dir = d.path();
+        append_to(dir, &note("a")).unwrap();
+        append_reply_to(
+            dir,
+            &Reply {
+                id: "a".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Well under the threshold: left alone, answered line and all.
+        assert!(!compact_if_large(dir).unwrap());
+        assert!(std::fs::read_to_string(inbox_path(dir))
+            .unwrap()
+            .contains("\"a\""));
     }
 }

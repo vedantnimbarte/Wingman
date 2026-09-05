@@ -35,6 +35,17 @@ pub fn run() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // The one moment compaction is cheap and safe: the popup is provably not
+    // running (checked just above), so the only writers left are pilot runs,
+    // and `compact_if_large` abandons the attempt if one appends underneath.
+    // Doing it here rather than in the app keeps the inbox format in one crate
+    // — the notifier is a separate workspace that cannot see `wingman-config`.
+    match wingman_config::inbox::compact_if_large_global() {
+        Ok(true) => eprintln!("[notify] compacted the notification inbox."),
+        Ok(false) => {}
+        Err(e) => eprintln!("[notify] could not compact the inbox: {e}"),
+    }
+
     let bin = beside_this_exe().ok_or_else(|| {
         anyhow!(
             "{BIN} not found next to the wingman binary.\n\
