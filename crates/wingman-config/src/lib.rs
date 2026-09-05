@@ -19,7 +19,7 @@ pub mod trust;
 pub use paths::{
     ensure_global_dir, ensure_global_logs_dir, find_owning_project_root, find_project_root,
     global_config_path, global_credentials_path, global_dir, global_logs_dir, project_dir,
-    ProjectPaths,
+    user_home, ProjectPaths, HOME_ENV,
 };
 
 use serde::{Deserialize, Serialize};
@@ -1276,7 +1276,7 @@ impl Config {
             return;
         }
         let mut report = claude_hooks::ImportReport::default();
-        if let Ok(home) = paths::home() {
+        if let Ok(home) = paths::user_home() {
             let r = claude_hooks::import_file(
                 &home.join(".claude").join("settings.json"),
                 false,
