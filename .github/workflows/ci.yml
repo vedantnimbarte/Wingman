@@ -150,6 +150,14 @@ jobs:
         run: cargo install cargo-audit --locked
       - name: cargo audit
         run: cargo audit
+      # The notifier keeps its own lockfile (decision 0018), so the scan above
+      # does not reach it. Non-blocking on purpose and for the same reason that
+      # record gives for excluding it from the workspace: an advisory somewhere
+      # in the webview tree must not turn a required gate red on a Rust PR. It
+      # reuses the cargo-audit installed above, so it costs seconds.
+      - name: cargo audit (notifier)
+        continue-on-error: true
+        run: cargo audit --file desktop/notifier/Cargo.lock
 
   # Type-check and bundle the VS Code extension so its TypeScript can't rot
   # silently (it lives in its own npm toolchain, separate from the Rust build).

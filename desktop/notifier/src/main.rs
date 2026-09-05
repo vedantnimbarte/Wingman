@@ -160,11 +160,7 @@ fn reply(
             .open
             .lock()
             .map_err(|_| "inbox lock poisoned".to_string())?;
-        let at = open
-            .iter()
-            .position(|c| c.id == id)
-            .ok_or_else(|| format!("no open notification {id}"))?;
-        open.remove(at)
+        tail::take_card(&mut open, &id)?
     };
 
     tail::answer(&state.dir, &card, action.as_deref(), text.as_deref())

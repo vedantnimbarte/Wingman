@@ -29,6 +29,26 @@ updates:
       # ref follows it by hand.
       - dependency-name: dtolnay/rust-toolchain
 
+  # The notifier is a separate cargo workspace with its own lockfile (decision
+  # 0018), so the root cargo entry above does not reach it. Without this it is
+  # the one dependency tree in the repo nobody ever updates — and it is the one
+  # holding a webview.
+  - package-ecosystem: cargo
+    directory: "/desktop/notifier"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+    groups:
+      patch-and-minor:
+        update-types: ["minor", "patch"]
+
+  # ...and its UI has its own npm toolchain, like the extension below.
+  - package-ecosystem: npm
+    directory: "/desktop/notifier/ui"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 3
+
   # The VS Code extension has its own npm toolchain.
   - package-ecosystem: npm
     directory: "/editors/vscode"

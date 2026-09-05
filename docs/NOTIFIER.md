@@ -74,9 +74,19 @@ ask_user_desktop_timeout_secs = 120
 |---|---|---|
 | Plan awaiting approval | the pilot approval gate | Approve / Veto |
 | wingman is asking | the `ask_user` tool | the suggested answers, plus a text box |
-| Task failed / Run failed / Run aborted | the orchestrator's failure watchdog | none — informational |
+| Task failed / N tasks failed | the orchestrator's failure watchdog | Abort run |
+| Run failed / Run aborted | the same watchdog | none — the run is already over |
 | Run finished | end-of-run reporting | none |
 | Run started | `pilot run` | none |
+
+Failures raised within a few seconds of each other become **one** card. The
+common shape is a single broken dependency taking three tasks down and then the
+run with them, which would otherwise be four cards to dismiss one at a time.
+When the run itself is in the batch it wins the title and the tasks are listed
+underneath it.
+
+The abort button appears only while the run is still going. On a card that
+already reports the run failing it would do nothing, so it is not offered.
 
 Failures and gates never disappear on their own. Only plain news auto-dismisses,
 after a few seconds — a card somebody owes an answer to that expires off the
@@ -104,6 +114,22 @@ If the timeout passes with no answer, the tool returns the same "proceed with
 your best judgment" note. **A headless run is never blocked longer than this.**
 And if the popup is not running, the question is not routed to it at all — you
 get the terminal prompt instead of waiting out a deadline nobody will meet.
+
+## The same cards in the web panel
+
+`wingman serve` serves the inbox at `GET /v1/notifications`, and the panel draws
+the same stack in its bottom-right corner, with the same buttons. One inbox, one
+`[pilot.notifications]`, two surfaces that cannot disagree.
+
+The panel used to raise browser notifications of its own, straight off the
+`/v1/events` stream with a hard-coded filter — which is precisely how the two
+came to disagree: a question from `ask_user` is not a run transition, so it
+reached the popup and never reached the panel. The browser notification is still
+there, because an in-page card cannot reach a backgrounded tab, but it is raised
+from a card now rather than from an event.
+
+The panel is also the only one of the two that reaches a phone. The popup is a
+desktop binary; `serve` is what a phone talks to.
 
 ## How it reaches you from anywhere
 
@@ -161,5 +187,7 @@ cargo test --manifest-path desktop/notifier/Cargo.toml
   deleted binary auto-launching after uninstall.
 - **Installers and code signing.** See
   [0018](decisions/0018-the-notifier-is-not-a-workspace-member.md).
-- **Compaction of the two files.** Every trim scheme races an appender, and at a
-  few hundred bytes an event the ceiling is years out.
+- **`tell` as a card button.** The mechanism is free — a button carries a
+  literal `ControlCommand` — but a message to a task needs a task id the card
+  does not carry, and the panel's run view already has that control next to the
+  task it applies to.

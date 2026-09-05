@@ -147,6 +147,19 @@ pub enum Answered {
     Reply,
 }
 
+/// Take the card `id` out of the open stack, or say why not.
+///
+/// Removing it *is* the guard against answering twice: the webview can deliver
+/// two clicks for one card (a double-click, or a button pressed as the stack
+/// re-renders), and without this the second would append a second reply for a
+/// question already answered. The second call finds nothing and errors.
+pub fn take_card(open: &mut Vec<Notification>, id: &str) -> Result<Notification, String> {
+    match open.iter().position(|c| c.id == id) {
+        Some(at) => Ok(open.remove(at)),
+        None => Err(format!("no open notification {id}")),
+    }
+}
+
 /// Record the user's answer to `n`.
 ///
 /// `action` is the id of the button pressed, if any; `text` the free-text box.
@@ -400,4 +413,29 @@ mod tests {
 
         assert!(!evil.join("control.jsonl").exists());
     }
+
+    #[test]
+    fn taking_a_card_removes_it_so_a_second_click_cannot_answer_twice() {
+        let mut open = vec![card("a", "info"), card("b", "info"), card("c", "info")];
+
+        let got = take_card(&mut open, "b").expect("b is open");
+        assert_eq!(got.id, "b");
+        assert_eq!(
+            open.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "c"],
+            "only the answered card leaves the stack"
+        );
+
+        // The second delivery of the same click finds nothing rather than
+        // writing a second reply.
+        assert!(take_card(&mut open, "b").is_err());
+    }
+
+    #[test]
+    fn taking_an_unknown_card_errors_rather_than_answering_another() {
+        let mut open = vec![card("a", "info")];
+        assert!(take_card(&mut open, "nope").is_err());
+        assert_eq!(open.len(), 1, "the stack is left alone");
+    }
+
 }

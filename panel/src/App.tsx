@@ -9,6 +9,7 @@ import { Config } from './Config'
 import { ago, Sessions } from './Sessions'
 import { Insights } from './Insights'
 import { Output } from './output'
+import { Notifications } from './Notifications'
 import {
   EventsProvider,
   message,
@@ -55,6 +56,10 @@ export function App() {
       return (
         <EventsProvider>
           <Shell health={session.health} />
+          {/* An overlay, not part of the shell layout — it is fixed to the
+              corner and must sit above every view. Inside the provider
+              because a run transition usually means a new card. */}
+          <Notifications />
         </EventsProvider>
       )
   }

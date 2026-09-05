@@ -35,6 +35,17 @@ pub fn run() -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
+    // The one moment compaction is cheap and safe: the popup is provably not
+    // running (checked just above), so the only writers left are pilot runs,
+    // and `compact_if_large` abandons the attempt if one appends underneath.
+    // Doing it here rather than in the app keeps the inbox format in one crate
+    // — the notifier is a separate workspace that cannot see `wingman-config`.
+    match wingman_config::inbox::compact_if_large_global() {
+        Ok(true) => eprintln!("[notify] compacted the notification inbox."),
+        Ok(false) => {}
+        Err(e) => eprintln!("[notify] could not compact the inbox: {e}"),
+    }
+
     let bin = beside_this_exe().ok_or_else(|| {
         anyhow!(
             "{BIN} not found next to the wingman binary.\n\
@@ -62,6 +73,120 @@ pub fn run() -> Result<ExitCode> {
         .map_err(|e| anyhow!("could not start {}: {e}", bin.display()))?;
 
     eprintln!("[notify] started (pid {}).", child.id());
-    eprintln!("[notify] enable the cards you want in `[pilot.notifications]` and `[tools]` — see `docs/NOTIFIER.md`.");
+    for line in hints(load_config().ok().as_ref()) {
+        eprintln!("[notify] {line}");
+    }
     Ok(ExitCode::SUCCESS)
+}
+
+fn load_config() -> Result<wingman_config::Config> {
+    let global = wingman_config::global_config_path()?;
+    let project = wingman_config::ProjectPaths::discover(&std::env::current_dir()?);
+    let project_file = project.config_file.exists().then_some(project.config_file);
+    Ok(wingman_config::Config::load(
+        Some(&global),
+        project_file.as_deref(),
+    )?)
+}
+
+/// What to say after starting, given the config that is actually in force.
+///
+/// The generic "go and configure it" line was not enough for one case in
+/// particular: `progress` routes to the digest by default, so someone who turns
+/// `desktop_inbox` on gets cards for gates and failures but none for a run that
+/// finishes — and reads that as the feature being broken rather than as the
+/// setting it is. Saying so at the moment they start the app costs nothing and
+/// is where they are looking.
+///
+/// Split out from `run` so it is testable without spawning anything.
+fn hints(cfg: Option<&wingman_config::Config>) -> Vec<String> {
+    use wingman_autonomous::notify::{desktop_target, NotificationSeverity};
+
+    let Some(cfg) = cfg else {
+        return vec![
+            "enable the cards you want in `[pilot.notifications]` and `[tools]` — see `docs/NOTIFIER.md`."
+                .into(),
+        ];
+    };
+    let n = &cfg.pilot.notifications;
+    let on = |s| desktop_target(s, n).is_some();
+
+    if !on(NotificationSeverity::Escalation) && !on(NotificationSeverity::Decision) {
+        return vec![
+            "no cards are routed to the desktop yet — set `[pilot.notifications].desktop_inbox = true` and see `docs/NOTIFIER.md`."
+                .into(),
+        ];
+    }
+
+    let mut out = Vec::new();
+    if !on(NotificationSeverity::Progress) {
+        out.push(
+            "note: `progress` is not routed here, so a run that finishes cleanly will not raise a card. Set `[pilot.notifications].progress = \"desktop\"` if you want those too."
+                .into(),
+        );
+    }
+    if cfg.tools.ask_user_desktop_timeout_secs == 0 {
+        out.push(
+            "note: `[tools].ask_user_desktop_timeout_secs = 0`, so the agent's questions still go to the terminal rather than here."
+                .into(),
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wingman_config::Config;
+
+    fn cfg(desktop: bool, progress: &str, ask: u64) -> Config {
+        let mut c = Config::default();
+        c.pilot.notifications.desktop_inbox = desktop;
+        c.pilot.notifications.progress = progress.into();
+        c.tools.ask_user_desktop_timeout_secs = ask;
+        c
+    }
+
+    #[test]
+    fn with_no_config_it_falls_back_to_the_generic_line() {
+        let out = hints(None);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("NOTIFIER.md"));
+    }
+
+    #[test]
+    fn it_says_so_when_nothing_is_routed_here_at_all() {
+        // The defaults. Starting the app in this state shows nothing ever, and
+        // that is the first thing worth knowing.
+        let out = hints(Some(&cfg(false, "digest", 0)));
+        assert_eq!(out.len(), 1);
+        assert!(out[0].contains("desktop_inbox = true"), "{out:?}");
+    }
+
+    #[test]
+    fn it_warns_that_a_clean_run_will_not_card() {
+        // The case that reads as a bug: cards on, but `progress` digests, so a
+        // run that finishes says nothing.
+        let out = hints(Some(&cfg(true, "digest", 0)));
+        assert!(
+            out.iter().any(|l| l.contains("finishes cleanly")),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn routing_progress_here_removes_that_warning() {
+        let out = hints(Some(&cfg(true, "desktop", 30)));
+        assert!(out.is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn it_mentions_questions_still_going_to_the_terminal() {
+        let out = hints(Some(&cfg(true, "desktop", 0)));
+        assert!(
+            out.iter()
+                .any(|l| l.contains("ask_user_desktop_timeout_secs")),
+            "{out:?}"
+        );
+    }
 }
