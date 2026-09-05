@@ -199,10 +199,22 @@ impl SessionLog {
             .unwrap_or_default()
     }
 
+    /// Append one record.
+    ///
+    /// The line and its newline go out as **one** write, and the buffer is
+    /// flushed before returning. Both matter because `FileSessionStore` opens a
+    /// fresh log per append and drops it: a newline still queued when the next
+    /// handle writes lands *after* that record, concatenating two records onto
+    /// one line, and a tokio `File` dropped without a flush can lose the write
+    /// outright. `wingman_config::inbox::append_line` carries the same rule and
+    /// the longer version of this reasoning.
     pub async fn write(&mut self, record: SessionRecord) -> Result<(), SessionError> {
         let line = serde_json::to_string(&record)?;
-        self.file.write_all(line.as_bytes()).await?;
-        self.file.write_all(b"\n").await?;
+        let mut buf = String::with_capacity(line.len() + 1);
+        buf.push_str(&line);
+        buf.push('\n');
+        self.file.write_all(buf.as_bytes()).await?;
+        self.file.flush().await?;
         Ok(())
     }
 
