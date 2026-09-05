@@ -181,7 +181,10 @@ mod tests {
     fn the_installer_location_is_searched_too() {
         // Without this the installer from 0019 produces something
         // `wingman notify` cannot find.
-        std::env::set_var("LOCALAPPDATA", "C:\\tmp");
+        //
+        // Reads `LOCALAPPDATA` rather than setting it: it is always present on
+        // Windows, and `set_var` mutates state shared with every other test in
+        // this binary while they run in parallel.
         let c = candidates();
         assert!(
             c.iter()
