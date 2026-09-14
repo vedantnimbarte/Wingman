@@ -29,6 +29,36 @@ pub struct Selection {
     pub model: String,
 }
 
+impl Selection {
+    /// `provider/model`, the form config and `--model` take. Routing rows are
+    /// keyed by it so a learned pick resolves back onto the provider that
+    /// earned it, not onto whichever provider is the default.
+    pub fn spec(&self) -> String {
+        format!("{}/{}", self.provider_id, self.model)
+    }
+}
+
+/// Learned routing (`[router].learned_min_samples`): the model that has won
+/// `class` in `repo`. `None` when learned routing is off, when no model has
+/// enough samples yet, or when `learn.db` cannot be read — never an error,
+/// because the static choice it would have replaced still stands.
+pub fn learned_model(min_samples: Option<u32>, class: &str, repo: &str) -> Option<String> {
+    let min_samples = min_samples?;
+    let winner = wingman_learn::StatsStore::open_default()
+        .and_then(|store| store.learned_winner(class, repo, min_samples));
+    match winner {
+        Ok(Some(model)) => {
+            tracing::info!("learned routing: class '{class}' -> {model}");
+            Some(model)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("learned routing unavailable: {e}");
+            None
+        }
+    }
+}
+
 /// Parse a model string. Either `provider/model` (preferred) or bare
 /// `model` (uses `default_provider` from config).
 pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selection> {

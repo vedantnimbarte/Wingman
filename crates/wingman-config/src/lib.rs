@@ -1073,6 +1073,14 @@ pub struct RouterConfig {
     /// ```
     #[serde(default)]
     pub classes: BTreeMap<String, String>,
+    /// Learned routing, off unless set. Once a model has at least this many
+    /// verification-gate results for a task class in this repo, the model
+    /// with the best record there serves that class: the session model when
+    /// no `--model` is given, and a pilot worker role's first attempt. Only
+    /// models that have already run the class are candidates. `wingman router
+    /// stats` shows the table it picks from.
+    #[serde(default)]
+    pub learned_min_samples: Option<u32>,
 }
 
 impl RouterConfig {
@@ -3637,6 +3645,13 @@ max_retries_per_task = 1
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    #[test]
+    fn learned_routing_is_off_until_a_threshold_is_set() {
+        assert_eq!(Config::default().router.learned_min_samples, None);
+        let cfg: Config = toml::from_str("[router]\nlearned_min_samples = 20\n").unwrap();
+        assert_eq!(cfg.router.learned_min_samples, Some(20));
     }
 
     /// A config with only OpenRouter configured — the shape that made

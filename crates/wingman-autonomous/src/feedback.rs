@@ -13,6 +13,9 @@
 //! - [`is_revert_of`] / [`detect_reverts`] — recognise
 //!   `Revert "<original title>"` commits in a `git log` so a poller can
 //!   spot reverts without a webhook.
+//! - [`durability_facts`] + [`Durability`] — the durable verdict on a merged
+//!   PR some days on (#183): reverted, rewritten, broke the base branch,
+//!   reopened its issue, or held. `wingman router backfill` records it.
 //! - [`WeightedStats`] — fold a stream of [`PrOutcomeKind`] (per run, per
 //!   role, per model) into a weighted score the adaptive router (E6) reads
 //!   instead of the raw first-try pass rate.
@@ -165,6 +168,245 @@ pub fn detect_reverts<'a>(
         }
     }
     None
+}
+
+/// The durable verdict on a merged PR (#183): some days after the merge, did
+/// the change hold? Recorded against the models and roles that wrote it, next
+/// to the gate pass-rate, which only says the code compiled when the turn
+/// ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durability {
+    /// Later work built on it and it is still mostly there.
+    Held,
+    /// Reverted, mostly rewritten, broke the base branch, or reopened the
+    /// issue it closed.
+    Reverted,
+    /// No evidence either way. A PR nobody has touched since it merged is not
+    /// proof of quality, so this is never counted as a pass.
+    Unknown,
+}
+
+impl Durability {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Held => "held",
+            Self::Reverted => "reverted",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// What the post-merge checks found for one PR. `None` means that check
+/// could not be answered (no CI runs, `gh` or `git` unavailable, the merge
+/// commit no longer on the base branch).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DurabilityFacts {
+    /// A later commit on the base branch reverts the merge.
+    pub reverted: Option<bool>,
+    /// CI failed on the merge commit and on the next commit after it.
+    pub base_stayed_red: Option<bool>,
+    /// An issue the PR closed is open again.
+    pub issue_reopened: Option<bool>,
+    /// Fewer than half the lines the PR added survive on the base branch.
+    pub rewritten: Option<bool>,
+    /// Later commits on the base branch touched the files the PR changed.
+    pub built_on: bool,
+}
+
+impl DurabilityFacts {
+    /// Any failing signal means `Reverted`. `Held` needs the revert and
+    /// rewrite checks answered *and* later work on the same files — surviving
+    /// untouched is not surviving anything.
+    pub fn verdict(&self) -> Durability {
+        let signals = [
+            self.reverted,
+            self.base_stayed_red,
+            self.issue_reopened,
+            self.rewritten,
+        ];
+        if signals.contains(&Some(true)) {
+            Durability::Reverted
+        } else if self.reverted == Some(false) && self.rewritten == Some(false) && self.built_on {
+            Durability::Held
+        } else {
+            Durability::Unknown
+        }
+    }
+}
+
+/// Ask `gh` and `git` what became of a PR. `Ok(None)` while the PR is not
+/// merged, or merged less than `min_age` ago — it is judged once, when old
+/// enough. `Err` only when the PR itself cannot be read; a later check that
+/// fails just leaves its fact unanswered.
+pub fn durability_facts(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    pr_ref: &str,
+    min_age: chrono::Duration,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<DurabilityFacts>, String> {
+    let body = gh_stdout(
+        runner,
+        repo_root,
+        &[
+            "pr",
+            "view",
+            pr_ref,
+            "--json",
+            "state,mergedAt,mergeCommit,baseRefName,title,commits,files,closingIssuesReferences",
+        ],
+    )?;
+    if parse_pr_view_json(&body)? != PrState::Merged {
+        return Ok(None);
+    }
+    let pr: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("invalid gh json: {e}"))?;
+    let merged_at = pr["mergedAt"]
+        .as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .ok_or("merged PR has no readable mergedAt")?;
+    if now.signed_duration_since(merged_at) < min_age {
+        return Ok(None);
+    }
+    let merge_sha = pr["mergeCommit"]["oid"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("merged PR has no merge commit")?;
+    let base = pr["baseRefName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("merged PR has no base branch")?;
+    let title = pr["title"].as_str().unwrap_or("");
+    let files = pr["files"].as_array().cloned().unwrap_or_default();
+    let paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+
+    let git = |args: &[&str]| {
+        runner
+            .run("git", args, repo_root)
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| o.stdout)
+    };
+    let mut facts = DurabilityFacts::default();
+
+    // Judge against the remote's base branch, not a local one that may be
+    // days behind. A failed fetch leaves whatever `origin/<base>` already is.
+    let _ = git(&["fetch", "--quiet", "origin", base]);
+    let base_ref = format!("origin/{base}");
+    // Everything below reads history after the merge, which only means
+    // something while the merge commit is still on the base branch.
+    if git(&["merge-base", "--is-ancestor", merge_sha, &base_ref]).is_some() {
+        let range = format!("{merge_sha}..{base_ref}");
+        let revert_body = format!("This reverts commit {merge_sha}");
+        facts.reverted = git(&["log", "--format=%s%x1f%b%x1e", &range]).map(|log| {
+            log.split('\u{1e}').any(|commit| {
+                let commit = commit.trim_start();
+                let (subject, body) = commit.split_once('\u{1f}').unwrap_or((commit, ""));
+                body.contains(&revert_body) || is_revert_of(subject, title)
+            })
+        });
+
+        if !paths.is_empty() {
+            let mut args = vec!["log", "--format=%H", range.as_str(), "--"];
+            args.extend(&paths);
+            facts.built_on = git(&args).is_some_and(|out| !out.trim().is_empty());
+        }
+
+        // Lines the PR added that `git blame` still attributes to it. A squash
+        // merge is one commit (the merge commit); a merge commit keeps the
+        // PR's own. ponytail: a rebase merge re-hashes every commit but the
+        // last, so its surviving lines undercount; pilot merges squash.
+        let added: u64 = files.iter().filter_map(|f| f["additions"].as_u64()).sum();
+        let mut ours: std::collections::HashSet<&str> = pr["commits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["oid"].as_str())
+            .collect();
+        ours.insert(merge_sha);
+        let mut surviving = 0u64;
+        for path in &paths {
+            // A file gone from the base branch keeps none of its lines, and
+            // blame on it fails — which counts it as zero, correctly.
+            if let Some(out) = git(&["blame", "--line-porcelain", &base_ref, "--", path]) {
+                surviving += out
+                    .lines()
+                    .filter(|l| l.split(' ').next().is_some_and(|sha| ours.contains(sha)))
+                    .count() as u64;
+            }
+        }
+        facts.rewritten = Some(surviving * 2 < added);
+
+        let ci_red = |sha: &str| -> Option<bool> {
+            let body = gh_stdout(
+                runner,
+                repo_root,
+                &["run", "list", "--commit", sha, "--json", "conclusion"],
+            )
+            .ok()?;
+            let runs: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+            (!runs.is_empty()).then(|| {
+                runs.iter().any(|r| {
+                    matches!(
+                        r["conclusion"].as_str(),
+                        Some("failure" | "timed_out" | "startup_failure")
+                    )
+                })
+            })
+        };
+        facts.base_stayed_red = match ci_red(merge_sha) {
+            // Red at landing is only a verdict if the next commit did not fix it.
+            Some(true) => git(&["rev-list", "--reverse", "--first-parent", &range])
+                .and_then(|out| out.lines().next().map(str::to_string))
+                .and_then(|next| ci_red(&next)),
+            other => other,
+        };
+    }
+
+    facts.issue_reopened = pr["closingIssuesReferences"].as_array().and_then(|issues| {
+        let mut answered = true;
+        for issue in issues {
+            let target = issue["url"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| issue["number"].as_u64().map(|n| n.to_string()));
+            let state = target
+                .and_then(|t| {
+                    gh_stdout(runner, repo_root, &["issue", "view", &t, "--json", "state"]).ok()
+                })
+                .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
+            match state {
+                Some(v)
+                    if v["state"]
+                        .as_str()
+                        .is_some_and(|s| s.eq_ignore_ascii_case("open")) =>
+                {
+                    return Some(true);
+                }
+                Some(_) => {}
+                None => answered = false,
+            }
+        }
+        answered.then_some(false)
+    });
+
+    Ok(Some(facts))
+}
+
+/// Run `gh` and return its stdout, or say which call failed and why.
+fn gh_stdout(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    args: &[&str],
+) -> Result<String, String> {
+    let call = args.iter().take(2).copied().collect::<Vec<_>>().join(" ");
+    let out = runner
+        .run("gh", args, repo_root)
+        .map_err(|e| format!("gh {call} failed: {e}"))?;
+    if !out.success() {
+        return Err(format!("gh {call} exited non-zero: {}", out.stderr.trim()));
+    }
+    Ok(out.stdout)
 }
 
 /// Weighted post-merge stats for one bucket (a run, a role, or a
@@ -462,6 +704,231 @@ mod tests {
             .unwrap();
         assert_eq!(outcome, None);
         assert_eq!(store.read_events().await.unwrap().len(), before);
+    }
+
+    /// A repository's post-merge history as `gh` and `git` would report it.
+    /// Commands not described here fail, the way a missing tool would.
+    struct History {
+        state: &'static str,
+        merged_days_ago: i64,
+        on_base: bool,
+        /// `git log --format=%s%x1f%b%x1e` over merge..base.
+        log: &'static str,
+        /// Commits after the merge that touched the PR's files.
+        touched: &'static str,
+        /// Lines of `a.rs` blame still attributes to the merge commit, of 10 added.
+        surviving: usize,
+        /// `gh run list --commit` per sha.
+        ci: Vec<(&'static str, &'static str)>,
+        issue_state: Option<&'static str>,
+    }
+
+    impl Default for History {
+        fn default() -> Self {
+            Self {
+                state: "MERGED",
+                merged_days_ago: 40,
+                on_base: true,
+                log: "",
+                touched: "c1\n",
+                surviving: 8,
+                ci: vec![("m1", r#"[{"conclusion":"success"}]"#)],
+                issue_state: Some("CLOSED"),
+            }
+        }
+    }
+
+    impl CommandRunner for History {
+        fn run(&self, program: &str, args: &[&str], _cwd: &StdPath) -> std::io::Result<CommandOut> {
+            let ok = |stdout: String| CommandOut {
+                status: Some(0),
+                stdout,
+                stderr: String::new(),
+            };
+            let fail = CommandOut {
+                status: Some(1),
+                stdout: String::new(),
+                stderr: "no".into(),
+            };
+            let now = chrono::Utc::now() - chrono::Duration::days(self.merged_days_ago);
+            let out = match (program, args) {
+                ("gh", ["pr", "view", ..]) => ok(serde_json::json!({
+                    "state": self.state,
+                    "mergedAt": now.to_rfc3339(),
+                    "mergeCommit": {"oid": "m1"},
+                    "baseRefName": "main",
+                    "title": "add the parser",
+                    "commits": [{"oid": "p1"}],
+                    "files": [{"path": "a.rs", "additions": 10}],
+                    "closingIssuesReferences": match self.issue_state {
+                        Some(_) => serde_json::json!([{"number": 7}]),
+                        None => serde_json::json!([]),
+                    },
+                })
+                .to_string()),
+                ("gh", ["run", "list", "--commit", sha, ..]) => {
+                    match self.ci.iter().find(|(s, _)| s == sha) {
+                        Some((_, runs)) => ok(runs.to_string()),
+                        None => ok("[]".into()),
+                    }
+                }
+                ("gh", ["issue", "view", "7", ..]) => ok(format!(
+                    r#"{{"state":"{}"}}"#,
+                    self.issue_state.unwrap_or("")
+                )),
+                ("git", ["fetch", ..]) => ok(String::new()),
+                ("git", ["merge-base", ..]) if self.on_base => ok(String::new()),
+                ("git", ["log", "--format=%H", ..]) => ok(self.touched.into()),
+                ("git", ["log", ..]) => ok(self.log.into()),
+                ("git", ["rev-list", ..]) => ok("c1\nc2\n".into()),
+                ("git", ["blame", ..]) => {
+                    let mut out = String::new();
+                    for i in 0..10 {
+                        let sha = if i < self.surviving { "m1" } else { "c1" };
+                        out.push_str(&format!("{sha} {i} {i} 1\nauthor x\n\tline\n"));
+                    }
+                    ok(out)
+                }
+                _ => fail,
+            };
+            Ok(out)
+        }
+    }
+
+    fn judge(h: &History) -> Option<Durability> {
+        durability_facts(
+            h,
+            StdPath::new("."),
+            "https://github.com/o/r/pull/1",
+            chrono::Duration::days(30),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .map(|f| f.verdict())
+    }
+
+    #[test]
+    fn built_on_and_intact_holds() {
+        assert_eq!(judge(&History::default()), Some(Durability::Held));
+    }
+
+    #[test]
+    fn untouched_since_merge_is_unknown_not_held() {
+        let h = History {
+            touched: "",
+            ..Default::default()
+        };
+        assert_eq!(judge(&h), Some(Durability::Unknown));
+    }
+
+    #[test]
+    fn open_or_young_prs_are_not_judged_yet() {
+        let open = History {
+            state: "OPEN",
+            ..Default::default()
+        };
+        assert_eq!(judge(&open), None);
+        let young = History {
+            merged_days_ago: 3,
+            ..Default::default()
+        };
+        assert_eq!(judge(&young), None);
+    }
+
+    #[test]
+    fn a_revert_commit_is_caught_by_body_or_subject() {
+        let by_body = History {
+            log: "Revert something\u{1f}This reverts commit m1.\n\u{1e}",
+            ..Default::default()
+        };
+        assert_eq!(judge(&by_body), Some(Durability::Reverted));
+        let by_subject = History {
+            log: "unrelated\u{1f}\u{1e}\nRevert \"add the parser (#1)\"\u{1f}\u{1e}",
+            ..Default::default()
+        };
+        assert_eq!(judge(&by_subject), Some(Durability::Reverted));
+    }
+
+    #[test]
+    fn most_lines_rewritten_counts_against_it() {
+        let h = History {
+            surviving: 4,
+            ..Default::default()
+        };
+        assert_eq!(judge(&h), Some(Durability::Reverted));
+    }
+
+    #[test]
+    fn red_base_counts_only_when_the_next_commit_is_red_too() {
+        let fixed = History {
+            ci: vec![
+                ("m1", r#"[{"conclusion":"failure"}]"#),
+                ("c1", r#"[{"conclusion":"success"}]"#),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(judge(&fixed), Some(Durability::Held));
+        let stayed = History {
+            ci: vec![
+                (
+                    "m1",
+                    r#"[{"conclusion":"success"},{"conclusion":"failure"}]"#,
+                ),
+                ("c1", r#"[{"conclusion":"timed_out"}]"#),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(judge(&stayed), Some(Durability::Reverted));
+    }
+
+    #[test]
+    fn a_reopened_issue_counts_against_it() {
+        let h = History {
+            issue_state: Some("OPEN"),
+            ..Default::default()
+        };
+        assert_eq!(judge(&h), Some(Durability::Reverted));
+    }
+
+    #[test]
+    fn history_that_cannot_be_read_is_unknown() {
+        // The merge commit is not on the base branch (force-push, or no remote).
+        let h = History {
+            on_base: false,
+            ..Default::default()
+        };
+        let facts = durability_facts(
+            &h,
+            StdPath::new("."),
+            "1",
+            chrono::Duration::days(30),
+            chrono::Utc::now(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(facts.reverted, None);
+        assert_eq!(facts.rewritten, None);
+        assert_eq!(facts.issue_reopened, Some(false));
+        assert_eq!(facts.verdict(), Durability::Unknown);
+    }
+
+    #[test]
+    fn an_unreadable_pr_is_an_error() {
+        struct NoGh;
+        impl CommandRunner for NoGh {
+            fn run(&self, _: &str, _: &[&str], _: &StdPath) -> std::io::Result<CommandOut> {
+                Err(std::io::Error::other("gh not installed"))
+            }
+        }
+        let err = durability_facts(
+            &NoGh,
+            StdPath::new("."),
+            "1",
+            chrono::Duration::days(30),
+            chrono::Utc::now(),
+        )
+        .unwrap_err();
+        assert!(err.contains("gh pr view"), "{err}");
     }
 
     #[test]

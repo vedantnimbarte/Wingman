@@ -54,14 +54,19 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         .with_context(|| format!("parsing task file {} as JSON", opts.task_file))?;
     let role = parse_role(&opts.role)?;
 
-    // Resolve the worker model — prefer pilot.worker_model, then --model,
+    // Resolve the worker model — prefer --model, then pilot.worker_model,
     // then the global default. We deliberately don't fall back to
     // pilot.default_model: workers should be the cheap tier.
-    let model_string = cfg
-        .pilot
-        .worker_model
+    //
+    // --model comes first because it is how the orchestrator hands a worker
+    // the model it chose: pilot.worker_model on a normal attempt, the manager
+    // model when escalating, or a routed pick. With pilot.worker_model read
+    // first, every one of those choices was silently ignored whenever it was
+    // configured.
+    let model_string = opts
+        .model_override
         .clone()
-        .or_else(|| opts.model_override.clone())
+        .or_else(|| cfg.pilot.worker_model.clone())
         .or_else(|| cfg.default_model.clone());
     let selection = runtime::resolve_selection(&cfg, model_string.as_deref())?;
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
@@ -283,6 +288,16 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         });
     }
 
+    // Gate results are recorded per role against the model that ran them —
+    // the per-class signal `wingman router stats` and learned routing read,
+    // and the rows `wingman router backfill` later attaches this task's PR
+    // verdict to. Keyed by the owning project, as the transcript is: the
+    // worktree path is gone once the run cleans up.
+    let routing_stats = wingman_learn::StatsStore::open_default().ok();
+    let routing_repo = wingman_config::find_owning_project_root(&paths.root)
+        .to_string_lossy()
+        .to_string();
+
     let stdout = std::io::stdout();
     let mut stdout = stdout.lock();
     let mut exit = ExitCode::SUCCESS;
@@ -346,6 +361,17 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             break;
         }
         match event {
+            AgentEvent::Verification { passed, .. } => {
+                if let Some(st) = &routing_stats {
+                    let _ = st.record_routing(
+                        role.as_str(),
+                        &selection.spec(),
+                        &routing_repo,
+                        opts.session_id.as_deref(),
+                        passed,
+                    );
+                }
+            }
             AgentEvent::Error { .. } => {
                 exit = ExitCode::from(1);
             }

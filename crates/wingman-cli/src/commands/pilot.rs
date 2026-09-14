@@ -659,6 +659,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             pilot.worker_model.as_deref().unwrap_or(&selection.model),
             &selection.model,
             routing,
+            learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(pilot.task_timeout_secs),
         )?,
         base_branch,
@@ -1463,6 +1464,7 @@ pub async fn resume(
                 .unwrap_or(&selection.model),
             &selection.model,
             routing,
+            learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
         )?,
         base_branch,
@@ -1520,6 +1522,14 @@ pub async fn resume(
     Ok(ExitCode::SUCCESS)
 }
 
+/// `[router].learned_min_samples` paired with the repo key routing rows are
+/// recorded under, or `None` when learned routing is off.
+fn learned_routing(cfg: &Config, project_root: &std::path::Path) -> Option<(u32, String)> {
+    cfg.router
+        .learned_min_samples
+        .map(|n| (n, project_root.to_string_lossy().to_string()))
+}
+
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
 /// child processes via [`wingman_autonomous::worker::run_worker`].
 ///
@@ -1531,10 +1541,15 @@ pub async fn resume(
 /// chosen adaptively per role: a role whose cheap-model history is below
 /// threshold is dispatched straight to the capable model instead of
 /// burning a first attempt that history says will fail.
+///
+/// `learned` is `[router].learned_min_samples` and the repo it reads
+/// `learn.db` for. When set, and a model has won the task's role there, that
+/// model takes the base attempt ahead of the E6 choice.
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
+    learned: Option<(u32, String)>,
     task_timeout: std::time::Duration,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
@@ -1546,12 +1561,22 @@ fn build_real_worker_spawner(
             let worker_model = worker_model.clone();
             let manager_model = manager_model.clone();
             let routing = routing.clone();
+            let learned = learned.clone();
             Box::pin(async move {
                 // E5 rung 2: escalate to the manager model when the
                 // orchestrator flagged this attempt as needing it. Otherwise
-                // E6 adaptive routing picks the base model per role.
+                // learned routing, then E6 adaptive routing, picks the base
+                // model per role.
+                let learned_pick = match (&learned, ctx.escalate_model) {
+                    (Some((n, repo)), false) => {
+                        runtime::learned_model(Some(*n), ctx.task.role.as_str(), repo)
+                    }
+                    _ => None,
+                };
                 let model = if ctx.escalate_model {
                     Some(manager_model)
+                } else if learned_pick.is_some() {
+                    learned_pick
                 } else if let Some(agg) = &routing {
                     Some(wingman_autonomous::learning::route_model(
                         agg,

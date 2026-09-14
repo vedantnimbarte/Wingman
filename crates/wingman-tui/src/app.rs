@@ -561,7 +561,7 @@ async fn run_inner(
                         ui.composer.busy = true;
                         let steer = a.steer_handle();
                         draw(terminal, &ui)?;
-                        run_turn(
+                        let gates = run_turn(
                             terminal,
                             a,
                             &mut events,
@@ -570,6 +570,12 @@ async fn run_inner(
                             steer.clone(),
                         )
                         .await?;
+                        record_routing(
+                            &gates,
+                            &ui.status,
+                            &ctx.project_root,
+                            &session_id_for_feedback,
+                        );
                         // Persist after every turn: an LLM round-trip already
                         // took seconds, so one small atomic write is noise, and
                         // it means an external kill/SIGHUP between turns can't
@@ -1550,10 +1556,12 @@ async fn run_turn(
     ui: &mut UiState,
     prompt: String,
     steer: Option<std::sync::Arc<wingman_core::SteerInbox>>,
-) -> Result<()> {
+) -> Result<Vec<bool>> {
     // Persistence is the agent loop's job now — it is the only place that
     // knows what actually went into a request. This function only renders.
+    // It does hand back the turn's verification-gate results, for routing.
     let mut assistant_text = String::new();
+    let mut gates = Vec::new();
     let mut stream = agent.run(prompt.clone());
     loop {
         let mut done = false;
@@ -1611,6 +1619,9 @@ async fn run_turn(
                         if let AgentEvent::TextDelta { text } = &event {
                             assistant_text.push_str(text);
                         }
+                        if let AgentEvent::Verification { passed, .. } = &event {
+                            gates.push(*passed);
+                        }
                         apply_event(&event, &mut ui.transcript, &mut ui.status);
                         draw(terminal, ui)?;
                         if matches!(event, AgentEvent::Stop { .. }) {
@@ -1626,7 +1637,30 @@ async fn run_turn(
         }
     }
     drop(stream);
-    Ok(())
+    Ok(gates)
+}
+
+/// Record a turn's verification-gate results against the model that ran it,
+/// so `wingman router stats` and learned routing see interactive work and not
+/// only `--print` runs. Best-effort: routing stats never interrupt a session.
+fn record_routing(gates: &[bool], status: &StatusLine, repo: &std::path::Path, session_id: &str) {
+    if gates.is_empty() {
+        return;
+    }
+    let Ok(store) = wingman_learn::StatsStore::open_default() else {
+        return;
+    };
+    let model = format!("{}/{}", status.provider, status.model);
+    let repo = repo.to_string_lossy();
+    for passed in gates {
+        let _ = store.record_routing(
+            wingman_learn::stats::SESSION_CLASS,
+            &model,
+            &repo,
+            Some(session_id),
+            *passed,
+        );
+    }
 }
 
 fn apply_event(event: &AgentEvent, transcript: &mut Transcript, status: &mut StatusLine) {

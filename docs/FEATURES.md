@@ -250,6 +250,18 @@ Wingman different; this is everything else it does.
   only for subagents — so today the preset is a starting point for your own
   config rather than a switch that redirects live traffic. For a real
   guarantee use `[privacy].local_only` and `wingman attest`.
+- **Learned routing.** Every verification-gate result — from `--print`, the
+  TUI and pilot workers — is recorded in `~/.wingman/learn.db` against the
+  task class (`default` for a session, the role for a pilot worker) and the
+  `provider/model` that ran it. `wingman router backfill` adds a later,
+  durable verdict for merged pilot PRs (`held` / `reverted` / `unknown`,
+  where an untouched PR is `unknown`, never a pass), and `wingman router
+  stats` shows both per class. Setting `[router].learned_min_samples` turns
+  on learned routing: once a model has that many gate results for a class in
+  this repo, the best of them (skipping any whose PRs were reverted more often
+  than they held) serves that class — the session model when no `--model` is
+  given, and each pilot worker role's first attempt. Off by default; it only
+  chooses among models that have already run the class.
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
   why it matters" walkthrough of the working diff (fast-model), for reviewers
   and juniors.

@@ -39,7 +39,8 @@ wingman [OPTIONS] [COMMAND]
 | `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
 | `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
-| `router stats`       | Per-class model win-rates (gate pass-rate) for this repo. `--all` across repos. |
+| `router stats`       | Per-class model win-rates for this repo: the gate pass-rate beside the durable PR verdicts (held / reverted / unknown). `--all` across repos. |
+| `router backfill`    | Judge merged pilot PRs at least `--days` (default 30) old — reverted, mostly rewritten, broke the base branch, reopened their issue, or held — and record it against the roles and models that wrote them. Needs `gh` and `git`. |
 | `router preset local`| Print a recommended local-first `[router]` preset. `--model <provider/model>`. |
 | `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |

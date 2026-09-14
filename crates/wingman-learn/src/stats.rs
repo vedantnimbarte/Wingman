@@ -146,6 +146,16 @@ impl StatsStore {
              );
              CREATE INDEX IF NOT EXISTS idx_routing_repo ON routing_outcome(repo);
 
+             CREATE TABLE IF NOT EXISTS routing_verdict (
+                pr          TEXT NOT NULL,
+                task_class  TEXT NOT NULL,
+                model       TEXT NOT NULL,
+                repo        TEXT NOT NULL,
+                ts          TEXT NOT NULL,
+                verdict     TEXT NOT NULL CHECK (verdict IN ('held', 'reverted', 'unknown')),
+                PRIMARY KEY (pr, task_class, model)
+             );
+
              CREATE TABLE IF NOT EXISTS feedback (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id  TEXT NOT NULL,
@@ -160,13 +170,17 @@ impl StatsStore {
         // grafted on. SQLite has no `ADD COLUMN IF NOT EXISTS`, and the only
         // way to ask is to try — a duplicate-column error means a previous
         // run already did it, which is success, not failure.
-        if let Err(e) = conn.execute(
+        for alter in [
             "ALTER TABLE skill_usage ADD COLUMN explicit INTEGER NOT NULL DEFAULT 0",
-            [],
-        ) {
-            let msg = e.to_string();
-            if !msg.contains("duplicate column") {
-                return Err(e.into());
+            // Which session produced a routing row, so a later PR verdict can
+            // find the (class, model) pairs that wrote the change.
+            "ALTER TABLE routing_outcome ADD COLUMN session_id TEXT",
+        ] {
+            if let Err(e) = conn.execute(alter, []) {
+                let msg = e.to_string();
+                if !msg.contains("duplicate column") {
+                    return Err(e.into());
+                }
             }
         }
         Ok(Self {
@@ -395,46 +409,80 @@ impl StatsStore {
     /// Record the outcome of a routed model call: which `model` served
     /// `task_class` in `repo`, and whether the turn's verification gate passed.
     /// This is the raw signal behind `wingman router stats` (which model wins
-    /// per class in this repo).
+    /// per class in this repo). `session_id` names the session that ran the
+    /// turn, which is how [`Self::record_verdict`] later finds the rows behind
+    /// a PR.
     pub fn record_routing(
         &self,
         task_class: &str,
         model: &str,
         repo: &str,
+        session_id: Option<&str>,
         passed: bool,
     ) -> Result<()> {
         let ts = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO routing_outcome(task_class, model, repo, ts, passed) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![task_class, model, repo, ts, passed as i64],
+            "INSERT INTO routing_outcome(task_class, model, repo, ts, passed, session_id)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![task_class, model, repo, ts, passed as i64, session_id],
         )?;
         Ok(())
     }
 
+    /// Whether a durable verdict has already been recorded for `pr`.
+    pub fn has_verdict(&self, pr: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM routing_verdict WHERE pr = ?1",
+            params![pr],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record the durable verdict (`held` / `reverted` / `unknown`) for a
+    /// merged PR against every (task_class, model) pair the given sessions
+    /// recorded routing rows for. Returns how many pairs it was recorded
+    /// against — zero when none of the sessions ever reached a gate, in which
+    /// case nothing is written and a later backfill will look again.
+    ///
+    /// One row per pair per PR, not per turn: a worker that ran the gate five
+    /// times wrote one change, and should be judged once for it.
+    pub fn record_verdict(&self, pr: &str, session_ids: &[String], verdict: &str) -> Result<usize> {
+        let ts = Utc::now().to_rfc3339();
+        let conn = self.conn.lock().unwrap();
+        let mut n = 0;
+        for session_id in session_ids {
+            n += conn.execute(
+                // `ON CONFLICT DO NOTHING`, not `OR IGNORE`: the latter also
+                // swallows the CHECK on `verdict`, and a typo would vanish.
+                "INSERT INTO routing_verdict(pr, task_class, model, repo, ts, verdict)                  SELECT DISTINCT ?1, task_class, model, repo, ?2, ?3                  FROM routing_outcome WHERE session_id = ?4                  ON CONFLICT DO NOTHING",
+                params![pr, ts, verdict, session_id],
+            )?;
+        }
+        Ok(n)
+    }
+
     /// Aggregate routing outcomes by (task_class, model), optionally scoped to
-    /// one repo. Ordered by class then by pass-rate descending so the winner
-    /// per class is first.
+    /// one repo, with the durable PR verdicts for the same pair alongside.
+    /// Ordered by class, then by gate pass-rate descending (more samples
+    /// breaking a tie) so the winner per class is first.
     pub fn routing_summary(&self, repo: Option<&str>) -> Result<Vec<RoutingStat>> {
         let conn = self.conn.lock().unwrap();
         // `?1 IS NULL` short-circuits the repo filter when no repo is given.
         let mut stmt = conn.prepare(
-            "SELECT task_class, model, \
-                    SUM(passed) AS passes, COUNT(*) AS total \
-             FROM routing_outcome \
-             WHERE (?1 IS NULL OR repo = ?1) \
-             GROUP BY task_class, model \
-             ORDER BY task_class ASC, (CAST(SUM(passed) AS REAL) / COUNT(*)) DESC",
+            "SELECT o.task_class, o.model, o.passes, o.total,                     COALESCE(v.held, 0), COALESCE(v.reverted, 0), COALESCE(v.unknown, 0)              FROM (SELECT task_class, model, SUM(passed) AS passes, COUNT(*) AS total                    FROM routing_outcome                    WHERE (?1 IS NULL OR repo = ?1)                    GROUP BY task_class, model) o              LEFT JOIN (SELECT task_class, model,                           SUM(verdict = 'held') AS held,                           SUM(verdict = 'reverted') AS reverted,                           SUM(verdict = 'unknown') AS unknown                         FROM routing_verdict                         WHERE (?1 IS NULL OR repo = ?1)                         GROUP BY task_class, model) v                ON v.task_class = o.task_class AND v.model = o.model              ORDER BY o.task_class ASC, (CAST(o.passes AS REAL) / o.total) DESC, o.total DESC",
         )?;
         let rows = stmt.query_map(params![repo], |r| {
-            let passes: i64 = r.get(2)?;
-            let total: i64 = r.get(3)?;
+            let count = |i: usize| r.get::<_, i64>(i).map(|n| n as u32);
             Ok(RoutingStat {
                 task_class: r.get(0)?,
                 model: r.get(1)?,
-                passed: passes as u32,
-                total: total as u32,
+                passed: count(2)?,
+                total: count(3)?,
+                held: count(4)?,
+                reverted: count(5)?,
+                unknown: count(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -442,6 +490,25 @@ impl StatsStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// The model learned routing picks for `task_class` in `repo`: the best
+    /// gate pass-rate among models with at least `min_samples` gate results
+    /// there, passing over any whose merged PRs were reverted more often than
+    /// they held. `None` until some model has enough samples.
+    pub fn learned_winner(
+        &self,
+        task_class: &str,
+        repo: &str,
+        min_samples: u32,
+    ) -> Result<Option<String>> {
+        Ok(self
+            .routing_summary(Some(repo))?
+            .into_iter()
+            .find(|s| {
+                s.task_class == task_class && s.total >= min_samples.max(1) && s.reverted <= s.held
+            })
+            .map(|s| s.model))
     }
 
     /// Count rows newer than `cutoff_iso` for a skill.
@@ -503,6 +570,11 @@ pub struct SkillSummary {
     pub explicit: u32,
 }
 
+/// The task class a main-session turn routes as. Nothing classifies a user's
+/// turn, so it runs on the session model — which is what the router's
+/// `"default"` target names.
+pub const SESSION_CLASS: &str = "default";
+
 /// Aggregated routing outcomes for one (task_class, model) pair.
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutingStat {
@@ -511,6 +583,12 @@ pub struct RoutingStat {
     /// Turns whose verification gate passed.
     pub passed: u32,
     pub total: u32,
+    /// Merged PRs still intact when judged (`wingman router backfill`).
+    pub held: u32,
+    /// Merged PRs reverted, rewritten, or that broke the default branch.
+    pub reverted: u32,
+    /// Merged PRs with no evidence either way. Never counted as held.
+    pub unknown: u32,
 }
 
 impl RoutingStat {
@@ -521,6 +599,13 @@ impl RoutingStat {
         } else {
             self.passed as f32 / self.total as f32
         }
+    }
+
+    /// Fraction of decided PR verdicts that held. `unknown` is left out
+    /// rather than counted as a pass; `None` when nothing is decided yet.
+    pub fn durable_rate(&self) -> Option<f32> {
+        let decided = self.held + self.reverted;
+        (decided > 0).then(|| self.held as f32 / decided as f32)
     }
 }
 
@@ -779,19 +864,18 @@ mod tests {
         let p = tmp_db();
         let store = StatsStore::open(&p).unwrap();
         // opus: 2/2 pass; haiku: 1/3 pass — both on "default" in repo "r".
-        store.record_routing("default", "opus", "r", true).unwrap();
-        store.record_routing("default", "opus", "r", true).unwrap();
-        store.record_routing("default", "haiku", "r", true).unwrap();
-        store
-            .record_routing("default", "haiku", "r", false)
-            .unwrap();
-        store
-            .record_routing("default", "haiku", "r", false)
-            .unwrap();
+        let rec = |model: &str, repo: &str, passed: bool| {
+            store
+                .record_routing("default", model, repo, None, passed)
+                .unwrap()
+        };
+        rec("opus", "r", true);
+        rec("opus", "r", true);
+        rec("haiku", "r", true);
+        rec("haiku", "r", false);
+        rec("haiku", "r", false);
         // Different repo — excluded when scoped to "r".
-        store
-            .record_routing("default", "haiku", "other", true)
-            .unwrap();
+        rec("haiku", "other", true);
 
         let stats = store.routing_summary(Some("r")).unwrap();
         assert_eq!(stats.len(), 2);
@@ -810,6 +894,119 @@ mod tests {
             .map(|s| s.total)
             .sum();
         assert_eq!(haiku_total, 4);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn verdicts_attach_once_per_pair_and_unknown_is_not_held() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        // One worker session ran the gate three times on the same pair.
+        for passed in [false, true, true] {
+            store
+                .record_routing("developer", "a/opus", "r", Some("w1"), passed)
+                .unwrap();
+        }
+        store
+            .record_routing("tester", "a/haiku", "r", Some("w2"), true)
+            .unwrap();
+        store
+            .record_routing("developer", "a/opus", "r", Some("elsewhere"), true)
+            .unwrap();
+
+        assert!(!store.has_verdict("pr/1").unwrap());
+        let sessions = vec!["w1".to_string(), "w2".to_string()];
+        assert_eq!(store.record_verdict("pr/1", &sessions, "held").unwrap(), 2);
+        assert!(store.has_verdict("pr/1").unwrap());
+        // Recording again is a no-op, not a second vote.
+        assert_eq!(store.record_verdict("pr/1", &sessions, "held").unwrap(), 0);
+        store
+            .record_verdict("pr/2", &["w1".to_string()], "unknown")
+            .unwrap();
+        // A session that never reached a gate attaches to nothing.
+        assert_eq!(
+            store
+                .record_verdict("pr/3", &["no-gate".to_string()], "reverted")
+                .unwrap(),
+            0
+        );
+        assert!(!store.has_verdict("pr/3").unwrap());
+        // The CHECK constraint keeps the value set closed.
+        assert!(store.record_verdict("pr/4", &sessions, "fine").is_err());
+
+        let stats = store.routing_summary(Some("r")).unwrap();
+        let dev = stats.iter().find(|s| s.task_class == "developer").unwrap();
+        assert_eq!((dev.passed, dev.total), (3, 4));
+        assert_eq!((dev.held, dev.reverted, dev.unknown), (1, 0, 1));
+        // The unknown PR is not in the rate: 1 held of 1 decided.
+        assert_eq!(dev.durable_rate(), Some(1.0));
+        let tester = stats.iter().find(|s| s.task_class == "tester").unwrap();
+        assert_eq!(tester.held, 1);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn learned_winner_needs_samples_and_skips_reverted_models() {
+        let p = tmp_db();
+        let store = StatsStore::open(&p).unwrap();
+        let rec = |model: &str, session: &str, passed: bool| {
+            store
+                .record_routing("default", model, "r", Some(session), passed)
+                .unwrap()
+        };
+        // "fast" is perfect on one sample; "big" is 2/3.
+        rec("fast", "s1", true);
+        rec("big", "s2", true);
+        rec("big", "s2", true);
+        rec("big", "s2", false);
+
+        assert_eq!(store.learned_winner("default", "r", 5).unwrap(), None);
+        assert_eq!(
+            store.learned_winner("default", "r", 3).unwrap().as_deref(),
+            Some("big")
+        );
+        assert_eq!(
+            store.learned_winner("default", "r", 1).unwrap().as_deref(),
+            Some("fast")
+        );
+        // Other classes and repos are not evidence for this one.
+        assert_eq!(store.learned_winner("tester", "r", 1).unwrap(), None);
+        assert_eq!(store.learned_winner("default", "x", 1).unwrap(), None);
+
+        // Green gates do not rescue a model whose merged work did not hold.
+        store
+            .record_verdict("pr/1", &["s1".to_string()], "reverted")
+            .unwrap();
+        assert_eq!(
+            store.learned_winner("default", "r", 1).unwrap().as_deref(),
+            Some("big")
+        );
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn routing_session_column_is_grafted_onto_an_old_db() {
+        let p = tmp_db();
+        {
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE routing_outcome (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, task_class TEXT NOT NULL,
+                    model TEXT NOT NULL, repo TEXT NOT NULL, ts TEXT NOT NULL,
+                    passed INTEGER NOT NULL);
+                 INSERT INTO routing_outcome(task_class, model, repo, ts, passed)
+                    VALUES ('default', 'old', 'r', 'then', 1);",
+            )
+            .unwrap();
+        }
+        let store = StatsStore::open(&p).unwrap();
+        store
+            .record_routing("default", "new", "r", Some("s"), true)
+            .unwrap();
+        assert_eq!(store.routing_summary(Some("r")).unwrap().len(), 2);
+        drop(store);
+        // Opening again must not trip over the column it already added.
+        StatsStore::open(&p).unwrap();
         let _ = std::fs::remove_file(&p);
     }
 }
