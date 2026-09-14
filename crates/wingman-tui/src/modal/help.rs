@@ -126,6 +126,10 @@ impl HelpModal {
                 Span::raw("Export session report"),
             ]),
             Line::from(vec![
+                Span::styled("  /rewind        ", Style::default().fg(Color::Cyan)),
+                Span::raw("Checkpoints by turn: preview, restore to a point"),
+            ]),
+            Line::from(vec![
                 Span::styled("  /resume        ", Style::default().fg(Color::Cyan)),
                 Span::raw("Resume a previous session"),
             ]),

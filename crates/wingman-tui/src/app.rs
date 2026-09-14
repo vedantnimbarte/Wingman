@@ -29,8 +29,8 @@ use wingman_core::{AgentEvent, AgentLoop, AgentStop, Provider};
 
 use crate::modal::{
     ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
-    ModalOutcome, ModalTask, ModePicker, ModelPicker, ParamsModal, SessionEntry, SessionPicker,
-    SkillsView, UsageView,
+    ModalOutcome, ModalTask, ModePicker, ModelPicker, ParamsModal, RewindChoice, RewindView,
+    SessionEntry, SessionPicker, SkillsView, UsageView,
 };
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
@@ -199,6 +199,7 @@ enum Cmd {
     ApprovePlan,
     Clear,
     Undo(usize),
+    Rewind,
     Compact,
     Help,
     Mode(Option<String>),
@@ -248,6 +249,7 @@ fn parse_slash(line: &str) -> Cmd {
         "/quit" | "/exit" | "/q" => Cmd::Quit,
         "/clear" => Cmd::Clear,
         "/undo" => Cmd::Undo(arg.trim().parse().unwrap_or(1)),
+        "/rewind" => Cmd::Rewind,
         "/compact" => Cmd::Compact,
         // Accept the agent's plan: in `plan` mode this is what unlocks
         // writes and shell for the rest of the session.
@@ -463,7 +465,7 @@ async fn run_inner(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: &mut Option<AgentLoop>,
     ctx: AppCtx,
-    session_id_for_feedback: String,
+    mut session_id: String,
 ) -> Result<()> {
     let mut ui = UiState {
         transcript: Transcript::default(),
@@ -485,6 +487,10 @@ async fn run_inner(
     };
     ui.status.refresh_git(&ctx.project_root);
     let mut events = EventStream::new();
+    // Which turn of `session_id` runs next. Tags the checkpoints each turn
+    // writes, so `/rewind` can group them; `/rewind` moves it back when it
+    // truncates the conversation.
+    let mut turn = 0usize;
     loop {
         ui.composer.busy = false;
         draw(terminal, &ui)?;
@@ -504,7 +510,8 @@ async fn run_inner(
             terminal,
             agent,
             &ctx,
-            &session_id_for_feedback,
+            &mut session_id,
+            &mut turn,
         )
         .await?;
         match next_action {
@@ -559,6 +566,8 @@ async fn run_inner(
                             None => exp.prompt,
                         };
                         ui.composer.busy = true;
+                        wingman_core::checkpoint::set_turn(&session_id, turn);
+                        turn += 1;
                         let steer = a.steer_handle();
                         draw(terminal, &ui)?;
                         run_turn(
@@ -691,7 +700,8 @@ async fn idle_step(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     agent: &mut Option<AgentLoop>,
     ctx: &AppCtx,
-    session_id_for_feedback: &str,
+    session_id: &mut String,
+    turn: &mut usize,
 ) -> Result<IdleAction> {
     let builder = &ctx.builder;
     let logout_runner = &ctx.logout_runner;
@@ -829,6 +839,19 @@ async fn idle_step(
                                             resume_session(agent, ui, entry);
                                         }
                                     }
+                                    ActiveModal::Rewind(v) => {
+                                        if let Some(choice) = v.take_choice() {
+                                            apply_rewind(
+                                                ui,
+                                                agent,
+                                                project_root,
+                                                session_id,
+                                                turn,
+                                                choice,
+                                            )
+                                            .await;
+                                        }
+                                    }
                                     _ => {}
                                 }
                                 ui.modal = ActiveModal::None;
@@ -876,6 +899,10 @@ async fn idle_step(
                                     ui.transcript
                                         .push(TranscriptItem::System("nothing to undo".into()));
                                 }
+                            }
+                            Cmd::Rewind => {
+                                ui.modal =
+                                    ActiveModal::Rewind(RewindView::new(project_root, session_id));
                             }
                             Cmd::ApprovePlan => {
                                 if ui.status.mode == "plan" {
@@ -1071,8 +1098,7 @@ async fn idle_step(
                                 ui.modal = ActiveModal::Mcp(McpView::new(servers));
                             }
                             Cmd::Export(fmt) => {
-                                let path =
-                                    export_session(project_root, session_id_for_feedback, &fmt);
+                                let path = export_session(project_root, session_id, &fmt);
                                 match path {
                                     Ok(p) => ui.transcript.push(TranscriptItem::System(format!(
                                         "exported to {}",
@@ -1230,7 +1256,7 @@ async fn idle_step(
                                         // still short enough that it cannot
                                         // land on yesterday's work.
                                         let applied = stats.apply_feedback(
-                                            session_id_for_feedback,
+                                            session_id,
                                             rating,
                                             note,
                                             chrono::Duration::minutes(30),
@@ -1933,6 +1959,97 @@ fn resume_session(agent: &mut Option<AgentLoop>, ui: &mut UiState, entry: Sessio
     }
 }
 
+/// Carry out what the `/rewind` overlay confirmed: restore the files to before
+/// the point and, only if asked, truncate the conversation to before its turn.
+///
+/// Truncating forks the transcript rather than cutting it — the original stays
+/// on disk and in the timeline — and moves this TUI onto the fork: the agent's
+/// history, the log it writes, and the turn count all follow.
+async fn apply_rewind(
+    ui: &mut UiState,
+    agent: &mut Option<AgentLoop>,
+    project_root: &std::path::Path,
+    session_id: &mut String,
+    turn: &mut usize,
+    choice: RewindChoice,
+) {
+    // Checked first, so a truncate that cannot happen does not leave the files
+    // restored and the conversation not.
+    if choice.truncate.is_some() && agent.is_none() {
+        ui.transcript.push(TranscriptItem::Error(
+            "/rewind: no active agent to truncate — run /login first".into(),
+        ));
+        return;
+    }
+    match wingman_core::checkpoint::restore_to(project_root, choice.seq, Some(session_id.as_str()))
+    {
+        Err(e) => {
+            ui.transcript
+                .push(TranscriptItem::Error(format!("/rewind: {e}")));
+            return;
+        }
+        Ok(lines) if lines.is_empty() => ui.transcript.push(TranscriptItem::System(
+            "/rewind: the files were already as they were at that point".into(),
+        )),
+        Ok(lines) => {
+            for line in lines {
+                ui.transcript
+                    .push(TranscriptItem::System(format!("↩ {line}")));
+            }
+            ui.transcript.push(TranscriptItem::System(
+                "restore checkpointed — /rewind again to undo it".into(),
+            ));
+        }
+    }
+    ui.status.refresh_git(project_root);
+
+    let Some(to) = choice.truncate else {
+        return;
+    };
+    let sessions_dir = project_root.join(".wingman").join("sessions");
+    let forked = match wingman_session::session_path(&sessions_dir, session_id) {
+        Some(src) => wingman_session::fork_before_turn(&src, to)
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|f| f.ok_or_else(|| "this session's log has no such turn".to_string())),
+        None => Err("this session has no log to truncate".to_string()),
+    };
+    let opened = match forked {
+        Ok(path) => {
+            let id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match (
+                wingman_session::load_session(&path),
+                wingman_session::SessionLog::open_named(&sessions_dir, &id).await,
+            ) {
+                (Ok(records), Ok(log)) => Ok((id, records, log)),
+                (Err(e), _) | (_, Err(e)) => Err(e.to_string()),
+            }
+        }
+        Err(e) => Err(e),
+    };
+    match (opened, agent.as_mut()) {
+        (Ok((id, records, log)), Some(a)) => {
+            a.set_history(wingman_session::records_to_messages(&records));
+            a.set_context_sink(Arc::new(wingman_session::SessionLogSink::new(log)));
+            ui.transcript.clear();
+            ui.transcript.push(TranscriptItem::System(format!(
+                "conversation truncated to before turn {} — continuing in session {id}; \
+                 session {session_id} is kept as it was",
+                to + 1
+            )));
+            *session_id = id;
+            *turn = to;
+        }
+        (Err(e), _) => ui.transcript.push(TranscriptItem::Error(format!(
+            "/rewind: files restored, but the conversation was not truncated: {e}"
+        ))),
+        (Ok(_), None) => {}
+    }
+}
+
 /// Write this session's report — summary, files changed, verification
 /// receipts, cost and the tool-call timeline, secrets redacted — to
 /// `.wingman/exports/<session>.<ext>`. Built from the session log rather than
@@ -1977,6 +2094,8 @@ fn help_text() -> String {
          /params                     adjust temperature and max_tokens\n  \
          /resume                     resume a previous session\n  \
          /export [md|html|json]      export this session's report to file\n  \
+         /undo [n]                   revert the agent's last n file edits\n  \
+         /rewind                     checkpoints by turn: preview and restore to a point\n  \
          /quit                       exit\n\nKeys: \
          Enter submit, Up/Down history, Esc clear input, Ctrl-C exit, \
          PgUp/PgDn or Shift+Up/Down scroll transcript, ? show shortcuts. \

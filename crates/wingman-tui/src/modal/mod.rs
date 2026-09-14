@@ -20,6 +20,7 @@ pub mod mcp;
 pub mod mode_picker;
 pub mod model_picker;
 pub mod params;
+pub mod rewind;
 pub mod session_picker;
 pub mod skill_vars;
 pub mod skills;
@@ -33,6 +34,7 @@ pub use mcp::{McpAddPayload, McpServerSummary, McpTask, McpView};
 pub use mode_picker::ModePicker;
 pub use model_picker::{ModelChoice, ModelPicker};
 pub use params::ParamsModal;
+pub use rewind::{RewindChoice, RewindView};
 pub use session_picker::{SessionEntry, SessionPicker};
 pub use skill_vars::SkillVarsModal;
 pub use skills::SkillsView;
@@ -77,6 +79,7 @@ pub enum ActiveModal {
     SessionPicker(SessionPicker),
     SkillVars(SkillVarsModal),
     DiffPreview(DiffPreviewModal),
+    Rewind(RewindView),
 }
 
 impl ActiveModal {
@@ -99,6 +102,7 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.handle_key(key),
             Self::SkillVars(v) => v.handle_key(key),
             Self::DiffPreview(v) => v.handle_key(key),
+            Self::Rewind(v) => v.handle_key(key),
         }
     }
 
@@ -118,6 +122,7 @@ impl ActiveModal {
             Self::SessionPicker(_) => None,
             Self::SkillVars(_) => None,
             Self::DiffPreview(_) => None,
+            Self::Rewind(_) => None,
         }
     }
 
@@ -149,6 +154,7 @@ impl ActiveModal {
             Self::SessionPicker(_) => {}
             Self::SkillVars(_) => {}
             Self::DiffPreview(_) => {}
+            Self::Rewind(_) => {}
         }
     }
 
@@ -167,6 +173,7 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.render(area, buf),
             Self::SkillVars(v) => v.render(area, buf),
             Self::DiffPreview(v) => v.render(area, buf),
+            Self::Rewind(v) => v.render(area, buf),
         }
     }
 }

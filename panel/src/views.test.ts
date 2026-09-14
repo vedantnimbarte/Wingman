@@ -4,8 +4,15 @@ import { classify, path, strip } from './Changes'
 import { rate } from './Insights'
 import { stripAnsi, verdict } from './output'
 import { clockOf, isIrreversible, summarise } from './Runs'
-import { ago, clock, matching, unquote, usageLine } from './Sessions'
-import { exportUrl, type BoardData, type Card, type SessionSummary, type Task } from './api'
+import { ago, clock, matching, pointLabel, rewindQuestion, unquote, usageLine } from './Sessions'
+import {
+  exportUrl,
+  type BoardData,
+  type Card,
+  type RewindPoint,
+  type SessionSummary,
+  type Task,
+} from './api'
 
 /**
  * The derivations the second pass added.
@@ -384,5 +391,30 @@ describe('exportUrl', () => {
     expect(exportUrl('r', 's', 'html', true)).toBe(
       '/v1/projects/r/sessions/s/export?format=html&download=1',
     )
+  })
+})
+
+describe('rewind', () => {
+  const turn: RewindPoint = {
+    seq: 4,
+    turn: 1,
+    prompt: 'fix the parser\nand the tests',
+    restore: null,
+    ts: null,
+    files: ['src/parse.rs'],
+  }
+
+  it('names a turn by what it was asked, and a restore by its target', () => {
+    expect(pointLabel(turn)).toBe('turn 2: fix the parser')
+    expect(pointLabel({ ...turn, turn: null, restore: 4 })).toBe('restore to before #4')
+    expect(pointLabel({ ...turn, turn: null })).toBe('edits #4')
+  })
+
+  it('says a truncate forks the conversation, and only when asked', () => {
+    const plain = rewindQuestion(turn, 1, false)
+    expect(plain).toContain('Restore 1 file to before turn 2')
+    expect(plain).toContain('can be undone')
+    expect(plain).not.toContain('conversation')
+    expect(rewindQuestion(turn, 2, true)).toContain('this one is kept')
   })
 })

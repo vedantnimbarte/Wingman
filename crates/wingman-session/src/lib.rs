@@ -544,10 +544,132 @@ pub fn session_meta(records: &[SessionRecord]) -> Option<(String, String)> {
     None
 }
 
+/// Where one turn of a transcript starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnStart {
+    /// Index of the turn's first record: its user record for the first turn,
+    /// the record after the previous `Stop` for later ones (so a `SessionStart`
+    /// a `--print` process wrote for this turn belongs to it). A copy keeping
+    /// records `..record` is the conversation from before this turn.
+    pub record: usize,
+    /// What the turn was asked.
+    pub prompt: String,
+}
+
+/// The turns of a transcript, in order.
+///
+/// A turn runs to its `Stop`. A user record inside a turn — verification-gate
+/// feedback, a steer — is written by the loop and does not start one. This is
+/// how the rewind timeline numbers turns, so `wingman_core::checkpoint::set_turn`
+/// callers count the same way.
+pub fn turn_starts(records: &[SessionRecord]) -> Vec<TurnStart> {
+    let mut out = Vec::new();
+    let mut from = None;
+    let mut in_turn = false;
+    for (i, record) in records.iter().enumerate() {
+        match record {
+            SessionRecord::User { text, .. } if !in_turn => {
+                out.push(TurnStart {
+                    record: from.unwrap_or(i),
+                    prompt: text.clone(),
+                });
+                in_turn = true;
+            }
+            SessionRecord::Stop { .. } => {
+                in_turn = false;
+                from = Some(i + 1);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Fork the session at `src` into a new session beside it, keeping only the
+/// conversation from before turn `turn`. The original is untouched. `None`
+/// when the transcript has no such turn.
+pub async fn fork_before_turn(src: &Path, turn: usize) -> Result<Option<PathBuf>, SessionError> {
+    let records = load_session(src)?;
+    let Some(start) = turn_starts(&records).get(turn).map(|t| t.record) else {
+        return Ok(None);
+    };
+    // One record per line: the writer never leaves a blank one, so a record
+    // index is a line count.
+    let dir = src.parent().unwrap_or_else(|| Path::new("."));
+    fork_session(src, dir, Some(start)).await.map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wingman_core::AgentStop;
+
+    fn user(text: &str) -> SessionRecord {
+        SessionRecord::User {
+            ts: "t".into(),
+            text: text.into(),
+        }
+    }
+
+    fn stop() -> SessionRecord {
+        SessionRecord::Stop {
+            ts: "t".into(),
+            reason: "end_turn".into(),
+            first_output_ms: None,
+            verified: None,
+        }
+    }
+
+    fn start() -> SessionRecord {
+        SessionRecord::SessionStart {
+            ts: "t".into(),
+            model: "m".into(),
+            provider: "p".into(),
+            system_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn turns_start_after_each_stop_and_fork_keeps_what_came_before() {
+        let records = vec![
+            start(),
+            user("first"),
+            user("gate feedback, same turn"),
+            stop(),
+            start(),
+            user("second"),
+            stop(),
+        ];
+        let turns = turn_starts(&records);
+        assert_eq!(
+            turns,
+            vec![
+                TurnStart {
+                    record: 1,
+                    prompt: "first".into()
+                },
+                TurnStart {
+                    record: 4,
+                    prompt: "second".into()
+                },
+            ]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("20260101T000000000Z.jsonl");
+        let body: String = records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap() + "\n")
+            .collect();
+        std::fs::write(&src, body).unwrap();
+
+        let fork = fork_before_turn(&src, 1).await.unwrap().unwrap();
+        let kept = load_session(&fork).unwrap();
+        assert_eq!(kept.len(), 4);
+        assert_eq!(turn_starts(&kept).len(), 1);
+        assert_eq!(load_session(&src).unwrap().len(), 7, "original untouched");
+        assert!(fork_before_turn(&src, 2).await.unwrap().is_none());
+    }
 
     /// Write a message and a couple of records, then read the file back and
     /// confirm the log round-trips through JSONL without loss.

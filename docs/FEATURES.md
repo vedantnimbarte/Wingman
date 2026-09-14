@@ -159,6 +159,16 @@ Wingman different; this is everything else it does.
   multi-file edit block atomically — no partial writes on failure.
 - **Working-tree checkpoints.** `wingman checkpoint` snapshots the tree
   into a tagged `git stash`; `wingman undo` restores the most recent one.
+- **Rewind timeline.** Every file edit the agent makes is already an undo
+  checkpoint (`/undo [n]`); the TUI and `--print` now tag each with the session
+  and turn that made it. `/rewind` in the TUI lists them one point per turn,
+  with the files touched, and Enter previews what restoring to before a point
+  would change, diff and all; `y` confirms. The restore is itself a checkpoint
+  — none is ever deleted — so it shows at the top of the timeline and is
+  undone the same way. `t` additionally truncates the conversation to before
+  that turn, by forking the transcript and continuing in the fork. The panel's
+  conversation view has the same timeline, preview and confirmation, over
+  `GET/POST /v1/projects/{p}/sessions/{id}/rewind[/{seq}]`.
 - **`wingman init`.** Scans the project (Cargo.toml, package.json,
   pyproject.toml, go.mod, …) and writes a starter `WINGMAN.md`.
 - **`wingman cost`.** Per-model token + USD spend table derived from

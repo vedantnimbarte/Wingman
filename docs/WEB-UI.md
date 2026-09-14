@@ -312,6 +312,20 @@ the clipboard for a PR or an issue (and says when the browser refuses); the
 `Content-Disposition: attachment`, never `data:` or blob links, which a
 sandboxed page cannot open.
 
+**The timeline rewinds the files a conversation changed.** *Timeline* lists
+the files each turn of the session edited, and every restore, newest first —
+the same checkpoints the TUI's `/rewind` shows. Nothing is restored from a row:
+*Preview* shows what restoring to before that point would change, file by file
+with the diff (redacted by the server, since a repo holds `.env` files), and
+only *Restore* then asks, in a confirmation that says what it will do. A
+restore puts back every file touched since the point, whichever session
+touched it, which is why the preview comes first. It never deletes a
+checkpoint: it writes one of its own, which appears at the top of the timeline
+and is undone the same way. *Also truncate the conversation* is a separate,
+unticked box; it forks the transcript to before that turn and opens the fork,
+leaving the original as it was. A server whose ceiling cannot write refuses the
+restore.
+
 Long transcripts render the newest 150 records with the rest one click away, and
 the view stops auto-scrolling the moment you scroll up.
 

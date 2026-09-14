@@ -186,7 +186,11 @@ loop. One dispatch runs, in order:
    error. A non-blocking hook that fails is still logged, because a policy hook
    whose binary is missing is a security control failing silently.
 2. **Undo snapshot** — the pre-image of any file this call is about to mutate,
-   committed only if the call succeeds, so `/undo` can restore it.
+   committed only if the call succeeds, so `/undo` can restore it. Each entry
+   carries the session and turn the surface set with
+   `checkpoint::set_turn`, which is how `/rewind` and the panel's timeline
+   group them by turn; a restore to a point writes its own entries rather than
+   deleting any.
 3. **Capability gate** — `capability_denial`, the central permission check.
 4. **The tool**, under a backstop deadline (`[tools].tool_timeout_secs`); tools
    that bound themselves opt out via `Tool::owns_timeout`.

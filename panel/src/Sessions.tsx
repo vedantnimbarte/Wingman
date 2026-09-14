@@ -5,10 +5,13 @@ import {
   ApiError,
   exportUrl,
   type ContentBlock,
+  type RewindChange,
+  type RewindPoint,
   type SessionRecord,
   type SessionSummary,
   type TurnEvent,
 } from './api'
+import { classify } from './Changes'
 import { Markdown } from './markdown'
 import { navigate } from './router'
 import { message } from './state'
@@ -248,6 +251,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const [pinned, setPinned] = useState(true)
   const [mode, setMode] = useState(() => window.localStorage.getItem(MODE_KEY) ?? '')
   const [model, setModel] = useState(() => window.localStorage.getItem(MODEL_KEY) ?? '')
+  const [timeline, setTimeline] = useState(false)
   const abort = useRef<AbortController | null>(null)
   const foot = useRef<HTMLDivElement | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
@@ -356,8 +360,28 @@ function Conversation({ project, id }: { project: string; id: string }) {
           <span className="eyebrow">Conversation</span>
           <h1 className="figure identifier">{isNew ? 'new conversation' : id}</h1>
         </div>
-        {!isNew && <ExportActions project={project} id={id} />}
+        {!isNew && (
+          <div className="actions">
+            <button
+              type="button"
+              className="button button-quiet button-sm"
+              aria-expanded={timeline}
+              onClick={() => setTimeline((v) => !v)}
+            >
+              Timeline
+            </button>
+            <ExportActions project={project} id={id} />
+          </div>
+        )}
       </header>
+
+      {timeline && !isNew && (
+        <Rewind
+          project={project}
+          id={id}
+          onRestored={(forked) => (forked ? navigate(`/sessions/${forked}`) : void load())}
+        />
+      )}
 
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         <Transcript records={records} />
@@ -553,6 +577,193 @@ function ExportActions({ project, id }: { project: string; id: string }) {
       ))}
     </div>
   )
+}
+
+/**
+ * The rewind timeline: the files each turn of this session edited, and every
+ * restore, newest first — the same checkpoints the TUI's `/rewind` lists.
+ *
+ * Nothing is restored from a row. A row opens a preview of what restoring to
+ * before it would change, diff by diff, and only then asks. Restoring puts
+ * back every file touched since the point, including by another session, which
+ * is why the preview comes first. The restore is itself a checkpoint, so it
+ * appears at the top and is undone the same way; truncating the conversation
+ * is a separate, explicit box, and forks rather than cuts.
+ */
+function Rewind({
+  project,
+  id,
+  onRestored,
+}: {
+  project: string
+  id: string
+  onRestored: (forked: string | null) => void
+}) {
+  const [points, setPoints] = useState<RewindPoint[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState<RewindPoint | null>(null)
+  const [changes, setChanges] = useState<RewindChange[] | null>(null)
+  const [truncate, setTruncate] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [restored, setRestored] = useState<string[] | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      setPoints(await api.rewindTimeline(project, id))
+      setError(null)
+    } catch (e) {
+      setError(message(e))
+    }
+  }, [project, id])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  async function preview(p: RewindPoint) {
+    setOpen(p)
+    setChanges(null)
+    setTruncate(false)
+    setRestored(null)
+    try {
+      setChanges((await api.rewindPreview(project, id, p.seq)).changes)
+      setError(null)
+    } catch (e) {
+      setError(message(e))
+    }
+  }
+
+  async function restore(p: RewindPoint, n: number) {
+    if (!window.confirm(rewindQuestion(p, n, truncate))) return
+    setBusy(true)
+    try {
+      const r = await api.rewind(project, id, p.seq, truncate)
+      setRestored(r.restored)
+      setOpen(null)
+      setChanges(null)
+      setError(null)
+      await load()
+      onRestored(r.forked_session)
+    } catch (e) {
+      setError(message(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section aria-label="Rewind timeline">
+      <h2 className="section-head">Timeline</h2>
+      <p className="section-intro">
+        The files each turn edited. Preview a point to see what restoring to before it would change.
+      </p>
+      {error && (
+        <Note tone="is-failed" role="alert">
+          {error}
+        </Note>
+      )}
+      {restored && (
+        <Note>
+          {restored.length === 0
+            ? 'The files were already as they were at that point.'
+            : `${restored.join(' · ')} — the restore is on the timeline and can be undone.`}
+        </Note>
+      )}
+      {!points ? (
+        !error && <Loading what="the timeline" />
+      ) : points.length === 0 ? (
+        <p className="section-intro">No checkpoints from this session yet.</p>
+      ) : (
+        <div className="rows">
+          {points.map((p) => (
+            <div key={p.seq} className="row row-wrap">
+              <span className="task-meta-block">
+                <span>{pointLabel(p)}</span>
+                <span className="muted figure">{p.files.join(', ')}</span>
+              </span>
+              <button
+                type="button"
+                className="button button-sm"
+                aria-expanded={open?.seq === p.seq}
+                disabled={busy}
+                onClick={() => (open?.seq === p.seq ? setOpen(null) : void preview(p))}
+              >
+                {open?.seq === p.seq ? 'Close' : 'Preview'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {open && changes && (
+        <>
+          <h3 className="section-head">Restore to before {pointLabel(open)}</h3>
+          {changes.length === 0 ? (
+            <p className="section-intro">The files are already as they were at this point.</p>
+          ) : (
+            changes.map((c) => (
+              <div key={c.path}>
+                <p className="figure">
+                  {!c.exists_after ? 'removed' : !c.exists_now ? 'recreated' : 'restored'}{' '}
+                  {c.path}
+                </p>
+                <div className="diff" role="group" aria-label={`What restoring does to ${c.path}`}>
+                  {classify(c.diff).map((l, i) => (
+                    <div key={i} className={`diff-line diff-${l.kind}`}>
+                      <span className="diff-gutter" aria-hidden="true">
+                        {l.kind === 'add' ? '+' : l.kind === 'del' ? '−' : ''}
+                      </span>
+                      <span className="diff-text">
+                        {(l.kind === 'add' || l.kind === 'del' ? l.text.slice(1) : l.text) || ' '}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+          <div className="actions">
+            {open.turn !== null && (
+              <label className="check">
+                <input
+                  type="checkbox"
+                  checked={truncate}
+                  onChange={(e) => setTruncate(e.target.checked)}
+                />
+                also truncate the conversation to before this turn
+              </label>
+            )}
+            <button
+              type="button"
+              className="button button-primary button-sm"
+              disabled={busy || (changes.length === 0 && !truncate)}
+              onClick={() => void restore(open, changes.length)}
+            >
+              {busy ? 'Restoring…' : 'Restore'}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  )
+}
+
+/** A timeline row's name: the turn and what it was asked, or the restore it is. */
+export function pointLabel(p: RewindPoint): string {
+  if (p.restore !== null) return `restore to before #${p.restore}`
+  if (p.turn === null) return `edits #${p.seq}`
+  const asked = (p.prompt ?? '').split('\n')[0]
+  const short = asked.length > 60 ? `${asked.slice(0, 60)}…` : asked
+  return short ? `turn ${p.turn + 1}: ${short}` : `turn ${p.turn + 1}`
+}
+
+/** The confirmation a restore asks, saying what it will and will not do. */
+export function rewindQuestion(p: RewindPoint, files: number, truncate: boolean): string {
+  const parts = [`Restore ${files} file${files === 1 ? '' : 's'} to before ${pointLabel(p)}?`]
+  if (truncate)
+    parts.push('The conversation will continue in a copy cut to before this turn; this one is kept.')
+  parts.push('The restore is itself a checkpoint, so it can be undone from this timeline.')
+  return parts.join(' ')
 }
 
 /** Fold one streamed event into the in-flight turn. */

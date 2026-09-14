@@ -388,6 +388,36 @@ export function exportUrl(
   return `${base}?format=${format}${download ? '&download=1' : ''}`
 }
 
+/**
+ * One point on a session's rewind timeline: the files one turn edited, or one
+ * restore. Mirrors `serve::sessions::rewind_timeline`.
+ */
+export type RewindPoint = {
+  /** The point's first checkpoint; restoring to it undoes the point and everything after. */
+  seq: number
+  /** 0-based turn of this session; null on a restore. */
+  turn: number | null
+  prompt: string | null
+  /** On a restore: the seq it restored to. */
+  restore: number | null
+  /** Unix seconds of the latest edit. */
+  ts: number | null
+  files: string[]
+}
+
+/** What a restore would do to one file. */
+export type RewindChange = {
+  path: string
+  exists_now: boolean
+  exists_after: boolean
+  /** Unified diff from the file as it is to the file as it will be. */
+  diff: string
+}
+
+function rewindUrl(project: string, id: string): string {
+  return `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}/rewind`
+}
+
 /** A block inside an assistant message. Mirrors `wingman_core::ContentBlock`. */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -809,6 +839,33 @@ export const api = {
     request<{ deleted: string; deindexed: unknown }>(
       `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
+    ),
+
+  /** This session's rewind timeline, newest first. */
+  rewindTimeline: (project: string, id: string) =>
+    request<{ session_id: string; points: RewindPoint[] }>(rewindUrl(project, id)).then(
+      (r) => r.points,
+    ),
+
+  /** What restoring to before `seq` would change. Writes nothing; diffs are redacted. */
+  rewindPreview: (project: string, id: string, seq: number) =>
+    request<{ seq: number; changes: RewindChange[]; redacted: number }>(
+      `${rewindUrl(project, id)}/${seq}`,
+    ),
+
+  /**
+   * Restore the files to before `seq`. The restore is itself checkpointed.
+   * `truncate` also forks the conversation to before that turn, and the new
+   * session's id comes back as `forked_session`.
+   */
+  rewind: (project: string, id: string, seq: number, truncate: boolean) =>
+    request<{ restored: string[]; forked_session: string | null }>(
+      `${rewindUrl(project, id)}/${seq}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ truncate }),
+      },
     ),
 
   config: () => request<Record<string, unknown>>('/v1/config'),

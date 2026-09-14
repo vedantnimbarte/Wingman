@@ -132,6 +132,13 @@ async fn project_route(
         ("GET", ["sessions", id]) => sessions::get(project, id, sock).await,
         ("GET", ["sessions", id, "export"]) => sessions::export(project, id, req, sock).await,
         ("DELETE", ["sessions", id]) => sessions::delete(project, id, sock).await,
+        ("GET", ["sessions", id, "rewind"]) => sessions::rewind_timeline(project, id, sock).await,
+        ("GET", ["sessions", id, "rewind", seq]) => {
+            sessions::rewind_preview(project, id, seq, sock).await
+        }
+        ("POST", ["sessions", id, "rewind", seq]) => {
+            sessions::rewind(state, project, id, seq, req, sock).await
+        }
         ("POST", ["sessions", id, "turns"]) => {
             sessions::turn(state, project, Some(id), req, sock).await
         }
@@ -282,11 +289,21 @@ mod tests {
 
     /// As above, with an allowlist so project-scoped routes resolve.
     async fn round_trip_for(projects: Vec<Project>, token: Option<&str>, request: &str) -> String {
+        round_trip_at(projects, token, request, PermissionMode::AutoEdit).await
+    }
+
+    /// As above, under a given ceiling.
+    async fn round_trip_at(
+        projects: Vec<Project>,
+        token: Option<&str>,
+        request: &str,
+        ceiling: PermissionMode,
+    ) -> String {
         let state = Arc::new(ServeState {
             cfg: Config::default(),
             projects,
             token: token.map(str::to_string),
-            ceiling: PermissionMode::AutoEdit,
+            ceiling,
             started: Instant::now(),
             pairing: std::sync::Mutex::new(None),
             turns: Semaphore::new(1),
@@ -800,6 +817,79 @@ mod tests {
         .await;
         assert!(deleted.starts_with("HTTP/1.1 200"), "{deleted}");
         assert!(!dir.join("20260818T104200000Z.jsonl").exists());
+    }
+
+    #[tokio::test]
+    async fn a_session_rewinds_to_a_turn_and_forks_the_conversation() {
+        let (_tmp, projects, _) = seed_run("running", "in_progress");
+        let root = projects[0].root.clone();
+        let id = "20260818T104200000Z-rewind";
+        let dir = root.join(".wingman").join("sessions");
+        std::fs::create_dir_all(&dir).unwrap();
+        let transcript = [
+            r#"{"kind":"session_start","ts":"t","model":"m","provider":"p","system_hash":null}"#,
+            r#"{"kind":"user","ts":"t","text":"make it v1"}"#,
+            r#"{"kind":"stop","ts":"t","reason":"end_turn"}"#,
+        ]
+        .join("\n");
+        std::fs::write(dir.join(format!("{id}.jsonl")), transcript + "\n").unwrap();
+
+        // What turn 0 of that session would have left behind.
+        std::fs::write(root.join("a.txt"), "v0\n").unwrap();
+        wingman_core::checkpoint::set_turn(id, 0);
+        let pre = wingman_core::checkpoint::capture(&root, "a.txt");
+        std::fs::write(root.join("a.txt"), "v1\n").unwrap();
+        wingman_core::checkpoint::commit(&root, vec![pre]);
+        let seq = wingman_core::checkpoint::timeline(&root)[0].seq;
+        let base = format!("/v1/projects/repo/sessions/{id}/rewind");
+
+        let timeline = round_trip_for(projects.clone(), None, &get(&base)).await;
+        assert!(timeline.starts_with("HTTP/1.1 200"), "{timeline}");
+        assert!(timeline.contains("make it v1"), "{timeline}");
+        assert!(timeline.contains("a.txt"), "{timeline}");
+
+        let preview = round_trip_for(projects.clone(), None, &get(&format!("{base}/{seq}"))).await;
+        assert!(
+            preview.contains("-v1") && preview.contains("+v0"),
+            "{preview}"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1\n");
+
+        let missing = round_trip_for(projects.clone(), None, &get(&format!("{base}/999999"))).await;
+        assert!(missing.starts_with("HTTP/1.1 404"), "{missing}");
+
+        // A server that may not write may not restore.
+        let refused = round_trip_at(
+            projects.clone(),
+            None,
+            &post(&format!("{base}/{seq}"), "{}"),
+            PermissionMode::ReadOnly,
+        )
+        .await;
+        assert!(refused.starts_with("HTTP/1.1 403"), "{refused}");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v1\n");
+
+        let restored = round_trip_for(
+            projects,
+            None,
+            &post(&format!("{base}/{seq}"), r#"{"truncate":true}"#),
+        )
+        .await;
+        assert!(restored.starts_with("HTTP/1.1 200"), "{restored}");
+        assert!(restored.contains("restored a.txt"), "{restored}");
+        assert!(restored.contains("-fork"), "{restored}");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "v0\n");
+        // The restore is on the timeline; the original transcript is intact.
+        assert_eq!(
+            wingman_core::checkpoint::timeline(&root)[0].restore,
+            Some(seq)
+        );
+        assert_eq!(
+            wingman_session::load_session(&dir.join(format!("{id}.jsonl")))
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[tokio::test]

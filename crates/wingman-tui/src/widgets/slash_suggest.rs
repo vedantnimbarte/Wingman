@@ -36,6 +36,10 @@ pub const CATALOG: &[Command] = &[
         description: "revert the agent's last file edit(s) · /undo [n]",
     },
     Command {
+        name: "/rewind",
+        description: "checkpoints by turn · preview, then restore to a point",
+    },
+    Command {
         name: "/clear",
         description: "reset the conversation",
     },
