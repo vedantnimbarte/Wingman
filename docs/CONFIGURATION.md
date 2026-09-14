@@ -164,7 +164,7 @@ import_claude_code = false
 # diagnostics, and optional headless-browser visual check.
 [verify]
 turn_gate = "auto"        # "auto" | "off" | an explicit command
-affected_tests = true
+affected_tests = true     # tests referencing edited symbols (LSP, else tree-sitter), else changed crates
 lsp_diagnostics = true
 # [verify.browser]
 # url = "http://localhost:5173"

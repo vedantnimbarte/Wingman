@@ -29,6 +29,9 @@ degrade, not an error.
 `textDocument/references`, and only then name-matches. Its first output line
 says which of the three answered.
 
+The affected-tests gate and `wingman knows` use it too; see
+[Verification receipts](#verification-receipts) and the staleness note below.
+
 The client (`wingman-lsp`) speaks JSON-RPC over stdio directly (raw wire JSON,
 no protocol-types dependency), performs the `initialize`/`initialized`
 handshake, opens documents on demand, and keeps one warm server per language per
@@ -63,7 +66,7 @@ Set under `[verify]` in config:
 ```toml
 [verify]
 turn_gate       = "auto"   # compile check (cargo check / tsc --noEmit / …)
-affected_tests  = true     # tests of the changed crates
+affected_tests  = true     # tests referencing the edited symbols, else the changed crates
 lsp_diagnostics = true     # fold changed-file LSP diagnostics into the gate
 ```
 
@@ -74,6 +77,34 @@ diagnostics for the files changed this turn and **fails on any error** (severity
 — or a change in a language with no cheap compile step — is caught before the
 agent is allowed to say "done". Fail-open: no server installed, no changed
 files, or a server hiccup all pass with a note rather than trapping the agent.
+
+The affected-tests stage narrows to the tests that reference the symbols edited
+this turn. It finds each edited function or type with tree-sitter, asks the
+language server for its `textDocument/references`, keeps the sites in test code
+(files under `tests/`, or below a file's `#[cfg(test)]`), and runs just the
+`#[test]` functions around them with `cargo test -- --exact`. With no server,
+or one that errors or answers nothing for any symbol (a cold server still
+indexing), it name-matches the edited symbols in test code instead. The receipt
+names which one mapped the tests:
+
+```text
+edited symbols: parse
+narrowed via LSP textDocument/references to 1 test(s) referencing them: tests::parses
+$ cargo test --quiet -p foo -- --exact tests::parses
+```
+
+It runs the whole changed crates instead, and the receipt says why, when a
+change can't be tied to a symbol: a new, deleted or non-Rust file inside a
+crate, a line outside any function or type (a `use`, a doc comment that may be
+a doc test), no test referencing an edited symbol, or more than 64 matching
+tests. Only direct references count: a test that reaches the edit through a
+helper function is not mapped.
+
+`wingman knows` flags a memory as stale when it names a code symbol the project
+no longer has, as well as a file that is gone. A symbol counts as present when a
+source file defines it or still mentions it (a `PathBuf` imported from the
+standard library is not stale); a name found neither way is put to each
+installed server's `workspace/symbol` before it is reported.
 
 ## Notes & limits
 

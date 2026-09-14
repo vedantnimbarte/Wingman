@@ -2,7 +2,8 @@
 //!
 //! We speak the LSP wire format directly (raw JSON) rather than depending on a
 //! protocol-types crate: the wire shapes we use — `textDocument/definition`,
-//! `references`, `callHierarchy`, `hover`, `rename`, and `publishDiagnostics` —
+//! `references`, `callHierarchy`, `workspace/symbol`, `hover`, `rename`, and
+//! `publishDiagnostics` —
 //! are stable, and staying in `serde_json::Value` keeps this crate immune to
 //! type-crate churn and free of heavy dependencies.
 //!
@@ -228,7 +229,8 @@ impl LspClient {
                     "workspaceFolders": true,
                     "configuration": true,
                     "applyEdit": true,
-                    "executeCommand": { "dynamicRegistration": false }
+                    "executeCommand": { "dynamicRegistration": false },
+                    "symbol": { "dynamicRegistration": false }
                 }
             }
         });
@@ -328,6 +330,19 @@ impl LspClient {
             )
             .await?;
         Ok(parse_locations(&result))
+    }
+
+    /// `workspace/symbol` for `query` → the names the server matched. Servers
+    /// match fuzzily, so a caller wanting one exact name compares it itself.
+    pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<String>> {
+        let result = self
+            .request(
+                "workspace/symbol",
+                json!({ "query": query }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        Ok(parse_symbol_names(&result))
     }
 
     /// `textDocument/references` at a 0-based position.
@@ -738,6 +753,16 @@ fn parse_locations(result: &Value) -> Vec<Location> {
     }
 }
 
+/// `SymbolInformation[]` / `WorkspaceSymbol[]` → their `name`s.
+fn parse_symbol_names(result: &Value) -> Vec<String> {
+    result
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("name")?.as_str().map(str::to_string))
+        .collect()
+}
+
 /// `CallHierarchyIncomingCall[]` → one [`IncomingCall`] per `fromRanges`
 /// entry. The ranges are in the caller's file (`from.uri`).
 fn parse_incoming_calls(result: &Value) -> Vec<IncomingCall> {
@@ -928,6 +953,17 @@ mod tests {
         let locs = parse_locations(&link);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].line, 1);
+    }
+
+    #[test]
+    fn parse_symbol_names_reads_each_name() {
+        let result = json!([
+            { "name": "AgentLoop", "kind": 23, "location": { "uri": "file:///x/a.rs" } },
+            { "name": "run", "kind": 6 },
+            { "kind": 6 }
+        ]);
+        assert_eq!(parse_symbol_names(&result), vec!["AgentLoop", "run"]);
+        assert!(parse_symbol_names(&Value::Null).is_empty());
     }
 
     #[test]

@@ -978,11 +978,11 @@ impl TurnGate for ShellTurnGate {
 }
 
 /// Runs the tests of the crates changed this turn (via `git`), not the whole
-/// suite. Discovers changed crates at check-time so it tracks whatever the
-/// agent edited. A no-op (passes) when nothing relevant changed.
-///
-/// ponytail: crate-level granularity, not symbol→test mapping. Upgrade path is
-/// mapping edited symbols to the specific tests that reference them.
+/// suite, narrowed to the tests that reference the symbols edited this turn
+/// when that mapping can be made (see [`crate::symbols::narrow_to_tests`]).
+/// Discovers changes at check-time so it tracks whatever the agent edited. A
+/// no-op (passes) when nothing relevant changed. The receipt names the method
+/// that mapped the tests, or why the whole changed crates ran.
 pub struct AffectedTestsGate {
     root: std::path::PathBuf,
 }
@@ -1001,63 +1001,88 @@ impl TurnGate for AffectedTestsGate {
                 summary: "affected tests: none (no changed Rust crates)".into(),
             };
         }
-        let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
 
-        // Safe symbol-level narrowing: map the diff to the symbols it edited,
-        // then run ONLY the tests whose names match an edited symbol — but
-        // first confirm (via `cargo test -- --list`) that at least one test
-        // actually matches. If none do, fall back to the whole changed crate.
-        // This never runs zero tests under the guise of "passing" (the
-        // false-green trap): narrowing is a pure speed win when it applies and a
-        // no-op otherwise.
-        let symbols = edited_symbol_names(&self.root);
-        let mut narrowed_to: Vec<String> = Vec::new();
-        if !symbols.is_empty() {
-            if let Some(all_tests) = list_tests(&self.root, &pkg_flags).await {
-                narrowed_to = symbols
-                    .iter()
-                    .filter(|s| all_tests.iter().any(|t| t.contains(s.as_str())))
-                    .cloned()
-                    .collect();
+        // Narrowing is a pure speed win when it applies and the whole changed
+        // crate otherwise: every narrowed name comes from `cargo test --
+        // --list`, so it never runs zero tests under the guise of "passing"
+        // (the false-green trap).
+        let (symbols, narrowed) = narrow_to_tests(&self.root, &crates).await;
+        let (cmd, note) = match narrowed {
+            Ok(n) => {
+                let pkg_flags: String = n.crates.iter().map(|c| format!(" -p {c}")).collect();
+                let names: String = n.tests.iter().map(|t| format!(" {t}")).collect();
+                (
+                    format!("cargo test --quiet{pkg_flags} -- --exact{names}"),
+                    format!(
+                        "narrowed via {} to {} test(s) referencing them: {}",
+                        n.via,
+                        n.tests.len(),
+                        shortlist(&n.tests)
+                    ),
+                )
             }
-        }
-
-        let cmd = if narrowed_to.is_empty() {
-            format!("cargo test --quiet{pkg_flags}")
-        } else {
-            let filters: String = narrowed_to.iter().map(|s| format!(" {s}")).collect();
-            format!("cargo test --quiet{pkg_flags}{filters}")
+            Err(why) => {
+                let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
+                (
+                    format!("cargo test --quiet{pkg_flags}"),
+                    format!("crate-level: {why} — ran the whole changed crate(s)"),
+                )
+            }
         };
         let mut report = run_check_cmd(&cmd, &self.root).await;
-
-        if !symbols.is_empty() {
-            let shown: Vec<&str> = symbols.iter().take(12).map(String::as_str).collect();
-            let more = symbols.len().saturating_sub(shown.len());
-            let narrow_note = if narrowed_to.is_empty() {
-                " (no test names matched — ran the whole changed crate)".to_string()
-            } else {
-                format!(" → narrowed to tests matching: {}", narrowed_to.join(", "))
-            };
-            report.summary = format!(
-                "edited symbols: {}{}{}\n{}",
-                shown.join(", "),
-                if more > 0 {
-                    format!(" (+{more})")
-                } else {
-                    String::new()
-                },
-                narrow_note,
-                report.summary
-            );
-        }
+        let edited = if symbols.is_empty() {
+            String::new()
+        } else {
+            format!("edited symbols: {}\n", shortlist(&symbols))
+        };
+        report.summary = format!("{edited}{note}\n{}", report.summary);
         report
     }
+}
+
+/// Up to 12 names, then a `(+n)` count.
+fn shortlist(names: &[String]) -> String {
+    let shown = names
+        .iter()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().saturating_sub(12) {
+        0 => shown,
+        more => format!("{shown} (+{more})"),
+    }
+}
+
+/// Tests narrowed from this turn's edited symbols.
+#[cfg_attr(not(feature = "treesitter"), allow(dead_code))]
+pub(crate) struct Narrowed {
+    /// Which method found the referencing tests.
+    pub via: &'static str,
+    /// Packages to test: the changed crates plus any crate a referencing test
+    /// lives in.
+    pub crates: Vec<String>,
+    /// Full test names, as `cargo test -- --list` prints them.
+    pub tests: Vec<String>,
+}
+
+#[cfg(feature = "treesitter")]
+use crate::symbols::narrow_to_tests;
+
+/// Without tree-sitter there are no edited symbols to map.
+#[cfg(not(feature = "treesitter"))]
+async fn narrow_to_tests(
+    _root: &std::path::Path,
+    _crates: &[String],
+) -> (Vec<String>, Result<Narrowed, String>) {
+    (Vec::new(), Err("built without tree-sitter".into()))
 }
 
 /// List every test name in `pkg_flags`'s packages via `cargo test -- --list`.
 /// `None` when the command can't run, so the caller runs the full suite rather
 /// than narrowing on incomplete data.
-async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<String>> {
+#[cfg(feature = "treesitter")]
+pub(crate) async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<String>> {
     let cmd = format!("cargo test{pkg_flags} -- --list");
     let output = if cfg!(windows) {
         tokio::process::Command::new("cmd")
@@ -1085,15 +1110,18 @@ async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<Strin
     Some(names)
 }
 
-/// Repo-relative changed file -> 1-based line numbers touched, from
-/// `git diff --unified=0` hunk headers. Empty on non-git repos.
-fn changed_lines_by_file(
+/// Repo-relative changed file -> 1-based line numbers touched since `HEAD`
+/// (staged or not), from `git diff HEAD --unified=0` hunk headers. Untracked
+/// and deleted files have no entry. Empty on non-git repos and before the
+/// first commit.
+#[cfg(feature = "treesitter")]
+pub(crate) fn changed_lines_by_file(
     root: &std::path::Path,
 ) -> std::collections::HashMap<String, std::collections::BTreeSet<u32>> {
     let mut map: std::collections::HashMap<String, std::collections::BTreeSet<u32>> =
         std::collections::HashMap::new();
     let out = std::process::Command::new("git")
-        .args(["diff", "--unified=0"])
+        .args(["diff", "HEAD", "--unified=0"])
         .current_dir(root)
         .output();
     let Ok(out) = out else {
@@ -1126,35 +1154,6 @@ fn changed_lines_by_file(
         }
     }
     map
-}
-
-/// Names of symbols whose definition span overlaps a changed line this turn,
-/// via tree-sitter over the changed files. Used to make the affected-tests
-/// receipt informative (which symbols changed). Empty without tree-sitter.
-#[cfg(feature = "treesitter")]
-fn edited_symbol_names(root: &std::path::Path) -> Vec<String> {
-    let changed = changed_lines_by_file(root);
-    let mut names = std::collections::BTreeSet::new();
-    for (path, lines) in changed {
-        let abs = root.join(&path);
-        let Some(lang) = wingman_ts::Language::from_path(&abs) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&abs) else {
-            continue;
-        };
-        for sym in wingman_ts::extract_symbols(lang, &text) {
-            if lines.range(sym.start_line..=sym.end_line).next().is_some() {
-                names.insert(sym.name);
-            }
-        }
-    }
-    names.into_iter().collect()
-}
-
-#[cfg(not(feature = "treesitter"))]
-fn edited_symbol_names(_root: &std::path::Path) -> Vec<String> {
-    Vec::new()
 }
 
 /// Characterization gate: re-run captured `wingman golden` snapshots and fail
@@ -1331,11 +1330,9 @@ impl TurnGate for CompositeGate {
     }
 }
 
-/// Changed Rust crates (by package name) in the working tree, via
-/// `git status --porcelain`. Maps each changed `.rs` file up to its nearest
-/// `Cargo.toml` and reads the package name. Empty on non-git repos or when
-/// nothing Rust changed.
-fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+/// Repo-relative paths changed in the working tree (staged, unstaged, or
+/// untracked), via `git status --porcelain -z`. Empty on non-git repos.
+pub(crate) fn changed_paths(root: &std::path::Path) -> Vec<String> {
     let out = std::process::Command::new("git")
         .args(["status", "--porcelain", "-z"])
         .current_dir(root)
@@ -1346,21 +1343,29 @@ fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
     if !out.status.success() {
         return Vec::new();
     }
-    let mut crates: Vec<String> = Vec::new();
     // `-z` gives NUL-separated `XY <path>` entries where `XY` is exactly two
     // status columns followed by a space — so the path starts at byte 3. Do
     // NOT trim: a leading space in `XY` (e.g. " M") is significant alignment.
     // Renames emit a second NUL field (the old path) with no status prefix;
     // it won't map to a real file so it's harmlessly ignored.
-    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
-        if entry.len() < 4 {
-            continue;
-        }
-        let path = &entry[3..]; // strip "XY " status prefix
+    String::from_utf8_lossy(&out.stdout)
+        .split('\0')
+        .filter(|entry| entry.len() >= 4)
+        .map(|entry| entry[3..].to_string()) // strip "XY " status prefix
+        .collect()
+}
+
+/// Changed Rust crates (by package name) in the working tree. Maps each
+/// changed `.rs` file (see [`changed_paths`]) up to its nearest `Cargo.toml`
+/// and reads the package name. Empty on non-git repos or when nothing Rust
+/// changed.
+fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+    let mut crates: Vec<String> = Vec::new();
+    for path in changed_paths(root) {
         if !path.ends_with(".rs") {
             continue;
         }
-        if let Some(name) = crate_name_for(root, std::path::Path::new(path)) {
+        if let Some(name) = crate_name_for(root, std::path::Path::new(&path)) {
             if !crates.contains(&name) {
                 crates.push(name);
             }
@@ -1371,33 +1376,16 @@ fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
 }
 
 /// Changed files in the working tree (absolute paths) whose extension maps to
-/// a language server we can drive. Shares the `git status --porcelain -z`
-/// parsing of [`changed_rust_crates`]. Empty on non-git repos.
+/// a language server we can drive, from [`changed_paths`]. Empty on non-git
+/// repos.
 fn changed_lsp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["status", "--porcelain", "-z"])
-        .current_dir(root)
-        .output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
-        if entry.len() < 4 {
-            continue;
-        }
-        let path = &entry[3..]; // strip "XY " status prefix
-        let abs = root.join(path);
-        // Deletions won't exist on disk; skip so we don't ask the server about
-        // a vanished file.
-        if wingman_lsp::Lang::from_path(&abs).is_some() && abs.exists() {
-            files.push(abs);
-        }
-    }
-    files
+    changed_paths(root)
+        .into_iter()
+        .map(|path| root.join(path))
+        // Deletions won't exist on disk; skip so we don't ask the server
+        // about a vanished file.
+        .filter(|abs| wingman_lsp::Lang::from_path(abs).is_some() && abs.exists())
+        .collect()
 }
 
 /// Post-edit gate that folds the language server's diagnostics for the files
@@ -1483,7 +1471,7 @@ impl TurnGate for LspDiagnosticsGate {
 
 /// Walk up from a repo-relative file path to the nearest `Cargo.toml` and read
 /// its `[package] name`. Returns None if no manifest or no name found.
-fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
+pub(crate) fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
     let mut dir = root.join(rel_file);
     dir.pop(); // drop filename
     loop {
