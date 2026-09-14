@@ -1831,7 +1831,15 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
                 continue; // already handled in a prior cycle/run
             }
             seen.insert(key);
-            if let Err(e) = append_daemon_queue(&queue_path, cand, *action) {
+            // A dry run leaves no durable trace: the queue is what later
+            // daemons dedup on, so recording a candidate here would stop the
+            // real daemon from ever dispatching what the dry run only showed.
+            let queued = if dry_run {
+                Ok(())
+            } else {
+                append_daemon_queue(&queue_path, cand, *action)
+            };
+            if let Err(e) = queued {
                 eprintln!("[pilot] daemon: failed to queue candidate: {e:#}");
             }
             // J2 — auto-dispatch a trusted AutoRun candidate into a real
@@ -1899,7 +1907,8 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
 
         if deferred > 0 {
             eprintln!(
-                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a                  later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
+                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a \
+                 later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
             );
         }
 

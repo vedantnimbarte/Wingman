@@ -326,6 +326,45 @@ name=\"x\"
     );
 }
 
+#[test]
+fn daemon_dry_run_leaves_the_candidate_for_the_real_daemon() {
+    // Regression: `pilot daemon --dry-run` appended what it found to the
+    // durable dedup queue, so the real daemon later skipped every candidate
+    // the dry run had only shown — a `pr_reviews` round previewed once never
+    // ran. A trusted intake request is a candidate that needs no `gh`.
+    let s = Scratch::new();
+    let home = s.dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("config.toml"),
+        "[pilot.daemon]\nenabled = true\nauto_dispatch = true\n\
+         sources = [\"intake\"]\ntrusted_authors = [\"alice\"]\n",
+    )
+    .unwrap();
+    let project = s.dir.join("project");
+    let intake = project.join(".wingman").join("intake");
+    std::fs::create_dir_all(&intake).unwrap();
+    std::fs::write(project.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
+    std::fs::write(intake.join("req.md"), "author: alice\nFix the flaky test\n").unwrap();
+
+    let out = wingman()
+        .args(["pilot", "daemon", "--cycles", "1", "--dry-run"])
+        .env(wingman_config::HOME_ENV, &home)
+        .current_dir(&project)
+        .output()
+        .expect("pilot daemon --dry-run");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "daemon failed: {stderr}");
+    assert!(
+        stderr.contains("[dry-run] would auto-dispatch"),
+        "the candidate should reach the dry-run decision: {stderr}"
+    );
+    assert!(
+        !project.join(".wingman").join("daemon-queue.jsonl").exists(),
+        "a dry run must not record candidates in the queue"
+    );
+}
+
 struct Scratch {
     dir: PathBuf,
 }
