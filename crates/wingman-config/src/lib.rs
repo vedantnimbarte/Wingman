@@ -2843,6 +2843,17 @@ pub struct PilotDaemonConfig {
     /// needed. An optional first line `author: <name>` sets trust.
     #[serde(default = "default_intake_dir")]
     pub intake_dir: String,
+    /// R2 — how often, in seconds, the daemon polls the PRs its runs opened
+    /// for their post-merge outcome (merged, closed) and records it for the
+    /// cross-run learner. Checked between discovery cycles, so it runs at
+    /// most once per `poll_interval_secs` even when set lower. `0` turns it
+    /// off; `wingman pilot feedback` still polls on demand.
+    #[serde(default = "default_feedback_poll_secs")]
+    pub feedback_poll_secs: u64,
+}
+
+fn default_feedback_poll_secs() -> u64 {
+    3600
 }
 
 fn default_intake_dir() -> String {
@@ -2874,6 +2885,7 @@ impl Default for PilotDaemonConfig {
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
+            feedback_poll_secs: default_feedback_poll_secs(),
         }
     }
 }

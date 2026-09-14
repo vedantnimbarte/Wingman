@@ -2002,10 +2002,15 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let interval = Duration::from_secs(pilot.daemon.poll_interval_secs.max(1));
 
     eprintln!(
-        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s){}",
+        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s, \
+         feedback: {}){}",
         pilot.daemon.sources,
         pilot.daemon.auto_threshold,
         pilot.daemon.poll_interval_secs,
+        match pilot.daemon.feedback_poll_secs {
+            0 => "off".to_string(),
+            s => format!("every {s}s"),
+        },
         if cycles == 0 {
             " — Ctrl-C to stop".to_string()
         } else {
@@ -2017,9 +2022,19 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     // queued is remembered by source+title, so the same issue isn't
     // re-queued or re-dispatched every poll.
     let mut seen: std::collections::HashSet<String> = load_queued_keys(&queue_path);
+    let mut last_feedback: Option<std::time::Instant> = None;
 
     let mut n = 0usize;
     loop {
+        // R2 — the post-merge feedback pass rides the discovery loop on its
+        // own, slower cadence. It only reads PR state and appends to run logs
+        // this repo already holds, so `--dry-run` runs it too.
+        let now = std::time::Instant::now();
+        if feedback_due(last_feedback, now, pilot.daemon.feedback_poll_secs) {
+            last_feedback = Some(now);
+            poll_feedback(&runner, &project.root, n).await;
+        }
+
         let results = wingman_autonomous::daemon::run_cycle(
             &runner,
             &project.root,
@@ -2152,33 +2167,7 @@ pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
 
     let mut n = 0usize;
     loop {
-        let pending = feedback_pending_runs(&project.root).await;
-        if pending.is_empty() {
-            eprintln!("[pilot] feedback cycle {n}: no open PRs awaiting outcome");
-        }
-        for (dir, pr_url) in pending {
-            let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
-                    continue;
-                }
-            };
-            match wingman_autonomous::feedback::poll_and_record(
-                &runner,
-                &mut store,
-                &project.root,
-                &pr_url,
-            )
-            .await
-            {
-                Ok(Some(kind)) => {
-                    eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
-                }
-                Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
-                Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
-            }
-        }
+        poll_feedback(&runner, &project.root, n).await;
 
         n += 1;
         if cycles != 0 && n >= cycles {
@@ -2187,6 +2176,59 @@ pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// One R2 feedback pass: poll every run awaiting an outcome and record the
+/// terminal ones. Returns how many outcomes it recorded. `pilot feedback` runs
+/// it each cycle; `pilot daemon` on `[pilot.daemon].feedback_poll_secs`.
+async fn poll_feedback(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    project_root: &std::path::Path,
+    cycle: usize,
+) -> usize {
+    let pending = feedback_pending_runs(project_root).await;
+    if pending.is_empty() {
+        eprintln!("[pilot] feedback cycle {cycle}: no open PRs awaiting outcome");
+    }
+    let mut recorded = 0;
+    for (dir, pr_url) in pending {
+        let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
+                continue;
+            }
+        };
+        match wingman_autonomous::feedback::poll_and_record(
+            runner,
+            &mut store,
+            project_root,
+            &pr_url,
+        )
+        .await
+        {
+            Ok(Some(kind)) => {
+                recorded += 1;
+                eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
+            }
+            Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
+            Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
+        }
+    }
+    recorded
+}
+
+/// Whether the daemon's R2 feedback pass is due: never with `every_secs == 0`,
+/// on the first cycle, then once `every_secs` have passed since the last pass.
+/// Checked at cycle boundaries, so a cycle busy with a dispatched run delays
+/// the pass rather than running it alongside.
+fn feedback_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    every_secs: u64,
+) -> bool {
+    every_secs != 0
+        && last.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(every_secs))
 }
 
 /// Runs that opened a PR (`pr_url` set) but have no `pr.outcome` event yet.
@@ -2272,18 +2314,20 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
 /// R4 — eval / regression harness + CI gate.
 ///
 /// Two modes:
-/// - `--goals <FILE>` runs each goal line live through the pilot pipeline,
-///   harvesting success/usd/wall, and writes `<eval>/results.jsonl`.
+/// - `--goals <FILE>` runs each goal live through the pilot pipeline,
+///   harvesting success/usd/wall and a quality score, and writes
+///   `<eval>/results.jsonl`.
 /// - otherwise reads an existing `<eval>/results.jsonl` (produced earlier or
 ///   hand-authored).
 ///
-/// Then it summarizes, compares to `<eval>/baseline.json`, prints the
-/// markdown report, and **exits non-zero on regression** — that exit code is
-/// the CI gate. `--update-baseline` rewrites the baseline from the current
-/// results and skips gating.
+/// Then it summarizes, compares to the baseline (`--baseline`, default
+/// `<eval>/baseline.json`), prints the markdown report, and **exits non-zero
+/// on regression** — that exit code is the CI gate. `--update-baseline`
+/// rewrites the baseline from the current results and skips gating.
 pub async fn eval(
     cfg: Config,
     goals_file: Option<std::path::PathBuf>,
+    baseline: Option<std::path::PathBuf>,
     threshold: f64,
     update_baseline: bool,
 ) -> Result<ExitCode> {
@@ -2291,22 +2335,22 @@ pub async fn eval(
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let eval_dir = project.root.join(".wingman").join("eval");
     let results_path = eval_dir.join("results.jsonl");
-    let baseline_path = eval_dir.join("baseline.json");
+    let baseline_path = baseline.unwrap_or_else(|| eval_dir.join("baseline.json"));
 
     // Gather this run's results: live if --goals given, else from disk.
     let results: Vec<EvalResult> = if let Some(gf) = goals_file {
-        let goals: Vec<String> = std::fs::read_to_string(&gf)
-            .with_context(|| format!("reading goals file {}", gf.display()))?
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
+        let text = std::fs::read_to_string(&gf)
+            .with_context(|| format!("reading goals file {}", gf.display()))?;
+        let goals = wingman_autonomous::eval::parse_goals(&text)
+            .map_err(|e| anyhow!("goals file {}: {e}", gf.display()))?;
         if goals.is_empty() {
             eprintln!("[pilot] eval: no goals in {}", gf.display());
             return Ok(ExitCode::from(1));
         }
+        // Golden diff paths are relative to the goals file.
+        let goals_dir = gf.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         eprintln!("[pilot] eval: running {} canned goal(s) live…", goals.len());
-        let res = run_eval_goals(&cfg, &project.root, &goals).await;
+        let res = run_eval_goals(&cfg, &project.root, &goals, &goals_dir).await;
         write_eval_results(&results_path, &res)?;
         res
     } else {
@@ -2356,39 +2400,108 @@ fn eval_gate(
     threshold: f64,
 ) -> (String, bool) {
     use wingman_autonomous::eval;
+    // Quality from the judge and from the success proxy average together, so
+    // say how much of each side was judged.
+    let judged = |rs: &[eval::EvalResult]| {
+        format!("{}/{}", rs.iter().filter(|r| r.judged).count(), rs.len())
+    };
     let cur = eval::summarize(current);
     match baseline {
         None => (
             format!(
                 "# Eval report\n\nNo baseline to compare against. {} result(s), \
-                 {:.0}% success, avg ${:.2}.\n\nRun `wingman pilot eval --update-baseline` \
-                 to set one.\n",
+                 {:.0}% success, avg ${:.2}.\n\nQuality judged against a golden reference \
+                 for {} goal(s); the rest are success-proxied.\n\nRun `wingman pilot eval \
+                 --update-baseline` to set one.\n",
                 cur.n,
                 cur.success_rate * 100.0,
-                cur.avg_usd
+                cur.avg_usd,
+                judged(current)
             ),
             false,
         ),
         Some(base) => {
             let b = eval::summarize(base);
             let report = eval::compare(&cur, &b, threshold);
-            (eval::render_report(&report), report.regressed)
+            (
+                format!(
+                    "{}\nQuality judged against a golden reference for {} goal(s) \
+                     (baseline: {}); the rest are success-proxied.\n",
+                    eval::render_report(&report),
+                    judged(current),
+                    judged(base)
+                ),
+                report.regressed,
+            )
         }
     }
 }
 
+/// R4 — the eval judge. It runs on the `judge` task class (`[router.classes]`)
+/// when that is routed, else on the planner model `pilot run` uses
+/// (`[pilot].default_model`, then `default_model`). `None` when neither can be
+/// built; goals with a golden reference then fall back to the success proxy.
+fn eval_judge(cfg: &Config) -> Option<wingman_autonomous::pipeline::AuxAgent> {
+    use wingman_autonomous::pipeline::AuxAgent;
+    let routed = cfg
+        .router
+        .resolve_class("judge")
+        .and_then(|spec| cfg.resolve_model_spec(&spec))
+        .and_then(
+            |(provider_id, model)| match runtime::build_provider(cfg, &provider_id) {
+                Ok(provider) => Some(AuxAgent { provider, model }),
+                Err(e) => {
+                    eprintln!(
+                        "[pilot] eval: cannot build provider {provider_id} for the judge class \
+                         ({e}); using the planner model"
+                    );
+                    None
+                }
+            },
+        );
+    routed.or_else(|| {
+        let spec = cfg
+            .pilot
+            .default_model
+            .clone()
+            .or_else(|| cfg.default_model.clone());
+        let built = runtime::resolve_selection(cfg, spec.as_deref()).and_then(|sel| {
+            runtime::build_provider(cfg, &sel.provider_id).map(|provider| AuxAgent {
+                provider,
+                model: sel.model,
+            })
+        });
+        match built {
+            Ok(judge) => Some(judge),
+            Err(e) => {
+                eprintln!("[pilot] eval: no judge model ({e:#}); golden goals are success-proxied");
+                None
+            }
+        }
+    })
+}
+
 /// Run each canned goal live through the pilot pipeline, harvesting metrics
 /// from the resulting run state. success = the run reached Done; usd from the
-/// run's recorded totals; wall from the wall clock around the call.
-/// ponytail: quality is success-proxied (1.0/0.0) — a real LLM-judge needs a
-/// golden diff per goal, which doesn't exist yet. Add it when golden refs do.
+/// run's recorded totals; wall from the wall clock around the call; quality
+/// from [`wingman_autonomous::eval::score_quality`] — the judge's grade of the
+/// run's diff against the goal's golden reference, else the success proxy.
+///
+/// A goal runs from its `base` (a golden commit's parent by default) and
+/// never opens a PR: an eval's attempts are measurements, not contributions.
 async fn run_eval_goals(
     cfg: &Config,
     project_root: &std::path::Path,
-    goals: &[String],
+    goals: &[wingman_autonomous::eval::EvalGoal],
+    goals_dir: &std::path::Path,
 ) -> Vec<wingman_autonomous::eval::EvalResult> {
     use std::time::Instant;
     use wingman_autonomous::eval::EvalResult;
+    let has_golden = goals
+        .iter()
+        .any(|g| g.golden_commit.is_some() || g.golden_diff.is_some());
+    let judge = if has_golden { eval_judge(cfg) } else { None };
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
     let mut out = Vec::with_capacity(goals.len());
     for goal in goals {
         let before: std::collections::HashSet<String> =
@@ -2399,39 +2512,65 @@ async fn run_eval_goals(
                 .collect();
         let started = Instant::now();
         let opts = PilotOptions {
-            goal: goal.clone(),
+            goal: goal.goal.clone(),
             yes: true,
+            no_pr: true,
+            base: goal.base(),
             ..PilotOptions::default()
         };
-        let _ = run(cfg.clone(), opts).await;
+        if let Err(e) = run(cfg.clone(), opts).await {
+            eprintln!("[pilot] eval: {:?} run failed: {e:#}", goal.goal);
+        }
         let wall_min = started.elapsed().as_secs_f64() / 60.0;
 
         // Find the run this goal produced (newest id not seen before) and
         // read its terminal status + spend.
-        let (success, usd) = wingman_autonomous::dashboard::list_runs(project_root)
+        let state = wingman_autonomous::dashboard::list_runs(project_root)
             .unwrap_or_default()
             .into_iter()
             .find(|r| !before.contains(&r.run_id))
-            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok())
-            .map(|s| {
-                (
-                    s.status == wingman_autonomous::RunStatus::Done,
-                    s.totals.usd,
-                )
-            })
-            .unwrap_or((false, 0.0));
+            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok());
+        let success = state
+            .as_ref()
+            .is_some_and(|s| s.status == wingman_autonomous::RunStatus::Done);
+        let usd = state.as_ref().map_or(0.0, |s| s.totals.usd);
+
+        let judge_llm = judge.as_ref().map(|j| ProviderLlm {
+            provider: j.provider.as_ref(),
+            model: j.model.clone(),
+            max_tokens: 1024,
+        });
+        let score = wingman_autonomous::eval::score_quality(
+            judge_llm.as_ref().map(|l| l as &dyn PlannerLlm),
+            &runner,
+            project_root,
+            goals_dir,
+            goal,
+            success,
+            state
+                .as_ref()
+                .map(|s| (s.base_commit.as_str(), s.integration_branch.as_str())),
+        )
+        .await;
 
         out.push(EvalResult {
-            goal: goal.clone(),
+            goal: goal.goal.clone(),
             success,
             usd,
             wall_min,
-            quality: if success { 1.0 } else { 0.0 },
+            quality: score.quality,
+            judged: score.judged,
         });
         eprintln!(
-            "[pilot] eval: {goal:?} → {} (${usd:.2}, {wall_min:.1}m)",
-            if success { "ok" } else { "fail" }
+            "[pilot] eval: {:?} → {} (${usd:.2}, {wall_min:.1}m, quality {:.2} {})",
+            goal.goal,
+            if success { "ok" } else { "fail" },
+            score.quality,
+            if score.judged { "judged" } else { "proxied" }
         );
+        if let Some(note) = &score.note {
+            eprintln!("[pilot] eval:   {note}");
+        }
     }
     out
 }
@@ -2640,6 +2779,7 @@ mod tests {
             usd: 0.10,
             wall_min: 1.0,
             quality: 1.0,
+            judged: g == "a",
         };
         let baseline = vec![good("a"), good("b")];
 
@@ -2657,6 +2797,10 @@ mod tests {
         let (report, fail) = eval_gate(&worse, Some(&baseline), 0.10);
         assert!(fail, "halved success rate must fail the gate");
         assert!(report.contains("REGRESSED"));
+        assert!(
+            report.contains("golden reference for 1/2 goal(s) (baseline: 1/2)"),
+            "{report}"
+        );
 
         // baseline round-trips through disk
         let dir = tempfile::tempdir().unwrap();
@@ -2705,6 +2849,87 @@ mod tests {
         let pending = feedback_pending_runs(dir.path()).await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, "https://gh/pr/1");
+    }
+
+    /// R2 in the daemon: a pass records each terminal PR once, and the daemon
+    /// runs one on its first cycle and then every `feedback_poll_secs`.
+    #[tokio::test]
+    async fn r2_daemon_polls_feedback_on_its_cadence() {
+        use std::time::{Duration, Instant};
+        use wingman_autonomous::model::Event;
+        use wingman_autonomous::pr::{CommandOut, CommandRunner};
+        use wingman_autonomous::store::RunStore;
+
+        struct MergedGh;
+        impl CommandRunner for MergedGh {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &std::path::Path,
+            ) -> std::io::Result<CommandOut> {
+                assert_eq!((program, &args[..2]), ("gh", &["pr", "view"][..]));
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout: r#"{"state":"MERGED"}"#.into(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join(".wingman").join("autonomous").join("r1");
+        let mut store = RunStore::create(&run, "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        store
+            .append(Event::RunPr {
+                t: RunStore::now(),
+                url: "https://gh/pr/1".into(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        assert_eq!(poll_feedback(&MergedGh, dir.path(), 0).await, 1);
+        assert_eq!(
+            poll_feedback(&MergedGh, dir.path(), 1).await,
+            0,
+            "an outcome is recorded once"
+        );
+
+        let t0 = Instant::now();
+        assert!(feedback_due(None, t0, 3600));
+        assert!(!feedback_due(None, t0, 0), "0 turns it off");
+        let later = t0 + Duration::from_secs(3599);
+        assert!(!feedback_due(Some(t0), later, 3600));
+        assert!(feedback_due(Some(t0), later + Duration::from_secs(1), 3600));
+        assert_eq!(
+            wingman_config::PilotDaemonConfig::default().feedback_poll_secs,
+            3600
+        );
+    }
+
+    /// R4: the judge runs on the `judge` class when routed, else on the
+    /// planner model.
+    #[test]
+    fn r4_eval_judge_routes_through_the_judge_class() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            default_model = "ollama/qwen2.5-coder"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            [router]
+            fast_model = "ollama/llama3.2"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(eval_judge(&cfg).unwrap().model, "qwen2.5-coder");
+
+        let mut routed = cfg.clone();
+        routed.router.classes.insert("judge".into(), "fast".into());
+        assert_eq!(eval_judge(&routed).unwrap().model, "llama3.2");
     }
 
     #[test]

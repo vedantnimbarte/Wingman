@@ -49,7 +49,11 @@ Wingman different; this is everything else it does.
   before review. A critic model, which can be required to come from a different
   model family than the workers, adds guardrail tasks to the plan and can veto
   auto-merge. Cross-run stats count a task as a first-try success only when no
-  retry rung ran. See [PILOT-MODE.md](PILOT-MODE.md).
+  retry rung ran. The daemon polls opened PRs for their post-merge outcome on
+  its own cadence, and `wingman pilot eval` scores canned goals, with an LLM
+  judge grading each run's diff against a golden commit, and fails on a
+  regression against a committed baseline (run weekly by
+  `.github/workflows/eval.yml`). See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
   freshness.

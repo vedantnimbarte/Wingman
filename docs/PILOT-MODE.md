@@ -407,6 +407,71 @@ checkpoint_hygiene = true    # autopilot only by default
 critic             = true    # autopilot only by default
 ```
 
+## Post-merge feedback and evals
+
+**Post-merge feedback.** A run that opened a PR learns how it ended: merged or
+closed. `wingman pilot feedback` polls every such run's PR with `gh pr view`
+and appends a `pr.outcome` event to its log once the PR is no longer open;
+runs that already have one are skipped. `pilot daemon` runs the same pass on
+the first cycle and then every `feedback_poll_secs` (default one hour, `0`
+turns it off). The daemon checks between discovery cycles, so a cycle busy
+with a dispatched run delays the pass, and the pass never runs more often than
+`poll_interval_secs`. Before, only `pilot feedback` polled, and only when
+someone ran it.
+
+```toml
+[pilot.daemon]
+enabled            = true
+poll_interval_secs = 300
+feedback_poll_secs = 3600   # 0 = off
+```
+
+**Evals.** `wingman pilot eval --goals <file>` runs each goal through
+`pilot run` with no PR, and scores it on success (the run reached Done), cost,
+wall time and quality. It writes `.wingman/eval/results.jsonl`, compares the
+averages with the baseline (`--baseline <file>`, default
+`.wingman/eval/baseline.json`), prints the report, and exits 1 when an axis is
+more than `--threshold` (default 10%) worse. `--update-baseline` writes the
+current results as the baseline instead. Without `--goals` it gates the
+results already on disk.
+
+A goals file has one goal per line. A plain line is a goal with no golden
+reference. A JSON line can add one:
+
+```
+add a --version-only flag to wingman-cli
+{"goal": "flush each session record in one write", "golden_commit": "8a9c0a9f293a4a0217c8208d71506c79b9b76928"}
+{"goal": "rename the config key", "golden_diff": "golden/rename.diff", "base": "v0.3.0"}
+```
+
+- `golden_commit`: the commit's own change is the reference, and the run
+  starts from its parent unless `base` says otherwise.
+- `golden_diff`: a unified diff file, relative to the goals file.
+- `base`: the revision the run starts from.
+
+For a goal with a golden reference that reached Done, a judge model is given
+the goal, the reference diff and the run's diff (base commit to integration
+branch, each cut at 30,000 characters), and returns a score from 0 to 1. A run
+that changed nothing scores 0. The judge runs on the `judge` task class, and
+falls back to the planner model when that class is unrouted. Every other goal
+is scored by the success proxy: 1.0 for Done, 0.0 otherwise. A reference that
+cannot be read, a judge that cannot be built, or a reply that is not a score
+in range also falls back to the proxy, and the reason is printed. The report
+says how many goals on each side were judged, since judged and proxied scores
+average together. Keep the judge model fixed, or quality moves with the judge.
+
+```toml
+[router.classes]
+judge = "anthropic/claude-opus-4-7"
+```
+
+`.github/workflows/eval.yml` runs the suite in `eval/goals.jsonl` every Monday
+and on demand, against `eval/baseline.jsonl`. It needs the `OPENROUTER_API_KEY`
+secret and a `WINGMAN_EVAL_MODEL` variable (`WINGMAN_EVAL_JUDGE_MODEL` routes
+the judge); without them it skips with a notice and passes. With no committed
+baseline it gates nothing and says so. To set or move the baseline, commit the
+`results.jsonl` from the `eval-results` artifact of a run you accept.
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

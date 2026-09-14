@@ -658,10 +658,16 @@ pub enum PilotAction {
     /// R4 — eval / regression gate. Summarize eval results, compare to the
     /// committed baseline, and exit non-zero on regression (the CI gate).
     Eval {
-        /// Run each goal line in this file live, then gate on the results.
-        /// Omit to gate on an existing `.wingman/eval/results.jsonl`.
+        /// Run each goal in this file live (no PR), then gate on the results.
+        /// A plain line is a goal; a JSON line can add `golden_commit` or
+        /// `golden_diff` for the LLM judge, and `base`. Omit to gate on an
+        /// existing `.wingman/eval/results.jsonl`.
         #[arg(long, value_name = "FILE")]
         goals: Option<std::path::PathBuf>,
+        /// Baseline to compare against (or rewrite with --update-baseline).
+        /// Defaults to `.wingman/eval/baseline.json`.
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<std::path::PathBuf>,
         /// Allowed fractional drift before an axis counts as regressed.
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
@@ -1317,11 +1323,12 @@ pub async fn run() -> Result<ExitCode> {
             }
             PilotAction::Eval {
                 goals,
+                baseline,
                 threshold,
                 update_baseline,
             } => {
                 let cfg = load_config()?;
-                commands::pilot::eval(cfg, goals, threshold, update_baseline).await
+                commands::pilot::eval(cfg, goals, baseline, threshold, update_baseline).await
             }
             PilotAction::Skills => {
                 let cfg = load_config()?;
