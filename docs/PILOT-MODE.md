@@ -148,6 +148,64 @@ under it would be force-removed with the worktree at cleanup. Worker
 transcripts are also queued for the recall index, so `recall_session` can find
 what a past worker did.
 
+## Acceptance checks
+
+Every task carries executable checks the worker must pass before review:
+`shell` (exit 0), `grep` (literal or regex match in a file), `run` (execute
+the app), `assert` (a rendered artifact contains text), and `http`:
+
+```jsonc
+{"kind": "http", "url": "http://localhost:3000/api/version",
+ "must_match": 200,                      // status code, body substring, or omitted (< 400)
+ "schema": {                             // optional: body must be JSON matching this
+   "type": "object",
+   "required": ["version"],
+   "properties": {"version": {"type": "string", "pattern": "^\\d+\\.\\d+"}}
+ }}
+```
+
+`schema` supports `type`, `enum`, `const`, `properties`, `required`,
+`additionalProperties`, `items`, `minItems`/`maxItems`,
+`minLength`/`maxLength`, `pattern`, `minimum`/`maximum` (and the exclusive
+forms), and `allOf`/`anyOf`/`oneOf`/`not`; `title`, `description`, `format`
+and the other annotations are ignored. Any other keyword (`$ref`,
+`patternProperties`, `if`, ...) fails the check with "unsupported schema
+keyword" rather than being skipped, so a schema that cannot be fully checked
+never passes.
+
+## Security pass
+
+Before the auto-merge gate, every run that opens a PR gets a security pass
+over the integration branch. Its summary is posted on the PR as a comment
+(when `gh` opened it) and printed by `wingman pilot run`; any finding at or
+above `block_severity` blocks auto-merge.
+
+- **Secrets.** A built-in scan (known key prefixes plus entropy) over the
+  added lines always runs. When `gitleaks` is on PATH it also scans the run's
+  commits (`--redact`, so secrets never reach the report or the comment).
+- **Licenses.** For each `Cargo.lock` or `package-lock.json` the run changed,
+  the packages it added (new names or new versions) are checked against the
+  policy. npm licenses come from the lockfile; Cargo licenses from
+  `cargo metadata`. A denied license is critical, one not on a non-empty
+  allowlist is high, a missing license is medium. `package-lock.json` v1 has
+  no license data and is reported as unscanned.
+- **Advisories.** `cargo audit` runs next to each changed `Cargo.lock` when
+  cargo-audit is installed.
+
+A scanner that is missing or fails never fails the run; the summary's
+**Scanners** section says what did and did not run, so an empty findings list
+is never mistaken for a full scan.
+
+```toml
+[pilot.security]
+secrets_scanner  = "gitleaks"    # or a path to it; "" disables
+dependency_audit = true          # cargo audit on Cargo.lock changes
+allowed_licenses = ["MIT", "Apache-2.0", "BSD-3-Clause", "BSD-2-Clause",
+                    "ISC", "MPL-2.0", "Unicode-DFS-2016"]  # [] = allow all not denied
+denied_licenses  = []            # e.g. ["GPL-3.0", "AGPL-3.0"]
+block_severity   = "medium"
+```
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

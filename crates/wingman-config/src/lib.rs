@@ -2886,14 +2886,21 @@ pub struct PilotSkillsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSecurityConfig {
-    /// Secrets scanner binary to invoke on the diff (e.g. "gitleaks").
-    /// Empty disables the external scanner (the built-in heuristic scan
-    /// still runs).
+    /// Secrets scanner binary to run over the run's commits: "gitleaks", or a
+    /// path to it. Skipped, and said so in the security summary, when it is
+    /// not on PATH. Empty disables the external scanner (the built-in
+    /// heuristic scan still runs).
     pub secrets_scanner: String,
-    /// Run `cargo audit` / `npm audit` on lockfile changes.
+    /// Run `cargo audit` when the run changed a `Cargo.lock`. Skipped, and
+    /// said so, when cargo-audit is not installed.
     pub dependency_audit: bool,
-    /// SPDX identifiers permitted for new dependencies.
+    /// SPDX identifiers permitted for dependencies a run adds to a lockfile
+    /// (`Cargo.lock`, `package-lock.json`). Empty allows any license not in
+    /// `denied_licenses`.
     pub allowed_licenses: Vec<String>,
+    /// SPDX identifiers never permitted, even when also allowed. A denied
+    /// license is a critical finding.
+    pub denied_licenses: Vec<String>,
     /// Findings at or above this severity block auto-merge.
     /// "info" | "low" | "medium" | "high" | "critical".
     #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
@@ -2963,6 +2970,7 @@ impl Default for PilotSecurityConfig {
                 "MPL-2.0".into(),
                 "Unicode-DFS-2016".into(),
             ],
+            denied_licenses: Vec::new(),
             block_severity: "medium".into(),
         }
     }

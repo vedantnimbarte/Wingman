@@ -96,8 +96,13 @@ fn run_one(check: &Acceptance, cwd: &Path, timeout: Duration) -> AcceptanceResul
         Acceptance::Shell { cmd } => run_shell(cmd, cwd, timeout),
         Acceptance::Grep { pattern, path } => run_grep(pattern, path, cwd),
         // J6 — real HTTP GET via `curl` (no async runtime, no new dep). The
-        // status line proves reachability; `must_match` asserts on body/code.
-        Acceptance::Http { url, must_match } => run_http(url, must_match, cwd),
+        // status line proves reachability; `must_match` asserts on body/code,
+        // `schema` on the shape of the JSON body.
+        Acceptance::Http {
+            url,
+            must_match,
+            schema,
+        } => run_http(url, must_match, schema.as_ref(), cwd),
         // J6 — run the app: execute the script (or the target as a
         // command) like a shell check, but label it as a run.
         Acceptance::Run { target, script } => {
@@ -125,9 +130,14 @@ fn run_one(check: &Acceptance, cwd: &Path, timeout: Duration) -> AcceptanceResul
 /// - anything else (object/array) → its compact JSON form must appear in the
 ///   body (and status < 400) — a coarse "shape present" check.
 ///
-/// ponytail: substring/status checks, not a JSON-schema match. Add a real
-/// JSON-path assertion when a canned string-contains proves too blunt.
-fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> AcceptanceResult {
+/// `schema`, when given, is checked on top of that: the body must parse as
+/// JSON and validate against it (see [`schema_errors`]).
+fn run_http(
+    url: &str,
+    must_match: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+    cwd: &Path,
+) -> AcceptanceResult {
     let label = format!("http: {url}");
     // -sS quiet-but-show-errors, -L follow redirects, -m 30 hard timeout,
     // -w appends the numeric status on its own trailing line.
@@ -154,7 +164,252 @@ fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> Acceptance
         None => ("", raw.trim()),
     };
     let status: u32 = status_str.parse().unwrap_or(0);
-    assert_http(label, status, body, must_match)
+    let res = assert_http(label, status, body, must_match);
+    match schema {
+        Some(schema) if res.ok => assert_schema(res, body, schema),
+        _ => res,
+    }
+}
+
+/// Validate a JSON `body` against `schema`, turning a passing [`assert_http`]
+/// result into a failure when it does not.
+fn assert_schema(
+    res: AcceptanceResult,
+    body: &str,
+    schema: &serde_json::Value,
+) -> AcceptanceResult {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return AcceptanceResult::fail(
+                res.label,
+                format!("{}, body is not JSON: {e}", res.output),
+            )
+        }
+    };
+    let mut errs = Vec::new();
+    schema_errors(&value, schema, "$", &mut errs);
+    if errs.is_empty() {
+        AcceptanceResult::ok(res.label, format!("{}, schema matched", res.output))
+    } else {
+        let shown = errs.iter().take(5).cloned().collect::<Vec<_>>().join("; ");
+        AcceptanceResult::fail(
+            res.label,
+            format!(
+                "{}, schema mismatch ({} error(s)): {shown}",
+                res.output,
+                errs.len()
+            ),
+        )
+    }
+}
+
+/// JSON Schema keywords [`schema_errors`] treats as annotations and ignores.
+/// `format` is annotation-only by default in draft 2020-12, too.
+const SCHEMA_ANNOTATIONS: &[&str] = &[
+    "$schema",
+    "$id",
+    "$comment",
+    "title",
+    "description",
+    "default",
+    "examples",
+    "format",
+];
+
+/// Validate `value` against a JSON Schema, appending one message per
+/// violation (prefixed with its JSON path) to `errs`.
+///
+/// Covers the keywords an acceptance check realistically asserts on: `type`,
+/// `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`,
+/// `min/maxItems`, `min/maxLength`, `pattern`, `minimum`/`maximum` (and the
+/// exclusive forms), `allOf`/`anyOf`/`oneOf`/`not`.
+///
+/// ponytail: a subset, not a full validator (no `$ref`, `patternProperties`,
+/// `if/then/else`, …). Any keyword outside the subset is reported as an error
+/// rather than skipped, so a schema this cannot fully check fails the
+/// acceptance check instead of passing it unexamined. Swap in the
+/// `jsonschema` crate if planners start writing schemas that need more.
+fn schema_errors(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    path: &str,
+    errs: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let obj = match schema {
+        Value::Bool(true) => return,
+        Value::Bool(false) => {
+            return errs.push(format!("{path}: schema `false` rejects every value"))
+        }
+        Value::Object(o) => o,
+        other => {
+            return errs.push(format!(
+                "{path}: schema must be an object or boolean, got {other}"
+            ))
+        }
+    };
+    let num = |k: &str| obj.get(k).and_then(Value::as_f64);
+    let len = |k: &str| obj.get(k).and_then(Value::as_u64);
+    for (key, kw) in obj {
+        match key.as_str() {
+            "type" => {
+                let names: Vec<&str> = match kw {
+                    Value::String(s) => vec![s.as_str()],
+                    Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+                    _ => vec![],
+                };
+                if !names.iter().any(|n| json_type_matches(value, n)) {
+                    errs.push(format!(
+                        "{path}: expected type {}, got {}",
+                        names.join("|"),
+                        json_type_name(value)
+                    ));
+                }
+            }
+            "enum" => {
+                if !kw.as_array().is_some_and(|a| a.contains(value)) {
+                    errs.push(format!("{path}: {value} is not one of {kw}"));
+                }
+            }
+            "const" => {
+                if kw != value {
+                    errs.push(format!("{path}: expected {kw}, got {value}"));
+                }
+            }
+            "properties" => {
+                if let (Some(props), Value::Object(v)) = (kw.as_object(), value) {
+                    for (name, sub) in props {
+                        if let Some(child) = v.get(name) {
+                            schema_errors(child, sub, &format!("{path}.{name}"), errs);
+                        }
+                    }
+                }
+            }
+            "required" => {
+                if let Value::Object(v) = value {
+                    for name in kw
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        if !v.contains_key(name) {
+                            errs.push(format!("{path}: missing required property `{name}`"));
+                        }
+                    }
+                }
+            }
+            "additionalProperties" => {
+                if let Value::Object(v) = value {
+                    let declared = obj.get("properties").and_then(Value::as_object);
+                    for (name, child) in v {
+                        if !declared.is_some_and(|d| d.contains_key(name)) {
+                            schema_errors(child, kw, &format!("{path}.{name}"), errs);
+                        }
+                    }
+                }
+            }
+            "items" => {
+                if let Value::Array(items) = value {
+                    for (i, child) in items.iter().enumerate() {
+                        schema_errors(child, kw, &format!("{path}[{i}]"), errs);
+                    }
+                }
+            }
+            "minItems" | "maxItems" => {
+                if let (Value::Array(a), Some(n)) = (value, len(key)) {
+                    if (key == "minItems" && (a.len() as u64) < n)
+                        || (key == "maxItems" && a.len() as u64 > n)
+                    {
+                        errs.push(format!("{path}: {} item(s) violates {key} {n}", a.len()));
+                    }
+                }
+            }
+            "minLength" | "maxLength" => {
+                if let (Value::String(s), Some(n)) = (value, len(key)) {
+                    let chars = s.chars().count() as u64;
+                    if (key == "minLength" && chars < n) || (key == "maxLength" && chars > n) {
+                        errs.push(format!("{path}: length {chars} violates {key} {n}"));
+                    }
+                }
+            }
+            "pattern" => {
+                if let (Value::String(s), Some(p)) = (value, kw.as_str()) {
+                    match regex::Regex::new(p) {
+                        Ok(re) if re.is_match(s) => {}
+                        Ok(_) => errs.push(format!("{path}: {s:?} does not match pattern {p:?}")),
+                        Err(e) => errs.push(format!("{path}: invalid pattern {p:?}: {e}")),
+                    }
+                }
+            }
+            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => {
+                if let (Some(v), Some(n)) = (value.as_f64(), num(key)) {
+                    let ok = match key.as_str() {
+                        "minimum" => v >= n,
+                        "maximum" => v <= n,
+                        "exclusiveMinimum" => v > n,
+                        _ => v < n,
+                    };
+                    if !ok {
+                        errs.push(format!("{path}: {v} violates {key} {n}"));
+                    }
+                }
+            }
+            "allOf" | "anyOf" | "oneOf" => {
+                let subs = kw.as_array().map(Vec::as_slice).unwrap_or_default();
+                let results: Vec<Vec<String>> = subs
+                    .iter()
+                    .map(|s| {
+                        let mut e = Vec::new();
+                        schema_errors(value, s, path, &mut e);
+                        e
+                    })
+                    .collect();
+                let passing = results.iter().filter(|e| e.is_empty()).count();
+                match key.as_str() {
+                    "allOf" => errs.extend(results.into_iter().flatten()),
+                    "anyOf" if passing == 0 => errs.push(format!("{path}: matches none of anyOf")),
+                    "oneOf" if passing != 1 => errs.push(format!(
+                        "{path}: matches {passing} of oneOf, wanted exactly 1"
+                    )),
+                    _ => {}
+                }
+            }
+            "not" => {
+                let mut e = Vec::new();
+                schema_errors(value, kw, path, &mut e);
+                if e.is_empty() {
+                    errs.push(format!("{path}: matches a `not` schema"));
+                }
+            }
+            k if SCHEMA_ANNOTATIONS.contains(&k) => {}
+            k => errs.push(format!("{path}: unsupported schema keyword `{k}`")),
+        }
+    }
+}
+
+fn json_type_matches(value: &serde_json::Value, name: &str) -> bool {
+    use serde_json::Value;
+    match (name, value) {
+        ("integer", Value::Number(n)) => {
+            n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        ("number", Value::Number(_)) => true,
+        (other, v) => other == json_type_name(v),
+    }
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    use serde_json::Value;
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Pure assertion half of [`run_http`] — separated so the match/status
@@ -588,6 +843,7 @@ mod tests {
         let checks = vec![Acceptance::Http {
             url: "http://127.0.0.1:1/nope".into(),
             must_match: serde_json::Value::Null,
+            schema: None,
         }];
         let results = run_acceptance_checks(&checks, dir.path());
         assert!(!results[0].ok);
@@ -732,5 +988,86 @@ error[E0425]: cannot find value",
         assert!(assert_http(lbl(), 200, "welcome home", &json!("welcome")).ok);
         assert!(!assert_http(lbl(), 200, "welcome home", &json!("missing")).ok);
         assert!(!assert_http(lbl(), 503, "welcome home", &json!("welcome")).ok);
+    }
+
+    /// J6 — the JSON-schema option: the body must be JSON and validate.
+    #[test]
+    fn j6_http_schema_validates_body_shape() {
+        use serde_json::json;
+        let passed = || AcceptanceResult::ok("http: x", "status 200");
+        let schema = json!({
+            "type": "object",
+            "required": ["version", "tags"],
+            "properties": {
+                "version": {"type": "string", "pattern": r"^\d+\.\d+"},
+                "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+            },
+            "additionalProperties": false
+        });
+        let good = r#"{"version":"0.4.0","tags":["stable"],"port":8080}"#;
+        let r = assert_schema(passed(), good, &schema);
+        assert!(r.ok, "{}", r.output);
+
+        // Every kind of violation is reported, each with its path.
+        let bad = r#"{"tags":[],"port":0.5,"extra":1}"#;
+        let r = assert_schema(passed(), bad, &schema);
+        assert!(!r.ok);
+        for needle in ["`version`", "$.tags", "$.port", "$.extra"] {
+            assert!(
+                r.output.contains(needle),
+                "{needle} missing from {}",
+                r.output
+            );
+        }
+
+        // A body that is not JSON fails rather than vacuously passing.
+        assert!(!assert_schema(passed(), "<html>", &schema).ok);
+
+        // Combinators.
+        let one_of = json!({"oneOf": [{"type": "string"}, {"type": "integer"}]});
+        assert!(assert_schema(passed(), "3", &one_of).ok);
+        assert!(!assert_schema(passed(), "true", &one_of).ok);
+        let not_enum = json!({"not": {"const": 2}, "enum": [1, 2]});
+        assert!(assert_schema(passed(), "1", &not_enum).ok);
+        assert!(!assert_schema(passed(), "2", &not_enum).ok);
+    }
+
+    /// A schema keyword the validator does not implement must fail the check,
+    /// never be skipped: skipping would pass a body nobody actually checked.
+    #[test]
+    fn j6_http_schema_fails_closed_on_unsupported_keywords() {
+        use serde_json::json;
+        let passed = AcceptanceResult::ok("http: x", "status 200");
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "annotations are fine",
+            "$ref": "#/$defs/thing"
+        });
+        let r = assert_schema(passed, "{}", &schema);
+        assert!(!r.ok);
+        assert!(
+            r.output.contains("unsupported schema keyword `$ref`"),
+            "{}",
+            r.output
+        );
+    }
+
+    /// `schema` is optional in the plan JSON, so existing plans still parse.
+    #[test]
+    fn j6_http_schema_is_optional_in_plans() {
+        let a: Acceptance =
+            serde_json::from_str(r#"{"kind":"http","url":"http://x","must_match":200}"#).unwrap();
+        assert!(matches!(a, Acceptance::Http { schema: None, .. }));
+        let a: Acceptance =
+            serde_json::from_str(r#"{"kind":"http","url":"http://x","schema":{"type":"object"}}"#)
+                .unwrap();
+        assert!(matches!(
+            a,
+            Acceptance::Http {
+                schema: Some(_),
+                ..
+            }
+        ));
     }
 }

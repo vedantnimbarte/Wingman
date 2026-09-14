@@ -31,7 +31,10 @@ Wingman different; this is everything else it does.
   model; `wingman logout <provider>` clears it. ChatGPT uses a browser
   OAuth flow.
 - **Multi-agent pilot mode.** `wingman pilot run "<goal>"` plans, spawns
-  worker agents in isolated worktrees, and opens a PR. See
+  worker agents in isolated worktrees, and opens a PR. Tasks are gated on
+  executable acceptance checks (including HTTP responses validated against a
+  JSON schema), and every PR gets a security pass (secrets, gitleaks, lockfile
+  license policy, cargo audit) whose summary is posted as a PR comment. See
   [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index

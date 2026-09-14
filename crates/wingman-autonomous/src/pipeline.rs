@@ -15,6 +15,7 @@
 //! Used by both `wingman pilot run` (fresh run after planning) and
 //! `wingman pilot resume` (existing run loaded from disk).
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -124,6 +125,10 @@ pub struct PipelineOutcome {
     /// plan (dangerous-path-without-goal-mention, secrets, license-header
     /// edits). Empty on a clean run. Any blocking trigger vetoes auto-merge.
     pub escalation_triggers: Vec<crate::escalation::EscalationTrigger>,
+    /// R6 security pass: findings plus a note per external scanner saying
+    /// whether it ran, was not installed, or failed. `None` when no PR step
+    /// ran (`--no-pr` or a blocked run).
+    pub security: Option<crate::security::SecurityReport>,
 }
 
 /// Fallback rework gate when `[pilot.pr] reviewer_rework_severity` is unset or
@@ -347,6 +352,7 @@ pub async fn run_to_completion(
             critic_vetoed: false,
             sandbox_tiers,
             escalation_triggers,
+            security: None,
         });
     }
 
@@ -430,6 +436,7 @@ pub async fn run_to_completion(
                     critic_vetoed: false,
                     sandbox_tiers,
                     escalation_triggers: Vec::new(),
+                    security: None,
                 });
             }
             Err(e) => return Err(e.into()),
@@ -472,6 +479,7 @@ pub async fn run_to_completion(
             critic_vetoed: false,
             sandbox_tiers,
             escalation_triggers: Vec::new(),
+            security: None,
         });
     }
 
@@ -506,6 +514,14 @@ pub async fn run_to_completion(
             target: "pilot::pipeline",
             findings = security_report.findings.len(),
             "security pass blocks auto-merge"
+        );
+    }
+    if pr_outcome.created_by_gh {
+        post_security_comment(
+            inputs.command_runner.as_ref(),
+            &project_root,
+            &pr_outcome.url,
+            &crate::security::render_report(&security_report, sec_gate),
         );
     }
 
@@ -632,6 +648,7 @@ pub async fn run_to_completion(
         critic_vetoed,
         sandbox_tiers,
         escalation_triggers,
+        security: Some(security_report),
     })
 }
 
@@ -768,11 +785,20 @@ fn query_ci_status(
     }
 }
 
-/// R6 — run the security pass over the integration diff. Currently the
-/// dependency-free built-in scan (secrets via prefix + entropy) over the
-/// added lines of `git diff <base>..<integration>`. External scanners
-/// (`gitleaks`, `cargo audit`) and license scanning layer on once their
-/// inputs are gathered; this is the always-on baseline.
+/// R6 — run the security pass over the integration diff:
+///
+/// - the built-in secrets scan (prefix + entropy) over the added lines of
+///   `git diff <base>..<integration>` — always;
+/// - gitleaks over the run's commits, when it is on PATH;
+/// - for each lockfile the run changed, a license check of the packages it
+///   added, against `allowed_licenses` / `denied_licenses`;
+/// - `cargo audit` for each changed `Cargo.lock`, when cargo-audit is
+///   installed.
+///
+/// The project root has the integration branch checked out by now (see
+/// [`worktree::merge_integration`]), so tools that read the tree see the
+/// run's result. A missing or failing external tool never fails the pass; it
+/// is recorded in [`crate::security::SecurityReport::notes`] instead.
 fn run_security_pass(
     runner: &dyn CommandRunner,
     project_root: &std::path::Path,
@@ -783,63 +809,373 @@ fn run_security_pass(
     let mut report = crate::security::SecurityReport::default();
     let diff = collect_diff_lines(runner, project_root, base_commit, integration_branch);
     report.extend(crate::security::scan_secrets(&diff.added));
-    // License gate: only when the change touched a dependency manifest (so we
-    // don't re-scan the whole tree every run) and a policy is configured. Flags
-    // dependencies whose license isn't in `allowed_licenses`.
-    if !cfg.allowed_licenses.is_empty() && diff_touches_manifest(&diff) {
-        let deps = collect_dependency_licenses(runner, project_root);
-        report.extend(crate::security::scan_licenses(&deps, &cfg.allowed_licenses));
+    run_gitleaks(
+        runner,
+        project_root,
+        base_commit,
+        integration_branch,
+        &cfg.secrets_scanner,
+        &mut report,
+    );
+    let lockfiles = changed_lockfiles(&diff);
+    if !cfg.allowed_licenses.is_empty() || !cfg.denied_licenses.is_empty() {
+        for lockfile in &lockfiles {
+            scan_lockfile_licenses(
+                runner,
+                project_root,
+                base_commit,
+                integration_branch,
+                lockfile,
+                cfg,
+                &mut report,
+            );
+        }
+    }
+    if cfg.dependency_audit {
+        for lockfile in lockfiles.iter().filter(|l| file_name(l) == "Cargo.lock") {
+            run_cargo_audit(runner, project_root, lockfile, &mut report);
+        }
     }
     report
 }
 
-/// True if the diff changed a dependency manifest, the only case where a
-/// license re-scan is worth the `cargo metadata` cost.
-fn diff_touches_manifest(diff: &DiffLines) -> bool {
-    diff.changed.iter().any(|(f, _)| {
-        let base = f.rsplit('/').next().unwrap_or(f);
-        matches!(
-            base,
-            "Cargo.toml" | "Cargo.lock" | "package.json" | "package-lock.json"
-        )
-    })
+/// Every lockfile the diff changed, deduplicated. Lockfiles and not
+/// manifests: a dependency a run added is only real once it is resolved into
+/// the lockfile, and that is also where the exact version lives.
+fn changed_lockfiles(diff: &DiffLines) -> Vec<String> {
+    let mut files: Vec<String> = diff
+        .changed
+        .iter()
+        .map(|(f, _)| f.clone())
+        .filter(|f| matches!(file_name(f), "Cargo.lock" | "package-lock.json"))
+        .collect();
+    files.sort();
+    files.dedup();
+    files
 }
 
-/// Collect `(crate_name, spdx_license)` for every resolved dependency via
-/// `cargo metadata`. Returns empty for non-Rust projects or on any failure —
-/// the license gate then simply finds nothing.
-fn collect_dependency_licenses(
+fn file_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// The directory a repo-relative lockfile lives in, for tools that read it
+/// from their working directory.
+fn lockfile_dir(project_root: &std::path::Path, lockfile: &str) -> PathBuf {
+    match lockfile.rsplit_once('/') {
+        Some((dir, _)) => project_root.join(dir),
+        None => project_root.to_path_buf(),
+    }
+}
+
+/// `git show <rev>:<path>`, or `None` when the file does not exist at `rev`.
+fn git_show(
     runner: &dyn CommandRunner,
     project_root: &std::path::Path,
-) -> Vec<(String, String)> {
+    rev: &str,
+    path: &str,
+) -> Option<String> {
+    match runner.run("git", &["show", &format!("{rev}:{path}")], project_root) {
+        Ok(o) if o.success() => Some(o.stdout),
+        _ => None,
+    }
+}
+
+/// License-check the packages `lockfile` gained between `base_commit` and
+/// the integration branch. Packages already present at the base were
+/// accepted before this run and are not re-litigated; a version bump counts
+/// as new, because a new version can change its license.
+fn scan_lockfile_licenses(
+    runner: &dyn CommandRunner,
+    project_root: &std::path::Path,
+    base_commit: &str,
+    integration_branch: &str,
+    lockfile: &str,
+    cfg: &wingman_config::PilotSecurityConfig,
+    report: &mut crate::security::SecurityReport,
+) {
+    use crate::security::{parse_cargo_lock, parse_package_lock};
+    // Absent at the base means every package is new; absent at the tip means
+    // the run deleted the lockfile and added nothing.
+    let before = git_show(runner, project_root, base_commit, lockfile).unwrap_or_default();
+    let Some(after) = git_show(runner, project_root, integration_branch, lockfile) else {
+        return;
+    };
+    let mut deps: Vec<(String, String)> = if file_name(lockfile) == "Cargo.lock" {
+        let added: BTreeSet<(String, String)> = parse_cargo_lock(&after)
+            .difference(&parse_cargo_lock(&before))
+            .cloned()
+            .collect();
+        if added.is_empty() {
+            return;
+        }
+        let Some(known) =
+            collect_dependency_licenses(runner, &lockfile_dir(project_root, lockfile))
+        else {
+            report.notes.push(format!(
+                "license scan of `{lockfile}` skipped: `cargo metadata` failed, so the licenses \
+                 of {} new crate(s) are unchecked",
+                added.len()
+            ));
+            return;
+        };
+        let deps: Vec<(String, String)> = known
+            .into_iter()
+            .filter(|(name, version, _)| added.contains(&(name.clone(), version.clone())))
+            .map(|(name, _, license)| (name, license))
+            .collect();
+        if deps.len() < added.len() {
+            report.notes.push(format!(
+                "license scan of `{lockfile}`: {} new crate(s) missing from `cargo metadata` \
+                 are unchecked",
+                added.len() - deps.len()
+            ));
+        }
+        deps
+    } else {
+        let before: BTreeSet<(String, String)> = parse_package_lock(&before)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, version, _)| (name, version))
+            .collect();
+        match parse_package_lock(&after) {
+            Ok(pkgs) => pkgs
+                .into_iter()
+                .filter(|(name, version, _)| !before.contains(&(name.clone(), version.clone())))
+                .map(|(name, _, license)| (name, license))
+                .collect(),
+            Err(e) => {
+                report
+                    .notes
+                    .push(format!("license scan of `{lockfile}` skipped: {e}"));
+                return;
+            }
+        }
+    };
+    // npm installs one package at several paths; one finding each is enough.
+    deps.sort();
+    deps.dedup();
+    report.notes.push(format!(
+        "license scan: {} new package(s) in `{lockfile}` checked",
+        deps.len()
+    ));
+    report.extend(crate::security::scan_licenses(
+        &deps,
+        lockfile,
+        &cfg.allowed_licenses,
+        &cfg.denied_licenses,
+    ));
+}
+
+/// Collect `(name, version, spdx_license)` for every package `cargo metadata`
+/// resolves in `dir`. `None` when cargo is missing or the command fails, so
+/// the caller can say the licenses went unchecked rather than report a clean
+/// scan.
+fn collect_dependency_licenses(
+    runner: &dyn CommandRunner,
+    dir: &std::path::Path,
+) -> Option<Vec<(String, String, String)>> {
+    let out = match runner.run("cargo", &["metadata", "--format-version", "1"], dir) {
+        Ok(o) if o.success() => o.stdout,
+        _ => return None,
+    };
+    let json: serde_json::Value = serde_json::from_str(&out).ok()?;
+    let pkgs = json.get("packages")?.as_array()?;
+    Some(
+        pkgs.iter()
+            .filter_map(|p| {
+                let s = |k: &str| p.get(k).and_then(|v| v.as_str()).map(str::to_string);
+                Some((
+                    s("name")?,
+                    s("version").unwrap_or_default(),
+                    s("license").unwrap_or_default(),
+                ))
+            })
+            .collect(),
+    )
+}
+
+/// Run gitleaks over the commits between `base_commit` and the integration
+/// branch, folding its findings into `report`. Only gitleaks' CLI is known
+/// here, so any other `secrets_scanner` is noted as unsupported rather than
+/// invoked with guessed arguments.
+fn run_gitleaks(
+    runner: &dyn CommandRunner,
+    project_root: &std::path::Path,
+    base_commit: &str,
+    integration_branch: &str,
+    scanner: &str,
+    report: &mut crate::security::SecurityReport,
+) {
+    if scanner.is_empty() {
+        return;
+    }
+    let is_gitleaks = std::path::Path::new(scanner)
+        .file_stem()
+        .is_some_and(|s| s.eq_ignore_ascii_case("gitleaks"));
+    if !is_gitleaks {
+        report.notes.push(format!(
+            "secrets_scanner `{scanner}` is not supported (only gitleaks is); external secrets \
+             scan skipped"
+        ));
+        return;
+    }
+    if base_commit.is_empty() {
+        report
+            .notes
+            .push("gitleaks skipped: the run recorded no base commit to scan from".into());
+        return;
+    }
+    if !runner
+        .run(scanner, &["version"], project_root)
+        .is_ok_and(|o| o.success())
+    {
+        report.notes.push(format!(
+            "`{scanner}` not found on PATH; external secrets scan skipped (the built-in scan \
+             still ran)"
+        ));
+        return;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let report_path = std::env::temp_dir().join(format!(
+        "wingman-gitleaks-{}-{nanos}.json",
+        std::process::id()
+    ));
+    let report_arg = report_path.to_string_lossy().into_owned();
+    let range = format!("{base_commit}..{integration_branch}");
+    // `--exit-code 0`: findings come from the report, so a leak is not an
+    // error exit. `--redact` keeps the secret out of the report file.
+    let out = runner.run(
+        scanner,
+        &[
+            "detect",
+            "--source",
+            ".",
+            "--log-opts",
+            &range,
+            "--report-format",
+            "json",
+            "--report-path",
+            &report_arg,
+            "--redact",
+            "--no-banner",
+            "--exit-code",
+            "0",
+        ],
+        project_root,
+    );
+    let parsed = match out {
+        Ok(o) if o.success() => std::fs::read_to_string(&report_path)
+            .map_err(|e| format!("could not read its report: {e}"))
+            .and_then(|json| crate::security::parse_gitleaks_report(&json)),
+        Ok(o) => Err(format!(
+            "exit {}: {}",
+            o.status
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".into()),
+            o.stderr.lines().next().unwrap_or("").trim()
+        )),
+        Err(e) => Err(e.to_string()),
+    };
+    let _ = std::fs::remove_file(&report_path);
+    match parsed {
+        Ok(findings) => {
+            report.notes.push(format!(
+                "gitleaks: {} finding(s) over `{range}`",
+                findings.len()
+            ));
+            report.extend(findings);
+        }
+        Err(e) => report.notes.push(format!(
+            "gitleaks failed, external secrets scan incomplete: {e}"
+        )),
+    }
+}
+
+/// Run `cargo audit --json` next to a changed `Cargo.lock`. cargo-audit
+/// exits non-zero when it finds advisories but still prints the JSON, so
+/// stdout is parsed whatever the exit status; only unparseable output counts
+/// as a failure.
+fn run_cargo_audit(
+    runner: &dyn CommandRunner,
+    project_root: &std::path::Path,
+    lockfile: &str,
+    report: &mut crate::security::SecurityReport,
+) {
     let out = match runner.run(
         "cargo",
-        &["metadata", "--format-version", "1"],
+        &["audit", "--json"],
+        &lockfile_dir(project_root, lockfile),
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            report
+                .notes
+                .push(format!("cargo audit of `{lockfile}` skipped: {e}"));
+            return;
+        }
+    };
+    match crate::security::parse_cargo_audit(&out.stdout) {
+        Ok(findings) => {
+            report.notes.push(format!(
+                "cargo audit: {} advisory(ies) in `{lockfile}`",
+                findings.len()
+            ));
+            report.extend(findings);
+        }
+        Err(_) if out.stderr.contains("no such command") => report.notes.push(format!(
+            "cargo-audit is not installed; dependency audit of `{lockfile}` skipped"
+        )),
+        Err(e) => {
+            let detail = out
+                .stderr
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+                .unwrap_or(e);
+            report
+                .notes
+                .push(format!("cargo audit of `{lockfile}` failed: {detail}"));
+        }
+    }
+}
+
+/// GitHub rejects comment bodies over 65536 characters.
+const MAX_PR_COMMENT_BYTES: usize = 60_000;
+
+/// R6 — post the security summary on the PR `gh` opened, so it sits where
+/// the change is reviewed. Best-effort: a failed comment is logged and the
+/// run carries on, since the same report still gates auto-merge.
+fn post_security_comment(
+    runner: &dyn CommandRunner,
+    project_root: &std::path::Path,
+    pr_url: &str,
+    summary: &str,
+) {
+    let mut body = summary.to_string();
+    if body.len() > MAX_PR_COMMENT_BYTES {
+        let mut cut = MAX_PR_COMMENT_BYTES;
+        while !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        body.truncate(cut);
+        body.push_str("\n\n… (truncated)\n");
+    }
+    match runner.run(
+        "gh",
+        &["pr", "comment", pr_url, "--body", &body],
         project_root,
     ) {
-        Ok(o) if o.success() => o.stdout,
-        _ => return Vec::new(),
-    };
-    let json: serde_json::Value = match serde_json::from_str(&out) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    json.get("packages")
-        .and_then(|p| p.as_array())
-        .map(|pkgs| {
-            pkgs.iter()
-                .filter_map(|p| {
-                    let name = p.get("name")?.as_str()?.to_string();
-                    let license = p
-                        .get("license")
-                        .and_then(|l| l.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    Some((name, license))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        Ok(o) if o.success() => {
+            tracing::info!(target: "pilot::pipeline", url = %pr_url, "posted security summary")
+        }
+        Ok(o) => {
+            tracing::warn!(target: "pilot::pipeline", stderr = %o.stderr, "gh pr comment failed")
+        }
+        Err(e) => tracing::warn!(target: "pilot::pipeline", error = %e, "gh pr comment errored"),
+    }
 }
 
 /// Parsed lines from `git diff <base>..<branch>`, used by both the R6
@@ -1463,12 +1799,26 @@ mod tests {
     use crate::pr::{CommandOut, CommandRunner};
 
     #[test]
-    fn diff_touches_manifest_detects_dep_files() {
+    fn changed_lockfiles_finds_each_lockfile_once() {
         let mut d = DiffLines::default();
         d.changed.push(("src/main.rs".into(), "x".into()));
-        assert!(!diff_touches_manifest(&d));
         d.changed.push(("crates/foo/Cargo.toml".into(), "y".into()));
-        assert!(diff_touches_manifest(&d));
+        assert!(changed_lockfiles(&d).is_empty());
+        d.changed.push(("Cargo.lock".into(), "+a".into()));
+        d.changed.push(("Cargo.lock".into(), "-b".into()));
+        d.changed
+            .push(("panel/package-lock.json".into(), "+c".into()));
+        assert_eq!(
+            changed_lockfiles(&d),
+            vec![
+                "Cargo.lock".to_string(),
+                "panel/package-lock.json".to_string()
+            ]
+        );
+        assert_eq!(
+            lockfile_dir(Path::new("/repo"), "panel/package-lock.json"),
+            Path::new("/repo").join("panel")
+        );
     }
 
     #[test]
@@ -1485,21 +1835,250 @@ mod tests {
                 Ok(CommandOut {
                     status: Some(0),
                     stdout: r#"{"packages":[
-                        {"name":"foo","license":"MIT"},
-                        {"name":"bar","license":null}
+                        {"name":"foo","version":"1.0.0","license":"MIT"},
+                        {"name":"bar","version":"0.2.0","license":null}
                     ]}"#
                     .into(),
                     stderr: String::new(),
                 })
             }
         }
-        let deps = collect_dependency_licenses(&MetaRunner, std::path::Path::new("."));
+        let deps = collect_dependency_licenses(&MetaRunner, std::path::Path::new("."))
+            .expect("metadata parsed");
         assert_eq!(deps.len(), 2);
-        assert_eq!(deps[0], ("foo".into(), "MIT".into()));
-        assert_eq!(deps[1], ("bar".into(), String::new()));
-        // And the existing scan flags the empty license as a finding.
-        let findings = crate::security::scan_licenses(&deps, &["MIT".into()]);
+        assert_eq!(deps[0], ("foo".into(), "1.0.0".into(), "MIT".into()));
+        assert_eq!(deps[1], ("bar".into(), "0.2.0".into(), String::new()));
+        // And the scan flags the empty license as a finding.
+        let pairs: Vec<(String, String)> = deps.into_iter().map(|(n, _, l)| (n, l)).collect();
+        let findings = crate::security::scan_licenses(&pairs, "Cargo.lock", &["MIT".into()], &[]);
         assert_eq!(findings.len(), 1);
+        // A failing `cargo metadata` is `None`, not an empty (clean) list.
+        assert!(collect_dependency_licenses(&AllFailRunner, Path::new(".")).is_none());
+    }
+
+    /// Scripted runner for the R6 external-tool paths. `tools_present`
+    /// decides whether gitleaks / cargo-audit exist; when they do, gitleaks
+    /// writes a report to `--report-path` and cargo audit prints one advisory.
+    struct SecurityToolsRunner {
+        tools_present: bool,
+        calls: Mutex<Vec<(String, Vec<String>)>>,
+    }
+    impl SecurityToolsRunner {
+        fn new(tools_present: bool) -> Self {
+            Self {
+                tools_present,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+    impl CommandRunner for SecurityToolsRunner {
+        fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
+            self.calls.lock().unwrap().push((
+                program.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
+            let ok = |stdout: &str| {
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout: stdout.to_string(),
+                    stderr: String::new(),
+                })
+            };
+            const OLD_LOCK: &str =
+                "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\n";
+            const NEW_LOCK: &str = "[[package]]\nname = \"serde\"\nversion = \"1.0.0\"\nsource = \"registry+x\"\n\n[[package]]\nname = \"copyleft\"\nversion = \"0.1.0\"\nsource = \"registry+x\"\n\n[[package]]\nname = \"me\"\nversion = \"0.1.0\"\n";
+            match (program, args.first().copied().unwrap_or("")) {
+                ("git", "diff") => ok(concat!(
+                    "--- a/Cargo.lock\n+++ b/Cargo.lock\n+name = \"copyleft\"\n",
+                    "--- a/web/package-lock.json\n+++ b/web/package-lock.json\n+x\n",
+                )),
+                ("git", "show") => match args[1] {
+                    "base123:Cargo.lock" => ok(OLD_LOCK),
+                    "wingman/auto/r1:Cargo.lock" => ok(NEW_LOCK),
+                    "base123:web/package-lock.json" => ok(r#"{"packages":{}}"#),
+                    "wingman/auto/r1:web/package-lock.json" => ok(
+                        r#"{"packages":{"node_modules/agpl-thing":{"version":"1.0.0","license":"AGPL-3.0"}}}"#,
+                    ),
+                    _ => Ok(CommandOut {
+                        status: Some(128),
+                        stdout: String::new(),
+                        stderr: "fatal: path does not exist".into(),
+                    }),
+                },
+                ("cargo", "metadata") => ok(r#"{"packages":[
+                    {"name":"serde","version":"1.0.0","license":"GPL-3.0"},
+                    {"name":"copyleft","version":"0.1.0","license":"GPL-3.0"},
+                    {"name":"me","version":"0.1.0","license":"GPL-3.0"}
+                ]}"#),
+                ("gitleaks", _) | ("cargo", "audit") if !self.tools_present => {
+                    if program == "gitleaks" {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "not found"))
+                    } else {
+                        Ok(CommandOut {
+                            status: Some(101),
+                            stdout: String::new(),
+                            stderr: "error: no such command: `audit`".into(),
+                        })
+                    }
+                }
+                ("gitleaks", "version") => ok("8.21.2"),
+                ("gitleaks", "detect") => {
+                    let at = args.iter().position(|a| *a == "--report-path").unwrap();
+                    std::fs::write(
+                        args[at + 1],
+                        r#"[{"Description":"AWS","RuleID":"aws-access-token","File":"a.rs","StartLine":3}]"#,
+                    )?;
+                    ok("")
+                }
+                ("cargo", "audit") => Ok(CommandOut {
+                    // cargo-audit exits 1 when it finds something.
+                    status: Some(1),
+                    stdout: r#"{"vulnerabilities":{"list":[{"advisory":{"id":"RUSTSEC-2099-0001","title":"bad"},"package":{"name":"copyleft"}}]}}"#.into(),
+                    stderr: String::new(),
+                }),
+                _ => ok(""),
+            }
+        }
+    }
+
+    /// R6 — the license scan reads the lockfiles the run changed, checks only
+    /// the packages it added (not `serde`, already at the base, nor the
+    /// workspace's own crate), and applies the deny list to npm too.
+    #[test]
+    fn r6_license_scan_checks_only_packages_the_run_added() {
+        let cfg = wingman_config::PilotSecurityConfig {
+            secrets_scanner: String::new(),
+            dependency_audit: false,
+            denied_licenses: vec!["AGPL-3.0".into()],
+            ..Default::default()
+        };
+        let runner = SecurityToolsRunner::new(true);
+        let report = run_security_pass(&runner, Path::new("."), "base123", "wingman/auto/r1", &cfg);
+        let licenses: Vec<&crate::security::SecurityFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.kind == "license")
+            .collect();
+        assert_eq!(licenses.len(), 2, "{:?}", report.findings);
+        assert!(licenses.iter().any(|f| f.message.contains("`copyleft`")
+            && f.severity == crate::severity::Severity::High
+            && f.file.as_deref() == Some("Cargo.lock")));
+        assert!(licenses.iter().any(|f| f.message.contains("`agpl-thing`")
+            && f.severity == crate::severity::Severity::Critical
+            && f.file.as_deref() == Some("web/package-lock.json")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("1 new package(s) in `Cargo.lock`")));
+    }
+
+    /// R6 — gitleaks and cargo audit run when installed, and their findings
+    /// land in the report next to the built-in scan's.
+    #[test]
+    fn r6_external_scanners_run_when_present() {
+        let runner = SecurityToolsRunner::new(true);
+        let report = run_security_pass(
+            &runner,
+            Path::new("."),
+            "base123",
+            "wingman/auto/r1",
+            &wingman_config::PilotSecurityConfig::default(),
+        );
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("aws-access-token")));
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.message.contains("RUSTSEC-2099-0001")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.starts_with("gitleaks: 1 finding(s)")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.starts_with("cargo audit: 1 advisory")));
+        // gitleaks scanned exactly the run's commits, with redaction on.
+        let calls = runner.calls.lock().unwrap();
+        let detect = calls
+            .iter()
+            .find(|(p, a)| p == "gitleaks" && a.first().map(String::as_str) == Some("detect"))
+            .expect("gitleaks detect ran");
+        assert!(detect.1.contains(&"base123..wingman/auto/r1".to_string()));
+        assert!(detect.1.contains(&"--redact".to_string()));
+    }
+
+    /// R6 — a host without gitleaks or cargo-audit still gets a security pass,
+    /// and the summary says which scanners did not run instead of implying a
+    /// clean bill of health.
+    #[test]
+    fn r6_missing_external_scanners_degrade_and_say_so() {
+        let runner = SecurityToolsRunner::new(false);
+        let report = run_security_pass(
+            &runner,
+            Path::new("."),
+            "base123",
+            "wingman/auto/r1",
+            &wingman_config::PilotSecurityConfig::default(),
+        );
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("`gitleaks` not found on PATH")));
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("cargo-audit is not installed")));
+        let md = crate::security::render_report(&report, crate::severity::Severity::Medium);
+        assert!(md.contains("not found on PATH"), "{md}");
+
+        // A scanner nobody taught us the CLI of is noted, never invoked.
+        let cfg = wingman_config::PilotSecurityConfig {
+            secrets_scanner: "trufflehog".into(),
+            ..Default::default()
+        };
+        let runner = SecurityToolsRunner::new(true);
+        let report = run_security_pass(&runner, Path::new("."), "base123", "wingman/auto/r1", &cfg);
+        assert!(report
+            .notes
+            .iter()
+            .any(|n| n.contains("`trufflehog` is not supported")));
+        assert!(!runner
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, _)| p == "trufflehog"));
+    }
+
+    #[test]
+    fn r6_security_summary_is_posted_as_a_pr_comment() {
+        let runner = RecordingRunner::new();
+        post_security_comment(
+            &runner,
+            Path::new("."),
+            "https://github.com/test/repo/pull/9",
+            "# Security pass\n\n✅ No findings.\n",
+        );
+        let long = "x".repeat(MAX_PR_COMMENT_BYTES + 10);
+        post_security_comment(
+            &runner,
+            Path::new("."),
+            "https://github.com/test/repo/pull/9",
+            &long,
+        );
+        let calls = runner.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "gh");
+        assert_eq!(
+            calls[0].1[..3],
+            ["pr", "comment", "https://github.com/test/repo/pull/9"]
+        );
+        assert!(calls[0].1[4].contains("No findings"));
+        assert!(calls[1].1[4].len() <= MAX_PR_COMMENT_BYTES + 32);
+        assert!(calls[1].1[4].ends_with("(truncated)\n"));
     }
     use async_trait::async_trait;
     use std::path::Path;
@@ -1720,6 +2299,20 @@ mod tests {
         }
     }
 
+    /// [`AllOkCommandRunner`] that also records every call into a handle the
+    /// test keeps, for pipelines that take ownership of their runner.
+    type CallLog = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+    struct SharedRecorder(CallLog);
+    impl CommandRunner for SharedRecorder {
+        fn run(&self, program: &str, args: &[&str], cwd: &Path) -> std::io::Result<CommandOut> {
+            self.0.lock().unwrap().push((
+                program.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
+            AllOkCommandRunner.run(program, args, cwd)
+        }
+    }
+
     /// Runner where every command fails (exit 1) — used to simulate a host
     /// with no `docker` daemon for the J11 degradation test.
     struct AllFailRunner;
@@ -1833,13 +2426,14 @@ mod tests {
         // spawner doesn't write files, so the squash-merge will produce
         // empty commits. merge_integration uses --allow-empty so this is
         // fine for this test.
+        let recorded = Arc::new(Mutex::new(Vec::new()));
         let inputs = PipelineInputs {
             provider: Arc::new(ScriptedProvider::new()),
             manager_model: "stub".into(),
             worker_spawner: fake_happy_spawner(),
             base_branch: "main".into(),
             project_root: project_root.clone(),
-            command_runner: Box::new(AllOkCommandRunner),
+            command_runner: Box::new(SharedRecorder(recorded.clone())),
             no_pr: false,
             orchestrator_cfg: OrchestratorConfig {
                 max_concurrent_agents: 4,
@@ -1885,6 +2479,15 @@ mod tests {
         let pr = outcome.pr.expect("PR step ran");
         assert!(pr.created_by_gh, "all-ok runner should pick the gh path");
         assert!(pr.url.contains("github.com/test/repo/pull/1"));
+        // R6: the security pass ran and its summary was posted on that PR.
+        assert!(outcome.security.is_some());
+        assert!(
+            recorded.lock().unwrap().iter().any(|(p, a)| p == "gh"
+                && a.len() == 5
+                && a[..3] == ["pr", "comment", pr.url.as_str()]
+                && a[4].starts_with("# Security pass")),
+            "no security comment was posted"
+        );
 
         // Final state: every task Done, run.pr + run.done in log.
         let final_store = RunStore::load(&run_dir).await.unwrap();

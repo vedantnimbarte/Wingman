@@ -92,11 +92,14 @@ pub enum Acceptance {
     Shell { cmd: String },
     /// Grep `pattern` in `path`; success = at least one match.
     Grep { pattern: String, path: String },
-    /// HTTP GET; success = response JSON shape matches `must_match`.
+    /// HTTP GET; success = the status/body satisfy `must_match` and, when
+    /// `schema` is given, the body parses as JSON that validates against it.
     Http {
         url: String,
         #[serde(default)]
         must_match: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
     },
     /// J6 — run the app/target to actually exercise the change (not just
     /// test it). `script` (when given) is the command to run; otherwise

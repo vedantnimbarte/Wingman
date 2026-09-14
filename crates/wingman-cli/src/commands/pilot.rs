@@ -760,6 +760,16 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     } else if outcome.merged.is_some() {
         eprintln!("[pilot] integration branch ready; PR step skipped (--no-pr).");
     }
+    // R6 — say which scanners ran; a skipped one is not a clean result.
+    if let Some(security) = &outcome.security {
+        eprintln!(
+            "[pilot] security pass: {} finding(s)",
+            security.findings.len()
+        );
+        for note in &security.notes {
+            eprintln!("[pilot]   {note}");
+        }
+    }
     Ok(ExitCode::SUCCESS)
 }
 
