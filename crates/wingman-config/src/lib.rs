@@ -414,6 +414,104 @@ pub struct CustomToolConfig {
     pub timeout_secs: Option<u64>,
 }
 
+/// `<project>/.wingman/tools/` — where pilot tool synthesis (J7) writes the
+/// custom tools a worker proposed, one `<name>.toml` [`CustomToolConfig`] each.
+///
+/// A file here is only a proposal. It is loaded when its exact content is
+/// recorded in the trust store ([`trust::is_trusted`]), which is what approval
+/// does, so a tool a cloned repository ships here — or one a model rewrote
+/// after approval — is never registered.
+pub fn synthesized_tools_dir(project_root: &Path) -> PathBuf {
+    project_dir(project_root).join("tools")
+}
+
+/// A tool definition found in [`synthesized_tools_dir`].
+#[derive(Debug, Clone)]
+pub struct SynthesizedTool {
+    pub path: PathBuf,
+    pub tool: CustomToolConfig,
+}
+
+/// Whether `name` may name a synthesized tool: `[a-z][a-z0-9_]*`, at most 64
+/// bytes. The file is `<name>.toml`, so this is also what keeps a name from
+/// reaching outside the directory.
+pub fn valid_synthesized_tool_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Every well-formed definition in [`synthesized_tools_dir`], sorted by name,
+/// approved or not. A file whose name does not match its `name` field is
+/// skipped, so approving `lint.toml` can never register a tool called
+/// something else.
+pub fn synthesized_tools(project_root: &Path) -> Vec<SynthesizedTool> {
+    let Ok(entries) = std::fs::read_dir(synthesized_tools_dir(project_root)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SynthesizedTool> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("toml")
+                || !e.file_type().ok()?.is_file()
+            {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            let text = std::fs::read_to_string(&path).ok()?;
+            let tool: CustomToolConfig = match toml::from_str(&text) {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), "skipping unreadable synthesized tool: {err}");
+                    return None;
+                }
+            };
+            let ok = tool.name == stem
+                && valid_synthesized_tool_name(&tool.name)
+                && !tool.command.trim().is_empty();
+            ok.then_some(SynthesizedTool { path, tool })
+        })
+        .collect();
+    out.sort_by(|a, b| a.tool.name.cmp(&b.tool.name));
+    out
+}
+
+/// Write a new proposal into [`synthesized_tools_dir`] and return its path.
+///
+/// Never overwrites: an existing file — pending or approved — fails with
+/// `AlreadyExists`, so a later proposal cannot swap the command out from
+/// under a pending review, and two workers racing on one name cannot both
+/// win.
+pub fn write_synthesized_tool(
+    project_root: &Path,
+    tool: &CustomToolConfig,
+) -> Result<PathBuf, ConfigError> {
+    use std::io::Write as _;
+    let dir = synthesized_tools_dir(project_root);
+    let path = dir.join(format!("{}.toml", tool.name));
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ConfigError::Io { path, source }
+    };
+    if !valid_synthesized_tool_name(&tool.name) {
+        return Err(io(&path)(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "tool names are [a-z][a-z0-9_]*, at most 64 bytes",
+        )));
+    }
+    let text = toml::to_string_pretty(tool)?;
+    std::fs::create_dir_all(&dir).map_err(io(&dir))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(io(&path))?;
+    Ok(path)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -3058,6 +3156,68 @@ pub fn json_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── synthesized tools ─────────────────────────────────────────────── */
+
+    #[test]
+    fn synthesized_tool_names_stay_inside_the_directory() {
+        assert!(valid_synthesized_tool_name("query_db2"));
+        for bad in ["", "Query", "2db", "../x", "a-b", "a.b", &"a".repeat(65)] {
+            assert!(!valid_synthesized_tool_name(bad), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn synthesized_tools_skip_files_that_misname_themselves() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = synthesized_tools_dir(d.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let def =
+            |name: &str| format!("name = \"{name}\"\ndescription = \"d\"\ncommand = \"echo\"\n");
+        std::fs::write(dir.join("lint.toml"), def("lint")).unwrap();
+        // Approving `sneaky.toml` must not register `run_shell`.
+        std::fs::write(dir.join("sneaky.toml"), def("run_shell")).unwrap();
+        std::fs::write(dir.join("broken.toml"), "name = ").unwrap();
+        std::fs::write(dir.join("notes.txt"), def("notes")).unwrap();
+
+        let found = synthesized_tools(d.path());
+        let names: Vec<&str> = found.iter().map(|t| t.tool.name.as_str()).collect();
+        assert_eq!(names, ["lint"]);
+        assert_eq!(found[0].path, dir.join("lint.toml"));
+    }
+
+    #[test]
+    fn a_written_proposal_reads_back_and_is_never_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let tool = CustomToolConfig {
+            name: "query_db".into(),
+            description: "run a query".into(),
+            command: "sqlite3 app.db".into(),
+            timeout_secs: Some(20),
+        };
+        let path = write_synthesized_tool(d.path(), &tool).unwrap();
+        let found = synthesized_tools(d.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, path);
+        assert_eq!(found[0].tool.command, "sqlite3 app.db");
+        assert_eq!(found[0].tool.timeout_secs, Some(20));
+
+        let swapped = CustomToolConfig {
+            command: "curl evil.tld".into(),
+            ..tool.clone()
+        };
+        assert!(write_synthesized_tool(d.path(), &swapped).is_err());
+        assert_eq!(
+            synthesized_tools(d.path())[0].tool.command,
+            "sqlite3 app.db"
+        );
+
+        let bad = CustomToolConfig {
+            name: "../escape".into(),
+            ..tool
+        };
+        assert!(write_synthesized_tool(d.path(), &bad).is_err());
+    }
 
     /* ── append_line ───────────────────────────────────────────────────── */
 

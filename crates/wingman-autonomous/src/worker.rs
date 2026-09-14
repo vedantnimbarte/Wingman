@@ -73,6 +73,11 @@ pub struct WorkerSpec {
     /// of `worktree`, and apply its diff back when it completes. `None` runs
     /// it on the host.
     pub sandbox: Option<crate::sandbox::WorkerSandbox>,
+    /// J7 — register `propose_tool` on the worker, approving its proposals
+    /// at this tier ([`crate::approval::tool_synthesis_tier`]). `None` leaves
+    /// tool synthesis off. Ignored for a sandboxed worker, which runs against
+    /// a copy with no `.wingman/` and no trust store to write to.
+    pub tool_synthesis: Option<crate::approval::ApprovalTier>,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -125,6 +130,7 @@ pub async fn run_worker(
                 &spec.session_id,
                 guest.as_ref(),
                 spec.model.as_deref(),
+                None,
             )
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -167,6 +173,7 @@ pub async fn run_worker(
                 &spec.session_id,
                 spec.worktree.as_os_str(),
                 spec.model.as_deref(),
+                spec.tool_synthesis,
             ));
             sc
         }
@@ -907,6 +914,7 @@ fn worker_args(
     session_id: &str,
     worktree: &std::ffi::OsStr,
     model: Option<&str>,
+    tool_synthesis: Option<crate::approval::ApprovalTier>,
 ) -> Vec<std::ffi::OsString> {
     let mut args: Vec<std::ffi::OsString> = vec![
         "--worker-mode".into(),
@@ -932,6 +940,12 @@ fn worker_args(
     // read as `opts.model_override` by worker-mode.
     if let Some(model) = model {
         args.extend(["--model".into(), model.into()]);
+    }
+    // Decided here, not in the worker: the worker's config comes from inside
+    // the worktree, so it sees neither `pilot run --tier` nor the project
+    // config the trust decision is about.
+    if let Some(tier) = tool_synthesis {
+        args.extend(["--tool-synthesis".into(), tier.to_string().into()]);
     }
     args
 }
@@ -963,6 +977,7 @@ mod tests {
                 "s1",
                 "/work".as_ref(),
                 model,
+                None,
             )
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -983,6 +998,20 @@ mod tests {
         assert_eq!(at("--worktree"), "/work");
         assert_eq!(&with[with.len() - 2..], ["--model", "m1"]);
         assert!(!args(None).iter().any(|a| a == "--model"));
+        assert!(!with.iter().any(|a| a == "--tool-synthesis"));
+
+        let synth: Vec<String> = worker_args(
+            "t".as_ref(),
+            "developer",
+            "s1",
+            "w".as_ref(),
+            None,
+            Some(crate::approval::ApprovalTier::Hard),
+        )
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+        assert_eq!(&synth[synth.len() - 2..], ["--tool-synthesis", "hard-gate"]);
     }
 
     /// Phase 3 acceptance (plan.md line 638): a single task executes

@@ -278,6 +278,13 @@ Wingman different; this is everything else it does.
   `wingman doctor` reports which tiers are available. Unvalidated against a
   real Docker daemon or Firecracker host. See
   [PILOT-MODE.md](PILOT-MODE.md#sandbox-tiers).
+- **Tool synthesis.** A pilot worker that keeps needing a command the toolset
+  lacks calls `propose_tool`; the proposal lands in `.wingman/tools/` as a
+  custom command tool and every registry built after approval carries it, so
+  the next worker can call it by name. Approval is automatic only on
+  `autopilot` in a trusted project, otherwise `wingman pilot tools approve`.
+  Synthesized tools run under `run_shell`'s own guards. Unvalidated against a
+  live provider. See [PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
 - **Skill packs.** `wingman pilot skills install | search | list | verify`
   shares pilot roles as versioned packs from a git-hosted index, resolving
   dependencies with caret rules and refusing unsigned packs unless told

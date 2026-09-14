@@ -1,6 +1,7 @@
-//! Manager-only tools.
+//! Pilot tools: the manager's orchestration tools, plus the worker-only
+//! `run_acceptance` and `propose_tool`.
 //!
-//! These are the only tools registered on the manager's [`wingman_core::AgentLoop`].
+//! The orchestration tools are the only ones on the manager's [`wingman_core::AgentLoop`].
 //! Each is a thin Tool that translates JSON args from the model into a
 //! [`crate::orchestrator::OrchestratorCommand`] and awaits the reply. Read-
 //! only inspection tools (`list_dir`, `read_file`, `grep_tool`) come from
@@ -28,6 +29,7 @@ mod add_task;
 mod assign_task;
 mod finalize_task;
 mod message_agent;
+mod propose_tool;
 mod reassign_task;
 mod run_acceptance;
 
@@ -36,5 +38,6 @@ pub use add_task::AddTask;
 pub use assign_task::AssignTask;
 pub use finalize_task::FinalizeTask;
 pub use message_agent::MessageAgent;
+pub use propose_tool::ProposeTool;
 pub use reassign_task::ReassignTask;
 pub use run_acceptance::RunAcceptance;

@@ -523,6 +523,34 @@ impl ToolRegistry {
         self
     }
 
+    /// Register approved synthesized tools (J7) as contained command tools.
+    ///
+    /// Never replaces a tool already registered: a synthesized `edit_file`
+    /// would otherwise take over a builtin, or a user's own custom tool,
+    /// under its name.
+    pub fn with_synthesized_tools(mut self, tools: &[wingman_config::CustomToolConfig]) -> Self {
+        for t in tools {
+            if self.capability_of(&t.name).is_some() {
+                tracing::warn!(
+                    target: "wingman::tools",
+                    tool = %t.name,
+                    "synthesized tool not registered: the name is already taken"
+                );
+                continue;
+            }
+            self.register(
+                crate::builtin::CommandTool::new(
+                    t.name.clone(),
+                    t.description.clone(),
+                    t.command.clone(),
+                    t.timeout_secs,
+                )
+                .contained(),
+            );
+        }
+        self
+    }
+
     /// Register the `spawn_subagent` tool. The `runner` closure is supplied
     /// by the runtime (which knows how to build inner agents) so this
     /// crate stays provider-agnostic.
@@ -925,6 +953,27 @@ mod tests {
     fn ctx_in(mode: PermissionMode) -> ToolCtx {
         let cwd = std::env::temp_dir();
         ToolCtx::new(mode, cwd.clone(), cwd)
+    }
+
+    #[test]
+    fn a_synthesized_tool_cannot_take_a_registered_name() {
+        let def = |name: &str| wingman_config::CustomToolConfig {
+            name: name.into(),
+            description: "d".into(),
+            command: "echo synthesized".into(),
+            timeout_secs: None,
+        };
+        let reg = ToolRegistry::new(ctx_in(PermissionMode::AutoEdit))
+            .with_builtins()
+            .with_synthesized_tools(&[def("run_shell"), def("query_db")]);
+        assert!(reg.tool_names().iter().any(|n| n == "query_db"));
+        assert_eq!(
+            reg.capability_of("query_db"),
+            Some(crate::Capability::SHELL)
+        );
+        // Still the builtin, not a command tool wearing its name.
+        let spec = reg.collect_specs(|n| n == "run_shell");
+        assert!(!spec[0].description.contains("synthesized"));
     }
 
     /// The gate this table encodes is the whole point of declaring

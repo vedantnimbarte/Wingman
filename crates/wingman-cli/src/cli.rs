@@ -101,6 +101,12 @@ pub struct Cli {
     #[arg(long, hide = true, value_name = "PATH")]
     pub worktree: Option<String>,
 
+    /// J7 — give the worker `propose_tool`, approving proposals at this tier
+    /// (`auto` or `hard-gate`). The orchestrator decides it from the run's
+    /// tier and the project's trust; absent, tool synthesis is off.
+    #[arg(long, hide = true, value_name = "TIER")]
+    pub tool_synthesis: Option<String>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -647,6 +653,12 @@ pub enum PilotAction {
         #[command(subcommand)]
         action: Option<SkillsAction>,
     },
+    /// J7 — tools pilot workers proposed for this project
+    /// (`.wingman/tools/`). Bare `pilot tools` lists them.
+    Tools {
+        #[command(subcommand)]
+        action: Option<ToolsAction>,
+    },
     /// R4 — eval / regression gate. Summarize eval results, compare to the
     /// committed baseline, and exit non-zero on regression (the CI gate).
     Eval {
@@ -746,6 +758,24 @@ pub enum IntakeChannel {
     Email {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ToolsAction {
+    /// List proposed tools and whether each is approved.
+    List,
+    /// Approve a proposed tool: record its exact content in the trust store,
+    /// so the next worker spawned (and any session in this project) can call
+    /// it. Editing the file afterwards revokes the approval.
+    Approve {
+        /// The tool's name.
+        name: String,
+    },
+    /// Reject a proposed or approved tool: delete it and its trust record.
+    Reject {
+        /// The tool's name.
+        name: String,
     },
 }
 
@@ -1082,6 +1112,7 @@ pub async fn run() -> Result<ExitCode> {
             session_id: cli.session_id,
             worktree: cli.worktree,
             model_override: cli.model,
+            tool_synthesis: cli.tool_synthesis,
         };
         return commands::worker::run(cfg, opts).await;
     }
@@ -1358,6 +1389,11 @@ pub async fn run() -> Result<ExitCode> {
                 let cfg = load_config()?;
                 commands::pilot::eval(cfg, goals, threshold, update_baseline).await
             }
+            PilotAction::Tools { action } => match action {
+                None | Some(ToolsAction::List) => commands::pilot::tools_list().await,
+                Some(ToolsAction::Approve { name }) => commands::pilot::tools_approve(name).await,
+                Some(ToolsAction::Reject { name }) => commands::pilot::tools_reject(name).await,
+            },
             PilotAction::Skills { action } => match action {
                 None => commands::pilot::skills_install(load_config()?, Vec::new(), false).await,
                 Some(SkillsAction::Install {

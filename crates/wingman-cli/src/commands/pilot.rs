@@ -634,6 +634,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             std::time::Duration::from_secs(pilot.task_timeout_secs),
             pilot.sandbox.clone(),
             sandbox_avail.clone(),
+            tool_synthesis_for(&pilot, &project.config_file),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -894,9 +895,27 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
         "critic" => matches!(pilot.tier, Autopilot),
         // Goal refinement / negotiation (J1): autopilot-only by default.
         "goal_refinement" => matches!(pilot.tier, Autopilot),
+        // Tool synthesis (J7): autopilot-only by default.
+        "tool_synthesis" => matches!(pilot.tier, Autopilot),
         // Unknown capability defaults off.
         _ => false,
     }
+}
+
+/// J7 — whether workers get `propose_tool`, and at which approval tier:
+/// `None` when the `tool_synthesis` capability is off, otherwise
+/// [`wingman_autonomous::approval::tool_synthesis_tier`] over the run's tier
+/// and whether this project's config is trusted.
+fn tool_synthesis_for(
+    pilot: &wingman_config::PilotConfig,
+    project_config: &std::path::Path,
+) -> Option<wingman_autonomous::approval::ApprovalTier> {
+    capability_on(pilot, "tool_synthesis").then(|| {
+        wingman_autonomous::approval::tool_synthesis_tier(
+            pilot.tier,
+            wingman_config::trust::is_trusted(project_config),
+        )
+    })
 }
 
 /// Slice out the first balanced top-level JSON object from a chatty reply
@@ -1461,6 +1480,7 @@ pub async fn resume(
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
             cfg.pilot.sandbox.clone(),
             sandbox_avail.clone(),
+            tool_synthesis_for(&cfg.pilot, &project.config_file),
         )?,
         base_branch,
         project_root: project.root,
@@ -1598,6 +1618,9 @@ fn worker_sandbox_for(
 ///
 /// `sandbox` + `avail` pick each task's J11 tier: a container/vm task runs
 /// its worker in that sandbox, degraded to what this machine can honour.
+///
+/// `tool_synthesis` is [`tool_synthesis_for`]'s answer, handed to every
+/// worker.
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
@@ -1605,6 +1628,7 @@ fn build_real_worker_spawner(
     task_timeout: std::time::Duration,
     sandbox: wingman_config::PilotSandboxConfig,
     avail: wingman_autonomous::sandbox::TierAvailability,
+    tool_synthesis: Option<wingman_autonomous::approval::ApprovalTier>,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1663,6 +1687,7 @@ fn build_real_worker_spawner(
                     timeout: task_timeout,
                     cmd_rx,
                     sandbox: worker_sandbox,
+                    tool_synthesis,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
@@ -2239,6 +2264,70 @@ pub async fn skills_verify(specs: Vec<String>, allow_unsigned: bool) -> Result<E
     })
 }
 
+/// J7 — the project whose `.wingman/tools/` the `pilot tools` commands act
+/// on: the owning project, so running them from inside a worktree still
+/// reaches the directory workers write to.
+fn synthesized_tools_project() -> Result<std::path::PathBuf> {
+    Ok(wingman_config::find_owning_project_root(
+        &std::env::current_dir()?,
+    ))
+}
+
+/// J7 — list proposed tools, approved or pending.
+pub async fn tools_list() -> Result<ExitCode> {
+    let tools = wingman_config::synthesized_tools(&synthesized_tools_project()?);
+    if tools.is_empty() {
+        eprintln!("[pilot] tools: no proposed tools in this project");
+    }
+    for t in &tools {
+        let state = if wingman_config::trust::is_trusted(&t.path) {
+            "approved"
+        } else {
+            "pending"
+        };
+        println!("{}  [{state}]  {}", t.tool.name, t.tool.description);
+        println!("    command: {}", t.tool.command);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J7 — approve a proposed tool. Prints the command being approved, since
+/// that is what every later worker and session here will be able to run.
+pub async fn tools_approve(name: String) -> Result<ExitCode> {
+    let Some(t) = find_synthesized_tool(&name)? else {
+        return Ok(ExitCode::from(1));
+    };
+    let hash = wingman_config::trust::trust(&t.path)?;
+    println!("Approved `{}` ({})", t.tool.name, t.path.display());
+    println!("  command: {}", t.tool.command);
+    println!("  sha256:  {hash}");
+    println!("Editing the file revokes this; re-run `wingman pilot tools approve {name}`.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J7 — reject a proposed or approved tool: delete the file and forget it.
+pub async fn tools_reject(name: String) -> Result<ExitCode> {
+    let Some(t) = find_synthesized_tool(&name)? else {
+        return Ok(ExitCode::from(1));
+    };
+    wingman_config::trust::untrust(&t.path)?;
+    std::fs::remove_file(&t.path).with_context(|| format!("removing {}", t.path.display()))?;
+    println!("Rejected `{}`", t.tool.name);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn find_synthesized_tool(name: &str) -> Result<Option<wingman_config::SynthesizedTool>> {
+    let found = wingman_config::synthesized_tools(&synthesized_tools_project()?)
+        .into_iter()
+        .find(|t| t.tool.name == name);
+    if found.is_none() {
+        eprintln!(
+            "[pilot] tools: no proposed tool named `{name}` (see `wingman pilot tools list`)"
+        );
+    }
+    Ok(found)
+}
+
 /// J12 — for pack authors: the payload `ssh-keygen -Y sign -n
 /// wingman-skillpack` signs for `dir` published as `spec` with `deps`. The
 /// resulting `.sig` text goes in the index entry's `signature`.
@@ -2563,6 +2652,25 @@ mod tests {
             &avail(false, false),
             &[migration_task()]
         ));
+    }
+
+    #[test]
+    fn tool_synthesis_is_off_below_autopilot_and_gated_without_trust() {
+        use wingman_autonomous::approval::ApprovalTier;
+        let untrusted = std::path::Path::new("no-such-project/.wingman/config.toml");
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert_eq!(tool_synthesis_for(&pilot, untrusted), None);
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(
+            tool_synthesis_for(&pilot, untrusted),
+            Some(ApprovalTier::Hard)
+        );
+        pilot.tier = wingman_config::PilotTier::Copilot;
+        pilot.capabilities.insert("tool_synthesis".into(), true);
+        assert_eq!(
+            tool_synthesis_for(&pilot, untrusted),
+            Some(ApprovalTier::Hard)
+        );
     }
 
     #[test]

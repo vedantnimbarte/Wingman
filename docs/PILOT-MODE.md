@@ -389,6 +389,73 @@ ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n wingman-skillpack payload.txt
 # put the text of payload.txt.sig in the index entry's "signature"
 ```
 
+## Tool synthesis
+
+A worker that keeps needing a command the toolset lacks — querying the dev
+database, regenerating a fixture — can propose it as a named tool with
+`propose_tool`. The proposal is an ordinary custom command tool, written to
+the owning project (not the worker's worktree, which is deleted after the
+task):
+
+```toml
+# .wingman/tools/query_db.toml
+name = "query_db"
+description = "Run a read-only SQL query against the dev database"
+command = "python scripts/query_db.py"   # reads $WINGMAN_TOOL_INPUT
+timeout_secs = 20
+```
+
+Once approved, every registry built from then on carries it: the next worker
+spawned in this run, later runs, and interactive sessions in the project. The
+proposing worker does not get it mid-task.
+
+**Turning it on.** The `tool_synthesis` capability is on by default for
+`autopilot` only; turn it on (or off) for any tier with
+
+```toml
+[pilot.capabilities]
+tool_synthesis = true
+```
+
+**Approval.** A tool is approved when its exact file content is recorded in
+the trust store (`~/.wingman/trusted.toml`, the same store `wingman trust`
+uses), so editing an approved file revokes it.
+
+| Run | Gate |
+|-----|------|
+| `autopilot`, and the project config is trusted (`wingman trust`) | auto: the proposal approves itself |
+| anything else | hard gate: waits for you |
+
+```bash
+wingman pilot tools                  # list, with [approved] / [pending]
+wingman pilot tools approve query_db # prints the command it approves
+wingman pilot tools reject query_db  # deletes it and its trust record
+```
+
+There is no notify-only band: a synthesized tool runs shell commands in every
+later session, and a veto window during an unattended run is not a gate.
+
+**The ceiling.** A synthesized tool is a name for a command the worker could
+already run, never more:
+
+- `propose_tool` needs the shell permission and refuses a command the shell
+  denylist blocks.
+- A synthesized tool runs through `run_shell`'s guards —
+  `[tools].shell_sandbox` (including `required`), credential scrubbing, the
+  Windows Job Object — unlike a user-defined `[[tools.custom]]` entry. Its
+  input arrives in `$WINGMAN_TOOL_INPUT` only, not on stdin.
+- It never replaces a tool already registered, and a file whose name does not
+  match its `name` is ignored.
+- None load when `run_shell` is removed by `[tools].disabled_tools` or a
+  preset.
+
+**Limits.** Workers in the container and vm [sandbox tiers](#sandbox-tiers)
+do not get `propose_tool`: they run against a copy with no `.wingman/` and
+no trust store, so a proposal could not come back. They do not see approved
+tools either. A proposal names a command that already works; nothing writes a
+tool's implementation for it. Unvalidated against a live provider: the
+worker-side flow is covered by unit tests only.
+
 ---
 
 ## The board

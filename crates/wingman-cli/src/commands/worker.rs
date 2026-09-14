@@ -37,6 +37,7 @@ pub struct WorkerOptions {
     pub session_id: Option<String>,
     pub worktree: Option<String>,
     pub model_override: Option<String>,
+    pub tool_synthesis: Option<String>,
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
@@ -53,6 +54,12 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let task: Task = serde_json::from_str(&task_json)
         .with_context(|| format!("parsing task file {} as JSON", opts.task_file))?;
     let role = parse_role(&opts.role)?;
+    let tool_synthesis = opts
+        .tool_synthesis
+        .as_deref()
+        .map(str::parse::<wingman_autonomous::approval::ApprovalTier>)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--tool-synthesis: {e}"))?;
 
     // Resolve the worker model — prefer pilot.worker_model, then --model,
     // then the global default. We deliberately don't fall back to
@@ -106,6 +113,13 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let registry = Arc::new(registry);
     registry.register_arc(Arc::new(wingman_tools::builtin::TaskComplete));
     registry.register_arc(Arc::new(wingman_autonomous::tools::RunAcceptance));
+    // J7 — last, so it knows every name a proposal may not take.
+    if let Some(tier) = tool_synthesis {
+        registry.register_arc(Arc::new(wingman_autonomous::tools::ProposeTool::new(
+            tier,
+            registry.tool_names(),
+        )));
+    }
 
     // The removals now bind these two as well, and a worker without them
     // cannot report its result — it would run the whole task and then fail in
