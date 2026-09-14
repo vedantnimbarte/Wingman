@@ -58,7 +58,7 @@ impl Language {
 | Kotlin | `kt`, `kts` | fun (extension functions by their own name), class, interface, enum class, object, typealias |
 
 `.h` is deliberately unmapped: it is as often C as C++, and C is not a parsed
-language. Functions nested in a class, impl, or namespace are reported as
+language. Functions nested in a class, struct, enum, impl, or namespace are reported as
 methods; a forward declaration (`class Foo;`) is not a symbol.
 
 **`SymbolKind` enum** (`crates/wingman-ts/src/symbol.rs`):

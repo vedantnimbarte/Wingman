@@ -38,7 +38,8 @@ impl Tool for EditSymbol {
             description: "Replace the body of a named function or method using tree-sitter (rust, python, \
                           javascript, typescript, tsx, go, cpp, java, kotlin). Safer than `edit_file` when the same text \
                           appears in multiple places. `new_body` excludes outer braces for brace-delimited \
-                          languages; supply the indented block for Python. Returns a unified diff."
+                          languages; supply the indented block for Python, and just the expression for a Kotlin \
+                          `fun f() = expr`. Returns a unified diff."
                 .into(),
             input_schema: json!({
                 "type": "object",

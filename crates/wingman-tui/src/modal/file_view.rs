@@ -31,8 +31,8 @@ impl FileViewModal {
     /// `title` is what the frame shows (the project-relative path); `path`
     /// is read and decides the language.
     pub fn new(title: String, path: &Path, th: &Theme) -> Self {
-        let lines = match std::fs::read(path) {
-            Ok(bytes) => view_lines(&bytes, path, th),
+        let lines = match read_head(path) {
+            Ok((head, total)) => view_lines(&head, total, path, th),
             Err(e) => vec![note(format!("cannot read: {e}"), th)],
         };
         Self {
@@ -77,11 +77,21 @@ impl FileViewModal {
     }
 }
 
-fn view_lines(bytes: &[u8], path: &Path, th: &Theme) -> Vec<Line<'static>> {
-    if bytes.iter().take(8192).any(|&b| b == 0) {
+/// The first [`MAX_VIEW_BYTES`] of the file and its full length. Only the
+/// head is read, so opening a multi-gigabyte log does not load all of it.
+fn read_head(path: &Path) -> std::io::Result<(Vec<u8>, u64)> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let total = file.metadata()?.len();
+    let mut head = Vec::new();
+    file.take(MAX_VIEW_BYTES as u64).read_to_end(&mut head)?;
+    Ok((head, total))
+}
+
+fn view_lines(head: &[u8], total: u64, path: &Path, th: &Theme) -> Vec<Line<'static>> {
+    if head.iter().take(8192).any(|&b| b == 0) {
         return vec![note("binary file — not shown".into(), th)];
     }
-    let head = &bytes[..bytes.len().min(MAX_VIEW_BYTES)];
     // A cut through a multi-byte character is the only invalid UTF-8 the
     // cap can introduce; anything earlier is a file that is not text.
     let text = match std::str::from_utf8(head) {
@@ -103,12 +113,12 @@ fn view_lines(bytes: &[u8], path: &Path, th: &Theme) -> Vec<Line<'static>> {
             ),
         );
     }
-    if bytes.len() > head.len() {
+    if total > head.len() as u64 {
         lines.push(note(
             format!(
                 "… first {} KiB of {} KiB shown",
                 text.len() / 1024,
-                bytes.len() / 1024
+                total / 1024
             ),
             th,
         ));

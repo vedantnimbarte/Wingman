@@ -101,28 +101,39 @@ fn walk_symbols(
         if in_container && matches!(sym.kind, SymbolKind::Function) {
             sym.kind = SymbolKind::Method;
         }
-        let is_container = matches!(
-            sym.kind,
-            SymbolKind::Impl
-                | SymbolKind::Trait
-                | SymbolKind::Class
-                | SymbolKind::Interface
-                | SymbolKind::Module
-        );
+        let is_container = is_container(sym.kind);
         out.push(sym);
         if !descends_into(lang, kind) {
             return;
         }
         child_in_container = child_in_container || is_container;
     }
-    // Limit depth so we don't drown in noise from giant files.
-    if depth > 6 {
+    // Limit depth so we don't drown in noise from giant files. Deep enough
+    // for a C++ header: include guard > namespace > namespace > template >
+    // class > method is nine levels of nodes.
+    if depth > 10 {
         return;
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         walk_symbols(lang, src, child, out, depth + 1, child_in_container);
     }
+}
+
+/// Kinds whose body can hold further symbols. A C++ struct has methods as
+/// a class does, and a Java or Kotlin enum can declare functions; in the
+/// other languages nothing is ever nested inside a struct or enum.
+fn is_container(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Impl
+            | SymbolKind::Trait
+            | SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::Module
+            | SymbolKind::Struct
+            | SymbolKind::Enum
+    )
 }
 
 fn descends_into(lang: Language, kind: &str) -> bool {
@@ -310,22 +321,46 @@ fn cpp_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
 /// Follow the `declarator` chain (`int *foo()` is a pointer declarator around
 /// a function declarator around the identifier) down to the name node.
 fn cpp_innermost_declarator<'t>(node: &Node<'t>) -> Option<Node<'t>> {
-    let mut cur = node.child_by_field_name("declarator")?;
-    while let Some(next) = cur.child_by_field_name("declarator") {
+    let mut cur = cpp_next_declarator(node)?;
+    while let Some(next) = cpp_next_declarator(&cur) {
         cur = next;
     }
     Some(cur)
 }
 
+/// The declarator one level in. `&`, `(...)` and `[[attr]]` declarators
+/// hold theirs as an unnamed child rather than in a `declarator` field.
+fn cpp_next_declarator<'t>(node: &Node<'t>) -> Option<Node<'t>> {
+    match node.kind() {
+        "reference_declarator" | "parenthesized_declarator" | "attributed_declarator" => {
+            let mut cursor = node.walk();
+            let found = node.named_children(&mut cursor).find(|c| {
+                !matches!(
+                    c.kind(),
+                    "attribute_declaration" | "ms_call_modifier" | "variadic_declarator"
+                )
+            });
+            found
+        }
+        _ => node.child_by_field_name("declarator"),
+    }
+}
+
+/// Whether a declaration declares a function. `int (*cb)(int);` does not:
+/// its innermost function declarator wraps a parenthesized pointer, so `cb`
+/// is a variable holding a function pointer.
 fn is_cpp_function_declarator(node: &Node) -> bool {
-    let mut cur = node.child_by_field_name("declarator");
+    let mut innermost_fn = None;
+    let mut cur = cpp_next_declarator(node);
     while let Some(d) = cur {
         if d.kind() == "function_declarator" {
-            return true;
+            innermost_fn = Some(d);
         }
-        cur = d.child_by_field_name("declarator");
+        cur = cpp_next_declarator(&d);
     }
-    false
+    innermost_fn
+        .and_then(|f| f.child_by_field_name("declarator"))
+        .is_some_and(|d| d.kind() != "parenthesized_declarator")
 }
 
 /// The unqualified name a declarator declares: `ns::Foo::bar` -> `bar`, so
@@ -524,14 +559,7 @@ pub fn outline(lang: Language, src: &str) -> Option<String> {
             sig = sym.signature,
         ));
         // Treat containers (impl, class, mod, trait) as openings.
-        if matches!(
-            sym.kind,
-            SymbolKind::Impl
-                | SymbolKind::Class
-                | SymbolKind::Module
-                | SymbolKind::Trait
-                | SymbolKind::Interface
-        ) {
+        if is_container(sym.kind) {
             stack.push((sym.start_byte, sym.end_byte));
         }
     }
@@ -631,6 +659,10 @@ fn inner_body_span(lang: Language, src: &str, body: &Node) -> Option<(usize, usi
             // Brace-delimited block. Strip the outer `{` and `}`.
             if end > start + 1 && bytes[start] == b'{' && bytes[end - 1] == b'}' {
                 Some((start + 1, end - 1))
+            } else if end > start && bytes[start] == b'=' {
+                // A Kotlin expression body (`fun f() = expr`): keep the `=`
+                // so the replacement is still a function body.
+                Some((start + 1, end))
             } else {
                 Some((start, end))
             }
@@ -1087,6 +1119,53 @@ typealias Id = Int
             replace_function_body(Language::Kotlin, KOTLIN_SRC, "shout", " return this ").unwrap();
         assert!(
             edited.contains("fun String.shout(): String { return this }"),
+            "{edited}"
+        );
+        // A function declared in an enum class is one of its methods.
+        let syms = kinds(Language::Kotlin, "enum class E { A; fun f() = 1 }");
+        assert!(has(&syms, SymbolKind::Method, "f"), "{syms:?}");
+        // An expression body keeps its `=`.
+        let edited =
+            replace_function_body(Language::Kotlin, KOTLIN_SRC, "empty", " Store(1)").unwrap();
+        assert!(edited.contains("fun empty() = Store(1)\n"), "{edited}");
+    }
+
+    #[test]
+    fn cpp_names_through_reference_and_pointer_declarators() {
+        let src = "int& first() { return x; }
+const Foo& Foo::get() const { return *this; }
+std::string&& take() { return std::move(s); }
+int (*callback)(int);
+#ifndef V_H
+namespace a {
+namespace b {
+template <class T> class V {
+  T get() const { return t; }
+};
+}
+}
+#endif
+struct Pt { int len() const { return 0; } };
+";
+        let syms = kinds(Language::Cpp, src);
+        assert!(has(&syms, SymbolKind::Function, "first"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "get"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Function, "take"), "{syms:?}");
+        // A function-pointer variable is not a function.
+        assert!(
+            !syms.iter().any(|(_, n)| n.contains("callback")),
+            "{syms:?}"
+        );
+        // Guard, two namespaces and a template still reach the method.
+        let out = outline(Language::Cpp, src).unwrap();
+        assert!(out.contains("\n      9:method:get:"), "{out}");
+        // A struct holds methods the way a class does.
+        assert!(out.contains("\n14:struct:Pt:"), "{out}");
+        assert!(out.contains("\n  14:method:len:"), "{out}");
+
+        let edited = replace_function_body(Language::Cpp, src, "first", " return y; ").unwrap();
+        assert!(
+            edited.starts_with("int& first() { return y; }\n"),
             "{edited}"
         );
     }

@@ -157,7 +157,8 @@ Replace the body of a named function or method using tree-sitter. Args:
 
 Safer than `edit_file` when the same text appears in several places, because
 it targets the symbol rather than a string. `new_body` excludes the outer
-braces for brace-delimited languages; for Python, supply the indented block.
+braces for brace-delimited languages; for Python, supply the indented block;
+for a Kotlin expression body (`fun f() = expr`), supply the expression.
 Supported languages: rust, python, javascript, typescript, tsx, go, cpp, java, kotlin.
 
 ### `apply_patch`
