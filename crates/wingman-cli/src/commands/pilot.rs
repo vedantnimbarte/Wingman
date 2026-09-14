@@ -393,6 +393,15 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     if priming.is_some() {
         eprintln!("[pilot] priming planner with similar past runs (E6).");
     }
+    // J8 — and with what earlier merged runs left in the project's knowledge
+    // layer: the architecture summary, recent decisions, merge hotspots.
+    let priming = match (
+        priming,
+        wingman_autonomous::knowledge::render_planner_context(&project.root),
+    ) {
+        (Some(p), Some(k)) => Some(format!("{p}\n\n{k}")),
+        (p, k) => p.or(k),
+    };
     let plan = wingman_autonomous::planner::plan_from_goal_with_priming(
         &llm as &dyn PlannerLlm,
         &goal,
@@ -656,7 +665,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         .map(|g| g.join("stats.jsonl"));
     let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = wingman_autonomous::pipeline::PipelineInputs {
-        provider,
+        provider: provider.clone(),
         manager_model: selection.model.clone(),
         worker_spawner: build_real_worker_spawner(
             pilot.worker_model.as_deref().unwrap_or(&selection.model),
@@ -699,6 +708,15 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         },
         sandbox_default_tier: pilot.sandbox.default_tier.clone(),
         dangerous_paths: pilot.approval.dangerous_paths.clone(),
+        merge_fixer: capability_on(&pilot, "merge_fixer"),
+        knowledge_keeper: knowledge_keeper(
+            &cfg,
+            &pilot,
+            wingman_autonomous::pipeline::KnowledgeKeeper {
+                provider,
+                model: selection.model.clone(),
+            },
+        ),
     };
 
     eprintln!(
@@ -953,9 +971,47 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
         // Per-turn rollback to the last green checkpoint (E5.5): discards
         // worker edits, so autopilot-only by default.
         "turn_rollback" => matches!(pilot.tier, Autopilot),
+        // Merge-fixer workers on an unresolved merge conflict (E4): copilot
+        // and autopilot, with write-set scheduling.
+        "merge_fixer" => matches!(pilot.tier, Copilot | Autopilot),
+        // Knowledge-keeper agent after a merged run (J8): autopilot-only.
+        "knowledge_keeper" => matches!(pilot.tier, Autopilot),
         // Unknown capability defaults off.
         _ => false,
     }
+}
+
+/// J8 — the knowledge-keeper pass, while its capability is on. It runs on the
+/// `summarize` task class (`[router.classes]`, usually the fast model); when
+/// that class is unrouted, or its provider cannot be built, it runs on
+/// `manager` instead.
+fn knowledge_keeper(
+    cfg: &Config,
+    pilot: &wingman_config::PilotConfig,
+    manager: wingman_autonomous::pipeline::KnowledgeKeeper,
+) -> Option<wingman_autonomous::pipeline::KnowledgeKeeper> {
+    if !capability_on(pilot, "knowledge_keeper") {
+        return None;
+    }
+    let routed = cfg
+        .router
+        .resolve_class("summarize")
+        .and_then(|spec| cfg.resolve_model_spec(&spec))
+        .and_then(
+            |(provider_id, model)| match runtime::build_provider(cfg, &provider_id) {
+                Ok(provider) => {
+                    Some(wingman_autonomous::pipeline::KnowledgeKeeper { provider, model })
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[pilot] knowledge-keeper: cannot build provider {provider_id} for the \
+                         summarize class ({e}); using the manager model"
+                    );
+                    None
+                }
+            },
+        );
+    Some(routed.unwrap_or(manager))
 }
 
 /// E5.5 — the `--turn-rollback-after` a worker gets: `[pilot].turn_rollback_after`
@@ -1501,7 +1557,7 @@ pub async fn resume(
         .map(|g| g.join("stats.jsonl"));
     let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = wingman_autonomous::pipeline::PipelineInputs {
-        provider,
+        provider: provider.clone(),
         manager_model: selection.model.clone(),
         worker_spawner: build_real_worker_spawner(
             cfg.pilot
@@ -1549,6 +1605,15 @@ pub async fn resume(
         },
         sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
         dangerous_paths: cfg.pilot.approval.dangerous_paths.clone(),
+        merge_fixer: capability_on(&cfg.pilot, "merge_fixer"),
+        knowledge_keeper: knowledge_keeper(
+            &cfg,
+            &cfg.pilot,
+            wingman_autonomous::pipeline::KnowledgeKeeper {
+                provider,
+                model: selection.model.clone(),
+            },
+        ),
     };
 
     eprintln!("[pilot] resume: driving manager loop for run {run_id}");
@@ -2366,6 +2431,48 @@ mod tests {
         assert!(!capability_on(&pilot, "speculative_prespawn"));
         pilot.capabilities.insert("turn_rollback".into(), true);
         assert_eq!(turn_rollback_after(&pilot), 3);
+    }
+
+    /// E4's merge-fixer follows write-set scheduling (copilot and autopilot);
+    /// J8's knowledge-keeper is autopilot's, and runs on the `summarize` class
+    /// when that is routed.
+    #[test]
+    fn merge_fixer_and_knowledge_keeper_follow_the_tier() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            [router]
+            fast_model = "ollama/llama3.2"
+            "#,
+        )
+        .unwrap();
+        let manager = || wingman_autonomous::pipeline::KnowledgeKeeper {
+            provider: runtime::build_provider(&cfg, "ollama").unwrap(),
+            model: "manager".into(),
+        };
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert!(capability_on(&pilot, "merge_fixer"));
+        assert!(knowledge_keeper(&cfg, &pilot, manager()).is_none());
+
+        pilot.tier = wingman_config::PilotTier::Assist;
+        assert!(!capability_on(&pilot, "merge_fixer"));
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        let keeper = knowledge_keeper(&cfg, &pilot, manager()).unwrap();
+        assert_eq!(keeper.model, "manager", "summarize is unrouted");
+
+        let mut routed = cfg.clone();
+        routed
+            .router
+            .classes
+            .insert("summarize".into(), "fast".into());
+        let keeper = knowledge_keeper(&routed, &pilot, manager()).unwrap();
+        assert_eq!(keeper.model, "llama3.2");
+
+        pilot.capabilities.insert("knowledge_keeper".into(), false);
+        assert!(knowledge_keeper(&routed, &pilot, manager()).is_none());
     }
 
     #[test]

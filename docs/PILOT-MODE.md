@@ -300,6 +300,65 @@ speculative_prespawn = true    # copilot and autopilot
 turn_rollback        = true    # autopilot only by default
 ```
 
+## Merge conflicts
+
+Tasks whose declared `writes` overlap never run at the same time, and each
+task's branch is rebased onto the integration branch before it is squashed, so
+most conflicts never happen. When a squash still conflicts, the run records a
+`run.conflict` event and tries, in order:
+
+1. **A one-shot rewrite.** The reviewer model is given each conflicted file,
+   markers included, and its answer is kept only if no marker is left.
+2. **Merge-fixer workers.** A `merge-fixer-<task>` task is recorded with the
+   conflicted files as its `writes` and the conflicting task's acceptance
+   checks, and a worker runs it in a worktree checked out at the integration
+   branch tip with the conflicting task squash-merged in. When the worker
+   reports done and no conflict marker is left in those files, its worktree's
+   files become the conflicting task's squash commit and the merge carries on
+   with the remaining tasks. Two attempts: the second gets the first's outcome
+   and runs on the manager model. Capability `merge_fixer`, on for copilot and
+   autopilot.
+
+If neither resolves it, the run stops as it did before: the merge-fixer task
+stays in the log (Failed, with its attempts in the escalation packet, or
+pending when the capability is off) and `pilot resume` picks it up.
+
+## Project knowledge
+
+After every run that opens a PR, `.wingman/knowledge/` is brought up to date:
+
+| File               | What                                                                                     |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `hotspots.json`    | Per file, how often a landed task changed it and how often a merge conflicted on it, summed across runs from each run's `task.status` and `run.conflict` events |
+| `architecture.md`  | The knowledge-keeper's architecture summary, above a module map from each `crates/*/src/lib.rs` |
+| `decisions.jsonl`  | Architectural decisions, appended                                                        |
+
+With the `knowledge_keeper` capability (autopilot by default) a model is given
+the goal, each task's summary and changed files, the module map and the
+current summary, and returns the revised summary plus up to three decisions the
+run made. It runs on the `summarize` task class, so with
+`[router.classes] summarize = "fast"` it uses `[router].fast_model`; with that
+class unrouted it uses the manager's model. Without the capability, or when the
+reply does not parse, the summary is left as it was and the run's goal is
+appended as its decision.
+
+The planner reads this layer back: its prompt carries the summary, the five
+latest decisions, and the files earlier runs conflicted on most, with the
+instruction to list any it edits in `writes` so the scheduler keeps those
+tasks apart.
+
+```toml
+[router]
+fast_model = "anthropic/claude-haiku-4-5"
+
+[router.classes]
+summarize = "fast"
+
+[pilot.capabilities]
+merge_fixer      = true    # copilot and autopilot
+knowledge_keeper = true    # autopilot only by default
+```
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

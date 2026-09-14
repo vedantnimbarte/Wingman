@@ -545,6 +545,17 @@ pub enum Event {
         commit: String,
     },
 
+    /// E4 — squash-merging a task into the integration branch conflicted on
+    /// these files. Recorded before any resolver runs, so it is written
+    /// whether or not the conflict was then resolved; J8 counts these as
+    /// merge hotspots.
+    #[serde(rename = "run.conflict")]
+    RunConflict {
+        t: String,
+        id: String,
+        files: Vec<String>,
+    },
+
     /// PR was opened (or push URL printed if `gh` is missing).
     #[serde(rename = "run.pr")]
     RunPr { t: String, url: String },
@@ -604,6 +615,7 @@ impl Event {
             | Event::RunStatusEv { t, .. }
             | Event::RunMergeStart { t, .. }
             | Event::RunMergeTask { t, .. }
+            | Event::RunConflict { t, .. }
             | Event::RunPr { t, .. }
             | Event::PrOutcome { t, .. }
             | Event::Escalation { t, .. }
@@ -870,6 +882,10 @@ pub fn apply(state: &mut RunState, event: &Event) {
                     t.ended_at = Some(ts.clone());
                 }
             }
+        }
+        Event::RunConflict { .. } => {
+            // A record of what happened, read off the log by J8's hotspots;
+            // the merge-fixer task it may lead to carries the state.
         }
         Event::RunPr { url, .. } => {
             state.pr_url = Some(url.clone());

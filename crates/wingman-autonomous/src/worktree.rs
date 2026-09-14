@@ -8,9 +8,10 @@
 //! When every worker is in `Review`, the orchestrator runs the
 //! integration merge: a fresh branch (`wingman/auto/<run-id>`) off
 //! `base_commit`, then `git merge --squash <task-branch>` per task in
-//! topological order. A merge conflict halts the run and is surfaced via
-//! a `run.conflict` event for the user to resolve (or for the
-//! `merge-fixer` worker — E4 — to take a swing at).
+//! topological order. A merge conflict is handed to the caller's resolver
+//! (the pipeline records a `run.conflict` event and tries a one-shot model
+//! rewrite, then `merge-fixer` workers — E4); one it cannot resolve halts the
+//! run for the user.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -493,11 +494,12 @@ pub fn merge_integration(
     merge_integration_with_resolver(repo_root, base_commit, integration_branch, state, None)
 }
 
-/// Type of the in-run conflict resolver: given the conflicted paths (which
-/// carry git conflict markers in the working tree), edit them to a resolved
-/// state and return `true`. Returning `false` (or no resolver) preserves the
-/// old behavior — abort the merge and surface [`WorktreeError::Conflict`].
-pub type ConflictResolver<'a> = &'a dyn Fn(&[String]) -> bool;
+/// Type of the in-run conflict resolver: given the id of the task whose squash
+/// conflicted and the conflicted paths (which carry git conflict markers in
+/// the working tree), edit them to a resolved state and return `true`.
+/// Returning `false` (or no resolver) preserves the old behavior — abort the
+/// merge and surface [`WorktreeError::Conflict`].
+pub type ConflictResolver<'a> = &'a dyn Fn(&str, &[String]) -> bool;
 
 /// [`merge_integration`] with an optional [`ConflictResolver`]. When a squash
 /// conflicts and the resolver resolves it, the task still lands instead of
@@ -596,7 +598,7 @@ pub fn merge_integration_with_resolver(
             // success, stage the resolutions and fall through to the normal
             // squash-commit below so this task still lands on the branch.
             let resolved = !files.is_empty()
-                && resolver.map(|r| r(&files)).unwrap_or(false)
+                && resolver.map(|r| r(task_id, &files)).unwrap_or(false)
                 && Command::new("git")
                     .arg("-C")
                     .arg(repo_root)
@@ -685,6 +687,72 @@ fn has_conflict_markers(repo_root: &Path, files: &[String]) -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+/// E4 — set up a merge-fixer's worktree for the conflict
+/// [`merge_integration_with_resolver`] hit on `task_id`: `fixer_id`'s branch
+/// at the integration branch's current tip (every task merged so far) with
+/// `task_id`'s branch squash-merged on top, so the worktree holds the same
+/// conflict markers the integration checkout does. Recreates the worktree
+/// from scratch when an earlier attempt left one.
+pub fn prepare_merge_fixer_worktree(
+    repo_root: &Path,
+    integration_branch: &str,
+    run_id: &str,
+    task_id: &str,
+    fixer_id: &str,
+    worktree_path: &Path,
+) -> Result<(), WorktreeError> {
+    create_worktree(
+        repo_root,
+        integration_branch,
+        run_id,
+        fixer_id,
+        worktree_path,
+    )?;
+    // Exits non-zero on exactly the conflict this worktree exists to hold.
+    Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["merge", "--squash"])
+        .arg(task_branch(run_id, task_id))
+        .output()?;
+    Ok(())
+}
+
+/// E4 — carry a merge-fixer's resolution from its worktree into the
+/// integration checkout at `repo_root`, which is stopped on the same conflict.
+/// The checkout's files and index are set to the worktree's, committed by the
+/// fixer or not (`.wingman/` aside); HEAD stays where it is, so the caller's
+/// squash commit lands the result. Returns `false` and touches nothing while
+/// any of `files` in the worktree still holds a conflict marker.
+pub fn adopt_merge_fixer_resolution(
+    repo_root: &Path,
+    worktree_path: &Path,
+    files: &[String],
+) -> Result<bool, WorktreeError> {
+    if has_conflict_markers(worktree_path, files) {
+        return Ok(false);
+    }
+    let tree = snapshot_tree(worktree_path)?;
+    for args in [
+        vec!["reset", "-q", "--hard"],
+        vec!["read-tree", "-m", "-u", "HEAD", tree.as_str()],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(&args)
+            .output()?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "git {} failed: {}",
+                args[0],
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    Ok(true)
 }
 
 /// Remove every per-task worktree under `<project>/.wingman/worktrees/`
@@ -1352,7 +1420,8 @@ mod tests {
 
         // Resolver: write a clean merged body for any conflicted file.
         let repo_for_resolver = repo.clone();
-        let resolver = move |files: &[String]| -> bool {
+        let resolver = move |task_id: &str, files: &[String]| -> bool {
+            assert_eq!(task_id, "t2", "the later task is the one that conflicts");
             for f in files {
                 std::fs::write(repo_for_resolver.join(f), b"hello A\nhello B\n").unwrap();
             }
@@ -1365,6 +1434,93 @@ mod tests {
         assert_eq!(outcome.commits.len(), 2, "both tasks land");
         let merged = std::fs::read_to_string(repo.join("shared.txt")).unwrap();
         assert!(merged.contains("hello A") && merged.contains("hello B"));
+
+        let _ = cleanup_worktrees(&repo, run_id);
+    }
+
+    /// E4 merge-fixer: the resolver sets up a fixer worktree holding the same
+    /// conflict, a resolution made there (uncommitted, with a file the conflict
+    /// did not touch) is refused while markers remain, then carried into the
+    /// integration checkout so the conflicting task still lands.
+    #[test]
+    fn merge_fixer_worktree_resolution_lands_the_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, base)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let run_id = "fixer-test";
+        let branch = "wingman/auto/fixer-test";
+        let mut state = RunState::new(run_id, "demo", &base, branch);
+        for (id, body) in [("t1", "hello A"), ("t2", "hello B")] {
+            let mut task = Task::new(id, Role::Developer, format!("edit {id}"));
+            task.status = TaskStatus::Review;
+            state.tasks.push(task);
+            let wt = repo
+                .join(".wingman")
+                .join("worktrees")
+                .join(format!("auto-{run_id}-{id}"));
+            create_worktree(&repo, &base, run_id, id, &wt).unwrap();
+            std::fs::write(wt.join("shared.txt"), body.as_bytes()).unwrap();
+            git(&wt, &["add", "-A"]);
+            git(&wt, &["commit", "-m", &format!("touch from {id}")]);
+        }
+
+        let repo_for_resolver = repo.clone();
+        let resolver = move |task_id: &str, files: &[String]| -> bool {
+            let repo = &repo_for_resolver;
+            let wt = repo
+                .join(".wingman")
+                .join("worktrees")
+                .join(format!("auto-{run_id}-merge-fixer-{task_id}"));
+            let fixer = format!("merge-fixer-{task_id}");
+            prepare_merge_fixer_worktree(repo, branch, run_id, task_id, &fixer, &wt).unwrap();
+            let held = std::fs::read_to_string(wt.join("shared.txt")).unwrap();
+            assert!(
+                held.contains("<<<<<<<"),
+                "fixer worktree holds the conflict"
+            );
+            assert!(!adopt_merge_fixer_resolution(repo, &wt, files).unwrap());
+            std::fs::write(
+                wt.join("shared.txt"),
+                b"hello A
+hello B
+",
+            )
+            .unwrap();
+            std::fs::write(
+                wt.join("extra.txt"),
+                b"fixup
+",
+            )
+            .unwrap();
+            adopt_merge_fixer_resolution(repo, &wt, files).unwrap()
+        };
+
+        let outcome =
+            merge_integration_with_resolver(&repo, &base, branch, &state, Some(&resolver))
+                .expect("the fixer's resolution should let the merge complete");
+        assert_eq!(outcome.commits.len(), 2, "both tasks land");
+        let show = |path: &str| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["show", &format!("{branch}:{path}")])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        assert_eq!(
+            show("shared.txt"),
+            "hello A
+hello B
+"
+        );
+        assert_eq!(
+            show("extra.txt"),
+            "fixup
+"
+        );
 
         let _ = cleanup_worktrees(&repo, run_id);
     }

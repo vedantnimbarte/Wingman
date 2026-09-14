@@ -556,6 +556,10 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
                 &commit[..commit.len().min(8)]
             ),
         ),
+        Event::RunConflict { id, files, .. } => (
+            Warn,
+            format!("{short_ts}  run.conflict {id}: {}", files.join(", ")),
+        ),
         Event::RunPr { url, .. } => (Ok, format!("{short_ts}  run.pr       {url}")),
         Event::RunDone { .. } => (Ok, format!("{short_ts}  run.done")),
         Event::PrOutcome { kind, .. } => {

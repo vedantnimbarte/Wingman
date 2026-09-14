@@ -131,6 +131,7 @@ Each autonomous run creates:
 {"t":"…","ev":"agent.rate_limit","agent":"agent-7f3a","status":429,"retry_after_secs":20}
 {"t":"…","ev":"task.status","id":"t1","status":"done"}
 {"t":"…","ev":"run.merge.task","id":"t1","strategy":"squash","commit":"abc123"}
+{"t":"…","ev":"run.conflict","id":"t2","files":["src/lib.rs"]}
 {"t":"…","ev":"run.pr","url":"https://…/pull/42"}
 {"t":"…","ev":"run.done"}
 ```

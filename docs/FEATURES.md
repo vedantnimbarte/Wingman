@@ -41,6 +41,10 @@ Wingman different; this is everything else it does.
   under provider rate limits and host CPU load, a task about to become ready
   gets its worktree created and built ahead of assignment, and on autopilot a
   worker whose turn gate keeps failing is rolled back to its last green state.
+  A merge conflict the one-shot resolver cannot clear goes to merge-fixer
+  workers before the run stops. After each merged run the project knowledge
+  layer (architecture summary, decisions, merge hotspots) is updated, by a
+  knowledge-keeper agent on autopilot, and the planner reads it back.
   See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index

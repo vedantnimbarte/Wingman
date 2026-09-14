@@ -94,7 +94,25 @@ pub struct PipelineInputs {
     /// that the goal text never mentions raises a hard escalation trigger
     /// and blocks auto-merge. Empty disables the check.
     pub dangerous_paths: Vec<String>,
+    /// E4 — on a merge conflict the one-shot resolver cannot clear, spawn
+    /// merge-fixer workers (through `worker_spawner`) before blocking the run.
+    pub merge_fixer: bool,
+    /// J8 — run the knowledge-keeper agent after the PR opens. `None` keeps
+    /// only the deterministic knowledge upkeep (module map, hotspots, one
+    /// decision record per run).
+    pub knowledge_keeper: Option<KnowledgeKeeper>,
 }
+
+/// J8 — where the knowledge-keeper pass runs: the CLI routes it through the
+/// `summarize` task class (`[router.classes]`), so it lands on the fast model
+/// when one is configured.
+pub struct KnowledgeKeeper {
+    pub provider: Arc<dyn Provider>,
+    pub model: String,
+}
+
+/// E4 — merge-fixer workers spawned per conflict before the run blocks on it.
+const MERGE_FIXER_ATTEMPTS: u32 = 2;
 
 /// Outcome of one full pipeline run.
 #[derive(Debug, Clone)]
@@ -226,6 +244,10 @@ pub async fn run_to_completion(
     } else {
         None
     };
+
+    // The merge step after the orchestrator exits reuses the worker spawner
+    // for E4's merge-fixer.
+    let fixer_spawner = inputs.merge_fixer.then(|| inputs.worker_spawner.clone());
 
     let (handle, join) = orchestrator::spawn_full(
         store,
@@ -369,56 +391,66 @@ pub async fn run_to_completion(
         .iter()
         .any(|t| matches!(t.status, TaskStatus::Review | TaskStatus::Done));
 
-    let mut store = RunStore::load(&run_dir).await?;
-
-    // E4 in-run conflict resolver: bridge the sync merge path to an async
-    // agent that rewrites conflict markers to a clean resolution. Runs on the
-    // multi-thread runtime via `block_in_place`. If it can't resolve, the
-    // merge falls back to recording a merge-fixer task (the `Conflict` arm
-    // below), so a bad resolution never lands — the file's markers are
-    // re-checked before commit.
+    // E4 in-run conflict resolver: bridge the sync merge path to the async
+    // resolvers in `resolve_conflict` — a one-shot model rewrite of the
+    // conflict markers, then merge-fixer workers. Runs on the multi-thread
+    // runtime via `block_in_place`. If neither resolves, the merge falls back
+    // to the blocked path (the `Conflict` arm below), so a bad resolution
+    // never lands — the files' markers are re-checked before commit.
     let resolve_provider = aux_provider.clone();
     let resolve_model = inputs.reviewer_model.clone();
     let resolve_root = project_root.clone();
-    let resolver = move |files: &[String]| -> bool {
+    let resolve_run = run_id.clone();
+    let resolve_branch = integration_branch.clone();
+    let resolver = move |task_id: &str, files: &[String]| -> bool {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(resolve_conflicts_inline(
+            tokio::runtime::Handle::current().block_on(resolve_conflict(
                 resolve_provider.as_ref(),
                 &resolve_model,
+                fixer_spawner.as_ref(),
                 &resolve_root,
+                &resolve_run,
+                &resolve_branch,
+                task_id,
                 files,
             ))
         })
     };
 
-    let merge_outcome = if need_merge {
-        match worktree::merge_integration_with_resolver(
+    let merged = need_merge.then(|| {
+        worktree::merge_integration_with_resolver(
             &project_root,
             &final_state.base_commit,
             &integration_branch,
             &final_state,
             Some(&resolver),
-        ) {
+        )
+    });
+    // Loaded after the merge: the resolver appends to the run log through
+    // store handles of its own.
+    let mut store = RunStore::load(&run_dir).await?;
+
+    let merge_outcome = if let Some(merged) = merged {
+        match merged {
             Ok(outcome) => {
                 pr::finalize_all_review_tasks(&mut store, &final_state, &outcome.commits).await?;
                 Some(outcome)
             }
             Err(crate::worktree::WorktreeError::Conflict { task_id, files }) => {
-                // E4 auto-merge-fixer: a merge conflict no longer hard-errors
-                // the run. Record a merge-fixer task capturing the conflicted
-                // files so the conflict is structured, resumable work (a
-                // `pilot resume` picks it up), then write the R3 escalation
-                // packet and return a blocked outcome instead of a raw error.
-                // ponytail: this queues the fix as a visible task; fully
-                // autonomous live resolution (spawning a merge-fixer agent on
-                // the conflicted checkout and retrying the merge in-process)
-                // is the remaining provider-backed leaf — untestable headless.
+                // E4: neither the one-shot resolver nor the merge-fixer
+                // workers (when enabled) cleared the conflict. Make sure a
+                // merge-fixer task records the conflicted files so the
+                // conflict is structured, resumable work (a `pilot resume`
+                // picks it up), then write the R3 escalation packet and return
+                // a blocked outcome instead of a raw error.
                 tracing::warn!(
                     target: "pilot::pipeline",
                     task = %task_id, files = ?files,
-                    "merge conflict — recording a merge-fixer task and blocking the run"
+                    "merge conflict unresolved — blocking the run"
                 );
-                record_merge_fixer_task(&mut store, &task_id, &files).await;
+                if store.state().task(&merge_fixer_id(&task_id)).is_none() {
+                    record_merge_fixer_task(&mut store, &task_id, &files).await;
+                }
                 let blocked_state = store.state().clone();
                 let packet = write_escalation_packet(
                     &project_root,
@@ -670,12 +702,22 @@ pub async fn run_to_completion(
         &pr_outcome,
     );
 
-    // J8 — regenerate the durable project knowledge layer now that the run
-    // merged: an architecture map from the crates' `pub mod`s + one decision
-    // record. Best-effort; a knowledge write must never fail the run.
-    // ponytail: a plain function call, not a "knowledge-keeper agent" —
-    // render_architecture is deterministic; an LLM to invoke it is ceremony.
-    regenerate_knowledge(&project_root, &snapshot_for_pr);
+    // J8 — maintain the durable project knowledge layer now that the run
+    // merged: hotspots from this run's log, the module map, and (with the
+    // knowledge-keeper on) an agent-written architecture summary and
+    // decisions. Best-effort; a knowledge write must never fail the run.
+    let mut keeper_usage = wingman_core::Usage::default();
+    maintain_knowledge(
+        &project_root,
+        &snapshot_for_pr,
+        &store.read_events().await.unwrap_or_default(),
+        inputs.knowledge_keeper.as_ref(),
+        &mut keeper_usage,
+    )
+    .await;
+    if let Some(keeper) = &inputs.knowledge_keeper {
+        record_phase_usage(&mut store, "knowledge", &keeper.model, &keeper_usage).await;
+    }
 
     Ok(PipelineOutcome {
         merged: merge_outcome,
@@ -1475,6 +1517,173 @@ async fn resolve_conflicts_inline(
     true
 }
 
+/// E4 — resolve a conflict `merge_integration_with_resolver` hit while
+/// squashing `task_id`: record it in the run log, try a one-shot model rewrite
+/// of the conflict markers, then (when `fixer` is set) merge-fixer workers.
+/// `true` once the integration checkout holds a resolution.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_conflict(
+    provider: &dyn Provider,
+    model: &str,
+    fixer: Option<&WorkerSpawner>,
+    project_root: &std::path::Path,
+    run_id: &str,
+    integration_branch: &str,
+    task_id: &str,
+    files: &[String],
+) -> bool {
+    // J8 counts conflicts off the log, resolved or not.
+    if let Ok(mut store) = RunStore::load(crate::run_dir(project_root, run_id)).await {
+        let _ = store
+            .append(Event::RunConflict {
+                t: RunStore::now(),
+                id: task_id.to_string(),
+                files: files.to_vec(),
+            })
+            .await;
+    }
+    if resolve_conflicts_inline(provider, model, project_root, files).await {
+        return true;
+    }
+    match fixer {
+        Some(spawner) => {
+            run_merge_fixer(
+                spawner,
+                project_root,
+                run_id,
+                integration_branch,
+                task_id,
+                files,
+            )
+            .await
+        }
+        None => false,
+    }
+}
+
+/// E4 — spawn merge-fixer workers on a conflict, at most
+/// [`MERGE_FIXER_ATTEMPTS`] of them. Each gets a fresh worktree at the
+/// integration tip with `task_id`'s branch squash-merged in (so it holds the
+/// conflict), the merge-fixer task carrying `task_id`'s acceptance checks, and
+/// the summaries of the attempts before it; a retry escalates to the manager
+/// model, as rung 2 of the retry ladder does. The first worker that ends in
+/// Review with no conflict markers left has its tree carried into the
+/// integration checkout and its task marked Done. `false` when none does,
+/// which leaves the conflict to the blocked path.
+async fn run_merge_fixer(
+    spawner: &WorkerSpawner,
+    project_root: &std::path::Path,
+    run_id: &str,
+    integration_branch: &str,
+    task_id: &str,
+    files: &[String],
+) -> bool {
+    let Ok(mut store) = RunStore::load(crate::run_dir(project_root, run_id)).await else {
+        return false;
+    };
+    let fixer_id = merge_fixer_id(task_id);
+    if store.state().task(&fixer_id).is_none() {
+        record_merge_fixer_task(&mut store, task_id, files).await;
+    }
+    let Some(task) = store.state().task(&fixer_id).cloned() else {
+        return false;
+    };
+    let store = Arc::new(tokio::sync::Mutex::new(store));
+    let worktree = crate::worktree_dir(project_root, run_id, &fixer_id);
+    let mut history: Vec<String> = Vec::new();
+    for attempt in 0..MERGE_FIXER_ATTEMPTS {
+        if let Err(e) = worktree::prepare_merge_fixer_worktree(
+            project_root,
+            integration_branch,
+            run_id,
+            task_id,
+            &fixer_id,
+            &worktree,
+        ) {
+            tracing::warn!(target: "pilot::pipeline", task = %task_id, error = %e, "could not set up the merge-fixer worktree");
+            return false;
+        }
+        let agent_id = format!("{fixer_id}-{}", attempt + 1);
+        let _ = store
+            .lock()
+            .await
+            .append(Event::TaskAssign {
+                t: RunStore::now(),
+                id: fixer_id.clone(),
+                agent: agent_id.clone(),
+                worktree: worktree.display().to_string(),
+            })
+            .await;
+        let ctx = orchestrator::SpawnContext {
+            task: task.clone(),
+            session_id: format!("pilot-{run_id}-{agent_id}"),
+            agent_id,
+            worktree: worktree.clone(),
+            store: store.clone(),
+            rung: attempt,
+            escalate_model: attempt > 0,
+            failure_history: history.clone(),
+            cmd_rx: Arc::new(tokio::sync::Mutex::new(None)),
+        };
+        let (summary, outcome) = match spawner(ctx).await {
+            Ok(r) if r.status == TaskStatus::Review => {
+                match worktree::adopt_merge_fixer_resolution(project_root, &worktree, files) {
+                    Ok(true) => {
+                        let _ = store
+                            .lock()
+                            .await
+                            .append(Event::TaskStatus {
+                                t: RunStore::now(),
+                                id: fixer_id.clone(),
+                                status: TaskStatus::Done,
+                                outcome: r.outcome,
+                            })
+                            .await;
+                        return true;
+                    }
+                    Ok(false) => (
+                        "reported the conflict resolved, but conflict markers remain".to_string(),
+                        r.outcome,
+                    ),
+                    Err(e) => (
+                        format!("its resolution could not be applied: {e}"),
+                        r.outcome,
+                    ),
+                }
+            }
+            Ok(r) => (
+                r.outcome
+                    .as_ref()
+                    .map(|o| o.summary.clone())
+                    .unwrap_or_else(|| format!("ended {:?}", r.status)),
+                r.outcome,
+            ),
+            Err(e) => (format!("worker spawn failed: {e}"), None),
+        };
+        tracing::warn!(
+            target: "pilot::pipeline",
+            task = %task_id, attempt = attempt + 1, "merge-fixer did not resolve the conflict: {summary}"
+        );
+        // The worker recorded its own status; this one says why the attempt
+        // is not being used, which a worker that reported Review cannot know.
+        let _ = store
+            .lock()
+            .await
+            .append(Event::TaskStatus {
+                t: RunStore::now(),
+                id: fixer_id.clone(),
+                status: TaskStatus::Failed,
+                outcome: Some(crate::model::TaskOutcome {
+                    summary: summary.clone(),
+                    files_changed: outcome.map(|o| o.files_changed).unwrap_or_default(),
+                }),
+            })
+            .await;
+        history.push(format!("attempt {}: {summary}", attempt + 1));
+    }
+    false
+}
+
 async fn review_task_inline(
     provider: &dyn Provider,
     model: &str,
@@ -1633,31 +1842,44 @@ fn record_run_stats(
     }
 }
 
+/// Id of the merge-fixer task for a conflict on `conflicting_task_id`.
+fn merge_fixer_id(conflicting_task_id: &str) -> String {
+    format!("merge-fixer-{conflicting_task_id}")
+}
+
 /// E4 — record a merge-fixer task on a merge conflict. Appends a
 /// `task.create` for a [`crate::model::Role::MergeFixer`] whose `writes` are
-/// the conflicted files and whose goal points at the conflicting task, so the
-/// conflict is durable, resumable work rather than a lost hard error.
-/// Best-effort: a failed append is logged, not surfaced (the run is already
-/// blocking on the conflict).
+/// the conflicted files, whose goal points at the conflicting task, and whose
+/// acceptance checks are that task's, so the conflict is durable, resumable
+/// work rather than a lost hard error. Best-effort: a failed append is logged,
+/// not surfaced (the run is already stopped on the conflict).
 async fn record_merge_fixer_task(
     store: &mut RunStore,
     conflicting_task_id: &str,
     files: &[String],
 ) {
-    let id = format!("merge-fixer-{conflicting_task_id}");
+    let acceptance = store
+        .state()
+        .task(conflicting_task_id)
+        .map(|t| t.acceptance.clone())
+        .unwrap_or_default();
     let ev = crate::Event::TaskCreate {
         t: RunStore::now(),
-        id,
+        id: merge_fixer_id(conflicting_task_id),
         role: crate::model::Role::MergeFixer,
         title: format!("Resolve merge conflict from task {conflicting_task_id}"),
         goal: format!(
             "Task {conflicting_task_id} conflicts with earlier integration work in: {}. \
-             Resolve the conflict preserving both sides' intent, re-run acceptance, and commit.",
+             This worktree is the integration branch with {conflicting_task_id}'s changes \
+             squash-merged in, conflict markers included. Resolve the conflict preserving \
+             both sides' intent, re-run acceptance, and commit.",
             files.join(", ")
         ),
-        deps: Vec::new(),
+        // Ordered after the task it fixes, so a resumed run's merge reaches
+        // the conflicting task first.
+        deps: vec![conflicting_task_id.to_string()],
         writes: files.to_vec(),
-        acceptance: Vec::new(),
+        acceptance,
         reversibility: Default::default(),
         reversibility_reason: None,
     };
@@ -1666,44 +1888,151 @@ async fn record_merge_fixer_task(
     }
 }
 
-/// J8 — regenerate the durable knowledge layer under `.wingman/knowledge/`
-/// after a run merges: an `architecture.md` module map + one appended
-/// decision record. Best-effort; every failure is logged and swallowed so a
-/// knowledge write can never fail the run.
-fn regenerate_knowledge(project_root: &std::path::Path, state: &crate::model::RunState) {
-    let dir = crate::knowledge::knowledge_dir(project_root);
+/// J8 — maintain the durable knowledge layer under `.wingman/knowledge/`
+/// after a run merges:
+///
+/// - `hotspots.json` gains this run's edits and conflicts, read off `events`;
+/// - `architecture.md` is re-rendered from the crates' `pub mod`s, under the
+///   summary the knowledge-keeper agent writes when `keeper` is set (the
+///   previous summary is kept when it is not, or its reply is unusable);
+/// - `decisions.jsonl` gets the keeper's decisions, or without a usable keeper
+///   reply one record for the run (its goal, and the task summaries as the
+///   rationale).
+///
+/// Best-effort; every failure is logged and swallowed so a knowledge write can
+/// never fail the run.
+async fn maintain_knowledge(
+    project_root: &std::path::Path,
+    state: &crate::model::RunState,
+    events: &[Event],
+    keeper: Option<&KnowledgeKeeper>,
+    usage: &mut wingman_core::Usage,
+) {
+    use crate::knowledge;
+    let dir = knowledge::knowledge_dir(project_root);
+
+    let hotspots_path = knowledge::hotspots_path(&dir);
+    let mut hotspots = knowledge::load_hotspots(&hotspots_path);
+    hotspots.observe_run(events);
+    if let Err(e) = knowledge::save_hotspots(&hotspots_path, &hotspots) {
+        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to write hotspots.json");
+    }
 
     // Module map: each `crates/<name>/src/lib.rs` → its `pub mod`s.
     let crates = discover_crate_modules(&project_root.join("crates"));
-    let arch = crate::knowledge::render_architecture(&crates);
+    let arch_path = knowledge::architecture_path(&dir);
+    let previous = std::fs::read_to_string(&arch_path)
+        .ok()
+        .and_then(|md| knowledge::architecture_summary(&md));
+    let report = match keeper {
+        Some(k) => run_knowledge_keeper(k, state, &crates, previous.as_deref(), usage).await,
+        None => None,
+    };
+    let summary = report
+        .as_ref()
+        .map(|r| r.summary.as_str())
+        .or(previous.as_deref());
     if let Err(e) = std::fs::create_dir_all(&dir)
-        .and_then(|_| std::fs::write(dir.join("architecture.md"), arch))
+        .and_then(|_| std::fs::write(&arch_path, knowledge::render_architecture(summary, &crates)))
     {
         tracing::warn!(target: "pilot::pipeline", error = %e, "failed to write architecture.md");
     }
 
-    // One decision record for the run: the goal is what was decided, the
-    // top task summaries the rationale.
-    let rationale = state
+    let records: Vec<knowledge::DecisionRecord> = match report {
+        Some(r) => r
+            .decisions
+            .into_iter()
+            .take(KEEPER_MAX_DECISIONS)
+            .map(|d| knowledge::DecisionRecord {
+                run_id: state.run_id.clone(),
+                t: RunStore::now(),
+                decision: d.decision,
+                rationale: d.rationale,
+            })
+            .collect(),
+        None => vec![knowledge::DecisionRecord {
+            run_id: state.run_id.clone(),
+            t: RunStore::now(),
+            decision: state.goal.clone(),
+            rationale: state
+                .tasks
+                .iter()
+                .filter_map(|t| t.outcome.as_ref().map(|o| o.summary.clone()))
+                .collect::<Vec<_>>()
+                .join("; "),
+        }],
+    };
+    for rec in &records {
+        if let Err(e) = knowledge::append_decision(&knowledge::decisions_path(&dir), rec) {
+            tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append decision record");
+        }
+    }
+}
+
+/// Most decisions one knowledge-keeper reply may append.
+const KEEPER_MAX_DECISIONS: usize = 3;
+
+/// J8 — the knowledge-keeper agent: given the run, the module map and the
+/// current architecture summary, it returns the revised summary and the
+/// architectural decisions the run made. `None` on a failed call or a reply
+/// that does not parse.
+async fn run_knowledge_keeper(
+    keeper: &KnowledgeKeeper,
+    state: &crate::model::RunState,
+    crates: &[(String, Vec<String>)],
+    previous_summary: Option<&str>,
+    usage: &mut wingman_core::Usage,
+) -> Option<crate::knowledge::KeeperReport> {
+    const SYSTEM: &str = "You maintain a project's architecture notes after an autonomous \
+        run merges. Reply with ONLY a JSON object: {\"summary\":\"...\",\"decisions\":\
+        [{\"decision\":\"...\",\"rationale\":\"...\"}]}. `summary` is the whole updated \
+        architecture summary in Markdown, at most about 300 words: how the project is \
+        organised and why, revised for what this run changed. Describe the code, not the \
+        run. `decisions` lists only architectural choices this run made that later work \
+        should respect, at most 3; leave it empty when the run made none.";
+    let tasks: Vec<String> = state
         .tasks
         .iter()
-        .filter_map(|t| t.outcome.as_ref().map(|o| o.summary.clone()))
-        .collect::<Vec<_>>()
-        .join("; ");
-    let rec = crate::knowledge::DecisionRecord {
-        run_id: state.run_id.clone(),
-        t: RunStore::now(),
-        decision: state.goal.clone(),
-        rationale,
-    };
-    if let Err(e) = crate::knowledge::append_decision(&crate::knowledge::decisions_path(&dir), &rec)
-    {
-        tracing::warn!(target: "pilot::pipeline", error = %e, "failed to append decision record");
+        .map(|t| {
+            let (summary, files) = t
+                .outcome
+                .as_ref()
+                .map(|o| (o.summary.as_str(), o.files_changed.join(", ")))
+                .unwrap_or(("(no summary)", String::new()));
+            format!(
+                "- #{} [{}] {} — {summary} (files: {files})",
+                t.id,
+                t.role.as_str(),
+                t.title
+            )
+        })
+        .collect();
+    let modules: Vec<String> = crates
+        .iter()
+        .map(|(name, mods)| format!("- {name}: {}", mods.join(", ")))
+        .collect();
+    let user = format!(
+        "Goal: {}\n\nTasks:\n{}\n\nCrates and their public modules:\n{}\n\n\
+         Current architecture summary:\n{}",
+        state.goal,
+        tasks.join("\n"),
+        modules.join("\n"),
+        previous_summary.unwrap_or("(none yet)"),
+    );
+    match complete_text(keeper.provider.as_ref(), &keeper.model, SYSTEM, &user).await {
+        Ok((text, u)) => {
+            usage.add(&u);
+            let report = crate::knowledge::parse_keeper_report(extract_json(&text));
+            if report.is_none() {
+                tracing::warn!(target: "pilot::pipeline", "knowledge-keeper reply did not parse; keeping the previous summary");
+            }
+            report
+        }
+        Err(e) => {
+            tracing::warn!(target: "pilot::pipeline", error = %e, "knowledge-keeper call failed");
+            None
+        }
     }
-    // ponytail: hotspots are computed by knowledge::hotspots_from_observations
-    // but nothing reads a persisted hotspots file yet (the E4 scheduler takes
-    // them in-memory), so persisting one here would be write-only. Add it when
-    // the scheduler learns to load cross-run hotspots.
 }
 
 /// Walk `crates/*/src/lib.rs` and extract each crate's `pub mod <name>;`
@@ -2510,6 +2839,8 @@ mod tests {
             reviewer_model: "stub".into(),
             sandbox_default_tier: "host".into(),
             dangerous_paths: Vec::new(),
+            merge_fixer: true,
+            knowledge_keeper: None,
         };
 
         let outcome = run_to_completion(store, inputs).await.unwrap();
@@ -3251,11 +3582,13 @@ mod tests {
         );
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn resolver_bridge_resolves_conflict_via_block_in_place() {
-        // Exercises the exact live path: the sync merge calls a resolver that
-        // bridges to the async `resolve_conflicts_inline` via block_in_place +
-        // block_on. Uses a canned provider so it's deterministic and offline.
+    /// A git repo whose tasks `t1` and `t2` (both in Review) each add
+    /// `shared.txt` with different content on their own branch, so squashing
+    /// `t2` into the integration branch conflicts. `.wingman/` is ignored, as
+    /// in a real project. `None` when git is unavailable.
+    fn conflicting_repo(
+        run_id: &str,
+    ) -> Option<(tempfile::TempDir, PathBuf, crate::model::RunState)> {
         let tmp = tempdir().unwrap();
         let repo = tmp.path().to_path_buf();
         let gitc = |dir: &std::path::Path, args: &[&str]| {
@@ -3270,8 +3603,7 @@ mod tests {
                 .output()
         };
         if gitc(&repo, &["init", "-q"]).is_err() {
-            eprintln!("skipping: git not available");
-            return;
+            return None;
         }
         // Persist identity + line-ending settings in the repo config: CI
         // runners have no global git identity, and `merge_integration`'s
@@ -3285,7 +3617,7 @@ mod tests {
         ] {
             gitc(&repo, &cfg).unwrap();
         }
-        std::fs::write(repo.join("shared.txt"), "base\n").unwrap();
+        std::fs::write(repo.join(".gitignore"), ".wingman/\n").unwrap();
         gitc(&repo, &["add", "-A"]).unwrap();
         gitc(&repo, &["commit", "-qm", "seed"]).unwrap();
         let base = String::from_utf8(gitc(&repo, &["rev-parse", "HEAD"]).unwrap().stdout)
@@ -3293,28 +3625,48 @@ mod tests {
             .trim()
             .to_string();
 
-        let run_id = "bridge";
-        let mut state = crate::model::RunState::new(run_id, "g", &base, "wingman/auto/bridge");
+        let mut state =
+            crate::model::RunState::new(run_id, "g", &base, crate::integration_branch(run_id));
         for (id, body) in [("t1", "A"), ("t2", "B")] {
             let mut task = Task::new(id, Role::Developer, format!("edit {id}"));
             task.status = TaskStatus::Review;
             state.tasks.push(task);
-            let wt = repo
-                .join(".wingman")
-                .join("worktrees")
-                .join(format!("auto-{run_id}-{id}"));
+            let wt = crate::worktree_dir(&repo, run_id, id);
             crate::worktree::create_worktree(&repo, &base, run_id, id, &wt).unwrap();
             std::fs::write(wt.join("shared.txt"), format!("base\n{body}\n")).unwrap();
             gitc(&wt, &["add", "-A"]).unwrap();
             gitc(&wt, &["commit", "-qm", "edit"]).unwrap();
         }
+        Some((tmp, repo, state))
+    }
+
+    /// `<repo>:<branch>:<path>` via `git show`.
+    fn show(repo: &Path, branch: &str, path: &str) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["show", &format!("{branch}:{path}")])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resolver_bridge_resolves_conflict_via_block_in_place() {
+        // Exercises the exact live path: the sync merge calls a resolver that
+        // bridges to the async `resolve_conflicts_inline` via block_in_place +
+        // block_on. Uses a canned provider so it's deterministic and offline.
+        let Some((_tmp, repo, state)) = conflicting_repo("bridge") else {
+            eprintln!("skipping: git not available");
+            return;
+        };
 
         // Canned model returns a clean merged file.
         let provider = CannedTextProvider {
             text: "base\nA\nB\n".into(),
         };
         let repo_c = repo.clone();
-        let resolver = move |files: &[String]| -> bool {
+        let resolver = move |_task_id: &str, files: &[String]| -> bool {
             tokio::task::block_in_place(|| {
                 tokio::runtime::Handle::current()
                     .block_on(resolve_conflicts_inline(&provider, "m", &repo_c, files))
@@ -3323,8 +3675,8 @@ mod tests {
 
         let outcome = crate::worktree::merge_integration_with_resolver(
             &repo,
-            &base,
-            "wingman/auto/bridge",
+            &state.base_commit,
+            &state.integration_branch,
             &state,
             Some(&resolver),
         )
@@ -3332,6 +3684,186 @@ mod tests {
         assert_eq!(outcome.commits.len(), 2);
         let merged = std::fs::read_to_string(repo.join("shared.txt")).unwrap();
         assert!(merged.contains('A') && merged.contains('B') && !merged.contains("<<<<<<<"));
+    }
+
+    /// The run store for [`conflicting_repo`]'s plan; `t2` carries an
+    /// acceptance check the merge-fixer must inherit.
+    async fn conflicting_run_store(repo: &Path, state: &crate::model::RunState) {
+        let mut store = RunStore::create(
+            crate::run_dir(repo, &state.run_id),
+            &state.run_id,
+            "g",
+            &state.base_commit,
+            &state.integration_branch,
+        )
+        .await
+        .unwrap();
+        for task in &state.tasks {
+            store
+                .append(Event::TaskCreate {
+                    t: RunStore::now(),
+                    id: task.id.clone(),
+                    role: Role::Developer,
+                    title: task.title.clone(),
+                    goal: String::new(),
+                    deps: Vec::new(),
+                    writes: vec!["shared.txt".into()],
+                    acceptance: if task.id == "t2" {
+                        vec![crate::model::Acceptance::Grep {
+                            pattern: "B".into(),
+                            path: "shared.txt".into(),
+                        }]
+                    } else {
+                        Vec::new()
+                    },
+                    reversibility: Default::default(),
+                    reversibility_reason: None,
+                })
+                .await
+                .unwrap();
+        }
+    }
+
+    /// Merge `state` with the pipeline's resolver: a one-shot model that
+    /// always hands the markers back, then merge-fixers from `spawner`.
+    fn merge_with_fixer(
+        repo: &Path,
+        state: &crate::model::RunState,
+        spawner: WorkerSpawner,
+    ) -> Result<IntegrationMergeOutcome, crate::worktree::WorktreeError> {
+        let provider = CannedTextProvider {
+            text: "<<<<<<< still\nA\n=======\nB\n>>>>>>> broken".into(),
+        };
+        let resolver = |task_id: &str, files: &[String]| -> bool {
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current().block_on(resolve_conflict(
+                    &provider,
+                    "m",
+                    Some(&spawner),
+                    repo,
+                    &state.run_id,
+                    &state.integration_branch,
+                    task_id,
+                    files,
+                ))
+            })
+        };
+        crate::worktree::merge_integration_with_resolver(
+            repo,
+            &state.base_commit,
+            &state.integration_branch,
+            state,
+            Some(&resolver),
+        )
+    }
+
+    fn spawn_result(
+        ctx: &crate::orchestrator::SpawnContext,
+        status: TaskStatus,
+        summary: &str,
+    ) -> crate::orchestrator::WorkerSpawnResult {
+        crate::orchestrator::WorkerSpawnResult {
+            agent_id: ctx.agent_id.clone(),
+            status,
+            outcome: Some(crate::model::TaskOutcome {
+                summary: summary.into(),
+                files_changed: vec!["shared.txt".into()],
+            }),
+        }
+    }
+
+    /// E4: when the one-shot resolver fails, a merge-fixer worker runs in a
+    /// worktree holding the conflict. An attempt that claims success with the
+    /// markers still in place is refused; the retry (on the escalated model,
+    /// told what went wrong) resolves it, and the conflicting task lands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn e4_merge_fixer_resolves_what_the_one_shot_resolver_cannot() {
+        let Some((_tmp, repo, state)) = conflicting_repo("fixer") else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        conflicting_run_store(&repo, &state).await;
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_c = calls.clone();
+        let spawner: WorkerSpawner = Arc::new(move |ctx: crate::orchestrator::SpawnContext| {
+            let n = calls_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                let held = std::fs::read_to_string(ctx.worktree.join("shared.txt")).unwrap();
+                assert!(held.contains("<<<<<<<"), "the fixer starts on the conflict");
+                assert_eq!(ctx.task.role, Role::MergeFixer);
+                assert_eq!(ctx.task.acceptance.len(), 1, "t2's checks are inherited");
+                if n == 0 {
+                    assert!(!ctx.escalate_model && ctx.failure_history.is_empty());
+                    return Ok(spawn_result(&ctx, TaskStatus::Review, "done, honest"));
+                }
+                assert!(ctx.escalate_model);
+                assert!(ctx.failure_history[0].contains("conflict markers remain"));
+                std::fs::write(ctx.worktree.join("shared.txt"), "base\nA\nB\n").unwrap();
+                Ok(spawn_result(&ctx, TaskStatus::Review, "merged both lines"))
+            })
+        });
+
+        let outcome = merge_with_fixer(&repo, &state, spawner).expect("the fixer lands the task");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(outcome.commits.len(), 2);
+        assert_eq!(
+            show(&repo, &state.integration_branch, "shared.txt"),
+            "base\nA\nB\n"
+        );
+
+        let store = RunStore::load(crate::run_dir(&repo, &state.run_id))
+            .await
+            .unwrap();
+        let fixer = store.state().task("merge-fixer-t2").expect("fixer task");
+        assert_eq!(fixer.status, TaskStatus::Done);
+        assert_eq!(fixer.attempts, 2);
+        assert_eq!(fixer.deps, vec!["t2".to_string()]);
+        let events = store.read_events().await.unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            Event::RunConflict { id, files, .. } if id == "t2" && files == &["shared.txt".to_string()]
+        )));
+        let _ = crate::worktree::cleanup_worktrees(&repo, &state.run_id);
+    }
+
+    /// E4: merge-fixer attempts are bounded; when every one fails the
+    /// conflict surfaces as before, with the fixer task Failed and saying why.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn e4_merge_fixer_gives_up_after_its_attempts() {
+        let Some((_tmp, repo, state)) = conflicting_repo("fixer-fail") else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        conflicting_run_store(&repo, &state).await;
+
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let calls_c = calls.clone();
+        let spawner: WorkerSpawner = Arc::new(move |ctx: crate::orchestrator::SpawnContext| {
+            calls_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok(spawn_result(&ctx, TaskStatus::Failed, "acceptance red")) })
+        });
+
+        match merge_with_fixer(&repo, &state, spawner) {
+            Err(crate::worktree::WorktreeError::Conflict { task_id, .. }) => {
+                assert_eq!(task_id, "t2")
+            }
+            other => panic!("expected the conflict to surface, got {other:?}"),
+        }
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            MERGE_FIXER_ATTEMPTS
+        );
+        let store = RunStore::load(crate::run_dir(&repo, &state.run_id))
+            .await
+            .unwrap();
+        let fixer = store.state().task("merge-fixer-t2").expect("fixer task");
+        assert_eq!(fixer.status, TaskStatus::Failed);
+        assert_eq!(
+            fixer.outcome.as_ref().map(|o| o.summary.as_str()),
+            Some("acceptance red")
+        );
+        let _ = crate::worktree::cleanup_worktrees(&repo, &state.run_id);
     }
 
     #[test]
@@ -3525,8 +4057,86 @@ mod tests {
         // deduped, sorted, private `mod` excluded
         assert_eq!(got[0].1, vec!["alpha".to_string(), "beta".to_string()]);
         // renders without panicking and names the crate
-        let md = crate::knowledge::render_architecture(&got);
+        let md = crate::knowledge::render_architecture(None, &got);
         assert!(md.contains("wingman-foo") && md.contains("alpha"));
+    }
+
+    /// J8: the knowledge-keeper's summary and decisions land in the knowledge
+    /// layer alongside the module map and this run's hotspots; a later run
+    /// whose keeper reply is unusable keeps that summary and falls back to one
+    /// plain decision record, and the hotspots keep accumulating.
+    #[tokio::test]
+    async fn j8_maintain_knowledge_runs_the_keeper_and_falls_back() {
+        use crate::knowledge;
+        let tmp = tempdir().unwrap();
+        let root = tmp.path();
+        let src = root.join("crates").join("wingman-foo").join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub mod alpha;\n").unwrap();
+        let mut state = crate::model::RunState::new("r1", "split the parser", "abc", "b");
+        state.tasks = vec![done_task("t1")];
+        let events = vec![
+            Event::TaskStatus {
+                t: RunStore::now(),
+                id: "t1".into(),
+                status: TaskStatus::Review,
+                outcome: Some(crate::model::TaskOutcome {
+                    summary: "s".into(),
+                    files_changed: vec!["src/parse.rs".into()],
+                }),
+            },
+            Event::RunConflict {
+                t: RunStore::now(),
+                id: "t1".into(),
+                files: vec!["src/parse.rs".into()],
+            },
+        ];
+        let keeper = |text: &str| KnowledgeKeeper {
+            provider: Arc::new(CannedTextProvider { text: text.into() }),
+            model: "fast".into(),
+        };
+        let dir = knowledge::knowledge_dir(root);
+
+        let mut usage = wingman_core::Usage::default();
+        maintain_knowledge(
+            root,
+            &state,
+            &events,
+            Some(&keeper(
+                r#"{"summary":"Parsing lives in `alpha`.","decisions":[{"decision":"one parser per format","rationale":"formats diverge"}]}"#,
+            )),
+            &mut usage,
+        )
+        .await;
+        let md = std::fs::read_to_string(knowledge::architecture_path(&dir)).unwrap();
+        assert_eq!(
+            knowledge::architecture_summary(&md).as_deref(),
+            Some("Parsing lives in `alpha`.")
+        );
+        assert!(md.contains("- `alpha`"));
+        let decisions = knowledge::load_decisions(&knowledge::decisions_path(&dir)).unwrap();
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0].decision, "one parser per format");
+
+        maintain_knowledge(root, &state, &events, Some(&keeper("no json")), &mut usage).await;
+        let md = std::fs::read_to_string(knowledge::architecture_path(&dir)).unwrap();
+        assert_eq!(
+            knowledge::architecture_summary(&md).as_deref(),
+            Some("Parsing lives in `alpha`.")
+        );
+        let decisions = knowledge::load_decisions(&knowledge::decisions_path(&dir)).unwrap();
+        assert_eq!(decisions.len(), 2);
+        assert_eq!(decisions[1].decision, "split the parser");
+        let hot = knowledge::load_hotspots(&knowledge::hotspots_path(&dir));
+        assert_eq!(
+            (
+                hot.edit_count("src/parse.rs"),
+                hot.conflict_count("src/parse.rs")
+            ),
+            (2, 2)
+        );
+        let ctx = knowledge::render_planner_context(root).unwrap();
+        assert!(ctx.contains("Parsing lives in") && ctx.contains("src/parse.rs"));
     }
 
     // Silence unused-import warnings if the test gates above ever skip.

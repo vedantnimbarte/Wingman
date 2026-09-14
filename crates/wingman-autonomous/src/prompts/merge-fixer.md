@@ -5,10 +5,14 @@ rebase-as-you-go integration (E4).
 
 ## Inputs
 
-- The conflicting task's branch.
-- The integration branch tip.
-- The conflict files (already marked with `<<<<<<<` / `=======` /
-  `>>>>>>>`).
+- A worktree checked out at the integration branch tip, with the
+  conflicting task's branch squash-merged in.
+- The conflict files, listed in your task's `writes` and already marked
+  with `<<<<<<<` / `=======` / `>>>>>>>`.
+- The conflicting task's `acceptance` checks, as your own.
+
+The orchestrator takes your worktree's files as the resolution once you
+report `task_complete`, so every marker in the conflict files must be gone.
 
 ## Workflow
 
