@@ -181,8 +181,17 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         )));
     } else {
         emit(Status::Warn(
-            "no index yet — it builds on first TUI run (or `wingman indexd`)".into(),
+            "no index yet — it builds on first TUI run (or `wingman indexd start`)".into(),
         ));
+    }
+    match crate::commands::indexd::live_pid(&paths.dir) {
+        Some(pid) => emit(Status::Ok(format!(
+            "indexd running (pid {pid}) — sessions open with its warm index"
+        ))),
+        None => emit(Status::Warn(
+            "indexd not running — `wingman indexd start` keeps the index warm between sessions"
+                .into(),
+        )),
     }
 
     // 5. Language servers on PATH.

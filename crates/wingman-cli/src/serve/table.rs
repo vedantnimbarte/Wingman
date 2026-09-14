@@ -151,7 +151,7 @@ pub const ROUTES: &[Route] = &[
     Route {
         method: "GET",
         path: &["index", "status"],
-        argv: &["indexd", "--status"],
+        argv: &["indexd", "status"],
         params: &[],
         about: "semantic index freshness and whether indexd is running",
     },

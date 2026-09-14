@@ -37,7 +37,7 @@ wingman [OPTIONS] [COMMAND]
 | `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
 | `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
 | `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
-| `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
+| `indexd`             | Keep this project's semantic index warm (reindex, then watch) in the foreground. `start` runs it in the background (log: `.wingman/indexd.log`), `stop` asks it to exit, `status` reports whether it is running and the index age. A pidfile naming a dead process is cleared, so a crashed daemon never reads as running. While a daemon is live, the TUI uses its warm index instead of starting a second indexer, and `doctor` reports it. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
 | `router stats`       | Per-class model win-rates for this repo: the gate pass-rate beside the durable PR verdicts (held / reverted / unknown). `--all` across repos. |
 | `router backfill`    | Judge merged pilot PRs at least `--days` (default 30) old — reverted, mostly rewritten, broke the base branch, reopened their issue, or held — and record it against the roles and models that wrote them. Needs `gh` and `git`. |

@@ -291,6 +291,13 @@ Wingman different; this is everything else it does.
   mode rather than replacing it, so a client can narrow what the agent may do
   but never widen it. Writes still go to disk through Wingman
   ([#127](https://github.com/vedantnimbarte/Wingman/issues/127)).
+- **Warm index daemon.** `wingman indexd start` keeps `.wingman/index.db` fresh
+  in the background; `stop` and `status` manage it. Liveness is a real process
+  check (`kill(pid, 0)` / `OpenProcess`), so a crashed daemon's pidfile is
+  cleared rather than reported as running. The TUI opens on the daemon's warm
+  index instead of indexing again.
+- **Import-aware prefetch.** Reading a file pre-warms the files it imports,
+  then its siblings, so the agent's next read hits a warm cache.
 - **Hybrid semantic search.** The index fuses dense vector similarity with BM25
   keyword scoring (reciprocal-rank fusion), so exact identifier/error-string
   matches surface alongside semantic ones.

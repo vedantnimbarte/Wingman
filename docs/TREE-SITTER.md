@@ -90,6 +90,7 @@ When `treesitter` feature is enabled:
 | `outline`             | Generate a markdown outline (one symbol per line).        |
 | `enclosing_symbol`    | Find the function/class containing a given line number.   |
 | `replace_function_body` | Refactor a named function's body in-place.             |
+| `imports`             | Module paths a file imports (`use`, `import`, `require`). |
 | `ParserPool`          | Reusable thread-local parser cache.                       |
 
 When feature disabled, all return empty Vec/None (inert fallbacks).

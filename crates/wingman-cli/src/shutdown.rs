@@ -21,7 +21,7 @@ pub fn install() {
 }
 
 #[cfg(unix)]
-async fn wait_for_signal() {
+pub async fn wait_for_signal() {
     use tokio::signal::unix::{signal, SignalKind};
     // If a stream can't be installed there's nothing sane to fall back to;
     // a run that can't be interrupted is worse than a panic here.
@@ -34,6 +34,6 @@ async fn wait_for_signal() {
 }
 
 #[cfg(not(unix))]
-async fn wait_for_signal() {
+pub async fn wait_for_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }

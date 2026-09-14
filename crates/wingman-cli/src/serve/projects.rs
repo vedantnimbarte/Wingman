@@ -133,7 +133,7 @@ pub fn describe(project: &Project) -> Value {
         "id": project.id,
         "root": display_root(&project.root),
         "branch": current_branch(&project.root),
-        "indexd_running": wingman_dir.join("indexd.pid").exists(),
+        "indexd_running": crate::commands::indexd::live_pid(&wingman_dir).is_some(),
         "index_age_secs": index_age_secs,
     })
 }

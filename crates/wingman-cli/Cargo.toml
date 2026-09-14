@@ -59,9 +59,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ratatui = "0.29"
 crossterm = "0.28"
 
-# `setsid` for detaching a `-d` background run from the controlling terminal.
+# `setsid` for detaching a `-d` background run from the controlling terminal;
+# `kill(pid, 0)` for `indexd`'s liveness check.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process"] }
+nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
+
+# `OpenProcess` + `GetExitCodeProcess` for `indexd`'s liveness check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = ["embeddings", "treesitter"]

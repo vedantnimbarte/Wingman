@@ -314,12 +314,12 @@ pub enum Command {
         session: Option<std::path::PathBuf>,
     },
     /// Keep this project's semantic index warm: initial reindex, then watch
-    /// the tree and refresh on change until interrupted.
+    /// the tree and refresh on change. Runs in the foreground until
+    /// interrupted; `start` runs it in the background instead.
     #[command(display_order = 26)]
     Indexd {
-        /// Report whether a daemon is running and index freshness, then exit.
-        #[arg(long)]
-        status: bool,
+        #[command(subcommand)]
+        action: Option<IndexdAction>,
     },
     /// Run any [[schedule]] entries whose cadence is due.
     #[command(display_order = 43)]
@@ -924,6 +924,17 @@ pub enum RouterAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum IndexdAction {
+    /// Start the daemon in the background (log: `.wingman/indexd.log`).
+    /// Sessions opened while it runs use its warm index.
+    Start,
+    /// Ask a running daemon to exit and wait for it.
+    Stop,
+    /// Report whether a daemon is running and index freshness, then exit.
+    Status,
+}
+
+#[derive(Subcommand, Debug)]
 pub enum ConfigAction {
     /// Write a starter `~/.wingman/config.toml`.
     Init {
@@ -1197,7 +1208,7 @@ pub async fn run() -> Result<ExitCode> {
             commands::mcp_serve::run(load_config()?, mode).await
         }
         Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
-        Some(Command::Indexd { status }) => commands::indexd::run(status).await,
+        Some(Command::Indexd { action }) => commands::indexd::run(action).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
@@ -1437,9 +1448,20 @@ pub async fn run() -> Result<ExitCode> {
                     }
                 };
 
-            // Kick off background indexing for the project. The handle is
+            // Kick off background indexing for the project, unless a live
+            // `indexd` already keeps this index warm: a second indexer would
+            // only redo its work against the same database. The handle is
             // held until the TUI exits.
-            let _watch_handle = match crate::runtime::build_indexer(&project)? {
+            let indexd = crate::commands::indexd::live_pid(&project.dir);
+            if let Some(pid) = indexd {
+                tracing::info!("using the warm index kept by indexd (pid {pid})");
+            }
+            let _watch_handle = match indexd
+                .is_none()
+                .then(|| crate::runtime::build_indexer(&project))
+                .transpose()?
+                .flatten()
+            {
                 Some(indexer) => {
                     wingman_rag::spawn_background_indexer(indexer, project.root.clone())
                         .map_err(anyhow::Error::msg)

@@ -66,9 +66,10 @@ impl Tool for ReadFile {
             Ok(b) => b,
             Err(e) => return ToolOutcome::err(format!("read {}: {e}", path.display())),
         };
-        // Speculatively warm the page cache for likely-next reads (siblings)
-        // and pre-warm `git status`. Fire-and-forget; never blocks this read.
-        crate::prefetch::warm_siblings(path.clone());
+        // Speculatively warm the page cache for likely-next reads (its
+        // imports, then its siblings) and pre-warm `git status`.
+        // Fire-and-forget; never blocks this read.
+        crate::prefetch::warm_neighbours(path.clone(), ctx.project_root.clone());
         crate::prefetch::warm_git_status_once(ctx.project_root.clone());
         // PDFs before the binary check, because a PDF *is* binary and the
         // refusal below is otherwise the whole answer. A spec or a design doc

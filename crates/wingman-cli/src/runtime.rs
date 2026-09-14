@@ -834,6 +834,16 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
             e @ (wingman_rag::RagError::DimMismatch { .. }
             | wingman_rag::RagError::EmbedderChanged { .. }),
         ) => {
+            // A live `indexd` owns this database and keeps writing to it.
+            // Deleting it here would pull the file out from under the daemon
+            // (or fail outright on Windows), so leave its index alone and let
+            // the user restart the daemon with the embedder they want.
+            if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir) {
+                eprintln!(
+                    "wingman: the semantic index kept by indexd (pid {pid}) was built by a                      different embedder ({e}); `semantic_search` is disabled this session.                      Restart it with `wingman indexd stop` then `wingman indexd start`."
+                );
+                return Ok(None);
+            }
             // Both mean the same thing operationally — the vectors on disk were
             // produced by something this session cannot reproduce — so both
             // rebuild. They are reported apart because "4-dim vs 4-dim" is what
