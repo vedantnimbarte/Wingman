@@ -213,6 +213,79 @@ tool calls at all).
 
 ---
 
+## Skill packs
+
+A skill pack is a versioned bundle of role definitions (`<role>.md`), lessons
+(`<role>.lessons.md`), tool registrations (`tools/`) and acceptance templates,
+published as a git repo tagged `v<X.Y.Z>`. Installing one copies its roles and
+lessons into `~/.wingman/agents/`, where the role loader picks them up.
+
+```toml
+[pilot.skills]
+packs = ["acme/rust-reviewer@1.4"]                   # caret requirements
+index = "https://github.com/acme/wingman-packs"      # git URL or local dir
+```
+
+```bash
+wingman pilot skills install                # [pilot.skills].packs
+wingman pilot skills install acme/app@1.0   # or name them
+wingman pilot skills search reviewer
+wingman pilot skills list
+wingman pilot skills verify                 # non-zero exit on any failure
+```
+
+**Index.** `index` names a git repo (shallow-cloned on each use) or a local
+directory holding `index.json`:
+
+```json
+{"packs": {"acme/app": [
+  {"version": "1.2.0", "source": "https://github.com/acme/app",
+   "deps": ["acme/base@1.3"], "description": "App roles",
+   "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----\n"}
+]}}
+```
+
+**Dependencies.** Each requirement is caret-style: `acme/base@1.3` accepts any
+`1.x` at or above `1.3.0`. Install resolves the requested packs and everything
+they depend on, choosing the newest indexed version that satisfies every
+requirement on a pack, and stops with a `version conflict` error naming the
+requirements when none does. One version per pack, because every pack's roles
+share one agents directory. The resolver does not backtrack, so in a rare
+case it reports a conflict that a different choice upstream would have
+avoided.
+
+**Signatures.** Unsigned packs are refused unless you pass
+`--allow-unsigned`; a pack that *is* signed must verify either way. Without an
+`index`, packs are cloned from `https://github.com/<owner>/<name>` and are
+always unsigned. Checking uses `ssh-keygen -Y verify` (OpenSSH 8.1+, which
+ships with Git and with Windows 10+) against
+`~/.wingman/packs/allowed_signers`, with the pack **owner** as the principal,
+so a key you trust for `acme` cannot vouch for `evil/…`:
+
+```
+acme namespaces="wingman-skillpack" ssh-ed25519 AAAAC3Nza...
+```
+
+The signed message covers the exact pack version, a SHA-256 digest of its
+files (`.git` excluded, symlinks refused, checked out with
+`core.autocrlf=false`) and its dependency list, so neither the source nor the
+index can change what was signed. Content that fails the check is deleted.
+Each install leaves a receipt, `~/.wingman/packs/<slug>.json`; `verify`
+re-hashes the installed files against it, so later edits on disk are caught
+too, including for unsigned packs.
+
+**Publishing.** Sign a clean checkout of the tag. Write the payload with
+`--out` rather than a shell redirect, which can re-encode it:
+
+```bash
+git clone --branch v1.2.0 https://github.com/acme/app app
+wingman pilot skills digest acme/app@1.2.0 app --dep acme/base@1.3 --out payload.txt
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n wingman-skillpack payload.txt
+# put the text of payload.txt.sig in the index entry's "signature"
+```
+
+---
+
 ## The board
 
 `wingman board` is a persistent, multi-project kanban board over pilot runs.

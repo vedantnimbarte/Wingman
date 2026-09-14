@@ -229,6 +229,58 @@ fn pilot_help_lists_subcommands() {
 }
 
 #[test]
+fn pilot_skills_digest_writes_the_exact_payload_to_sign() {
+    // The one skills subcommand that touches neither the network nor the
+    // real home. `--out` must write bytes a later `ssh-keygen -Y verify` sees
+    // unchanged, so they must equal what stdout prints.
+    let s = Scratch::new();
+    let pack = s.dir.join("pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("r.md"), "# r").unwrap();
+    let out = wingman()
+        .args([
+            "pilot",
+            "skills",
+            "digest",
+            "acme/x@1.2",
+            "pack",
+            "--dep",
+            "acme/base@1.0",
+        ])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot skills digest");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(printed.starts_with("wingman-skillpack v1\npack acme/x@1.2.0\ndigest sha256:"));
+    assert!(printed.ends_with("\ndeps acme/base@1.0.0\n"), "{printed}");
+
+    let status = wingman()
+        .args([
+            "pilot",
+            "skills",
+            "digest",
+            "acme/x@1.2",
+            "pack",
+            "--dep",
+            "acme/base@1.0",
+        ])
+        .args(["--out", "payload.txt"])
+        .current_dir(&s.dir)
+        .status()
+        .expect("run pilot skills digest --out");
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(s.dir.join("payload.txt")).unwrap(),
+        printed
+    );
+}
+
+#[test]
 fn pilot_status_without_runs_does_not_panic() {
     // `pilot status` reads run artifacts under .wingman/autonomous and needs no
     // provider. In an empty scratch project it must exit cleanly (no runs), not

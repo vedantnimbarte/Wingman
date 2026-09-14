@@ -640,9 +640,13 @@ pub enum PilotAction {
         #[arg(long)]
         dry_run: bool,
     },
-    /// J12 — install the skill packs listed in `[pilot.skills].packs` into
-    /// `~/.wingman/packs/` and link their roles into `~/.wingman/agents/`.
-    Skills,
+    /// J12 — skill packs: install (with dependencies and signature checks),
+    /// search the index, list and re-verify installs. Bare `pilot skills`
+    /// installs `[pilot.skills].packs`.
+    Skills {
+        #[command(subcommand)]
+        action: Option<SkillsAction>,
+    },
     /// R4 — eval / regression gate. Summarize eval results, compare to the
     /// committed baseline, and exit non-zero on regression (the CI gate).
     Eval {
@@ -742,6 +746,51 @@ pub enum IntakeChannel {
     Email {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsAction {
+    /// Resolve packs and their dependencies against `[pilot.skills].index`,
+    /// verify each signature, and install into `~/.wingman/packs/`, linking
+    /// roles into `~/.wingman/agents/`.
+    Install {
+        /// `owner/name@X.Y[.Z]` specs; defaults to `[pilot.skills].packs`.
+        specs: Vec<String>,
+        /// Install packs that carry no signature (signed packs must still
+        /// verify).
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// Search the index by name or description.
+    Search {
+        /// Case-insensitive substring; omit to list every pack.
+        query: Option<String>,
+    },
+    /// List installed packs.
+    List,
+    /// Re-check installed packs against their signatures (or, for unsigned
+    /// packs, their install-time digest). Exits non-zero on any failure.
+    Verify {
+        /// `owner/name` or `owner/name@X.Y.Z`; omit to verify all.
+        specs: Vec<String>,
+        /// Accept unsigned packs whose files are unchanged.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// For pack authors: print the payload to sign with
+    /// `ssh-keygen -Y sign -n wingman-skillpack` for a pack directory.
+    Digest {
+        /// The `owner/name@X.Y.Z` being published.
+        spec: String,
+        /// A clean checkout of the pack's `v<version>` tag.
+        dir: std::path::PathBuf,
+        /// A dependency as listed in the index entry (repeatable).
+        #[arg(long = "dep", value_name = "SPEC")]
+        deps: Vec<String>,
+        /// Write the payload to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -1309,10 +1358,27 @@ pub async fn run() -> Result<ExitCode> {
                 let cfg = load_config()?;
                 commands::pilot::eval(cfg, goals, threshold, update_baseline).await
             }
-            PilotAction::Skills => {
-                let cfg = load_config()?;
-                commands::pilot::skills_install(cfg).await
-            }
+            PilotAction::Skills { action } => match action {
+                None => commands::pilot::skills_install(load_config()?, Vec::new(), false).await,
+                Some(SkillsAction::Install {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_install(load_config()?, specs, allow_unsigned).await,
+                Some(SkillsAction::Search { query }) => {
+                    commands::pilot::skills_search(load_config()?, query.unwrap_or_default()).await
+                }
+                Some(SkillsAction::List) => commands::pilot::skills_list().await,
+                Some(SkillsAction::Verify {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_verify(specs, allow_unsigned).await,
+                Some(SkillsAction::Digest {
+                    spec,
+                    dir,
+                    deps,
+                    out,
+                }) => commands::pilot::skills_digest(spec, dir, deps, out).await,
+            },
             PilotAction::Daemon { cycles, dry_run } => {
                 let cfg = load_config()?;
                 commands::pilot::daemon(cfg, cycles, dry_run).await

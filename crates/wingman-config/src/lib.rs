@@ -2877,8 +2877,13 @@ impl Default for PilotRefineConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSkillsConfig {
-    /// Installed skill packs, each `owner/name@semver`.
+    /// Installed skill packs, each `owner/name@semver` (a caret requirement
+    /// when resolved through `index`).
     pub packs: Vec<String>,
+    /// Skill-pack registry index: a git URL (https/ssh) or local directory
+    /// holding `index.json`. Empty means packs are cloned straight from
+    /// `https://github.com/<owner>/<name>`, unsigned and without dependencies.
+    pub index: String,
 }
 
 /// R6 — security pass run before E8's auto-merge gate.

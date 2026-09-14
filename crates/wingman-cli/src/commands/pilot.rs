@@ -1992,19 +1992,33 @@ async fn feedback_pending_runs(
     out
 }
 
-/// J12 — install the skill packs listed in `[pilot.skills].packs`. Each
-/// `owner/name@version` spec is fetched from `https://github.com/owner/name`
-/// (tag `v<version>`) into `~/.wingman/packs/<slug>/` and its role/lessons
-/// files are copied into `~/.wingman/agents/` so the role loader picks them
-/// up. Already-installed packs (exact version present) only re-install files.
-pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
+/// J12 — install skill packs: `specs`, or `[pilot.skills].packs` when none are
+/// given. With `[pilot.skills].index` set, the specs are resolved against the
+/// index together with their dependencies and each pack's signature is checked;
+/// without one, each `owner/name@version` is cloned from
+/// `https://github.com/owner/name` (tag `v<version>`), which is unsigned and so
+/// needs `allow_unsigned`. Packs land in `~/.wingman/packs/<slug>/` and their
+/// role/lessons files are copied into `~/.wingman/agents/` so the role loader
+/// picks them up.
+pub async fn skills_install(
+    cfg: Config,
+    specs: Vec<String>,
+    allow_unsigned: bool,
+) -> Result<ExitCode> {
     use wingman_autonomous::skillpack;
-    let (refs, errs) = skillpack::parse_pack_list(&cfg.pilot.skills.packs);
+    let specs = if specs.is_empty() {
+        cfg.pilot.skills.packs.clone()
+    } else {
+        specs
+    };
+    let (refs, errs) = skillpack::parse_pack_list(&specs);
     for e in &errs {
         eprintln!("[pilot] skills: bad spec — {e}");
     }
     if refs.is_empty() {
-        eprintln!("[pilot] skills: no valid packs in [pilot.skills].packs");
+        eprintln!(
+            "[pilot] skills: no valid packs to install (pass specs or set [pilot.skills].packs)"
+        );
         return Ok(if errs.is_empty() {
             ExitCode::SUCCESS
         } else {
@@ -2014,17 +2028,35 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     let home = wingman_config::user_home()
         .map_err(|e| anyhow!("cannot resolve home directory for pack install: {e}"))?;
     let runner = wingman_autonomous::pr::SystemCommandRunner;
-    let mut failures = 0;
-    for r in &refs {
-        let url = format!("https://github.com/{}/{}", r.owner, r.name);
-        match skillpack::fetch_pack(&runner, r, &url, &home) {
+    let resolved = if cfg.pilot.skills.index.trim().is_empty() {
+        refs.iter()
+            .map(|r| skillpack::ResolvedPack {
+                pack: r.clone(),
+                source: format!("https://github.com/{}/{}", r.owner, r.name),
+                signature: None,
+                deps: Vec::new(),
+            })
+            .collect()
+    } else {
+        let index = skillpack::load_index(&runner, &cfg.pilot.skills.index, &home)
+            .map_err(|e| anyhow!("skills: {e}"))?;
+        skillpack::resolve(&index, &refs).map_err(|e| anyhow!("skills: {e}"))?
+    };
+    let mut failures = errs.len();
+    for r in &resolved {
+        match skillpack::fetch_pack(&runner, r, &home, allow_unsigned) {
             Ok(dest) => eprintln!(
-                "[pilot] skills: installed {} → {}",
-                r.slug(),
+                "[pilot] skills: installed {} ({}) → {}",
+                r.pack,
+                if r.signature.is_some() {
+                    "signed"
+                } else {
+                    "unsigned"
+                },
                 dest.display()
             ),
             Err(e) => {
-                eprintln!("[pilot] skills: {} failed — {e}", r.slug());
+                eprintln!("[pilot] skills: {} failed — {e}", r.pack);
                 failures += 1;
             }
         }
@@ -2034,6 +2066,142 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// J12 — search `[pilot.skills].index` for packs whose name or description
+/// contains `query`, newest version of each.
+pub async fn skills_search(cfg: Config, query: String) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for the pack index: {e}"))?;
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let index = skillpack::load_index(&runner, &cfg.pilot.skills.index, &home)
+        .map_err(|e| anyhow!("skills: {e}"))?;
+    let hits = skillpack::search(&index, &query);
+    if hits.is_empty() {
+        eprintln!("[pilot] skills: no packs match `{query}`");
+    }
+    for (key, e) in hits {
+        let signed = if e.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        println!("{key}@{}  [{signed}]  {}", e.version, e.description);
+        if !e.deps.is_empty() {
+            println!("    deps: {}", e.deps.join(", "));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J12 — list installed packs from their install receipts.
+pub async fn skills_list() -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for installed packs: {e}"))?;
+    let (receipts, errs) = skillpack::list_installed(&home);
+    for e in &errs {
+        eprintln!("[pilot] skills: unreadable receipt — {e}");
+    }
+    if receipts.is_empty() {
+        eprintln!("[pilot] skills: no packs installed");
+    }
+    for r in &receipts {
+        let signed = if r.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        println!("{}  [{signed}]  {}", r.pack, r.source);
+        if !r.deps.is_empty() {
+            println!("    deps: {}", r.deps.join(", "));
+        }
+    }
+    Ok(if errs.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// J12 — re-verify installed packs (all, or those matching `specs` by
+/// `owner/name` or exact `owner/name@X.Y.Z`). Non-zero exit on any failure,
+/// so it can gate a CI job or a cron check.
+pub async fn skills_verify(specs: Vec<String>, allow_unsigned: bool) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for installed packs: {e}"))?;
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let (receipts, errs) = skillpack::list_installed(&home);
+    let mut failures = errs.len();
+    for e in &errs {
+        eprintln!("[pilot] skills: unreadable receipt — {e}");
+    }
+    let wanted = |pack: &str| {
+        specs.is_empty()
+            || specs
+                .iter()
+                .any(|s| pack == s || pack.starts_with(&format!("{s}@")))
+    };
+    let mut checked = 0;
+    for r in receipts.iter().filter(|r| wanted(&r.pack)) {
+        checked += 1;
+        match skillpack::verify_installed(&runner, r, &home, allow_unsigned) {
+            Ok(()) => eprintln!("[pilot] skills: {} ok", r.pack),
+            Err(e) => {
+                eprintln!("[pilot] skills: {} FAILED — {e}", r.pack);
+                failures += 1;
+            }
+        }
+    }
+    if checked == 0 {
+        eprintln!("[pilot] skills: no matching installed packs");
+        if !specs.is_empty() {
+            failures += 1;
+        }
+    }
+    Ok(if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// J12 — for pack authors: the payload `ssh-keygen -Y sign -n
+/// wingman-skillpack` signs for `dir` published as `spec` with `deps`. The
+/// resulting `.sig` text goes in the index entry's `signature`.
+pub async fn skills_digest(
+    spec: String,
+    dir: std::path::PathBuf,
+    deps: Vec<String>,
+    out: Option<std::path::PathBuf>,
+) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let pack = skillpack::parse_pack_ref(&spec).map_err(|e| anyhow!("skills: {e}"))?;
+    let deps = deps
+        .iter()
+        .map(|d| skillpack::parse_pack_ref(d))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("skills: {e}"))?;
+    let digest = skillpack::pack_digest(&dir).map_err(|e| anyhow!("skills: {e}"))?;
+    let payload = skillpack::signed_payload(&pack, &digest, &deps);
+    match out {
+        // Written as exact bytes: a shell redirect can re-encode or append a
+        // newline (PowerShell does both), which would never verify.
+        Some(path) => {
+            std::fs::write(&path, &payload)?;
+            eprintln!(
+                "[pilot] skills: wrote payload to {}; sign it with \
+                 `ssh-keygen -Y sign -f <key> -n {} {}`",
+                path.display(),
+                skillpack::SIGNATURE_NAMESPACE,
+                path.display()
+            );
+        }
+        None => print!("{payload}"),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// R4 — eval / regression harness + CI gate.

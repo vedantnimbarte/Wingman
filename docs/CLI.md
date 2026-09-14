@@ -74,6 +74,11 @@ wingman [OPTIONS] [COMMAND]
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |
 | `pilot ask "<msg>" [run-id]` | Same, but wait for the worker's reply and print it (`--wait <secs>`, default 120). |
 | `pilot intake slack\|email` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion). |
+| `pilot skills install [spec…]` | Resolve skill packs (default `[pilot.skills].packs`) and their dependencies against `[pilot.skills].index`, verify signatures, install. `--allow-unsigned` to accept packs without one. Bare `pilot skills` does the same. |
+| `pilot skills search [query]` | Search the pack index by name or description. |
+| `pilot skills list` | List installed packs, signed or not. |
+| `pilot skills verify [spec…]` | Re-check installed packs against their signatures / install digest; non-zero exit on failure. `--allow-unsigned`. |
+| `pilot skills digest <spec> <dir>` | For pack authors: the payload to sign with `ssh-keygen -Y sign -n wingman-skillpack`. `--dep <spec>` (repeatable), `--out <file>`. |
 | `board`              | Kanban board over pilot runs: a persistent, multi-project backlog. Cards are goals that outlive their runs; columns are derived from run state. |
 | `board add "<title>"` | Create a Backlog card. `--goal <text>` (the prompt sent to pilot; defaults to the title), `--project <id>`, `--label <l>`, `--notes <text>`. |
 | `board list`         | List cards with derived columns. `--project`, `--column backlog\|planned\|in-progress\|review\|done`, `--label`, `--all`, `--json`. |

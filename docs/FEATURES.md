@@ -269,6 +269,11 @@ Wingman different; this is everything else it does.
   (`[team]`), merging non-destructively.
 - **Multi-channel pilot intake.** `wingman pilot intake slack | email`
   turns Slack events or delivered `.eml` files into pilot requests.
+- **Skill packs.** `wingman pilot skills install | search | list | verify`
+  shares pilot roles as versioned packs from a git-hosted index, resolving
+  dependencies with caret rules and refusing unsigned packs unless told
+  otherwise; signatures are checked with `ssh-keygen`. See
+  [PILOT-MODE.md](PILOT-MODE.md#skill-packs).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,

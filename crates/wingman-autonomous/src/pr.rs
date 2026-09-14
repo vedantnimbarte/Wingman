@@ -116,6 +116,20 @@ pub fn render_pr_title(state: &RunState) -> String {
 /// a real remote.
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> std::io::Result<CommandOut>;
+
+    /// [`run`](Self::run) with `stdin` piped to the child (`ssh-keygen -Y
+    /// verify` only reads the signed message from stdin). The default drops
+    /// `stdin` so test doubles that only care about argv implement `run` alone.
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> std::io::Result<CommandOut> {
+        let _ = stdin;
+        self.run(program, args, cwd)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +150,35 @@ pub struct SystemCommandRunner;
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> std::io::Result<CommandOut> {
         let out = Command::new(program).args(args).current_dir(cwd).output()?;
+        Ok(CommandOut {
+            status: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> std::io::Result<CommandOut> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Payloads here are a few hundred bytes, well under a pipe buffer, so
+        // writing before draining stdout cannot deadlock.
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(stdin)?;
+        }
+        let out = child.wait_with_output()?;
         Ok(CommandOut {
             status: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
