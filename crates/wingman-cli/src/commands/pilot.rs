@@ -1945,7 +1945,8 @@ async fn rework_pr_reviews(
     };
     let Some(budget) = pr_reviews::round_budget(pilot.max_usd, target.spent_usd) else {
         eprintln!(
-            "[pilot] daemon: {} has spent its review budget (${:.2} of [pilot].max_usd ${:.2})              — leaving its threads to a person",
+            "[pilot] daemon: {} has spent its review budget (${:.2} of [pilot].max_usd ${:.2}) \
+             — leaving its threads to a person",
             target.pr_url, target.spent_usd, pilot.max_usd
         );
         return;
