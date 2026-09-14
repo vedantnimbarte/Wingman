@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { apply, resolve, scope } from './Board'
 import { classify, path, strip } from './Changes'
+import { rate } from './Insights'
 import { stripAnsi, verdict } from './output'
 import { clockOf, isIrreversible, summarise } from './Runs'
 import { ago, clock, matching, unquote, usageLine } from './Sessions'
@@ -360,5 +361,15 @@ describe('stripAnsi', () => {
 
   it('strips cursor and erase sequences, not just colour', () => {
     expect(stripAnsi('a\u001b[2Kb\u001b[1;31mc')).toBe('abc')
+  })
+})
+
+describe('rate', () => {
+  it('shows an absent rate as a dash, not a confident 0%', () => {
+    // `null` is what the server sends when nothing was gated: zero green out
+    // of zero is not a 0% verified-done rate.
+    expect(rate(null)).toBe('—')
+    expect(rate(0)).toBe('0%')
+    expect(rate(0.666)).toBe('67%')
   })
 })

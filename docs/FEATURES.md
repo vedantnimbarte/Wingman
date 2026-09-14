@@ -34,8 +34,16 @@ Wingman different; this is everything else it does.
   worker agents in isolated worktrees, and opens a PR. See
   [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
-  memories, skills, model routing, the verification gate, and index
-  freshness.
+  memories, skills, model routing, the verification gate, the metrics
+  summary below, and index freshness.
+- **`wingman metrics`.** The numbers that say whether any of this is
+  working, for the current repo: time to first token (median and p90 of
+  each session's first turn), tokens per completed task, verified-done rate
+  (of gated turns, and of sessions), and routing pass-rates by task class and
+  model. Read from the session transcripts, where the agent loop records each
+  turn's `first_output_ms` and last verification receipt on its `stop`
+  record — so every surface (TUI, `--print`, pilot workers, `serve`) counts.
+  `--json`; also `GET /v1/projects/{p}/metrics` and the panel's Insights view.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
   listing, shell execution, semantic search, and the new learning tools
   (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
@@ -257,7 +265,9 @@ Wingman different; this is everything else it does.
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
 - **Benchmark harness.** `wingman bench` runs a suite of prompts and records
-  time-to-first-token, tokens/task, and verified-done rate.
+  time to first token, tokens per completed task, verified-done rate, and
+  routing outcomes per served model — the same definitions as
+  `wingman metrics`. `--json` or `--markdown` prints a publishable report.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [SDK.md](SDK.md).
 - **Visual verification.** *(Opt-in build.)* Build with `--features browser`

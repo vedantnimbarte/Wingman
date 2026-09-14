@@ -157,6 +157,14 @@ pub enum Command {
         #[arg(long)]
         compare: bool,
     },
+    /// This repo's time to first token, tokens per completed task,
+    /// verified-done rate, and routing outcomes, from its session transcripts.
+    #[command(display_order = 17)]
+    Metrics {
+        /// Output as JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Session utilities.
     #[command(display_order = 16)]
     Session {
@@ -259,8 +267,11 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         suite: Option<String>,
         /// Output JSON instead of a table.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "markdown")]
         json: bool,
+        /// Output a publishable Markdown report instead of a table.
+        #[arg(long)]
+        markdown: bool,
     },
     /// Model routing utilities.
     #[command(display_order = 41)]
@@ -1083,6 +1094,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Undo) => commands::checkpoint::undo().await,
         Some(Command::Rewind { steps }) => commands::rewind::run(steps).await,
         Some(Command::Cost { json, compare }) => commands::cost::run_with(json, compare).await,
+        Some(Command::Metrics { json }) => commands::metrics::run(json).await,
         Some(Command::Session { action }) => commands::session::run(action).await,
         Some(Command::Worktree { action }) => match action {
             WorktreeAction::Create { branch } => commands::worktree::create(branch).await,
@@ -1178,7 +1190,11 @@ pub async fn run() -> Result<ExitCode> {
             GoldenAction::List => commands::golden::list().await,
         },
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
-        Some(Command::Bench { suite, json }) => commands::bench::run(suite, json).await,
+        Some(Command::Bench {
+            suite,
+            json,
+            markdown,
+        }) => commands::bench::run(suite, json, markdown).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
         Some(Command::McpServe) => {
             // Read-only by default: exposing write/shell tools to an external

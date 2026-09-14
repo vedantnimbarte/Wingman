@@ -335,6 +335,13 @@ that is the interesting number — a repo that is 80% cache reads is paying a
 fraction of what its input count implies, which is why the totals and the bill
 can disagree in your favour.
 
+**Is it working** shows the metrics `docs/DIFFERENTIATION.md` says to track,
+from `GET /v1/projects/{p}/metrics`: median and p90 time to first token, tokens
+per completed task, the verified-done rate (with green and red receipts as the
+one other status-coloured bar on the page), and routing pass-rates by task class
+and model. Every figure carries its sample size; a rate with nothing to divide
+by is a dash, not 0%.
+
 **Recent runs, by spend**, gives cost the time dimension the lifetime total
 cannot: `cost` answers "what has this cost", not "what cost it". There is no
 server route for a time series, so this prices the newest ten runs from their

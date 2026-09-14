@@ -30,12 +30,13 @@ wingman [OPTIONS] [COMMAND]
 | `config paths`       | Print the resolved global and project config paths.    |
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
-| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
+| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, the `metrics` summary, and index freshness. |
 | `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, and git/gh tooling. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
 | `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
 | `serve`              | Serve the HTTP/SSE API so another machine, a phone, or CI can drive Wingman. `--addr`, `--init-token`, `--list`, `--allow-yolo`, `--pair`. See [HTTP-API.md](HTTP-API.md). |
 | `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
-| `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
+| `metrics`            | This repo's time to first token (median/p90), tokens per completed task, verified-done rate, and routing outcomes, from its session transcripts and `learn.db`. `--json`. |
+| `bench`              | Benchmark harness: time to first token, tokens per completed task, verified-done rate, routing outcomes per served model. `--suite <file.jsonl>`; `--json` or `--markdown` for a publishable report. |
 | `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
 | `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |

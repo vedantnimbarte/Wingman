@@ -498,6 +498,12 @@ impl AgentLoop {
             // the verification gate before an EndTurn stop is accepted.
             let mut mutated = false;
             let mut gate_attempts: usize = 0;
+            // Turn measurements, written onto the `Stop` fact. The clock
+            // starts here, after context is loaded and the prompt recorded,
+            // so it measures the model rather than the surface.
+            let started = std::time::Instant::now();
+            let mut first_output_ms: Option<u64> = None;
+            let mut verified: Option<bool> = None;
             // Spans the whole user turn, not one provider round-trip: a loop
             // that alternates across turns is still a loop.
             let mut loop_guard = config.loop_guard.clone();
@@ -636,6 +642,17 @@ impl AgentLoop {
                             return;
                         }
                     };
+                    if first_output_ms.is_none()
+                        && matches!(
+                            evt,
+                            StreamEvent::TextDelta { .. }
+                                | StreamEvent::ThinkingDelta { .. }
+                                | StreamEvent::Thinking { .. }
+                                | StreamEvent::ToolUse { .. }
+                        )
+                    {
+                        first_output_ms = Some(started.elapsed().as_millis() as u64);
+                    }
                     match evt {
                         StreamEvent::TextDelta { text } => {
                             current_text.push_str(&text);
@@ -736,6 +753,7 @@ impl AgentLoop {
                     if reason == AgentStop::EndTurn && mutated {
                         if let Some(gate) = &config.gate {
                             let report = gate.check().await;
+                            verified = Some(report.passed);
                             yield AgentEvent::Verification {
                                 passed: report.passed,
                                 summary: report.summary.clone(),
@@ -772,8 +790,15 @@ impl AgentLoop {
                     }
                     if let Some(s) = &sink {
                         s.record(crate::ContextFact::Stop {
-                            reason: serde_json::to_string(&reason)
-                                .unwrap_or_else(|_| "\"unknown\"".into()),
+                            // The bare variant name. `to_string` wrote it
+                            // JSON-quoted (`"\"end_turn\""`), unlike every
+                            // other writer of this record.
+                            reason: serde_json::to_value(reason)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_string))
+                                .unwrap_or_else(|| "unknown".into()),
+                            first_output_ms,
+                            verified,
                         })
                         .await;
                     }
@@ -846,6 +871,8 @@ impl AgentLoop {
                     if let Some(s) = &sink {
                         s.record(crate::ContextFact::Stop {
                             reason: "loop_detected".into(),
+                            first_output_ms,
+                            verified,
                         })
                         .await;
                     }
@@ -951,6 +978,8 @@ impl AgentLoop {
                     if let Some(s) = &sink {
                         s.record(crate::ContextFact::Stop {
                             reason: "max_turns".into(),
+                            first_output_ms,
+                            verified,
                         })
                         .await;
                     }
@@ -1332,6 +1361,55 @@ mod tests {
         assert!(!events
             .iter()
             .any(|e| matches!(e, AgentEvent::Verification { .. })));
+    }
+
+    /// The `Stop` fact is where `wingman metrics` reads a turn's
+    /// time-to-first-output and its receipt from, so both have to be on it —
+    /// the receipt being the *last* one, after a red-then-green retry.
+    #[tokio::test]
+    async fn stop_fact_carries_first_output_and_the_last_receipt() {
+        #[derive(Default)]
+        struct Facts(Mutex<Vec<crate::ContextFact>>);
+        #[async_trait]
+        impl crate::ContextSink for Facts {
+            async fn record(&self, fact: crate::ContextFact) {
+                self.0.lock().unwrap().push(fact);
+            }
+        }
+
+        let facts = Arc::new(Facts::default());
+        let mut agent = AgentLoop::new(
+            Arc::new(ScriptedProvider::new(vec![
+                tool_use_response(),
+                end_turn_response("broken"),
+                end_turn_response("fixed"),
+            ])),
+            Arc::new(OkDispatcher),
+            AgentConfig {
+                model: "scripted/test".into(),
+                gate: Some(Arc::new(CountingGate {
+                    fail_first: 1,
+                    calls: AtomicUsize::new(0),
+                })),
+                context_sink: Some(facts.clone()),
+                ..Default::default()
+            },
+        );
+        let _ = collect_events(&mut agent).await;
+
+        let facts = facts.0.lock().unwrap();
+        let stop = facts.iter().rev().find_map(|f| match f {
+            crate::ContextFact::Stop {
+                reason,
+                first_output_ms,
+                verified,
+            } => Some((reason.clone(), *first_output_ms, *verified)),
+            _ => None,
+        });
+        let (reason, first_output_ms, verified) = stop.expect("a stop fact");
+        assert_eq!(reason, "end_turn", "unquoted, like every other writer");
+        assert!(first_output_ms.is_some());
+        assert_eq!(verified, Some(true));
     }
 }
 

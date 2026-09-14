@@ -472,6 +472,33 @@ export type CostTimeline = {
   unpriced_turns: number
 }
 
+/**
+ * The numbers `docs/DIFFERENTIATION.md` says to track, for one repo, from
+ * `GET /v1/projects/{p}/metrics` (`wingman metrics --json`).
+ *
+ * Every rate is `null` rather than `0` when there is nothing to divide by, and
+ * every rate travels with its sample size: "100%" over one turn and over three
+ * hundred are different claims.
+ */
+export type Metrics = {
+  sessions: number
+  turns: number
+  completed_turns: number
+  /** Each session's first turn: prompt reaching the loop to first model output. */
+  time_to_first_token_ms: { median: number | null; p90: number | null; samples: number }
+  total_tokens: number
+  tokens_per_completed_task: number | null
+  /** Turns the verification gate ran on, and how many ended green. */
+  gated_turns: number
+  verified_turns: number
+  verified_done_rate: number | null
+  sessions_with_receipt: number
+  sessions_verified: number
+  session_verified_done_rate: number | null
+  /** Gate pass-rate per task class and model, from `learn.db`. */
+  routing: { task_class: string; model: string; passed: number; total: number; pass_rate: number }[]
+}
+
 /** What a table-driven route returns when its output is not JSON. */
 export type TextOutput = { stdout: string; stderr: string; exit: number }
 
@@ -713,6 +740,9 @@ export const api = {
     request<CostTimeline>(
       `/v1/projects/${encodeURIComponent(project)}/cost/timeline?days=${days}`,
     ),
+
+  metrics: (project: string) =>
+    request<Metrics>(`/v1/projects/${encodeURIComponent(project)}/metrics`),
 
   apiSchema: () => request<ApiSchema>('/v1/schema'),
 

@@ -291,10 +291,14 @@ Consequences worth knowing:
                                        {"type":"tool_use","id":"t0","name":"read_file","input":{}}]}
 {"kind":"tool_result","ts":"…","id":"t0","output":"<full>","model_output":"<bounded>","is_error":false}
 {"kind":"recap","ts":"…","replaced":8,"text":"[wingman compact] …"}
-{"kind":"stop","ts":"…","reason":"\"end_turn\""}
+{"kind":"stop","ts":"…","reason":"end_turn","first_output_ms":412,"verified":true}
 ```
 
 Old logs load unchanged: every addition is a new variant or a defaulted field.
+Logs from before the loop's fix carry the stop reason JSON-quoted
+(`"\"end_turn\""`); readers accept both. `first_output_ms` (prompt to the
+model's first output) and `verified` (the turn's last verification receipt,
+absent when the gate did not run) are what `wingman metrics` reads.
 
 **Features:**
 - `wingman session list` — browse recent session files.

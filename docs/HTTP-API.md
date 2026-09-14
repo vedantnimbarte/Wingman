@@ -323,6 +323,7 @@ is returned as JSON; anything else comes back as
 |---|---|
 | `GET /v1/projects/{p}/cost?compare` | `cost --json [--compare]` |
 | `GET /v1/projects/{p}/context` | `context --json` |
+| `GET /v1/projects/{p}/metrics` | `metrics --json` |
 | `GET /v1/projects/{p}/knows` | `knows` |
 | `GET /v1/projects/{p}/doctor` | `doctor` |
 | `GET /v1/projects/{p}/attest` | `attest` |

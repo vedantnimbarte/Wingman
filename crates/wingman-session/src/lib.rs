@@ -112,6 +112,14 @@ pub enum SessionRecord {
     Stop {
         ts: String,
         reason: String,
+        /// Milliseconds from the prompt to the model's first output. Absent in
+        /// logs written before it was recorded, and on turns with no output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_output_ms: Option<u64>,
+        /// The turn's last verification receipt; absent when the gate did
+        /// not run. `wingman metrics` computes the verified-done rate from it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verified: Option<bool>,
     },
 }
 
@@ -337,10 +345,16 @@ impl SessionLog {
                 self.write(SessionRecord::UsageDelta { ts, usage: *usage })
                     .await
             }
-            ContextFact::Stop { reason } => {
+            ContextFact::Stop {
+                reason,
+                first_output_ms,
+                verified,
+            } => {
                 self.write(SessionRecord::Stop {
                     ts,
                     reason: reason.clone(),
+                    first_output_ms: *first_output_ms,
+                    verified: *verified,
                 })
                 .await
             }
@@ -363,6 +377,8 @@ impl SessionLog {
                         .ok()
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_else(|| "unknown".into()),
+                    first_output_ms: None,
+                    verified: None,
                 })
                 .await
             }

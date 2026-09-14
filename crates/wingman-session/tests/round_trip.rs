@@ -177,3 +177,40 @@ async fn a_truncated_result_reconstructs_as_the_bounded_form() {
     );
     assert!(rebuilt_result.contains("elided"));
 }
+
+/// The turn's measurements land on its `stop` record, in the bare-name form
+/// `wingman metrics` reads, and a log without them still parses.
+#[tokio::test]
+async fn the_stop_record_carries_the_turn_measurements() {
+    let (_, _, dir) = run_and_reconstruct(3).await;
+    let path = wingman_session::list_sessions(dir.path())
+        .pop()
+        .expect("a session file");
+    let records = wingman_session::load_session(&path).unwrap();
+    let stop = records
+        .iter()
+        .find_map(|r| match r {
+            wingman_session::SessionRecord::Stop {
+                reason,
+                first_output_ms,
+                verified,
+                ..
+            } => Some((reason.clone(), *first_output_ms, *verified)),
+            _ => None,
+        })
+        .expect("a stop record");
+    assert_eq!(stop.0, "end_turn");
+    assert!(stop.1.is_some(), "the model streamed text, so it was timed");
+    assert_eq!(stop.2, None, "no gate ran, so there is no receipt");
+
+    let old: wingman_session::SessionRecord =
+        serde_json::from_str(r#"{"kind":"stop","ts":"t","reason":"end_turn"}"#).unwrap();
+    assert!(matches!(
+        old,
+        wingman_session::SessionRecord::Stop {
+            first_output_ms: None,
+            verified: None,
+            ..
+        }
+    ));
+}

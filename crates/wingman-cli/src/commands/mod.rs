@@ -23,6 +23,7 @@ pub mod knows;
 pub mod login;
 pub mod mcp_serve;
 pub mod memory;
+pub mod metrics;
 pub mod notify;
 pub mod pilot;
 pub mod pilot_intake;

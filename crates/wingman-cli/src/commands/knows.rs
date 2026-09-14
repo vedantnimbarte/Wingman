@@ -1,7 +1,8 @@
 //! `wingman knows` — render what Wingman knows about this project: stored
-//! memories, available skills, model routing, the verification gate, and
-//! semantic-index freshness. Makes the accumulated knowledge visible so the
-//! learning loop's value is obvious (and auditable) to the user.
+//! memories, available skills, model routing, the verification gate, the
+//! metrics that say whether any of it is working, and semantic-index
+//! freshness. Makes the accumulated knowledge visible so the learning loop's
+//! value is obvious (and auditable) to the user.
 
 use anyhow::Result;
 use std::path::Path;
@@ -98,6 +99,14 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
                 "no project check command detected"
             }
         ),
+    }
+    println!();
+
+    // The DIFFERENTIATION.md metrics, from this repo's transcripts.
+    println!("metrics (`wingman metrics --json` for the raw figures):");
+    for line in crate::commands::metrics::summary_lines(&crate::commands::metrics::collect(&paths))
+    {
+        println!("  {line}");
     }
     println!();
 
