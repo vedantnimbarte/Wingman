@@ -39,6 +39,9 @@ fn ts_language(lang: Language) -> tree_sitter::Language {
         Language::TypeScript => tree_sitter_typescript::language_typescript(),
         Language::Tsx => tree_sitter_typescript::language_tsx(),
         Language::Go => tree_sitter_go::language(),
+        Language::Cpp => tree_sitter_cpp::language(),
+        Language::Java => tree_sitter_java::language(),
+        Language::Kotlin => tree_sitter_kotlin::language(),
     }
 }
 
@@ -138,6 +141,18 @@ fn descends_into(lang: Language, kind: &str) -> bool {
                 | "interface_body"
         ),
         Language::Go => matches!(kind, "source_file"),
+        Language::Cpp => matches!(
+            kind,
+            "namespace_definition" | "class_specifier" | "struct_specifier" | "union_specifier"
+        ),
+        Language::Java => matches!(
+            kind,
+            "class_declaration"
+                | "interface_declaration"
+                | "enum_declaration"
+                | "record_declaration"
+        ),
+        Language::Kotlin => matches!(kind, "class_declaration" | "object_declaration"),
     }
 }
 
@@ -147,6 +162,9 @@ fn symbol_from_node(lang: Language, src: &str, node: &Node) -> Option<Symbol> {
         Language::Python => python_symbol(src, node)?,
         Language::JavaScript | Language::TypeScript | Language::Tsx => js_symbol(src, node)?,
         Language::Go => go_symbol(src, node)?,
+        Language::Cpp => cpp_symbol(src, node)?,
+        Language::Java => java_symbol(src, node)?,
+        Language::Kotlin => kotlin_symbol(src, node)?,
     };
     let start = node.start_position();
     let end = node.end_position();
@@ -248,23 +266,132 @@ fn go_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
     Some((child_text(src, node, "name")?.to_string(), kind))
 }
 
+fn cpp_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
+    let kind = match node.kind() {
+        // `void Foo::bar() { ... }` defines a method outside its class.
+        "function_definition"
+            if cpp_innermost_declarator(node)?.kind() == "qualified_identifier" =>
+        {
+            SymbolKind::Method
+        }
+        "function_definition" => SymbolKind::Function,
+        // A prototype (`int add(int, int);`, or a method declared in a class
+        // body) is the only place a header names the function.
+        "declaration" | "field_declaration" if is_cpp_function_declarator(node) => {
+            SymbolKind::Function
+        }
+        "type_definition" => SymbolKind::TypeAlias,
+        "namespace_definition" => SymbolKind::Module,
+        "alias_declaration" => SymbolKind::TypeAlias,
+        // `struct Foo x;` and `class Foo;` mention a type without defining it.
+        "class_specifier" | "struct_specifier" | "union_specifier" | "enum_specifier"
+            if node.child_by_field_name("body").is_none() =>
+        {
+            return None
+        }
+        "class_specifier" => SymbolKind::Class,
+        "struct_specifier" | "union_specifier" => SymbolKind::Struct,
+        "enum_specifier" => SymbolKind::Enum,
+        _ => return None,
+    };
+    let name = match node.kind() {
+        "function_definition" | "declaration" | "field_declaration" | "type_definition" => {
+            cpp_declarator_name(src, node)?
+        }
+        _ => child_text(src, node, "name")?.to_string(),
+    };
+    Some((name, kind))
+}
+
+/// Follow the `declarator` chain (`int *foo()` is a pointer declarator around
+/// a function declarator around the identifier) down to the name node.
+fn cpp_innermost_declarator<'t>(node: &Node<'t>) -> Option<Node<'t>> {
+    let mut cur = node.child_by_field_name("declarator")?;
+    while let Some(next) = cur.child_by_field_name("declarator") {
+        cur = next;
+    }
+    Some(cur)
+}
+
+fn is_cpp_function_declarator(node: &Node) -> bool {
+    let mut cur = node.child_by_field_name("declarator");
+    while let Some(d) = cur {
+        if d.kind() == "function_declarator" {
+            return true;
+        }
+        cur = d.child_by_field_name("declarator");
+    }
+    false
+}
+
+/// The unqualified name a declarator declares: `ns::Foo::bar` -> `bar`, so
+/// `find_symbol bar` matches an out-of-class definition too.
+fn cpp_declarator_name(src: &str, node: &Node) -> Option<String> {
+    let mut name = cpp_innermost_declarator(node)?;
+    while let Some(inner) = name.child_by_field_name("name") {
+        name = inner;
+    }
+    src.get(name.start_byte()..name.end_byte())
+        .map(str::to_string)
+}
+
+fn java_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
+    let kind = match node.kind() {
+        "method_declaration" | "constructor_declaration" => SymbolKind::Method,
+        "class_declaration" | "record_declaration" => SymbolKind::Class,
+        "interface_declaration" | "annotation_type_declaration" => SymbolKind::Interface,
+        "enum_declaration" => SymbolKind::Enum,
+        _ => return None,
+    };
+    Some((child_text(src, node, "name")?.to_string(), kind))
+}
+
+fn kotlin_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
+    // The Kotlin grammar declares no field names, so a declaration's name is
+    // its first child of the identifier kind.
+    let (name_kind, kind) = match node.kind() {
+        "function_declaration" => ("simple_identifier", SymbolKind::Function),
+        "object_declaration" => ("type_identifier", SymbolKind::Class),
+        "type_alias" => ("type_identifier", SymbolKind::TypeAlias),
+        "class_declaration" => {
+            let kind = if kotlin_child(node, "interface").is_some() {
+                SymbolKind::Interface
+            } else if kotlin_child(node, "enum_class_body").is_some() {
+                SymbolKind::Enum
+            } else {
+                SymbolKind::Class
+            };
+            ("type_identifier", kind)
+        }
+        _ => return None,
+    };
+    let name = kotlin_child(node, name_kind)?;
+    Some((
+        src.get(name.start_byte()..name.end_byte())?.to_string(),
+        kind,
+    ))
+}
+
+fn kotlin_child<'t>(node: &Node<'t>, kind: &str) -> Option<Node<'t>> {
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).find(|c| c.kind() == kind);
+    found
+}
+
 // ─── Semantic chunking ──────────────────────────────────────────────────
 
 /// Split `src` into chunks aligned with top-level items. Returns `None`
 /// (via empty Vec) when parsing fails — callers should fall back to the
 /// line-window chunker.
 pub fn semantic_chunks(lang: Language, src: &str) -> Vec<SemanticChunk> {
-    let symbols = extract_symbols(lang, src);
-    if symbols.is_empty() {
+    let mut top = extract_symbols(lang, src);
+    if top.is_empty() {
         return Vec::new();
     }
-    // Use only top-level symbols (no methods inside impls/classes) as
-    // chunk boundaries. The inner ones still ride along inside their
-    // parent's chunk.
-    let mut top: Vec<Symbol> = symbols
-        .into_iter()
-        .filter(|s| !matches!(s.kind, SymbolKind::Method))
-        .collect();
+    // Use only top-level symbols as chunk boundaries. The inner ones still
+    // ride along inside their parent's chunk. Nesting is decided by span,
+    // not kind: a Go method or a C++ `Foo::bar` definition is a method that
+    // sits at the top level and needs a chunk of its own.
     top.sort_by_key(|s| s.start_byte);
     // Drop nested symbols (start inside the previous symbol's span).
     let mut last_end = 0usize;
@@ -439,13 +566,15 @@ pub fn replace_function_body(
 }
 
 fn find_body_span(lang: Language, src: &str, root: Node, name: &str) -> Option<(usize, usize)> {
-    let body_field = body_field_name(lang);
     let mut stack: Vec<Node> = vec![root];
     while let Some(node) = stack.pop() {
         if is_function_like(lang, node.kind()) {
-            if let Some(this_name) = child_text(src, &node, "name") {
+            if let Some(this_name) = function_name(lang, src, &node) {
                 if this_name == name {
-                    let body = node.child_by_field_name(body_field)?;
+                    let body = match lang {
+                        Language::Kotlin => kotlin_child(&node, "function_body")?,
+                        _ => node.child_by_field_name("body")?,
+                    };
                     // Slice exclusive of the outer braces / Python indent.
                     return inner_body_span(lang, src, &body);
                 }
@@ -459,11 +588,11 @@ fn find_body_span(lang: Language, src: &str, root: Node, name: &str) -> Option<(
     None
 }
 
-fn body_field_name(lang: Language) -> &'static str {
+fn function_name(lang: Language, src: &str, node: &Node) -> Option<String> {
     match lang {
-        Language::Rust | Language::Go => "body",
-        Language::Python => "body",
-        Language::JavaScript | Language::TypeScript | Language::Tsx => "body",
+        Language::Cpp => cpp_declarator_name(src, node),
+        Language::Kotlin => kotlin_symbol(src, node).map(|(name, _)| name),
+        _ => child_text(src, node, "name").map(str::to_string),
     }
 }
 
@@ -476,6 +605,9 @@ fn is_function_like(lang: Language, kind: &str) -> bool {
             "function_declaration" | "method_definition" | "generator_function_declaration"
         ),
         Language::Go => matches!(kind, "function_declaration" | "method_declaration"),
+        Language::Cpp => kind == "function_definition",
+        Language::Java => matches!(kind, "method_declaration" | "constructor_declaration"),
+        Language::Kotlin => kind == "function_declaration",
     }
 }
 
@@ -615,6 +747,242 @@ mod tests {
             replace_function_body(Language::Python, src, "add", "    return a - b\n").unwrap();
         assert!(out.contains("return a - b"));
         assert!(!out.contains("return a + b"));
+    }
+
+    fn kinds(lang: Language, src: &str) -> Vec<(SymbolKind, String)> {
+        extract_symbols(lang, src)
+            .into_iter()
+            .map(|s| (s.kind, s.name))
+            .collect()
+    }
+
+    fn has(syms: &[(SymbolKind, String)], kind: SymbolKind, name: &str) -> bool {
+        syms.iter().any(|(k, n)| *k == kind && n == name)
+    }
+
+    const CPP_SRC: &str = "#include <vector>
+namespace geo {
+class Shape {
+public:
+  Shape();
+  virtual double area() const { return 0; }
+  void scale(double f);
+};
+struct Point { int x; int y; };
+enum class Color { Red, Green };
+using Id = int;
+template <typename T> T biggest(T a, T b) { return a > b ? a : b; }
+}
+int *geo::Shape::raw() { return 0; }
+static int add(int a, int b);
+typedef struct { int y; } Pair;
+struct Point origin;
+";
+
+    #[test]
+    fn extracts_cpp_symbols() {
+        let syms = kinds(Language::Cpp, CPP_SRC);
+        assert!(has(&syms, SymbolKind::Module, "geo"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Class, "Shape"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "Shape"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "area"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "scale"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Struct, "Point"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Enum, "Color"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::TypeAlias, "Id"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::TypeAlias, "Pair"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "raw"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Function, "add"), "{syms:?}");
+        // Inside a namespace functions are promoted like Rust `mod` items.
+        assert!(has(&syms, SymbolKind::Method, "biggest"), "{syms:?}");
+        // `struct Point origin;` names the type without defining it again.
+        let points = syms.iter().filter(|(_, n)| n == "Point").count();
+        assert_eq!(points, 1, "{syms:?}");
+    }
+
+    #[test]
+    fn chunks_outlines_and_edits_cpp() {
+        let chunks = semantic_chunks(Language::Cpp, CPP_SRC);
+        let named: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol.as_ref().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(named, ["geo", "raw", "add", "Pair"]);
+        assert!(chunks[0].symbol.is_none() && chunks[0].content.contains("#include"));
+
+        let out = outline(Language::Cpp, CPP_SRC).unwrap();
+        assert!(out.contains("2:mod:geo: namespace geo {"), "{out}");
+        assert!(out.contains("\n  3:class:Shape: class Shape {"), "{out}");
+        assert!(out.contains("\n    6:method:area:"), "{out}");
+
+        let enc = enclosing_symbol(Language::Cpp, CPP_SRC, 12).unwrap();
+        assert_eq!(enc.name, "biggest");
+
+        let src = "int add(int a, int b) { return a + b; }\n";
+        let edited = replace_function_body(Language::Cpp, src, "add", " return a - b; ").unwrap();
+        assert_eq!(edited, "int add(int a, int b) { return a - b; }\n");
+    }
+
+    const JAVA_SRC: &str = "package demo;
+
+import java.util.List;
+
+public class Store extends Base {
+    public Store() {}
+
+    int count() {
+        return 1;
+    }
+
+    interface Listener {
+        void onChange();
+    }
+
+    enum Mode { READ, WRITE }
+}
+
+record Item(String name) {}
+
+@interface Audited {}
+";
+
+    #[test]
+    fn extracts_java_symbols() {
+        let syms = kinds(Language::Java, JAVA_SRC);
+        assert!(has(&syms, SymbolKind::Class, "Store"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "Store"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "count"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Interface, "Listener"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "onChange"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Enum, "Mode"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Class, "Item"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Interface, "Audited"), "{syms:?}");
+    }
+
+    #[test]
+    fn chunks_outlines_and_edits_java() {
+        let chunks = semantic_chunks(Language::Java, JAVA_SRC);
+        let named: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol.as_ref().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(named, ["Store", "Item", "Audited"]);
+        assert!(chunks[0].symbol.is_none() && chunks[0].content.contains("import"));
+
+        let out = outline(Language::Java, JAVA_SRC).unwrap();
+        assert!(
+            out.contains("5:class:Store: public class Store extends Base {"),
+            "{out}"
+        );
+        assert!(out.contains("\n  8:method:count:"), "{out}");
+        assert!(out.contains("\n    13:method:onChange:"), "{out}");
+
+        let enc = enclosing_symbol(Language::Java, JAVA_SRC, 9).unwrap();
+        assert_eq!((enc.kind, enc.name.as_str()), (SymbolKind::Method, "count"));
+
+        let edited =
+            replace_function_body(Language::Java, JAVA_SRC, "count", " return 2; ").unwrap();
+        assert!(edited.contains("int count() { return 2; }"), "{edited}");
+    }
+
+    const KOTLIN_SRC: &str = "package demo
+
+import kotlin.math.max
+
+class Store(val size: Int) : Base() {
+    fun count(): Int {
+        return size
+    }
+
+    companion object {
+        fun empty() = Store(0)
+    }
+}
+
+interface Listener {
+    fun onChange()
+}
+
+enum class Mode {
+    READ,
+    WRITE
+}
+
+object Registry {
+    fun lookup(): Int {
+        return 0
+    }
+}
+
+fun String.shout(): String {
+    return uppercase()
+}
+
+typealias Id = Int
+";
+
+    #[test]
+    fn extracts_kotlin_symbols() {
+        let syms = kinds(Language::Kotlin, KOTLIN_SRC);
+        assert!(has(&syms, SymbolKind::Class, "Store"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "count"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "empty"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Interface, "Listener"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "onChange"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Enum, "Mode"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Class, "Registry"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::Method, "lookup"), "{syms:?}");
+        // An extension function is named after itself, not its receiver.
+        assert!(has(&syms, SymbolKind::Function, "shout"), "{syms:?}");
+        assert!(has(&syms, SymbolKind::TypeAlias, "Id"), "{syms:?}");
+    }
+
+    #[test]
+    fn chunks_outlines_and_edits_kotlin() {
+        let chunks = semantic_chunks(Language::Kotlin, KOTLIN_SRC);
+        let named: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol.as_ref().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            ["Store", "Listener", "Mode", "Registry", "shout", "Id"]
+        );
+        assert!(chunks[0].symbol.is_none() && chunks[0].content.contains("import"));
+
+        let out = outline(Language::Kotlin, KOTLIN_SRC).unwrap();
+        assert!(
+            out.contains("5:class:Store: class Store(val size: Int) : Base() {"),
+            "{out}"
+        );
+        assert!(out.contains("\n  6:method:count:"), "{out}");
+        assert!(out.contains("\n  25:method:lookup:"), "{out}");
+
+        let enc = enclosing_symbol(Language::Kotlin, KOTLIN_SRC, 7).unwrap();
+        assert_eq!((enc.kind, enc.name.as_str()), (SymbolKind::Method, "count"));
+
+        let edited =
+            replace_function_body(Language::Kotlin, KOTLIN_SRC, "shout", " return this ").unwrap();
+        assert!(
+            edited.contains("fun String.shout(): String { return this }"),
+            "{edited}"
+        );
+    }
+
+    #[test]
+    fn semantic_chunks_keep_top_level_go_methods() {
+        let src = "package p
+
+func (s *S) A() {}
+
+func (s *S) B() {}
+";
+        let chunks = semantic_chunks(Language::Go, src);
+        let named: Vec<_> = chunks
+            .iter()
+            .filter_map(|c| c.symbol.as_ref().map(|s| s.name.as_str()))
+            .collect();
+        assert_eq!(named, ["A", "B"]);
     }
 
     #[test]

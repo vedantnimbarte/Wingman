@@ -7,7 +7,7 @@ Wingman integrates tree-sitter (`wingman-ts` crate) for language-aware code unde
 The `wingman-ts` crate provides a minimal facade over tree-sitter and language grammars, hiding transitive dependencies and allowing feature-gated opt-out for builds that don't need parsing.
 
 **Supported languages:**
-- Rust, Python, JavaScript, TypeScript, Go
+- Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin
 
 **Core abstractions:**
 - `Language` enum — file path → detected language.
@@ -32,15 +32,34 @@ pub enum Language {
     Python,
     JavaScript,
     TypeScript,
+    Tsx,
     Go,
-    Unknown,
+    Cpp,
+    Java,
+    Kotlin,
 }
 
 impl Language {
-    pub fn from_path(path: &Path) -> Self;
-    pub fn from_content(content: &str) -> Self; // fallback: detect shebang
+    pub fn from_path(path: &Path) -> Option<Self>;  // None for unknown extensions
+    pub fn from_extension(ext: &str) -> Option<Self>;
 }
 ```
+
+**What each language extracts:**
+
+| Language | Extensions | Symbols |
+|----------|------------|---------|
+| Rust | `rs` | fn, struct, enum, trait, impl, mod, const/static, type |
+| Python | `py`, `pyi` | def, class |
+| JavaScript / TypeScript / TSX | `js`, `jsx`, `mjs`, `cjs`, `ts`, `mts`, `cts`, `tsx` | function, method, class, interface, type alias |
+| Go | `go` | func, method, type |
+| C++ | `cc`, `cpp`, `cxx`, `hpp`, `hh`, `hxx` | function definitions and prototypes, methods (in-class and `Foo::bar` out-of-class), class, struct/union, enum, namespace, `using`/`typedef` aliases |
+| Java | `java` | class, record, interface, `@interface`, enum, method, constructor |
+| Kotlin | `kt`, `kts` | fun (extension functions by their own name), class, interface, enum class, object, typealias |
+
+`.h` is deliberately unmapped: it is as often C as C++, and C is not a parsed
+language. Functions nested in a class, impl, or namespace are reported as
+methods; a forward declaration (`class Foo;`) is not a symbol.
 
 **`SymbolKind` enum** (`crates/wingman-ts/src/symbol.rs`):
 ```rust
@@ -275,7 +294,7 @@ Test cases cover:
 
 - **Incremental parsing** — diff-based parser updates for performance.
 - **Syntax highlighting** — tree-sitter-highlight for pretty-printed code in TUI.
-- **Language expansion** — add C++, Java, Kotlin, etc.
+- **Language expansion** — add C, C#, Ruby, etc.
 - **Custom queries** — user-defined tree-sitter queries for domain-specific extraction.
 
 ## Troubleshooting
@@ -301,9 +320,9 @@ This removes the C toolchain dependency. All tree-sitter functions become no-ops
 ### Q: Can I add support for language X?
 
 **A:** Yes. In `crates/wingman-ts/src/lang.rs`:
-1. Add variant to `Language` enum.
-2. Update `from_path()` and `from_content()`.
-3. Add grammar crate to `Cargo.toml` (behind `treesitter` feature).
-4. Update language detection in `crates/wingman-ts/src/parse.rs`.
+1. Add variant to `Language` enum and its extensions to `from_extension()`.
+2. Add a grammar crate built against the workspace's `tree-sitter` version to `Cargo.toml` (behind `treesitter` feature) and note it in `docs/DEPENDENCIES.md`.
+3. In `crates/wingman-ts/src/parse.rs`: the grammar in `ts_language()`, a `<lang>_symbol()` mapping node kinds to `SymbolKind`, container kinds in `descends_into()`, and function kinds in `is_function_like()`.
+4. Add its highlight query to `config_for()` in `highlight.rs`.
 
 The rest of the codebase is language-agnostic.

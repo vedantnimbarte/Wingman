@@ -158,7 +158,7 @@ Replace the body of a named function or method using tree-sitter. Args:
 Safer than `edit_file` when the same text appears in several places, because
 it targets the symbol rather than a string. `new_body` excludes the outer
 braces for brace-delimited languages; for Python, supply the indented block.
-Supported languages: rust, python, javascript, typescript, tsx, go.
+Supported languages: rust, python, javascript, typescript, tsx, go, cpp, java, kotlin.
 
 ### `apply_patch`
 
@@ -491,7 +491,7 @@ Search the project RAG index for relevant code chunks.
 Tree-sitter-backed navigation (feature `treesitter`, on by default). Answers
 "where is this defined / who uses it" in one tool call instead of several
 grep→read round-trips. Supported languages: rust, python, javascript,
-typescript, tsx, go.
+typescript, tsx, go, cpp, java, kotlin.
 
 ### `find_symbol`
 

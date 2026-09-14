@@ -65,7 +65,7 @@ impl Tool for WhoCalls {
             description: "Find *references* to a function/struct/method by name (call sites, mentions), \
                           each annotated with the enclosing symbol it appears in. Unlike `grep`, tells you \
                           *which* function contains each reference. Skips the definition line itself. \
-                          Whole-word match; supported languages: rust, python, javascript, typescript, tsx, go. \
+                          Whole-word match; supported languages: rust, python, javascript, typescript, tsx, go, cpp, java, kotlin. \
                           Returns `path:line  [in enclosing]  <source line>` rows."
                 .into(),
             input_schema: json!({

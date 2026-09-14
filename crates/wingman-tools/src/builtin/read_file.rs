@@ -32,7 +32,7 @@ impl Tool for ReadFile {
             description: "Read a UTF-8 text file from disk. Optional 1-based `offset` and `limit` \
                           restrict the returned line range. Set `summary: true` to get a \
                           signatures-only outline instead of the full text (supported languages: \
-                          rust, python, javascript, typescript, tsx, go). Refuses files that look binary."
+                          rust, python, javascript, typescript, tsx, go, cpp, java, kotlin). Refuses files that look binary."
                 .into(),
             input_schema: json!({
                 "type": "object",

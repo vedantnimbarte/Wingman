@@ -327,6 +327,9 @@ fn render_code_block(
             "typescript" | "ts" => Some(wingman_ts::Language::TypeScript),
             "tsx" => Some(wingman_ts::Language::Tsx),
             "go" => Some(wingman_ts::Language::Go),
+            "cpp" | "c++" | "cc" | "cxx" | "hpp" => Some(wingman_ts::Language::Cpp),
+            "java" => Some(wingman_ts::Language::Java),
+            "kotlin" | "kt" | "kts" => Some(wingman_ts::Language::Kotlin),
             _ => None,
         };
         if let Some(lang) = lang {

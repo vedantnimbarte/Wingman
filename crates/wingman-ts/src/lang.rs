@@ -12,6 +12,9 @@ pub enum Language {
     TypeScript,
     Tsx,
     Go,
+    Cpp,
+    Java,
+    Kotlin,
 }
 
 impl Language {
@@ -28,6 +31,11 @@ impl Language {
             "ts" | "mts" | "cts" => Self::TypeScript,
             "tsx" => Self::Tsx,
             "go" => Self::Go,
+            // `.h` stays unmapped: it is as often C as C++, and C is not a
+            // language this crate parses.
+            "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" => Self::Cpp,
+            "java" => Self::Java,
+            "kt" | "kts" => Self::Kotlin,
             _ => return None,
         })
     }
@@ -41,6 +49,9 @@ impl Language {
             Self::TypeScript => "typescript",
             Self::Tsx => "tsx",
             Self::Go => "go",
+            Self::Cpp => "cpp",
+            Self::Java => "java",
+            Self::Kotlin => "kotlin",
         }
     }
 }
@@ -68,6 +79,19 @@ mod tests {
             Language::from_path(&PathBuf::from("a.cjs")),
             Some(Language::JavaScript)
         );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.HPP")),
+            Some(Language::Cpp)
+        );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("a.java")),
+            Some(Language::Java)
+        );
+        assert_eq!(
+            Language::from_path(&PathBuf::from("build.gradle.kts")),
+            Some(Language::Kotlin)
+        );
+        assert_eq!(Language::from_path(&PathBuf::from("a.h")), None);
         assert_eq!(Language::from_path(&PathBuf::from("a.unknown")), None);
         assert_eq!(Language::from_path(&PathBuf::from("noext")), None);
     }

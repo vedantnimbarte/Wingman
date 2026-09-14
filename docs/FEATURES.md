@@ -199,7 +199,7 @@ Wingman different; this is everything else it does.
   edit_file`) and writes draft skill markdown files under
   `~/.wingman/skills/proposed/` for you to review.
 - **Tree-sitter powered code understanding.** Deep language-aware parsing
-  (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
+  (Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin) for semantic chunking in the RAG
   index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
   so the workspace builds without the C toolchain if you don't need parsing.
 - **LSP-backed code intelligence.** Real, *resolved* go-to-definition,

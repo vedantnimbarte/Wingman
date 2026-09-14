@@ -36,7 +36,7 @@ impl Tool for FindSymbol {
             name: "find_symbol".into(),
             description: "Find where a function, struct, trait, class, or other symbol is *defined* \
                           (not just mentioned). Uses tree-sitter to parse files in supported languages \
-                          (rust, python, javascript, typescript, tsx, go). Returns `path:line  kind  name  signature` \
+                          (rust, python, javascript, typescript, tsx, go, cpp, java, kotlin). Returns `path:line  kind  name  signature` \
                           rows."
                 .into(),
             input_schema: json!({

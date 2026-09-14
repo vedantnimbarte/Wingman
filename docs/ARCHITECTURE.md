@@ -392,7 +392,7 @@ When the user asks for Y, respond with Z and call these tools:
 **Purpose:** Tree-sitter facade for language-aware parsing.
 
 **Supported languages:**
-- Rust, Python, JavaScript, TypeScript, Go.
+- Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin.
 
 **Key functions:**
 
