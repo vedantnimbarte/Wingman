@@ -1133,21 +1133,24 @@ pub(crate) fn changed_lines_by_file(
     let text = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<String> = None;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            current = Some(rest.trim().to_string());
+        if let Some(rest) = line.strip_prefix("+++ ") {
+            // `+++ /dev/null` (a deleted file) names no file here; its hunks
+            // must not land on the previous one.
+            current = rest.strip_prefix("b/").map(|p| p.trim().to_string());
         } else if line.starts_with("@@") {
             // `@@ -a,b +c,d @@` — take the `+c,d` (new-side) span.
             if let Some(plus) = line.split('+').nth(1) {
                 let spec = plus.split([' ', '@']).next().unwrap_or("");
                 let mut it = spec.split(',');
+                // A pure deletion's span starts at the line before it: `0`
+                // for lines deleted from the top, which counts as line 1 so
+                // the deletion still marks the file changed there.
                 let start: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let count: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-                if start > 0 {
-                    if let Some(f) = &current {
-                        let set = map.entry(f.clone()).or_default();
-                        for l in start..start + count.max(1) {
-                            set.insert(l);
-                        }
+                if let Some(f) = &current {
+                    let set = map.entry(f.clone()).or_default();
+                    for l in start.max(1)..start.max(1) + count.max(1) {
+                        set.insert(l);
                     }
                 }
             }

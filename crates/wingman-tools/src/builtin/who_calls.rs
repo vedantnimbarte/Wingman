@@ -15,8 +15,10 @@
 //! 3. a whole-word name match over the tree. It can over-report (same name,
 //!    different symbol) and can't see dynamic/aliased calls.
 //!
-//! The server is asked at the definitions tree-sitter finds, so a symbol
-//! tree-sitter can't see a definition for goes straight to the name match.
+//! The server is asked at the definitions tree-sitter finds, and only when it
+//! can answer for all of them: a symbol with no definition tree-sitter can
+//! see, more than five, or one no server covers goes straight to the name
+//! match, as does a method any definition's server declines.
 
 use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
@@ -106,7 +108,8 @@ fn walk(
     let mut out: Vec<String> = Vec::new();
     let walker = ignore::WalkBuilder::new(root).build();
     for entry in walker.flatten() {
-        if out.len() >= limit && defs.len() >= MAX_LSP_TARGETS {
+        // One definition past the cap is enough to know the server won't be asked.
+        if out.len() >= limit && defs.len() > MAX_LSP_TARGETS {
             break;
         }
         if entry.file_type().is_some_and(|t| t.is_dir()) {
@@ -196,14 +199,19 @@ fn walk(
 async fn lsp_sites(
     targets: &[(Arc<LspClient>, PathBuf, Position)],
 ) -> Option<(&'static str, Vec<Site>)> {
-    // A `Server` error is the server declining the method (not supported);
-    // anything else — timeout, closed pipe — means it is not answering, and
-    // waiting out the next request's timeout too would only delay the fallback.
+    // A `Server` error is the server declining the method (not supported), so
+    // the next method is tried for every target: an answer missing one
+    // target's sites would read as complete. Anything else — timeout, closed
+    // pipe — means it is not answering, and waiting out the next request's
+    // timeout too would only delay the fallback.
     let mut calls = Vec::new();
-    for (client, path, pos) in targets {
+    'hierarchy: for (client, path, pos) in targets {
         let items = match client.prepare_call_hierarchy(path, *pos).await {
             Ok(items) => items,
-            Err(LspError::Server(_)) => continue,
+            Err(LspError::Server(_)) => {
+                calls.clear();
+                break;
+            }
             Err(_) => return None,
         };
         for item in &items {
@@ -213,7 +221,10 @@ async fn lsp_sites(
                     line: c.at.line,
                     caller: Some(c.caller),
                 })),
-                Err(LspError::Server(_)) => {}
+                Err(LspError::Server(_)) => {
+                    calls.clear();
+                    break 'hierarchy;
+                }
                 Err(_) => return None,
             }
         }
@@ -230,7 +241,6 @@ async fn lsp_sites(
                 line: l.line,
                 caller: None,
             })),
-            Err(LspError::Server(_)) => {}
             Err(_) => return None,
         }
     }
@@ -344,13 +354,20 @@ impl Tool for WhoCalls {
         };
 
         // `client_for` read-gates the path and yields nothing when no server
-        // is installed (cached, so this is cheap after the first probe).
+        // is installed (cached, so this is cheap after the first probe). The
+        // server is asked only when it can answer for every definition: rows
+        // labelled resolved must not silently drop the callers of one it
+        // can't see.
         let mut targets = Vec::new();
-        for d in defs.iter().take(MAX_LSP_TARGETS) {
-            if let Ok((abs, client)) =
-                super::lsp_tools::client_for(ctx, &d.path.to_string_lossy()).await
-            {
-                targets.push((client, abs, d.pos));
+        if defs.len() <= MAX_LSP_TARGETS {
+            for d in &defs {
+                match super::lsp_tools::client_for(ctx, &d.path.to_string_lossy()).await {
+                    Ok((abs, client)) => targets.push((client, abs, d.pos)),
+                    Err(_) => {
+                        targets.clear();
+                        break;
+                    }
+                }
             }
         }
 
@@ -530,6 +547,44 @@ mod tests {
                     { "uri": b, "range": range(1) },
                     { "uri": a, "range": range(0) }
                 ]))
+            }
+            other => Err(format!("method not found: {other}")),
+        })
+        .await
+        .expect("references answer");
+        assert!(method.contains("references"), "{method}");
+        assert_eq!(rows, vec!["b.rs:2  [in fn caller]  foo();"]);
+    }
+
+    #[tokio::test]
+    async fn a_hierarchy_declined_for_one_definition_is_not_a_complete_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        std::fs::write(dir.path().join("c.rs"), "fn foo() {}\n").unwrap();
+        let (defs, _) = walk(
+            dir.path(),
+            &crate::filesystem::OsFileSystem,
+            "foo",
+            None,
+            50,
+        );
+        assert_eq!(defs.len(), 2);
+        let (method, rows) = ask(dir.path(), &defs, |method, params, root| match method {
+            "initialize" => Ok(json!({ "capabilities": {} })),
+            "textDocument/prepareCallHierarchy" => {
+                let uri = params["textDocument"]["uri"].as_str().unwrap();
+                if uri.ends_with("c.rs") {
+                    return Err("no hierarchy here".into());
+                }
+                Ok(json!([{ "name": "foo", "uri": uri }]))
+            }
+            "callHierarchy/incomingCalls" => {
+                let uri = wingman_lsp::client::path_to_uri(&root.join("b.rs"));
+                Ok(json!([{ "from": { "name": "caller", "uri": uri }, "fromRanges": [range(1)] }]))
+            }
+            "textDocument/references" => {
+                let uri = wingman_lsp::client::path_to_uri(&root.join("b.rs"));
+                Ok(json!([{ "uri": uri, "range": range(1) }]))
             }
             other => Err(format!("method not found: {other}")),
         })

@@ -13,7 +13,7 @@
 
 use std::path::Path;
 
-use crate::memory::Memory;
+use crate::memory::{Memory, MemoryScope};
 
 /// Pull project-relative file paths out of a memory body. A "path" here is a
 /// whitespace/delimiter-separated token that contains a `/` and ends in a
@@ -114,7 +114,9 @@ pub fn missing_paths(memory: &Memory, project_root: &Path) -> Vec<String> {
 /// All memories that reference at least one missing project file or, when
 /// `symbol_exists` is given, a symbol it says the project no longer has —
 /// paired with what's missing (paths as written, symbols in backticks).
-/// `project_root` is the tree to resolve paths against.
+/// `project_root` is the tree to resolve paths against. Symbols are checked
+/// for project memories only: a global one names code from whichever project
+/// it was learned in.
 pub fn stale_memories<'a>(
     memories: &'a [Memory],
     project_root: &Path,
@@ -124,7 +126,7 @@ pub fn stale_memories<'a>(
         .iter()
         .filter_map(|m| {
             let mut missing = missing_paths(m, project_root);
-            if let Some(exists) = symbol_exists {
+            if let (Some(exists), MemoryScope::Project) = (symbol_exists, m.scope) {
                 missing.extend(
                     referenced_symbols(&m.body)
                         .into_iter()
@@ -140,7 +142,7 @@ pub fn stale_memories<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{MemoryScope, MemoryType};
+    use crate::memory::MemoryType;
     use std::path::PathBuf;
 
     fn mem(body: &str) -> Memory {
@@ -209,5 +211,10 @@ mod tests {
         // Without a resolver only the path counts.
         let stale = stale_memories(&memories, dir.path(), None);
         assert_eq!(stale[0].1, vec!["src/gone.rs"]);
+
+        // A global memory's symbols belong to some other project.
+        let mut global = mem("`OldRouter` picks the model");
+        global.scope = MemoryScope::Global;
+        assert!(stale_memories(&[global], dir.path(), Some(&exists)).is_empty());
     }
 }

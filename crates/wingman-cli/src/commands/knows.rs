@@ -139,8 +139,8 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Resolver for the symbols `memories` name: whether the project still has
-/// each one, per the tree-sitter index and then the language server.
+/// Resolver for the symbols project `memories` name: whether the project
+/// still has each one, per the tree-sitter index and then the language server.
 #[cfg(feature = "treesitter")]
 async fn defined_symbols(
     root: &Path,
@@ -148,6 +148,7 @@ async fn defined_symbols(
 ) -> (Option<impl Fn(&str) -> bool>, &'static str) {
     let names: std::collections::BTreeSet<String> = memories
         .iter()
+        .filter(|m| m.scope == wingman_learn::memory::MemoryScope::Project)
         .flat_map(|m| wingman_learn::staleness::referenced_symbols(&m.body))
         .collect();
     if names.is_empty() {

@@ -185,8 +185,55 @@ fn name_sites(root: &Path, names: &BTreeSet<String>) -> Vec<(PathBuf, u32)> {
     sites
 }
 
+/// A doc-test code block in one of `crates` that mentions one of `names`,
+/// described for the receipt. Doc tests can't be named on the narrowed
+/// `cargo test -- --exact` line, so one that uses an edited symbol means the
+/// whole crate runs.
+fn doc_test_mention(root: &Path, crates: &[String], names: &BTreeSet<String>) -> Option<String> {
+    for path in source_files(root) {
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !names.iter().any(|n| text.contains(n.as_str())) {
+            continue;
+        }
+        let mut in_fence = false;
+        for (idx, line) in text.lines().enumerate() {
+            let line = line.trim_start();
+            let Some(doc) = line
+                .strip_prefix("///")
+                .or_else(|| line.strip_prefix("//!"))
+            else {
+                in_fence = false;
+                continue;
+            };
+            if doc.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if !in_fence || !names.iter().any(|n| find_word(doc, n).is_some()) {
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            if crate::runtime::crate_name_for(root, rel).is_some_and(|c| crates.contains(&c)) {
+                return Some(format!(
+                    "a doc test in `{}` line {} uses an edited symbol",
+                    rel.display(),
+                    idx + 1
+                ));
+            }
+            break; // Another crate's doc tests don't run crate-level either.
+        }
+    }
+    None
+}
+
 /// Whether `line` of `rel` is test code: a file under `tests/` or named
-/// `tests.rs`, or a line at or below the file's first `#[cfg(test)]`.
+/// `tests.rs`, or a line at or below the file's first `#[cfg(..)]` naming
+/// `test` (`#[cfg(test)]`, `#[cfg(all(test, ..))]`).
 ///
 /// ponytail: relies on the convention that a unit-test module sits at the
 /// bottom of its file; a `#[cfg(test)]` helper above production code makes
@@ -197,7 +244,8 @@ fn in_test_code(rel: &Path, text: &str, line: u32) -> bool {
         || rel.file_stem().is_some_and(|s| s == "tests")
         || text
             .lines()
-            .position(|l| l.trim_start().starts_with("#[cfg(test)]"))
+            .map(str::trim_start)
+            .position(|l| l.starts_with("#[cfg(") && find_word(l, "test").is_some())
             .is_some_and(|i| (i as u32) < line)
 }
 
@@ -293,6 +341,9 @@ pub(crate) async fn narrow_to_tests(
         Err(why) => return (Vec::new(), Err(why)),
     };
     let names: BTreeSet<String> = symbols.iter().map(|s| s.name.clone()).collect();
+    if let Some(why) = doc_test_mention(root, crates, &names) {
+        return (names.into_iter().collect(), Err(why));
+    }
 
     let (via, (fns, test_crates)) = match lsp_sites(root, &symbols).await {
         Some(sites) => (VIA_LSP, test_fns_at(root, &sites)),
@@ -540,9 +591,32 @@ mod tests {
         git(&["init", "-q"]);
         git(&["config", "user.email", "t@t"]);
         git(&["config", "user.name", "t"]);
+        std::fs::write(root.join("src/z.rs"), "fn z() {}\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-qm", "init"]);
         let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+
+        // A deleted file's hunks don't land on the file diffed before it, and
+        // lines deleted from the top of a file still mark it changed.
+        std::fs::write(
+            root.join("src/lib.rs"),
+            lib.replacen("    parse();", "    parse(); ", 1),
+        )
+        .unwrap();
+        std::fs::remove_file(root.join("src/z.rs")).unwrap();
+        let changed = crate::runtime::changed_lines_by_file(root);
+        assert_eq!(
+            changed,
+            [("src/lib.rs".to_string(), BTreeSet::from([6]))].into()
+        );
+        git(&["checkout", "-q", "--", "."]);
+        std::fs::write(root.join("src/lib.rs"), lib.split_once('\n').unwrap().1).unwrap();
+        let changed = crate::runtime::changed_lines_by_file(root);
+        assert_eq!(
+            changed,
+            [("src/lib.rs".to_string(), BTreeSet::from([1]))].into()
+        );
+        git(&["checkout", "-q", "--", "."]);
 
         // A staged edit to the blank line between items is still seen.
         std::fs::write(
@@ -614,6 +688,31 @@ mod tests {
         assert!(in_test_code(Path::new("src/lib.rs"), text, 3));
         assert!(in_test_code(Path::new("tests/it.rs"), "fn a() {}", 1));
         assert!(in_test_code(Path::new("src/tests.rs"), "fn a() {}", 1));
+        let gated = "fn a() {}\n#[cfg(all(test, feature = \"x\"))]\nmod tests {}\n";
+        assert!(!in_test_code(Path::new("src/lib.rs"), gated, 1));
+        assert!(in_test_code(Path::new("src/lib.rs"), gated, 3));
+    }
+
+    #[test]
+    fn a_doc_test_using_an_edited_symbol_blocks_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let root = dir.path();
+        let names = BTreeSet::from(["parse".to_string()]);
+        let foo = ["foo".to_string()];
+        // Prose mentioning the name is not a doc test.
+        std::fs::write(root.join("src/doc.rs"), "/// Calls `parse`.\nfn a() {}\n").unwrap();
+        assert_eq!(doc_test_mention(root, &foo, &names), None);
+
+        std::fs::write(
+            root.join("src/doc.rs"),
+            "/// ```\n/// assert_eq!(foo::parse(), 1);\n/// ```\nfn a() {}\n",
+        )
+        .unwrap();
+        let why = doc_test_mention(root, &foo, &names).unwrap();
+        assert!(why.contains("line 2"), "{why}");
+        // Only the changed crates' doc tests count.
+        assert_eq!(doc_test_mention(root, &["bar".to_string()], &names), None);
     }
 
     #[tokio::test]
