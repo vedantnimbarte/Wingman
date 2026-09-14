@@ -153,9 +153,12 @@ pub fn highlight(lang: Language, src: &str) -> Vec<Span> {
             Err(_) => break,
         }
     }
-    if out.is_empty() {
+    // An error mid-stream still owes the caller the rest of the text; a
+    // view built from these spans would otherwise end early.
+    let covered = out.last().map_or(0, |s| s.end_byte);
+    if covered < src.len() {
         out.push(Span {
-            start_byte: 0,
+            start_byte: covered,
             end_byte: src.len(),
             scope: None,
         });

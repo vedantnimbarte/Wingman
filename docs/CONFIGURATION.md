@@ -32,7 +32,7 @@ fast_model = "anthropic/claude-haiku-4-5-20251001"
 # local_model = "ollama/llama3.1"   # target of the `local` class keyword
 
 [tui]
-theme = "default"
+theme = "default"             # default | light | mono; NO_COLOR=1 in the environment overrides it
 show_token_usage = true
 
 [tools]

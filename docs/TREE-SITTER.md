@@ -110,6 +110,8 @@ When `treesitter` feature is enabled:
 | `enclosing_symbol`    | Find the function/class containing a given line number.   |
 | `replace_function_body` | Refactor a named function's body in-place.             |
 | `ParserPool`          | Reusable thread-local parser cache.                       |
+| `TreeCache`           | Per-file parse trees; `semantic_chunks` reparses incrementally. |
+| `highlight::highlight` | Scope spans for a source string (`highlight` feature).  |
 
 When feature disabled, all return empty Vec/None (inert fallbacks).
 
@@ -136,7 +138,9 @@ Insert into SQLite with embedding vector
 ```
 
 **Relevant code:**
-- `crates/wingman-rag/src/index.rs` — calls `wingman_ts::semantic_chunks()`.
+- `crates/wingman-rag/src/chunker.rs` — `Chunker` holds a `TreeCache`, so the
+  watcher's re-chunk of a file that changed (an `edit_file` write, a save in an
+  editor) reparses incrementally from the tree it kept for that file.
 - RAG index queries return chunks with symbol context (e.g., "in function foo()").
 
 ### 2. Tool Layer (`wingman-tools`)
@@ -163,16 +167,24 @@ Insert into SQLite with embedding vector
 - `crates/wingman-cli/src/commands/diff.rs` — interactive hunk review.
 - `crates/wingman-cli/src/commands/diff_annotate.rs` — tree-sitter outline generation.
 
-### 4. TUI Sidebar (`wingman-tui`)
+### 4. TUI Syntax Highlighting (`wingman-tui`)
 
-**Purpose:** File sidebar shows code outline (symbols in the open file).
+**Purpose:** Code in the terminal UI is coloured by syntax scope.
 
 **Features:**
-- Quick jump to function/class definitions.
-- Symbol kind icons (fn, struct, class, etc.).
+- Fenced code blocks in the transcript, by the fence's info string
+  (`rust`, `rs`, `c++`, `kotlin`, or any extension `Language` knows).
+- The file view: `v` on a file in the `Ctrl+B` sidebar opens it read-only,
+  line-numbered and highlighted by extension (the first 512 KiB).
+- Scopes map onto the theme: `default` and `light` have their own palettes,
+  `mono` and `NO_COLOR` tell scopes apart by bold/italic/dim only.
+- A `diff` fence is not highlighted: added and removed lines in green and red
+  would read as passed and failed (see decisions/0016).
 
 **Relevant code:**
-- `crates/wingman-tui/src/views/sidebar.rs` — calls `wingman_ts::outline()`.
+- `crates/wingman-ts/src/highlight.rs` — runs `tree-sitter-highlight` with each grammar's bundled query.
+- `crates/wingman-tui/src/widgets/code.rs` — maps scopes to styles from the theme.
+- `crates/wingman-tui/src/modal/file_view.rs` — the file view.
 
 ### 5. Learning Loop (`wingman-learn`)
 
@@ -267,6 +279,21 @@ let symbols2 = pool.extract_symbols(Language::Rust, src2)?;
 // Parser for Rust is reused; second call is faster.
 ```
 
+### Incremental Reparse
+
+`TreeCache` keeps the last tree for each file (up to 4 MiB of source across
+all files, least recently parsed dropped first). When a file comes back
+changed, the text between the unchanged prefix and suffix is described to the
+old tree as one `tree_sitter::InputEdit`, and the parser reuses every subtree
+outside it. Tests compare each incremental tree with a from-scratch parse of
+the same text (`to_sexp`, and the resulting chunks) across inserts, deletes,
+broken-then-repaired syntax and multi-byte text. To see the time saved on a
+3000-function file:
+
+```bash
+cargo test -p wingman-ts incremental_reparse_timing -- --nocapture
+```
+
 ### Embedding Cost
 
 Tree-sitter parsing adds ~5-10ms per file (typical sizes <10KB). For projects with thousands of files, semantic chunking is deferred to a background task (e.g., at agent startup).
@@ -292,8 +319,6 @@ Test cases cover:
 
 ## Future Enhancements
 
-- **Incremental parsing** — diff-based parser updates for performance.
-- **Syntax highlighting** — tree-sitter-highlight for pretty-printed code in TUI.
 - **Language expansion** — add C, C#, Ruby, etc.
 - **Custom queries** — user-defined tree-sitter queries for domain-specific extraction.
 

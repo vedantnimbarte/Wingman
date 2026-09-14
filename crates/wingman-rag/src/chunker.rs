@@ -1,10 +1,8 @@
 //! File chunker.
 //!
-//! M3 ships a simple line-window chunker — 200 lines per chunk with 20 lines
-//! of overlap. Tree-sitter-aware boundary detection (so chunks land on
-//! function/class edges) is a deferred enhancement; for typical source files
-//! the line-window approach already gives the model enough context to find
-//! the right symbol with a follow-up `read_file`.
+//! Files in a language `wingman-ts` parses are chunked on function/class
+//! edges; everything else (and anything that fails to parse) gets a
+//! line-window split — 200 lines per chunk with 20 lines of overlap.
 
 use std::path::Path;
 
@@ -19,18 +17,18 @@ pub struct Chunk {
     pub symbol: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
 pub struct Chunker {
     pub window_lines: u32,
     pub overlap_lines: u32,
+    /// Parse trees from the last chunking of each file, so the watcher's
+    /// re-chunk after an edit reparses only what the edit touched.
+    #[cfg(feature = "treesitter")]
+    trees: std::sync::Mutex<wingman_ts::TreeCache>,
 }
 
 impl Default for Chunker {
     fn default() -> Self {
-        Self {
-            window_lines: 200,
-            overlap_lines: 20,
-        }
+        Self::new(200, 20)
     }
 }
 
@@ -39,6 +37,8 @@ impl Chunker {
         Self {
             window_lines: window_lines.max(1),
             overlap_lines: overlap_lines.min(window_lines.saturating_sub(1)),
+            #[cfg(feature = "treesitter")]
+            trees: Default::default(),
         }
     }
 
@@ -53,7 +53,13 @@ impl Chunker {
         {
             use std::path::Path;
             if let Some(lang) = wingman_ts::Language::from_path(Path::new(rel_path)) {
-                let sem = wingman_ts::semantic_chunks(lang, content);
+                // A poisoned lock only means an earlier parse panicked; the
+                // cache holds no invariant that could have broken.
+                let sem = self
+                    .trees
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .semantic_chunks(rel_path, lang, content);
                 if !sem.is_empty() {
                     return sem
                         .into_iter()
@@ -188,6 +194,26 @@ mod tests {
         assert!(named.iter().any(|s| s.starts_with("fn:alpha")));
         assert!(named.iter().any(|s| s.starts_with("fn:beta")));
         assert!(named.iter().any(|s| s.starts_with("fn:gamma")));
+    }
+
+    #[cfg(feature = "treesitter")]
+    #[test]
+    fn rechunking_an_edited_file_matches_a_fresh_chunker() {
+        let c = Chunker::default();
+        let before = "fn alpha() {}\nfn beta() { 1 }\n";
+        let after = "fn alpha() {}\nfn inserted() {}\nfn beta() { 2 }\n";
+        c.chunk("file.rs", before);
+        // Second pass reuses the cached tree for file.rs.
+        let summary = |chunks: Vec<Chunk>| -> Vec<_> {
+            chunks
+                .into_iter()
+                .map(|c| (c.start_line, c.end_line, c.symbol, c.content))
+                .collect()
+        };
+        assert_eq!(
+            summary(c.chunk("file.rs", after)),
+            summary(Chunker::default().chunk("file.rs", after))
+        );
     }
 
     #[test]

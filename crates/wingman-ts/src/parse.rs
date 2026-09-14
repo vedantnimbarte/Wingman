@@ -19,7 +19,7 @@ use crate::{Language, Symbol, SymbolKind};
 /// falls back to a line-window split of that one symbol; the resulting
 /// chunks share the same `symbol` reference and the same byte span on the
 /// outer item.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SemanticChunk {
     pub start_line: u32,
     pub end_line: u32,
@@ -64,9 +64,13 @@ fn parse(lang: Language, src: &str) -> Option<(Parser, Tree)> {
 
 /// All top-level (and direct-child-of-impl) symbols in `src`.
 pub fn extract_symbols(lang: Language, src: &str) -> Vec<Symbol> {
-    let Some((_parser, tree)) = parse(lang, src) else {
-        return Vec::new();
-    };
+    match parse(lang, src) {
+        Some((_parser, tree)) => symbols_in(lang, src, &tree),
+        None => Vec::new(),
+    }
+}
+
+fn symbols_in(lang: Language, src: &str, tree: &Tree) -> Vec<Symbol> {
     let mut out = Vec::new();
     walk_symbols(
         lang,
@@ -384,7 +388,10 @@ fn kotlin_child<'t>(node: &Node<'t>, kind: &str) -> Option<Node<'t>> {
 /// (via empty Vec) when parsing fails — callers should fall back to the
 /// line-window chunker.
 pub fn semantic_chunks(lang: Language, src: &str) -> Vec<SemanticChunk> {
-    let mut top = extract_symbols(lang, src);
+    chunks_from_symbols(src, extract_symbols(lang, src))
+}
+
+fn chunks_from_symbols(src: &str, mut top: Vec<Symbol>) -> Vec<SemanticChunk> {
     if top.is_empty() {
         return Vec::new();
     }
@@ -629,6 +636,121 @@ fn inner_body_span(lang: Language, src: &str, body: &Node) -> Option<(usize, usi
             }
         }
     }
+}
+
+// ─── Incremental reparse ────────────────────────────────────────────────
+
+/// Source bytes the cache may hold across all files. The trees it keeps
+/// grow with the source, so this bounds both; the least recently parsed
+/// file is dropped first, and a file larger than the whole budget is
+/// parsed but never kept.
+const MAX_CACHED_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Parse trees kept between re-chunks of the same file.
+///
+/// A file that comes back changed is not parsed from scratch: the change is
+/// described to the old tree as one [`tree_sitter::InputEdit`] spanning
+/// everything between the unchanged prefix and suffix, and the parser reuses
+/// every subtree outside it. One bounding edit is exact for a single
+/// `edit_file` replacement and still correct (only less incremental) for a
+/// save that touched several places.
+#[derive(Default)]
+pub struct TreeCache {
+    /// Least recently parsed first.
+    entries: Vec<CachedTree>,
+}
+
+struct CachedTree {
+    key: String,
+    lang: Language,
+    src: String,
+    tree: Tree,
+}
+
+impl TreeCache {
+    /// [`semantic_chunks`] for the file `key` (any stable per-file id, e.g.
+    /// its project-relative path), reparsing incrementally from the tree
+    /// cached for that key when there is one.
+    pub fn semantic_chunks(&mut self, key: &str, lang: Language, src: &str) -> Vec<SemanticChunk> {
+        match self.parse(key, lang, src) {
+            Some(tree) => chunks_from_symbols(src, symbols_in(lang, src, &tree)),
+            None => Vec::new(),
+        }
+    }
+
+    fn parse(&mut self, key: &str, lang: Language, src: &str) -> Option<Tree> {
+        let old = self
+            .entries
+            .iter()
+            .position(|e| e.key == key)
+            .map(|i| self.entries.remove(i))
+            .filter(|e| e.lang == lang);
+        let mut parser = parser_for(lang)?;
+        let tree = match old {
+            Some(mut old) => {
+                old.tree.edit(&input_edit(&old.src, src));
+                parser.parse(src, Some(&old.tree))?
+            }
+            None => parser.parse(src, None)?,
+        };
+        if src.len() <= MAX_CACHED_SOURCE_BYTES {
+            self.entries.push(CachedTree {
+                key: key.to_string(),
+                lang,
+                src: src.to_string(),
+                tree: tree.clone(),
+            });
+            while self.entries.iter().map(|e| e.src.len()).sum::<usize>() > MAX_CACHED_SOURCE_BYTES
+            {
+                self.entries.remove(0);
+            }
+        }
+        Some(tree)
+    }
+}
+
+/// The single edit that turns `old` into `new`: everything between their
+/// longest common prefix and longest common suffix. Both ends are kept on
+/// char boundaries so the edit never splits a UTF-8 sequence.
+fn input_edit(old: &str, new: &str) -> tree_sitter::InputEdit {
+    let (o, n) = (old.as_bytes(), new.as_bytes());
+    let mut start = o.iter().zip(n).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(start) {
+        start -= 1;
+    }
+    let max_suffix = o.len().min(n.len()) - start;
+    let mut suffix = o
+        .iter()
+        .rev()
+        .zip(n.iter().rev())
+        .take(max_suffix)
+        .take_while(|(a, b)| a == b)
+        .count();
+    // The bytes after either end are the same suffix, so a boundary in one
+    // string is a boundary in the other.
+    while !old.is_char_boundary(o.len() - suffix) {
+        suffix -= 1;
+    }
+    let (old_end, new_end) = (o.len() - suffix, n.len() - suffix);
+    tree_sitter::InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: point_at(old, start),
+        old_end_position: point_at(old, old_end),
+        new_end_position: point_at(new, new_end),
+    }
+}
+
+/// Row and byte column of `byte` in `src`, as tree-sitter counts them.
+fn point_at(src: &str, byte: usize) -> tree_sitter::Point {
+    let before = &src.as_bytes()[..byte];
+    let row = before.iter().filter(|&&b| b == b'\n').count();
+    let column = before
+        .iter()
+        .rposition(|&b| b == b'\n')
+        .map_or(byte, |nl| byte - nl - 1);
+    tree_sitter::Point { row, column }
 }
 
 // ─── Parser pool (cheap reuse for hot paths) ────────────────────────────
@@ -983,6 +1105,133 @@ func (s *S) B() {}
             .filter_map(|c| c.symbol.as_ref().map(|s| s.name.as_str()))
             .collect();
         assert_eq!(named, ["A", "B"]);
+    }
+
+    /// Each step is compared with a from-scratch parse of the same text:
+    /// the tree itself, not just the chunks, has to come out identical.
+    fn assert_incremental_matches_full(lang: Language, steps: &[&str]) {
+        let mut cache = TreeCache::default();
+        for (i, src) in steps.iter().enumerate() {
+            let incremental = cache.parse("file", lang, src).unwrap();
+            let (_parser, full) = parse(lang, src).unwrap();
+            assert_eq!(
+                incremental.root_node().to_sexp(),
+                full.root_node().to_sexp(),
+                "step {i}: {src:?}"
+            );
+            assert_eq!(
+                cache.semantic_chunks("file", lang, src),
+                semantic_chunks(lang, src),
+                "step {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_reparse_matches_full_reparse() {
+        assert_incremental_matches_full(
+            Language::Rust,
+            &[
+                "fn a() {}\nfn b() { 1 }\n",
+                // Replace inside a body, as edit_file does.
+                "fn a() {}\nfn b() { 1 + 2 }\n",
+                // Insert a whole item between two others.
+                "fn a() {}\nstruct S;\nimpl S { fn m(&self) {} }\nfn b() { 1 + 2 }\n",
+                // Break the syntax, then repair it.
+                "fn a() {\nstruct S;\nimpl S { fn m(&self) {} }\nfn b() { 1 + 2 }\n",
+                "fn a() {}\nstruct S;\nimpl S { fn m(&self) {} }\nfn b() { 1 + 2 }\n",
+                // Multi-byte text on both sides of the change.
+                "fn a() { \"h\u{e9}llo\" }\nfn b() { \"\u{1f600}\" }\n",
+                "fn a() { \"h\u{e8}llo\" }\nfn b() { \"\u{1f601}\" }\n",
+                // Two separate changes in one save, and a delete to empty.
+                "fn z() { \"h\u{e8}llo\" }\nfn b() { \"\u{1f601}\" }\nfn c() {}\n",
+                "",
+                "fn back() {}\n",
+            ],
+        );
+        assert_incremental_matches_full(
+            Language::Python,
+            &[
+                "class A:\n    def m(self):\n        return 1\n",
+                "class A:\n    def m(self):\n        return 1\n\n    def n(self):\n        pass\n",
+                "def f():\n    pass\nclass A:\n    def n(self):\n        pass\n",
+            ],
+        );
+    }
+
+    #[test]
+    fn input_edit_spans_only_the_change() {
+        let edit = input_edit("ab\ncXd\nef", "ab\ncYYd\nef");
+        assert_eq!(
+            (edit.start_byte, edit.old_end_byte, edit.new_end_byte),
+            (4, 5, 6)
+        );
+        assert_eq!(
+            (edit.start_position.row, edit.start_position.column),
+            (1, 1)
+        );
+        assert_eq!(
+            (edit.new_end_position.row, edit.new_end_position.column),
+            (1, 3)
+        );
+        // é (c3 a9) -> è (c3 a8) shares a lead byte; the edit must start
+        // before it, not between the two bytes.
+        let edit = input_edit("x\u{e9}y", "x\u{e8}y");
+        assert_eq!((edit.start_byte, edit.old_end_byte), (1, 3));
+        // An append overlaps prefix and suffix candidates; neither may
+        // claim the same bytes twice.
+        let edit = input_edit("aa", "aaa");
+        assert_eq!(
+            (edit.start_byte, edit.old_end_byte, edit.new_end_byte),
+            (2, 2, 3)
+        );
+    }
+
+    #[test]
+    fn tree_cache_keys_by_file_and_evicts_over_budget() {
+        let mut cache = TreeCache::default();
+        cache.parse("a.rs", Language::Rust, "fn a() {}").unwrap();
+        cache.parse("b.rs", Language::Rust, "fn b() {}").unwrap();
+        // Same key, different language: the old tree is not reused.
+        let t = cache
+            .parse("a.rs", Language::Python, "def a(): pass")
+            .unwrap();
+        assert_eq!(t.root_node().kind(), "module");
+        assert_eq!(cache.entries.len(), 2);
+
+        let big = "x".repeat(MAX_CACHED_SOURCE_BYTES / 2 + 1);
+        cache.parse("big1", Language::Rust, &big).unwrap();
+        cache.parse("big2", Language::Rust, &big).unwrap();
+        let keys: Vec<_> = cache.entries.iter().map(|e| e.key.as_str()).collect();
+        assert_eq!(keys, ["big2"]);
+    }
+
+    /// Not a benchmark gate — timings on shared CI are noise — but run with
+    /// `--nocapture` to see what the cache buys on a large file.
+    #[test]
+    fn incremental_reparse_timing() {
+        let src: String = (0..3000)
+            .map(|i| format!("fn f{i}(x: u32) -> u32 {{ x + {i} }}\n"))
+            .collect();
+        let edited = src.replacen("x + 1500 }", "x * 1500 + 1 }", 1);
+        let mut cache = TreeCache::default();
+        cache.parse("big.rs", Language::Rust, &src).unwrap();
+
+        let t = std::time::Instant::now();
+        let full = parse(Language::Rust, &edited).unwrap().1;
+        let full_time = t.elapsed();
+        let t = std::time::Instant::now();
+        let incremental = cache.parse("big.rs", Language::Rust, &edited).unwrap();
+        let incremental_time = t.elapsed();
+
+        assert_eq!(
+            incremental.root_node().to_sexp(),
+            full.root_node().to_sexp()
+        );
+        eprintln!(
+            "{} bytes: full reparse {full_time:?}, incremental {incremental_time:?}",
+            edited.len()
+        );
     }
 
     #[test]

@@ -164,7 +164,11 @@ Wingman different; this is everything else it does.
   `/findclear` walk hits inside the current transcript. Mouse wheel
   scrolling is enabled.
 - **File-tree sidebar.** `Ctrl+B` toggles a left-side file browser; `j`/`k`
-  move, `Tab` descends, `Enter` inserts the path into the composer.
+  move, `Tab` descends, `Enter` inserts the path into the composer, `v` opens
+  the file in a read-only, line-numbered, syntax-highlighted view.
+- **Syntax highlighting.** Fenced code blocks in the transcript and the file
+  view are highlighted with tree-sitter for every parsed language. `diff`
+  fences stay plain (decisions/0016).
 - **`@file` attachments.** Write `@src/main.rs` in the composer and the file's
   contents are inlined into the prompt, saving the agent a `read_file` round
   trip. Image files (`png`/`jpg`/`gif`/`webp`) are base64-encoded for
@@ -177,6 +181,9 @@ Wingman different; this is everything else it does.
   rest with `read_file`'s `offset`/`limit`.
 - **Themes.** `tui.theme = "default" | "light" | "mono"`, plus optional
   per-role color overrides under `tui.colors` (`"#rrggbb"` hex or named).
+  Highlighted code follows the theme; `mono` marks scopes by weight and slant
+  instead of hue. A non-empty `NO_COLOR` environment variable wins over both
+  and draws the whole TUI without colour.
 - **Model fallback.** `router.fallback_models = ["openai/gpt-4.1",
   "openrouter/anthropic/claude-opus-4-7"]` — on primary failure the
   runtime walks the chain in order.
@@ -200,7 +207,8 @@ Wingman different; this is everything else it does.
   `~/.wingman/skills/proposed/` for you to review.
 - **Tree-sitter powered code understanding.** Deep language-aware parsing
   (Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin) for semantic chunking in the RAG
-  index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
+  index (re-chunked incrementally from a cached tree when a file changes),
+  symbol extraction, AST-aware diffs, and outline generation. Feature-gated
   so the workspace builds without the C toolchain if you don't need parsing.
 - **LSP-backed code intelligence.** Real, *resolved* go-to-definition,
   find-references, hover, diagnostics, and project-wide rename via whatever

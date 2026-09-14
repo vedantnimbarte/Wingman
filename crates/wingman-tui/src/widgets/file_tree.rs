@@ -2,8 +2,8 @@
 //!
 //! Kept intentionally simple: walks one level at a time and lists folders
 //! and files alphabetically. `j`/`k` (or arrows) move; Enter inserts the
-//! selected path into the composer; `Tab` enters a directory; Backspace
-//! goes up.
+//! selected path into the composer; `v` opens the file in a highlighted
+//! read-only view; `Tab` enters a directory; Backspace goes up.
 
 use crate::theme;
 use ratatui::{

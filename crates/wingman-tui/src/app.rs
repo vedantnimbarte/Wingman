@@ -28,9 +28,9 @@ use ratatui::{
 use wingman_core::{AgentEvent, AgentLoop, AgentStop, Provider};
 
 use crate::modal::{
-    ActiveModal, FilePicker, HelpModal, LoginTask, LoginWizard, McpServerSummary, McpTask, McpView,
-    ModalOutcome, ModalTask, ModePicker, ModelPicker, ParamsModal, SessionEntry, SessionPicker,
-    SkillsView, UsageView,
+    ActiveModal, FilePicker, FileViewModal, HelpModal, LoginTask, LoginWizard, McpServerSummary,
+    McpTask, McpView, ModalOutcome, ModalTask, ModePicker, ModelPicker, ParamsModal, SessionEntry,
+    SessionPicker, SkillsView, UsageView,
 };
 use crate::usage_store::LifetimeUsage;
 use crate::widgets::{
@@ -719,10 +719,12 @@ async fn idle_step(
                     continue;
                 }
                 // When the sidebar is open AND composer is empty, j/k/Up/
-                // Down move the sidebar selection; Enter picks; Tab/Backspace
-                // descend/ascend; Esc closes the sidebar.
+                // Down move the sidebar selection; Enter picks; `v` views
+                // the file; Tab/Backspace descend/ascend; Esc closes the
+                // sidebar. A modal opened over it (the file view) keeps
+                // the keys.
                 if let Some(tree) = ui.sidebar.as_mut() {
-                    if ui.composer.input.is_empty() {
+                    if ui.composer.input.is_empty() && !ui.modal.is_open() {
                         match k.code {
                             KeyCode::Char('j') | KeyCode::Down => {
                                 tree.move_down();
@@ -739,6 +741,20 @@ async fn idle_step(
                                     let rel = tree.pick_relative(&path);
                                     ui.composer.input.push_str(&format!("@{rel} "));
                                     ui.sidebar = None;
+                                }
+                                draw(terminal, ui)?;
+                                continue;
+                            }
+                            KeyCode::Char('v') => {
+                                if let Some(e) = tree.entries.get(tree.selected) {
+                                    if !e.is_dir {
+                                        let path = tree.cwd.join(&e.name);
+                                        ui.modal = ActiveModal::FileView(FileViewModal::new(
+                                            tree.pick_relative(&path),
+                                            &path,
+                                            &crate::theme::current(),
+                                        ));
+                                    }
                                 }
                                 draw(terminal, ui)?;
                                 continue;
@@ -2107,6 +2123,11 @@ fn draw(terminal: &mut Terminal<CrosstermBackend<Stdout>>, ui: &UiState) -> Resu
         }
 
         ui.modal.render(area, f.buffer_mut());
+
+        // Last, so it reaches the widgets that pick their own colours too.
+        if crate::theme::current().no_color {
+            crate::theme::strip_colour(f.buffer_mut());
+        }
     })?;
     Ok(())
 }
