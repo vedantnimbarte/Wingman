@@ -559,7 +559,9 @@ pub struct TurnStart {
 /// The turns of a transcript, in order.
 ///
 /// A turn runs to its `Stop`. A user record inside a turn — verification-gate
-/// feedback, a steer — is written by the loop and does not start one. This is
+/// feedback, a steer — is written by the loop and does not start one. A
+/// `SessionStart` also ends any turn still open: `--print` writes one per
+/// process, so a process killed mid-turn does not swallow the next. This is
 /// how the rewind timeline numbers turns, so `wingman_core::checkpoint::set_turn`
 /// callers count the same way.
 pub fn turn_starts(records: &[SessionRecord]) -> Vec<TurnStart> {
@@ -578,6 +580,10 @@ pub fn turn_starts(records: &[SessionRecord]) -> Vec<TurnStart> {
             SessionRecord::Stop { .. } => {
                 in_turn = false;
                 from = Some(i + 1);
+            }
+            SessionRecord::SessionStart { .. } if in_turn => {
+                in_turn = false;
+                from = Some(i);
             }
             _ => {}
         }
@@ -639,6 +645,13 @@ mod tests {
             start(),
             user("second"),
             stop(),
+            // A `--print` process killed before its stop: the next process's
+            // start still opens a turn of its own.
+            start(),
+            user("killed"),
+            start(),
+            user("fourth"),
+            stop(),
         ];
         let turns = turn_starts(&records);
         assert_eq!(
@@ -651,6 +664,14 @@ mod tests {
                 TurnStart {
                     record: 4,
                     prompt: "second".into()
+                },
+                TurnStart {
+                    record: 7,
+                    prompt: "killed".into()
+                },
+                TurnStart {
+                    record: 9,
+                    prompt: "fourth".into()
                 },
             ]
         );
@@ -667,8 +688,8 @@ mod tests {
         let kept = load_session(&fork).unwrap();
         assert_eq!(kept.len(), 4);
         assert_eq!(turn_starts(&kept).len(), 1);
-        assert_eq!(load_session(&src).unwrap().len(), 7, "original untouched");
-        assert!(fork_before_turn(&src, 2).await.unwrap().is_none());
+        assert_eq!(load_session(&src).unwrap().len(), 12, "original untouched");
+        assert!(fork_before_turn(&src, 4).await.unwrap().is_none());
     }
 
     /// Write a message and a couple of records, then read the file back and

@@ -623,6 +623,18 @@ impl AgentLoop {
                 let mut event_stream = match provider.complete(req).await {
                     Ok(s) => s,
                     Err(e) => {
+                        // Recorded like every other end of a turn: the log's
+                        // turns are counted by their `stop` records, so a turn
+                        // that died here would otherwise run into the next
+                        // prompt and shift the rewind timeline's numbering.
+                        if let Some(s) = &sink {
+                            s.record(crate::ContextFact::Stop {
+                                reason: "error".into(),
+                                first_output_ms,
+                                verified,
+                            })
+                            .await;
+                        }
                         yield AgentEvent::Error { message: e.to_string() };
                         yield AgentEvent::Stop { reason: AgentStop::Error };
                         return;
@@ -637,6 +649,14 @@ impl AgentLoop {
                     let evt = match evt {
                         Ok(e) => e,
                         Err(e) => {
+                            if let Some(s) = &sink {
+                                s.record(crate::ContextFact::Stop {
+                                    reason: "error".into(),
+                                    first_output_ms,
+                                    verified,
+                                })
+                                .await;
+                            }
                             yield AgentEvent::Error { message: e.to_string() };
                             yield AgentEvent::Stop { reason: AgentStop::Error };
                             return;
@@ -1410,6 +1430,59 @@ mod tests {
         assert_eq!(reason, "end_turn", "unquoted, like every other writer");
         assert!(first_output_ms.is_some());
         assert_eq!(verified, Some(true));
+    }
+
+    /// A turn the provider fails still ends in a `stop` record, so the next
+    /// prompt starts a turn of its own when the log is read back.
+    #[tokio::test]
+    async fn a_failed_provider_call_still_records_a_stop() {
+        #[derive(Default)]
+        struct Facts(Mutex<Vec<crate::ContextFact>>);
+        #[async_trait]
+        impl crate::ContextSink for Facts {
+            async fn record(&self, fact: crate::ContextFact) {
+                self.0.lock().unwrap().push(fact);
+            }
+        }
+        struct Down;
+        #[async_trait]
+        impl Provider for Down {
+            fn id(&self) -> &str {
+                "down"
+            }
+            fn capabilities(&self) -> ProviderCapabilities {
+                ProviderCapabilities {
+                    streaming: true,
+                    tools: true,
+                    vision: false,
+                    cache_kind: crate::CacheKind::None,
+                    reasoning: false,
+                }
+            }
+            async fn complete(
+                &self,
+                _req: CompletionRequest,
+            ) -> crate::Result<ProviderEventStream> {
+                Err(crate::WingmanError::Provider("503".into()))
+            }
+        }
+
+        let facts = Arc::new(Facts::default());
+        let mut agent = AgentLoop::new(
+            Arc::new(Down),
+            Arc::new(OkDispatcher),
+            AgentConfig {
+                model: "down/test".into(),
+                context_sink: Some(facts.clone()),
+                ..Default::default()
+            },
+        );
+        let _ = collect_events(&mut agent).await;
+        let facts = facts.0.lock().unwrap();
+        assert!(matches!(
+            facts.last(),
+            Some(crate::ContextFact::Stop { reason, .. }) if reason == "error"
+        ));
     }
 }
 

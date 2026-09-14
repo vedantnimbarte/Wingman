@@ -199,6 +199,11 @@ fn append(
             seq += 1;
         }
     }
+    // A restore that could not save every file's current state records none
+    // of it: a restore point that restored nothing would be a false entry.
+    if let (Some(e), Some(_)) = (failed.take(), restore) {
+        return Err(e);
+    }
     use std::io::Write;
     std::fs::OpenOptions::new()
         .create(true)
@@ -386,10 +391,7 @@ fn plan(root: &Path, seq: u64) -> Result<Vec<Planned>, String> {
             continue;
         }
         let path = PathBuf::from(&e.path);
-        let escapes = path
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir));
-        if escapes || !path.starts_with(root) {
+        if inside(root, &path).is_none() {
             return Err(format!(
                 "refusing to restore {}: it is outside the project",
                 e.path
@@ -481,9 +483,43 @@ pub fn restore_to(root: &Path, seq: u64, session: Option<&str>) -> Result<Vec<St
     Ok(lines)
 }
 
+/// `path` relative to the project, or `None` when it is not inside it.
+///
+/// Compared canonically. Surfaces spell the same directory differently —
+/// `wingman serve` canonicalises its roots (`\\?\C:\repo`, `/private/tmp/repo`)
+/// while the TUI records paths under the directory it started in (`C:\repo`,
+/// `/tmp/repo`) — and a symlink in the tree that points out of it has to count
+/// as outside. A path that does not exist yet (a file a restore recreates) is
+/// resolved through its nearest existing ancestor.
+fn inside(root: &Path, path: &Path) -> Option<PathBuf> {
+    if path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    let root = root.canonicalize().ok()?;
+    let mut probe = path;
+    let mut missing = Vec::new();
+    let resolved = loop {
+        if let Ok(c) = probe.canonicalize() {
+            break c;
+        }
+        missing.push(probe.file_name()?);
+        probe = probe.parent()?;
+    };
+    let mut rel = resolved.strip_prefix(&root).ok()?.to_path_buf();
+    rel.extend(missing.into_iter().rev());
+    Some(rel)
+}
+
 /// `path` relative to the project, with `/` separators, for display.
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
+        .ok()
+        .map(Path::to_path_buf)
+        .or_else(|| inside(root, path))
+        .as_deref()
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
@@ -683,5 +719,46 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
         assert_eq!(read(&root, "a.txt").as_deref(), Some("later"));
         assert_eq!(depth(&root), 2, "no checkpoint written for a refused plan");
+    }
+
+    /// The TUI records paths under the directory it started in; `wingman
+    /// serve` restores against its canonicalised root (`\\?\C:\…` on Windows,
+    /// `/private/var/…` on macOS). Both name the same project.
+    #[test]
+    fn a_root_spelled_canonically_still_restores_what_the_tui_recorded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("a.txt"), "v0\n").unwrap();
+        edit(root, "a.txt", Some("v1\n"), 0);
+        edit(root, "new.txt", Some("x\n"), 0);
+
+        let canonical = root.canonicalize().unwrap();
+        let points = timeline(&canonical);
+        assert_eq!(points[0].files, vec!["a.txt", "new.txt"]);
+        let lines = restore_to(&canonical, points[0].seq, None).unwrap();
+        assert_eq!(lines, vec!["restored a.txt", "removed new.txt"]);
+        assert_eq!(read(root, "a.txt").as_deref(), Some("v0\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_out_of_the_project_restores_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("victim.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+        // A checkpoint of "link.txt", so a restore would write its snapshot
+        // through the link to the file it points at.
+        let pre = Pre {
+            path: root.join("link.txt"),
+            prior: Some(b"planted".to_vec()),
+        };
+        append(&root, vec![pre], None, None, None).unwrap();
+
+        let err = restore_to(&root, 0, None).unwrap_err();
+        assert!(err.contains("outside the project"), "{err}");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
     }
 }
