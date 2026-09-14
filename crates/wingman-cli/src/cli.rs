@@ -186,6 +186,14 @@ pub enum Command {
         /// Path to a custom review prompt template.
         #[arg(long, value_name = "FILE")]
         template: Option<String>,
+        /// Post the findings to the PR as one GitHub review with inline
+        /// comments on their diff lines, skipping findings a previous run
+        /// already posted.
+        #[arg(long, requires = "pr", conflicts_with = "local")]
+        comment: bool,
+        /// With --comment: print the review payload instead of posting it.
+        #[arg(long, requires = "comment")]
+        dry_run: bool,
     },
     /// Probe localhost for running Ollama / LM Studio / vLLM and print
     /// discovered models.
@@ -1106,7 +1114,9 @@ pub async fn run() -> Result<ExitCode> {
             pr,
             local,
             template,
-        }) => commands::review::run(pr, local, template).await,
+            comment,
+            dry_run,
+        }) => commands::review::run(pr, local, template, comment, dry_run).await,
         Some(Command::Login {
             provider,
             api_key,

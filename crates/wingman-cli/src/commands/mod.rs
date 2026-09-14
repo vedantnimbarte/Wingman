@@ -31,6 +31,7 @@ pub mod pilot_watch_tui;
 pub mod pr;
 pub mod review;
 pub mod review_multi;
+pub mod review_post;
 pub mod rewind;
 pub mod router;
 pub mod schedule;

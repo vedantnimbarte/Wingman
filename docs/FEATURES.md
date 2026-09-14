@@ -191,7 +191,10 @@ Wingman different; this is everything else it does.
 - **Worktree sandbox.** `wingman worktree create <branch>` spins up an
   isolated working copy under `.wingman/worktrees/`.
 - **PR review.** `wingman review <pr#>` (or `--local <base>`) runs a
-  one-shot review prompt against the diff.
+  one-shot review prompt against the diff. `--comment` posts the findings
+  back as one GitHub review with inline comments anchored to their diff
+  lines (via `gh api`), skipping any a previous run already posted;
+  `--dry-run` prints the payload instead of posting.
 - **Local model auto-discovery.** `wingman discover` probes localhost
   Ollama / LM Studio / vLLM and prints available models.
 - **Skill auto-extraction.** `wingman skill extract` scans recent session

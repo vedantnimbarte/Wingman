@@ -56,7 +56,7 @@ wingman [OPTIONS] [COMMAND]
 | `memory sync [<ref>]` | Reconcile team-shared project memory: rebuild `MEMORY.md` from files (resolving index merge conflicts), optionally fold in a git ref's memories. |
 | `memory push` / `memory pull` | Sync memories through a team HTTP endpoint (`[team]`), non-clobbering. |
 | `memory review`      | Review distilled pending memories: list, or `--promote N` / `--discard N` / `--promote-all`. |
-| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
+| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. `--comment` posts the findings to the PR as one GitHub review with inline comments on their diff lines (findings not on a diff line go in the review body; findings a previous run already posted are skipped); add `--dry-run` to print the review payload instead. |
 | `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
 | `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
