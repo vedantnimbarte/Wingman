@@ -557,6 +557,20 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
         Event::PrOutcome { kind, .. } => {
             (Info, format!("{short_ts}  pr.outcome   {}", kind.as_str()))
         }
+        Event::TaskAttempt {
+            id, rung, status, ..
+        } => (
+            if *status == TaskStatus::Failed {
+                Warn
+            } else {
+                Info
+            },
+            format!("{short_ts}  task.attempt {id} rung {rung} → {status:?}"),
+        ),
+        Event::Escalation { trigger, .. } => (
+            Warn,
+            format!("{short_ts}  escalation   {}", trigger.short_label()),
+        ),
     };
     LogRow { text, severity }
 }

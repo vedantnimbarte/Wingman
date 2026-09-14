@@ -745,11 +745,23 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             !outcome.failed_tasks.is_empty(),
         );
     }
-    if !outcome.failed_tasks.is_empty() {
+    // J15 — every hard trigger the run hit, live or at the PR gate.
+    for trigger in &outcome.escalation_triggers {
         eprintln!(
-            "[pilot] some tasks did not reach Done: {:?}",
-            outcome.failed_tasks
+            "[pilot] escalation: {} — {}",
+            trigger.short_label(),
+            trigger.render()
         );
+    }
+    // A packet with no failed task is a run blocked on a trigger (a refused
+    // force-push), which is not a finished run either.
+    if !outcome.failed_tasks.is_empty() || outcome.escalation_packet.is_some() {
+        if !outcome.failed_tasks.is_empty() {
+            eprintln!(
+                "[pilot] some tasks did not reach Done: {:?}",
+                outcome.failed_tasks
+            );
+        }
         if let Some(packet) = &outcome.escalation_packet {
             eprintln!("[pilot] escalation packet written: {}", packet.display());
         }
@@ -1517,11 +1529,26 @@ pub async fn resume(
     let outcome = wingman_autonomous::pipeline::run_to_completion(store, inputs)
         .await
         .context("pipeline run_to_completion")?;
-    if !outcome.failed_tasks.is_empty() {
+    for trigger in &outcome.escalation_triggers {
         eprintln!(
-            "[pilot] resume: tasks ended in non-Done state: {:?}",
-            outcome.failed_tasks
+            "[pilot] resume: escalation: {} — {}",
+            trigger.short_label(),
+            trigger.render()
         );
+    }
+    if !outcome.failed_tasks.is_empty() || outcome.escalation_packet.is_some() {
+        if !outcome.failed_tasks.is_empty() {
+            eprintln!(
+                "[pilot] resume: tasks ended in non-Done state: {:?}",
+                outcome.failed_tasks
+            );
+        }
+        if let Some(packet) = &outcome.escalation_packet {
+            eprintln!(
+                "[pilot] resume: escalation packet written: {}",
+                packet.display()
+            );
+        }
         return Ok(ExitCode::from(2));
     }
     if let Some(pr) = outcome.pr {
@@ -1602,6 +1629,7 @@ fn build_real_worker_spawner(
                     model,
                     timeout: task_timeout,
                     cmd_rx,
+                    rung: ctx.rung,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently

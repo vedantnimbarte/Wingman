@@ -29,7 +29,8 @@ struct Args {
     outcome: Option<String>,
     /// Per-check results from `run_acceptance` (E3). Workers must include
     /// this when the task declared acceptance checks. Each entry is the
-    /// `AcceptanceResult` JSON shape: { label, ok, output }.
+    /// `AcceptanceResult` JSON shape: { label, ok, output, passed_tests? }.
+    /// `passed_tests` feeds the pilot's J15 net-negative-tests check.
     #[serde(default)]
     acceptance_results: Vec<Value>,
 }
@@ -70,7 +71,11 @@ impl Tool for TaskComplete {
                             "properties": {
                                 "label": {"type": "string"},
                                 "ok": {"type": "boolean"},
-                                "output": {"type": "string"}
+                                "output": {"type": "string"},
+                                "passed_tests": {
+                                    "type": "integer",
+                                    "description": "Copy from run_acceptance when present."
+                                }
                             },
                             "required": ["label", "ok"]
                         },

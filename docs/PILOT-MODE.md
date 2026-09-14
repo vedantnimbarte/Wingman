@@ -206,6 +206,46 @@ denied_licenses  = []            # e.g. ["GPL-3.0", "AGPL-3.0"]
 block_severity   = "medium"
 ```
 
+## Escalation triggers
+
+Some lines a run never crosses unseen, at any tier and with no switch to turn
+them off. Every trigger is listed by `wingman pilot run`, written into the
+escalation packet of a blocked run, and (except the 80% cost warning) blocks
+auto-merge. The runtime ones (the first five rows) are also recorded as
+`run.escalation` events the moment they fire, so they reach `state.json` and,
+while workers are still running, a desktop card.
+
+| Trigger | Fires when |
+|---|---|
+| Net-negative tests | A task reaches review with fewer passing tests than the same checks report at the base commit |
+| Cost warn / halt | Spend reaches 80% / 100% of `max_usd` (the halt also stops in-flight workers) |
+| 3 consecutive failures | The three runs before this one all failed (checked as it starts), or three worker attempts in a row fail |
+| Irreversible task | A task classified `irreversible` runs |
+| Force-push outside `wingman/auto/*` | Pushing the PR branch would need a force-push to a branch outside the pilot's namespace |
+| Dangerous path, secrets, license header | The plan or the integration diff touches them (checked before the PR gate) |
+
+**Test counts.** A `shell` or `run` check whose command mentions `test` (or
+`jest`) is a test run. Its passing-test count is read from the runner's
+summary: `cargo test` (every test binary, summed), `cargo nextest`, jest,
+vitest, pytest, and `go test -v`. A command whose output carries none of
+these is not counted, so a check that prints nothing recognisable never
+trips the trigger. The base-commit count is measured once per check per run,
+in the first worktree that needs it, before its worker starts; that worktree's
+build is reused by the worker, so the added cost is one test run per distinct
+check. Counts after the task come from the results the worker reports (the
+same results the acceptance gate trusts) or from the supervisor's own re-run
+when it re-verifies a worker that stopped without reporting.
+
+**Force-pushes.** Every merge rebuilds the integration branch from the base
+commit, so a resumed run whose branch was already pushed is rejected as
+non-fast-forward. Inside `wingman/auto/*` the branch is replaced with
+`--force-with-lease` pinned to the remote commit just read. Any other branch
+is refused, and the run stops with an escalation packet instead of a PR.
+
+**Retry history.** Each worker attempt records a `task.attempt` event (rung,
+model, outcome, test counts). The escalation packet's "What was tried" section
+lists them for the blocked task.
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

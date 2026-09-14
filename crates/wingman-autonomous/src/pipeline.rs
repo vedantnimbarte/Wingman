@@ -326,7 +326,7 @@ pub async fn run_to_completion(
         // checks degrade gracefully when the integration branch was never
         // built (collect_diff_lines returns empty), so the dangerous-path
         // check over the run's recorded writes still fires.
-        let escalation_triggers = detect_escalation_triggers(
+        let mut escalation_triggers = detect_escalation_triggers(
             inputs.command_runner.as_ref(),
             &project_root,
             &final_state.base_commit,
@@ -334,12 +334,14 @@ pub async fn run_to_completion(
             &final_state,
             &inputs.dangerous_paths,
         );
+        merge_escalations(&mut escalation_triggers, &final_state.escalations);
         let packet = write_escalation_packet(
             &project_root,
             &run_id,
             &final_state,
             inputs.tier,
             &escalation_triggers,
+            &read_run_events(&run_dir).await,
         );
         return Ok(PipelineOutcome {
             merged: None,
@@ -423,7 +425,8 @@ pub async fn run_to_completion(
                     &run_id,
                     &blocked_state,
                     inputs.tier,
-                    &[],
+                    &blocked_state.escalations,
+                    &store.read_events().await.unwrap_or_default(),
                 );
                 return Ok(PipelineOutcome {
                     merged: None,
@@ -435,7 +438,7 @@ pub async fn run_to_completion(
                     reviews: Vec::new(),
                     critic_vetoed: false,
                     sandbox_tiers,
-                    escalation_triggers: Vec::new(),
+                    escalation_triggers: blocked_state.escalations.clone(),
                     security: None,
                 });
             }
@@ -484,7 +487,7 @@ pub async fn run_to_completion(
     }
 
     let snapshot_for_pr = store.state().clone();
-    let pr_outcome = pr::open_pull_request(
+    let pr_outcome = match pr::open_pull_request(
         inputs.command_runner.as_ref(),
         &mut store,
         &project_root,
@@ -493,7 +496,45 @@ pub async fn run_to_completion(
         &snapshot_for_pr,
         None,
     )
-    .await?;
+    .await
+    {
+        Ok(outcome) => outcome,
+        // J15 — the push needed a force-push outside `wingman/auto/*`. The
+        // integration branch is left as built; the run blocks on the trigger
+        // with a packet, as any other blocked run does.
+        Err(pr::PrError::ForcePushRefused(trigger)) => {
+            tracing::warn!(target: "pilot::pipeline", "{}", trigger.render());
+            let _ = store
+                .append(Event::Escalation {
+                    t: RunStore::now(),
+                    trigger,
+                })
+                .await;
+            let blocked_state = store.state().clone();
+            let packet = write_escalation_packet(
+                &project_root,
+                &run_id,
+                &blocked_state,
+                inputs.tier,
+                &blocked_state.escalations,
+                &store.read_events().await.unwrap_or_default(),
+            );
+            return Ok(PipelineOutcome {
+                merged: merge_outcome,
+                pr: None,
+                failed_tasks: Vec::new(),
+                escalation_packet: packet,
+                auto_merge: None,
+                checkpoint_violations,
+                reviews: Vec::new(),
+                critic_vetoed: false,
+                sandbox_tiers,
+                escalation_triggers: blocked_state.escalations,
+                security: None,
+            });
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // R6 — security pass over the integration diff, feeding the E8 gate.
     let security_report = run_security_pass(
@@ -536,16 +577,15 @@ pub async fn run_to_completion(
         &snapshot_for_pr,
         &inputs.dangerous_paths,
     );
-    // J15 — fold the runtime escalation triggers (cost warn/halt, three
-    // consecutive related-run failures, irreversible-task-ran) into the same
-    // vec the E8 gate already vetoes on. `tests_before/after` stay `None`
-    // until a cargo-test counter exists (that's the one signal with no live
-    // producer); the other three fire from data already in scope.
-    // ponytail: no test-count capture — NetNegativeTests stays dormant until
-    // someone's willing to pay two full `cargo test` runs per pilot run.
-    let recent_run_outcomes = recent_run_outcomes(&project_root, &run_id);
-    escalation_triggers.extend(crate::escalation::check_runtime(
-        &crate::escalation::RuntimeSignals {
+    // J15 — fold in the runtime triggers the orchestrator's escalation
+    // watchdog recorded while the run was live (net-negative tests, cost
+    // warn/halt, failure streaks, irreversible task ran), then re-check spend
+    // and the irreversible task against the final state: the manager's own
+    // tokens are only priced after the orchestrator stops.
+    merge_escalations(&mut escalation_triggers, &snapshot_for_pr.escalations);
+    merge_escalations(
+        &mut escalation_triggers,
+        &crate::escalation::check_runtime(&crate::escalation::RuntimeSignals {
             state: &snapshot_for_pr,
             task: snapshot_for_pr
                 .tasks
@@ -554,9 +594,9 @@ pub async fn run_to_completion(
             tests_before: None,
             tests_after: None,
             max_usd,
-            recent_run_outcomes: &recent_run_outcomes,
-        },
-    ));
+            recent_run_outcomes: &[],
+        }),
+    );
     let dangerous_paths_touched = escalation_triggers.iter().any(|t| {
         matches!(
             t,
@@ -1550,10 +1590,7 @@ async fn compute_checkpoint_violations(
     run_dir: &std::path::Path,
     state: &crate::model::RunState,
 ) -> Vec<(String, String)> {
-    let events = match RunStore::load(run_dir).await {
-        Ok(store) => store.read_events().await.unwrap_or_default(),
-        Err(_) => return Vec::new(),
-    };
+    let events = read_run_events(run_dir).await;
     let mut violations = Vec::new();
     for task in &state.tasks {
         if !matches!(task.status, TaskStatus::Review | TaskStatus::Done) {
@@ -1627,24 +1664,6 @@ async fn record_merge_fixer_task(
     if let Err(e) = store.append(ev).await {
         tracing::warn!(target: "pilot::pipeline", error = %e, "failed to record merge-fixer task");
     }
-}
-
-/// J15 — the last-3 (run_id, ok) outcomes from run history, newest last,
-/// excluding the current run (still Running). Feeds
-/// [`crate::escalation::check_runtime`]'s RepeatedFailures trigger. Reads
-/// what `dashboard::load_all_run_states` already persists — no new store.
-fn recent_run_outcomes(
-    project_root: &std::path::Path,
-    current_run_id: &str,
-) -> Vec<(String, bool)> {
-    let mut states = crate::dashboard::load_all_run_states(project_root);
-    // run ids are timestamp-prefixed, so a lexical sort is chronological.
-    states.sort_by(|a, b| a.run_id.cmp(&b.run_id));
-    states
-        .into_iter()
-        .filter(|s| s.run_id != current_run_id)
-        .map(|s| (s.run_id, s.status == crate::model::RunStatus::Done))
-        .collect()
 }
 
 /// J8 — regenerate the durable knowledge layer under `.wingman/knowledge/`
@@ -1728,26 +1747,53 @@ fn discover_crate_modules(crates_dir: &std::path::Path) -> Vec<(String, Vec<Stri
     out
 }
 
+/// The run's event log, or nothing when it cannot be read. For the best-effort
+/// post-run passes that read the log; none of them may fail the run.
+async fn read_run_events(run_dir: &std::path::Path) -> Vec<Event> {
+    match RunStore::load(run_dir).await {
+        Ok(store) => store.read_events().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// J15 — add each trigger in `more` that `found` does not already hold as the
+/// same incident.
+fn merge_escalations(
+    found: &mut Vec<crate::escalation::EscalationTrigger>,
+    more: &[crate::escalation::EscalationTrigger],
+) {
+    for t in more {
+        if !found.iter().any(|f| f.duplicates(t)) {
+            found.push(t.clone());
+        }
+    }
+}
+
 /// R3 — render + write the escalation packet for a blocked run. Returns
 /// the packet path on success, or `None` if writing failed (best-effort;
-/// a failed packet write must not mask the run's real failure).
+/// a failed packet write must not mask the run's real failure). `events` is
+/// the run log, read for the blocked task's retry-ladder attempts.
 fn write_escalation_packet(
     project_root: &std::path::Path,
     run_id: &str,
     state: &crate::model::RunState,
     tier: wingman_config::PilotTier,
     triggers: &[crate::escalation::EscalationTrigger],
+    events: &[Event],
 ) -> Option<PathBuf> {
     let blocked_task = state
         .tasks
         .iter()
         .find(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Blocked));
+    let attempts = blocked_task
+        .map(|t| crate::handoff::attempts_for(events, &t.id))
+        .unwrap_or_default();
     let packet = crate::handoff::HandoffPacket {
         state,
         tier,
         blocked_task,
         triggers,
-        attempts: &[],
+        attempts: &attempts,
         why_stuck: None,
         suggested_next: None,
     };
@@ -2530,6 +2576,16 @@ mod tests {
             &state,
             wingman_config::PilotTier::Copilot,
             &[],
+            &[Event::TaskAttempt {
+                t: RunStore::now(),
+                id: "t1".into(),
+                agent: "agent-0003".into(),
+                rung: 2,
+                model: Some("big-model".into()),
+                status: TaskStatus::Failed,
+                summary: "acceptance checks failed: 0/1 green".into(),
+                tests: Default::default(),
+            }],
         )
         .expect("packet written");
 
@@ -2539,6 +2595,9 @@ mod tests {
         assert!(body.contains("blocked at task #t1"));
         assert!(body.contains("the hard part"));
         assert!(body.contains("wingman pilot resume blocked-run"));
+        // The ladder's recorded attempts fill "What was tried".
+        assert!(body.contains("rung 2, model `big-model`"), "{body}");
+        assert!(body.contains("0/1 green"));
     }
 
     /// R3 wiring: detected J15 triggers are rendered into the packet's
@@ -2580,6 +2639,7 @@ mod tests {
             &state,
             wingman_config::PilotTier::Copilot,
             &triggers,
+            &[],
         )
         .expect("packet written");
 

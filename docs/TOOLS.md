@@ -812,7 +812,8 @@ Terminal call for a pilot-mode worker: reports the final summary and the
 files changed, after which the worker ends its turn and the orchestrator
 takes over. Args: `summary` (required), `files_changed`, `outcome` (e.g.
 `approve` / `rework` for reviewer tasks), `acceptance_results` (required when
-the task carries acceptance checks).
+the task carries acceptance checks; each result's `passed_tests` count, when
+`run_acceptance` reported one, feeds the net-negative-tests escalation).
 
 Only registered for pilot workers — it is not part of an ordinary session's
 tool set. See [PILOT-MODE.md](PILOT-MODE.md).

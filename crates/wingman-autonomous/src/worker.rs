@@ -67,6 +67,9 @@ pub struct WorkerSpec {
     /// line per command). `None` leaves the channel unused (stdin is closed
     /// so the child sees EOF).
     pub cmd_rx: Option<tokio::sync::mpsc::Receiver<crate::ipc::ManagerCommand>>,
+    /// E5 retry-ladder rung this attempt runs on (`SpawnContext::rung`),
+    /// recorded in the attempt's `task.attempt` event.
+    pub rung: u32,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -300,7 +303,7 @@ pub async fn run_worker(
             // summary", which is not something anyone can act on.
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!("worker stream ended abnormally: {e}"),
             )
@@ -314,7 +317,7 @@ pub async fn run_worker(
                 .ok();
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!(
                     "worker exceeded pilot.task_timeout_secs ({}s) and was terminated",
@@ -331,7 +334,7 @@ pub async fn run_worker(
         Err(e) => {
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!("could not reap the worker process: {e}"),
             )
@@ -426,6 +429,18 @@ pub async fn run_worker(
         (None, _) => None,
     };
 
+    record_attempt(
+        store,
+        &spec,
+        agent_id,
+        final_status,
+        recorded_outcome
+            .as_ref()
+            .map(|o| o.summary.clone())
+            .unwrap_or_default(),
+        &acceptance,
+    )
+    .await;
     let _ = store
         .lock()
         .await
@@ -470,11 +485,21 @@ pub async fn run_worker(
 /// rung, which re-ran the same work blind.
 async fn record_failure(
     store: &tokio::sync::Mutex<RunStore>,
-    task_id: &str,
+    spec: &WorkerSpec,
     agent_id: &str,
     summary: String,
 ) {
+    let task_id = &spec.task.id;
     tracing::warn!(target: "pilot::worker", task = %task_id, "{summary}");
+    record_attempt(
+        store,
+        spec,
+        agent_id,
+        TaskStatus::Failed,
+        summary.clone(),
+        &[],
+    )
+    .await;
     let mut guard = store.lock().await;
     let _ = guard
         .append(Event::TaskStatus {
@@ -492,6 +517,38 @@ async fn record_failure(
             t: RunStore::now(),
             agent: agent_id.to_string(),
             status: AgentStatus::Failed,
+        })
+        .await;
+}
+
+/// E5/R3 — record how this attempt ended, with the passing-test counts its
+/// test-running checks reported (J15). Written before the attempt's final
+/// `task.status`: the retry ladder reassigns on that status and kills this
+/// attempt's task as it does, so anything written after it can be lost.
+async fn record_attempt(
+    store: &tokio::sync::Mutex<RunStore>,
+    spec: &WorkerSpec,
+    agent_id: &str,
+    status: TaskStatus,
+    summary: String,
+    results: &[crate::acceptance::AcceptanceResult],
+) {
+    let tests = results
+        .iter()
+        .filter_map(|r| r.passed_tests.map(|n| (r.label.clone(), n)))
+        .collect();
+    let _ = store
+        .lock()
+        .await
+        .append(Event::TaskAttempt {
+            t: RunStore::now(),
+            id: spec.task.id.clone(),
+            agent: agent_id.to_string(),
+            rung: spec.rung,
+            model: spec.model.clone(),
+            status,
+            summary,
+            tests,
         })
         .await;
 }
@@ -1092,7 +1149,18 @@ mod tests {
             .unwrap();
         let store = tokio::sync::Mutex::new(store);
 
-        record_failure(&store, "t1", "agent-0001", "worker exceeded 1800s".into()).await;
+        let spec = WorkerSpec {
+            wingman_bin: PathBuf::from("wingman"),
+            task: Task::new("t1", Role::Developer, "x"),
+            role: Role::Developer,
+            worktree: dir.path().to_path_buf(),
+            session_id: "s".into(),
+            model: Some("haiku".into()),
+            timeout: Duration::from_secs(1800),
+            cmd_rx: None,
+            rung: 2,
+        };
+        record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 
         let guard = store.lock().await;
         let task = guard.state().task("t1");
@@ -1106,6 +1174,14 @@ mod tests {
 {log}"
         );
         assert!(log.contains("\"status\":\"failed\""));
+        // The ladder telemetry lands first, so the reassign the failed status
+        // triggers cannot cut it off.
+        let attempt = log
+            .find("\"ev\":\"task.attempt\"")
+            .expect("attempt recorded");
+        let status = log.find("\"ev\":\"task.status\"").expect("status recorded");
+        assert!(attempt < status, "{log}");
+        assert!(log.contains("\"rung\":2") && log.contains("\"model\":\"haiku\""));
     }
 
     /// Observed on run 2026-08-21-1920-xoyw4q: t1 declared three acceptance
@@ -1140,6 +1216,7 @@ mod tests {
             label: "grep version_only".into(),
             ok: false,
             output: "no match".into(),
+            passed_tests: None,
         }];
         let s = failure_summary(&results, &declared, Some(1), None);
         assert!(s.starts_with("acceptance checks failed:"), "{s}");
@@ -1185,6 +1262,7 @@ mod tests {
             label: "grep version_only in src/args.rs".into(),
             ok: false,
             output: "no match".into(),
+            passed_tests: None,
         }];
         let summary = format!(
             "acceptance checks failed: {}",

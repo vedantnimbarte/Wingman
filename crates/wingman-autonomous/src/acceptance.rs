@@ -34,6 +34,12 @@ pub struct AcceptanceResult {
     /// Best-effort tail of stdout/stderr or the matched text. Capped to
     /// keep token usage bounded.
     pub output: String,
+    /// J15 — passing tests the command reported, when its output carried a
+    /// test-runner summary [`passed_tests`] recognises. Parsed from the whole
+    /// output rather than the tail: a workspace `cargo test` prints one
+    /// summary per test binary, and the tail holds only the last few.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed_tests: Option<u32>,
 }
 
 impl AcceptanceResult {
@@ -42,6 +48,7 @@ impl AcceptanceResult {
             label: label.into(),
             ok: true,
             output: output.into(),
+            passed_tests: None,
         }
     }
     pub fn fail(label: impl Into<String>, output: impl Into<String>) -> Self {
@@ -49,6 +56,7 @@ impl AcceptanceResult {
             label: label.into(),
             ok: false,
             output: output.into(),
+            passed_tests: None,
         }
     }
 }
@@ -541,15 +549,20 @@ fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> AcceptanceResult {
                     })
                     .unwrap_or_default();
                 let tail = tail_string(&combined, OUTPUT_TAIL_BYTES);
-                if status.success() {
-                    return AcceptanceResult::ok(label, tail);
+                let mut res = if status.success() {
+                    AcceptanceResult::ok(label, tail)
                 } else {
                     let code = status
                         .code()
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "signal".to_string());
-                    return AcceptanceResult::fail(label, format!("exit {code}\n{tail}"));
-                }
+                    AcceptanceResult::fail(label, format!("exit {code}\n{tail}"))
+                };
+                // Counted whether or not the command passed: a red test run
+                // still says how many tests passed, and that is the number the
+                // net-negative check compares.
+                res.passed_tests = passed_tests(&combined);
+                return res;
             }
             Ok(None) => {
                 if started.elapsed() > timeout {
@@ -673,6 +686,90 @@ pub fn summarize(results: &[AcceptanceResult]) -> String {
                 .join(", ")
         )
     }
+}
+
+/// J15 — passing tests reported by a test runner's summary, or `None` when
+/// `output` carries no summary this recognises. Tried in order, first match
+/// wins:
+///
+/// - `cargo test`: every `test result: … N passed;` line, summed (one per test
+///   binary); `cargo nextest`: the `Summary … N passed` line.
+/// - jest / vitest: the `Tests: … N passed` line.
+/// - pytest: the closing `N passed … in 1.23s` line.
+/// - `go test -v`: one `--- PASS:` line per test, subtests included. Plain
+///   `go test` prints no per-test lines and so reports nothing.
+pub fn passed_tests(output: &str) -> Option<u32> {
+    use std::sync::OnceLock;
+    static RES: OnceLock<[regex::Regex; 6]> = OnceLock::new();
+    let [ansi, cargo, nextest, jest, pytest, go] = RES.get_or_init(|| {
+        [
+            r"\x1b\[[0-9;]*m",
+            r"test result: \w+\. (\d+) passed;",
+            r"^\s*Summary \[.*?(\d+) passed",
+            r"^\s*Tests:?\s+(?:.*?, )?(\d+) passed",
+            r"^=*\s*(?:.*?, )?(\d+) passed.* in [\d.]+s",
+            r"^\s*--- PASS: ",
+        ]
+        .map(|p| regex::Regex::new(&format!("(?m){p}")).expect("static pattern"))
+    });
+    // Runners colour their summaries when they think they own a terminal.
+    let plain = ansi.replace_all(output, "");
+    let sum = |re: &regex::Regex| -> Option<u32> {
+        let mut found = None;
+        for c in re.captures_iter(&plain) {
+            let n: u32 = c[1].parse().ok()?;
+            found = Some(found.unwrap_or(0) + n);
+        }
+        found
+    };
+    let go_passes = go.find_iter(&plain).count() as u32;
+    sum(cargo)
+        .or_else(|| sum(nextest))
+        .or_else(|| sum(jest))
+        .or_else(|| sum(pytest))
+        .or((go_passes > 0).then_some(go_passes))
+}
+
+/// J15 — the label a test-running check's result will carry, or `None` for a
+/// check that does not look like it runs tests. Only `shell` and `run` checks
+/// execute a command; of those, one whose command mentions `test` (or `jest`)
+/// is treated as a test run.
+///
+/// ponytail: a keyword heuristic — a test runner invoked through a script
+/// named without "test" is missed, and its count stays unchecked. A plan field
+/// marking a check as the test suite would make it exact.
+pub fn test_check_label(check: &Acceptance) -> Option<String> {
+    let (label, cmd) = match check {
+        Acceptance::Shell { cmd } => (format!("shell: {cmd}"), cmd.as_str()),
+        Acceptance::Run { target, script } => (
+            format!("run: {target}"),
+            script.as_deref().unwrap_or(target),
+        ),
+        _ => return None,
+    };
+    let cmd = cmd.to_ascii_lowercase();
+    (cmd.contains("test") || cmd.contains("jest")).then_some(label)
+}
+
+/// J15 — compare an attempt's test counts with the base-commit counts for the
+/// same checks. Returns `(before, after)` summed over the labels both sides
+/// counted, or `None` when they share none — a check whose output carried no
+/// summary on one side says nothing about the other.
+///
+/// `before` maps a label to `None` when the base-commit run printed no
+/// summary, so a check is measured once per run whether or not it counted.
+pub fn net_test_counts(
+    before: &std::collections::HashMap<String, Option<u32>>,
+    after: &std::collections::BTreeMap<String, u32>,
+) -> Option<(u32, u32)> {
+    let shared: Vec<(u32, u32)> = after
+        .iter()
+        .filter_map(|(label, a)| before.get(label).copied().flatten().map(|b| (b, *a)))
+        .collect();
+    if shared.is_empty() {
+        return None;
+    }
+    Some(shared.iter().fold((0, 0), |(b, a), (x, y)| (b + x, a + y)))
 }
 
 #[cfg(test)]
@@ -1069,5 +1166,80 @@ error[E0425]: cannot find value",
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn j15_passed_tests_reads_each_runner_summary() {
+        // cargo test: one summary per test binary, summed.
+        let cargo = "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nrunning 9 tests\ntest result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        assert_eq!(passed_tests(cargo), Some(10));
+        let nextest = "     Summary [   0.123s] 12 tests run: 12 passed, 0 skipped\n";
+        assert_eq!(passed_tests(nextest), Some(12));
+        let jest = "Test Suites: 1 failed, 2 passed, 3 total\nTests:       1 failed, 12 passed, 13 total\n";
+        assert_eq!(passed_tests(jest), Some(12));
+        let vitest = " Test Files  3 passed (3)\n      Tests  21 passed (21)\n";
+        assert_eq!(passed_tests(vitest), Some(21));
+        // Coloured, as pytest prints when it thinks it owns a terminal.
+        let pytest = "\x1b[32m===== 1 failed, 4 passed, 1 warning in 0.12s =====\x1b[0m\n";
+        assert_eq!(passed_tests(pytest), Some(4));
+        let go = "=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n    --- PASS: TestB/sub (0.00s)\n--- FAIL: TestB (0.00s)\n";
+        assert_eq!(passed_tests(go), Some(2));
+        // No summary at all: no count, never a zero.
+        assert_eq!(
+            passed_tests("Finished dev profile\nok  \tpkg\t0.01s\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn j15_shell_checks_carry_the_whole_outputs_count() {
+        let dir = tempfile::tempdir().unwrap();
+        // More summary lines than the 1 KiB tail keeps, and a failing exit.
+        let line = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        std::fs::write(dir.path().join("out.txt"), format!("{line}\n").repeat(40)).unwrap();
+        let cmd = if cfg!(windows) {
+            "type out.txt && exit 1"
+        } else {
+            "cat out.txt; exit 1"
+        };
+        let r = run_acceptance_checks(&[Acceptance::Shell { cmd: cmd.into() }], dir.path());
+        assert!(!r[0].ok);
+        assert!(r[0].output.len() < line.len() * 40);
+        assert_eq!(r[0].passed_tests, Some(40));
+    }
+
+    #[test]
+    fn j15_test_checks_are_the_ones_that_run_tests() {
+        let shell = |c: &str| Acceptance::Shell { cmd: c.into() };
+        assert_eq!(
+            test_check_label(&shell("cargo test -p x")).as_deref(),
+            Some("shell: cargo test -p x")
+        );
+        assert_eq!(test_check_label(&shell("cargo check")), None);
+        let run = Acceptance::Run {
+            target: "suite".into(),
+            script: Some("npx jest".into()),
+        };
+        assert_eq!(test_check_label(&run).as_deref(), Some("run: suite"));
+        let grep = Acceptance::Grep {
+            pattern: "test".into(),
+            path: "x".into(),
+        };
+        assert_eq!(test_check_label(&grep), None);
+    }
+
+    #[test]
+    fn j15_net_counts_compare_only_shared_checks() {
+        let before: std::collections::HashMap<String, Option<u32>> = [
+            ("a".to_string(), Some(10)),
+            ("b".to_string(), Some(5)),
+            ("c".to_string(), None),
+        ]
+        .into();
+        let after: std::collections::BTreeMap<String, u32> =
+            [("a".to_string(), 8), ("c".to_string(), 99)].into();
+        assert_eq!(net_test_counts(&before, &after), Some((10, 8)));
+        let unrelated: std::collections::BTreeMap<String, u32> = [("c".to_string(), 1)].into();
+        assert_eq!(net_test_counts(&before, &unrelated), None);
     }
 }

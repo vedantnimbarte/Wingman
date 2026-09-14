@@ -412,6 +412,11 @@ struct RetryState {
     failure_history: Vec<String>,
 }
 
+/// J15 — passing tests per test-running acceptance check at the run's base
+/// commit, keyed by the check's result label; `None` when that run printed no
+/// summary. Filled once per check per run by [`measure_test_baselines`].
+type TestBaselines = Arc<std::sync::Mutex<HashMap<String, Option<u32>>>>;
+
 /// Run the orchestrator actor on the current Tokio runtime. Returns the
 /// handle and a `JoinHandle` for the actor task — the caller awaits the
 /// join handle to know when the run is fully drained.
@@ -448,7 +453,25 @@ pub fn spawn_full(
     let budget_rx = store.subscribe();
     let retry_rx = store.subscribe();
     let notify_rx = store.subscribe();
+    let escalation_rx = store.subscribe();
     let store = Arc::new(Mutex::new(store));
+    let baselines = TestBaselines::default();
+
+    // J15 escalation watchdog: the runtime triggers fire while the run is
+    // live, not only once the PR is open. Always on — J15 has no off switch.
+    // Skipped for the in-memory unit-test config, which has no run history.
+    let prior_runs = if cfg.project_root.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        recent_run_outcomes(&cfg.project_root, &cfg.run_id)
+    };
+    tokio::spawn(escalation_watchdog(
+        escalation_rx,
+        store.clone(),
+        baselines.clone(),
+        cfg.max_usd,
+        prior_runs,
+    ));
 
     // Failure watchdog: one subscriber rather than an emit at each of the ten-
     // plus places that write `TaskStatus::Failed`. The broadcast channel is
@@ -514,8 +537,174 @@ pub fn spawn_full(
         drop(retry_rx);
     }
 
-    let join = tokio::spawn(run_actor(store, cfg, spawner, splitter, reviewer, rx));
+    let join = tokio::spawn(run_actor(
+        store, cfg, spawner, splitter, reviewer, baselines, rx,
+    ));
     (handle, join)
+}
+
+/// Background task: evaluate the J15 runtime triggers
+/// ([`crate::escalation::check_runtime`]) while the run is live and record each
+/// new one as a `run.escalation` event. The failure watchdog turns those into
+/// desktop cards; the pipeline folds them into the merge gate and the R3
+/// packet.
+///
+/// As the run starts: the last three runs before it all failed. On every
+/// `agent.usd`: spend against the 0.8x / 1.0x cap. On every finished attempt
+/// (`task.attempt`): net-negative tests against the base-commit baselines (for
+/// an attempt that reached Review), an irreversible task having run, and three
+/// consecutive failed attempts in this run.
+async fn escalation_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    store: Arc<Mutex<RunStore>>,
+    baselines: TestBaselines,
+    max_usd: f64,
+    prior_runs: Vec<(String, bool)>,
+) {
+    record_escalations(&store, |state| {
+        crate::escalation::check_runtime(&crate::escalation::RuntimeSignals {
+            state,
+            task: None,
+            tests_before: None,
+            tests_after: None,
+            max_usd: 0.0,
+            recent_run_outcomes: &prior_runs,
+        })
+    })
+    .await;
+    let mut attempts: Vec<(String, bool)> = Vec::new();
+    loop {
+        let (task_id, tests) = match events.recv().await {
+            Ok(Event::AgentUsd { .. }) => (None, None),
+            Ok(Event::TaskAttempt {
+                id,
+                rung,
+                status,
+                tests,
+                ..
+            }) => {
+                attempts.push((
+                    format!("{id} (rung {rung})"),
+                    !matches!(status, TaskStatus::Failed | TaskStatus::Blocked),
+                ));
+                let counts = (status == TaskStatus::Review)
+                    .then(|| {
+                        let before = baselines.lock().unwrap_or_else(|e| e.into_inner());
+                        crate::acceptance::net_test_counts(&before, &tests)
+                    })
+                    .flatten();
+                (Some(id), counts)
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        record_escalations(&store, |state| {
+            crate::escalation::check_runtime(&crate::escalation::RuntimeSignals {
+                state,
+                task: task_id.as_deref().and_then(|id| state.task(id)),
+                tests_before: tests.map(|(before, _)| before),
+                tests_after: tests.map(|(_, after)| after),
+                max_usd,
+                recent_run_outcomes: if task_id.is_some() { &attempts } else { &[] },
+            })
+        })
+        .await;
+    }
+}
+
+/// Append a `run.escalation` event for each trigger `evaluate` finds that the
+/// run has not already recorded as the same incident.
+async fn record_escalations(
+    store: &Arc<Mutex<RunStore>>,
+    evaluate: impl FnOnce(&crate::model::RunState) -> Vec<crate::escalation::EscalationTrigger>,
+) {
+    let mut store = store.lock().await;
+    let state = store.state();
+    let fresh: Vec<_> = evaluate(state)
+        .into_iter()
+        .filter(|t| !state.escalations.iter().any(|e| e.duplicates(t)))
+        .collect();
+    for trigger in fresh {
+        tracing::warn!(
+            target: "pilot::escalation",
+            trigger = trigger.short_label(),
+            "{}",
+            trigger.render()
+        );
+        let _ = store
+            .append(Event::Escalation {
+                t: RunStore::now(),
+                trigger,
+            })
+            .await;
+    }
+}
+
+/// J15 — the (run_id, ok) outcome of every earlier run in this project, oldest
+/// first, excluding `current_run_id`. Feeds the RepeatedFailures trigger as a
+/// run starts. Reads what `dashboard::load_all_run_states` already persists —
+/// no new store.
+fn recent_run_outcomes(
+    project_root: &std::path::Path,
+    current_run_id: &str,
+) -> Vec<(String, bool)> {
+    let mut states = crate::dashboard::load_all_run_states(project_root);
+    // run ids are timestamp-prefixed, so a lexical sort is chronological.
+    states.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    states
+        .into_iter()
+        .filter(|s| s.run_id != current_run_id)
+        .map(|s| (s.run_id, s.status == RunStatus::Done))
+        .collect()
+}
+
+/// J15 — count the passing tests each of `task`'s test-running checks reports
+/// at the base commit, once per check per run. Runs in the attempt's freshly
+/// created worktree before its worker starts: the tree is still exactly the
+/// base commit, and the build it leaves behind is the one the worker's own
+/// checks then reuse, so the extra cost is one test run per distinct check.
+async fn measure_test_baselines(
+    store: &Arc<Mutex<RunStore>>,
+    task: &Task,
+    worktree: PathBuf,
+    budget: Duration,
+    baselines: &TestBaselines,
+) {
+    let pending: Vec<crate::model::Acceptance> = {
+        let known = baselines.lock().unwrap_or_else(|e| e.into_inner());
+        task.acceptance
+            .iter()
+            .filter(|c| {
+                crate::acceptance::test_check_label(c).is_some_and(|l| !known.contains_key(&l))
+            })
+            .cloned()
+            .collect()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    // The task is busy from here, though its worker has not started: the
+    // concurrency cap and the write-set scheduler count `in_progress`.
+    let _ = store
+        .lock()
+        .await
+        .append(Event::TaskStatus {
+            t: RunStore::now(),
+            id: task.id.clone(),
+            status: TaskStatus::InProgress,
+            outcome: None,
+        })
+        .await;
+    let results = tokio::task::spawn_blocking(move || {
+        crate::acceptance::run_acceptance_checks_within(&pending, &worktree, budget)
+    })
+    .await
+    .unwrap_or_default();
+    let mut known = baselines.lock().unwrap_or_else(|e| e.into_inner());
+    for r in results {
+        known.entry(r.label).or_insert(r.passed_tests);
+    }
 }
 
 /// How long a failure waits for company before its card is written.
@@ -533,10 +722,12 @@ enum Bad {
     Task(String, String),
     /// The run itself ended badly: `failed` or `aborted`.
     Run(&'static str),
+    /// A J15 escalation trigger fired: its short label and its rendering.
+    Escalation(&'static str, String),
 }
 
-/// Background task: writes desktop cards for task failures and for a run that
-/// ends badly. Runs until the broadcast channel closes.
+/// Background task: writes desktop cards for task failures, J15 escalations,
+/// and a run that ends badly. Runs until the broadcast channel closes.
 ///
 /// Failures inside one [`COALESCE`] window become a single card. That is worth
 /// more than it sounds: the common shape is one broken dependency failing three
@@ -633,6 +824,9 @@ async fn next_bad(
                     outcome.map(|o| o.summary).unwrap_or_default(),
                 ));
             }
+            Ok(Event::Escalation { trigger, .. }) => {
+                return Some(Bad::Escalation(trigger.short_label(), trigger.render()))
+            }
             Ok(Event::RunStatusEv {
                 status: RunStatus::Failed,
                 ..
@@ -654,7 +848,8 @@ async fn next_bad(
 ///
 /// The run outcome wins the title when it is in the batch — "run failed" is
 /// what the reader needs first, and the tasks that caused it belong in the
-/// body underneath it.
+/// body underneath it. Short of that, a J15 escalation wins: it is one of the
+/// lines a run must not cross unseen, and a task failure beside it is context.
 fn render(batch: &[Bad]) -> (String, String) {
     let run = batch.iter().find_map(|b| match b {
         Bad::Run(word) => Some(*word),
@@ -667,33 +862,41 @@ fn render(batch: &[Bad]) -> (String, String) {
             _ => None,
         })
         .collect();
-
-    match (run, tasks.as_slice()) {
-        // A run failure on its own, or with the tasks that explain it.
-        (Some(word), []) => (format!("Run {word}"), String::new()),
-        (Some(word), many) => (
-            format!("Run {word} — {} task(s) did not finish", many.len()),
-            many.iter()
-                .map(|(label, _)| format!("• {label}"))
-                .collect::<Vec<_>>()
-                .join(
-                    "
+    let escalations: Vec<(&str, String)> = batch
+        .iter()
+        .filter_map(|b| match b {
+            Bad::Escalation(label, detail) => Some((*label, format!("• {detail}"))),
+            _ => None,
+        })
+        .collect();
+    let bullets = |tasks: &[(&String, &String)]| {
+        tasks
+            .iter()
+            .map(|(label, _)| format!("• {label}"))
+            .chain(escalations.iter().map(|(_, line)| line.clone()))
+            .collect::<Vec<_>>()
+            .join(
+                "
 ",
-                ),
+            )
+    };
+
+    match (run, tasks.as_slice(), escalations.as_slice()) {
+        // A run failure on its own, or with the tasks that explain it.
+        (Some(word), [], _) => (format!("Run {word}"), bullets(&[])),
+        (Some(word), many, _) => (
+            format!("Run {word} — {} task(s) did not finish", many.len()),
+            bullets(many),
+        ),
+        (None, _, [(label, _)]) => (format!("Escalation — {label}"), bullets(&tasks)),
+        (None, _, [_, ..]) => (
+            format!("{} escalations", escalations.len()),
+            bullets(&tasks),
         ),
         // One task, and room to say what went wrong with it.
-        (None, [(label, summary)]) => (format!("Task failed — {label}"), (*summary).clone()),
+        (None, [(label, summary)], []) => (format!("Task failed — {label}"), (*summary).clone()),
         // Several: the list is more use than any one summary.
-        (None, many) => (
-            format!("{} tasks failed", many.len()),
-            many.iter()
-                .map(|(label, _)| format!("• {label}"))
-                .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                ),
-        ),
+        (None, many, []) => (format!("{} tasks failed", many.len()), bullets(many)),
     }
 }
 
@@ -885,6 +1088,7 @@ async fn run_actor(
     spawner: WorkerSpawner,
     splitter: Option<TaskSplitter>,
     reviewer: Option<Reviewer>,
+    baselines: TestBaselines,
     mut rx: mpsc::Receiver<OrchestratorCommand>,
 ) {
     // Track active worker tasks so we can enforce the concurrency cap and
@@ -928,6 +1132,7 @@ async fn run_actor(
                     &task_id,
                     &mut next_agent_seq,
                     &retries,
+                    &baselines,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -949,6 +1154,7 @@ async fn run_actor(
                     &mut next_agent_seq,
                     &mut retries,
                     &mut next_task_seq,
+                    &baselines,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -1088,6 +1294,7 @@ async fn handle_assign(
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &HashMap<String, RetryState>,
+    baselines: &TestBaselines,
 ) -> Result<String, OrchestratorError> {
     let (task, agent_id, worktree, session_id) = {
         let store_g = store.lock().await;
@@ -1263,6 +1470,17 @@ async fn handle_assign(
     }
 
     let retry = retries.get(task_id).cloned().unwrap_or_default();
+    let rung = retry.rung;
+    // J15 baselines need a worktree still at the base commit; the in-memory
+    // test config has none.
+    let baseline = (cfg.use_real_worktrees && !cfg.base_commit.is_empty()).then(|| {
+        (
+            task.clone(),
+            worktree.clone(),
+            cfg.task_timeout,
+            baselines.clone(),
+        )
+    });
     let ctx = SpawnContext {
         task,
         agent_id: agent_id.clone(),
@@ -1290,6 +1508,9 @@ async fn handle_assign(
     let handle = tokio::spawn(async move {
         use futures::FutureExt;
         let task_id = task_id_for_log;
+        if let Some((task, worktree, budget, baselines)) = baseline {
+            measure_test_baselines(&store_for_fail, &task, worktree, budget, &baselines).await;
+        }
         match std::panic::AssertUnwindSafe(spawner(ctx))
             .catch_unwind()
             .await
@@ -1299,11 +1520,25 @@ async fn handle_assign(
             }
             Ok(Err(e)) => {
                 tracing::warn!(target: "pilot::orch", task = %task_id, error = %e, "worker spawn failed");
-                mark_worker_failed(&store_for_fail, &task_id, &agent_for_fail).await;
+                mark_worker_failed(
+                    &store_for_fail,
+                    &task_id,
+                    &agent_for_fail,
+                    rung,
+                    format!("worker spawn failed: {e}"),
+                )
+                .await;
             }
             Err(_panic) => {
                 tracing::error!(target: "pilot::orch", task = %task_id, "worker task panicked; marking task Failed");
-                mark_worker_failed(&store_for_fail, &task_id, &agent_for_fail).await;
+                mark_worker_failed(
+                    &store_for_fail,
+                    &task_id,
+                    &agent_for_fail,
+                    rung,
+                    "worker task panicked".into(),
+                )
+                .await;
             }
         }
         senders_for_cleanup.lock().await.remove(&agent_for_cleanup);
@@ -1324,7 +1559,13 @@ async fn handle_assign(
 /// Mark a task Failed (and its agent Failed) when its worker future errored or
 /// panicked, so the retry watchdog reassigns it instead of the task hanging in
 /// InProgress forever. Best-effort — a failed append is logged and swallowed.
-async fn mark_worker_failed(store: &Arc<Mutex<RunStore>>, task_id: &str, agent_id: &str) {
+async fn mark_worker_failed(
+    store: &Arc<Mutex<RunStore>>,
+    task_id: &str,
+    agent_id: &str,
+    rung: u32,
+    summary: String,
+) {
     let mut g = store.lock().await;
     // Skip if the worker already recorded a terminal status (it may have
     // written Failed/Review before a late panic in teardown).
@@ -1336,6 +1577,21 @@ async fn mark_worker_failed(store: &Arc<Mutex<RunStore>>, task_id: &str, agent_i
             return;
         }
     }
+    // The worker never got to record its own attempt; do it for it, ahead of
+    // the Failed status for the same reason `worker::record_attempt` is.
+    let model = g.state().agent(agent_id).and_then(|a| a.model.clone());
+    let _ = g
+        .append(Event::TaskAttempt {
+            t: RunStore::now(),
+            id: task_id.to_string(),
+            agent: agent_id.to_string(),
+            rung,
+            model,
+            status: TaskStatus::Failed,
+            summary,
+            tests: Default::default(),
+        })
+        .await;
     let _ = g
         .append(Event::TaskStatus {
             t: RunStore::now(),
@@ -1365,6 +1621,7 @@ async fn handle_reassign(
     next_agent_seq: &mut u64,
     retries: &mut HashMap<String, RetryState>,
     next_task_seq: &mut u64,
+    baselines: &TestBaselines,
 ) -> Result<String, OrchestratorError> {
     // E5 ladder. Advance the rung and pick the action.
     //
@@ -1509,6 +1766,7 @@ async fn handle_reassign(
         task_id,
         next_agent_seq,
         retries,
+        baselines,
     )
     .await
 }
@@ -3873,6 +4131,273 @@ mod tests {
         );
         handle.shutdown().await;
         let _ = join.await;
+    }
+
+    /* ── J15 runtime escalations ────────────────────────────────────────── */
+
+    async fn wait_for_escalations(store: &Arc<Mutex<RunStore>>, n: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let labels: Vec<String> = store
+                .lock()
+                .await
+                .state()
+                .escalations
+                .iter()
+                .map(|t| t.short_label().to_string())
+                .collect();
+            if labels.len() >= n {
+                return labels;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fewer than {n} escalations recorded");
+    }
+
+    fn attempt(id: &str, rung: u32, status: TaskStatus, tests: &[(&str, u32)]) -> Event {
+        Event::TaskAttempt {
+            t: RunStore::now(),
+            id: id.into(),
+            agent: "agent-0001".into(),
+            rung,
+            model: None,
+            status,
+            summary: String::new(),
+            tests: tests.iter().map(|(l, n)| (l.to_string(), *n)).collect(),
+        }
+    }
+
+    /// The runtime triggers fire as the run goes, each recorded once: prior
+    /// failed runs as it starts, spend on `agent.usd`, and on a finished
+    /// attempt fewer passing tests than the base commit and a failure streak.
+    #[tokio::test]
+    async fn j15_escalation_watchdog_fires_during_the_run() {
+        use crate::escalation::EscalationTrigger;
+
+        let dir = tempdir().unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        store
+            .append(Event::TaskCreate {
+                t: RunStore::now(),
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "x".into(),
+                goal: String::new(),
+                deps: Vec::new(),
+                writes: Vec::new(),
+                acceptance: Vec::new(),
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            })
+            .await
+            .unwrap();
+        let events = store.subscribe();
+        let store = Arc::new(Mutex::new(store));
+        let baselines = TestBaselines::default();
+        baselines
+            .lock()
+            .unwrap()
+            .insert("shell: cargo test".into(), Some(120));
+        let prior = vec![
+            ("r-a".to_string(), false),
+            ("r-b".to_string(), false),
+            ("r-c".to_string(), false),
+        ];
+        tokio::spawn(escalation_watchdog(
+            events,
+            store.clone(),
+            baselines,
+            10.0,
+            prior,
+        ));
+        assert_eq!(
+            wait_for_escalations(&store, 1).await,
+            ["3 consecutive failures"]
+        );
+
+        let append = |ev: Event| {
+            let store = store.clone();
+            async move { store.lock().await.append(ev).await.unwrap() }
+        };
+        append(Event::AgentUsd {
+            t: RunStore::now(),
+            agent: "agent-0001".into(),
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            usd: 8.5,
+        })
+        .await;
+        wait_for_escalations(&store, 2).await;
+        // Still over 80%: the same incident, not a second card.
+        append(Event::AgentUsd {
+            t: RunStore::now(),
+            agent: "agent-0001".into(),
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            usd: 0.1,
+        })
+        .await;
+        // A failed attempt with fewer tests is not compared; a Review one is.
+        append(attempt(
+            "t1",
+            0,
+            TaskStatus::Failed,
+            &[("shell: cargo test", 1)],
+        ))
+        .await;
+        append(attempt(
+            "t1",
+            1,
+            TaskStatus::Review,
+            &[("shell: cargo test", 115)],
+        ))
+        .await;
+        wait_for_escalations(&store, 3).await;
+
+        let recorded = store.lock().await.state().escalations.clone();
+        assert!(recorded.contains(&EscalationTrigger::NetNegativeTests {
+            task_id: "t1".into(),
+            before: 120,
+            after: 115,
+        }));
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|t| matches!(t, EscalationTrigger::CostWarn { .. }))
+                .count(),
+            1
+        );
+        let log = std::fs::read_to_string(store.lock().await.log_path()).unwrap();
+        assert!(log.contains(r#""ev":"run.escalation""#));
+    }
+
+    /// Three failed attempts in a row inside the run trip the streak trigger,
+    /// and the watchdog is wired into every spawned orchestrator.
+    #[tokio::test]
+    async fn j15_three_failed_attempts_escalate_through_a_spawned_orchestrator() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(dir.path(), "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        let spawner: WorkerSpawner = Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                let mut store = ctx.store.lock().await;
+                for rung in 0..3 {
+                    let _ = store
+                        .append(attempt(&ctx.task.id, rung, TaskStatus::Failed, &[]))
+                        .await;
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
+                    status: TaskStatus::InProgress,
+                    outcome: None,
+                })
+            })
+        });
+        let (handle, join) = spawn(store, cfg(PathBuf::new()), spawner);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        let mut fired = false;
+        for _ in 0..200 {
+            let state = handle.snapshot().await.unwrap();
+            if state.escalations.iter().any(|t| {
+                matches!(
+                    t,
+                    crate::escalation::EscalationTrigger::RepeatedFailures { related_runs }
+                        if related_runs.len() == 3
+                )
+            }) {
+                fired = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(fired, "no RepeatedFailures escalation recorded");
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /// Base-commit counts are measured once per check per run, and the task
+    /// reads as busy while they are.
+    #[tokio::test]
+    async fn j15_baselines_are_measured_once_per_check() {
+        let dir = tempdir().unwrap();
+        let mut store =
+            RunStore::create(dir.path().join("run"), "r1", "g", "base", "wingman/auto/r1")
+                .await
+                .unwrap();
+        store
+            .append(Event::TaskCreate {
+                t: RunStore::now(),
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "x".into(),
+                goal: String::new(),
+                deps: Vec::new(),
+                writes: Vec::new(),
+                acceptance: Vec::new(),
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            })
+            .await
+            .unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let cmd = if cfg!(windows) {
+            "echo x>>ran.txt & echo test result: ok. 7 passed; 0 failed;"
+        } else {
+            "echo x >> ran.txt; echo 'test result: ok. 7 passed; 0 failed;'"
+        };
+        let mut task = Task::new("t1", Role::Developer, "x");
+        task.acceptance = vec![
+            Acceptance::Shell { cmd: cmd.into() },
+            // Not a test run: never measured.
+            Acceptance::Shell {
+                cmd: "cargo check".into(),
+            },
+        ];
+        let baselines = TestBaselines::default();
+        for _ in 0..2 {
+            measure_test_baselines(
+                &store,
+                &task,
+                dir.path().to_path_buf(),
+                Duration::from_secs(30),
+                &baselines,
+            )
+            .await;
+        }
+        let label = format!("shell: {cmd}");
+        assert_eq!(
+            baselines.lock().unwrap().clone(),
+            HashMap::from([(label, Some(7))])
+        );
+        let ran = std::fs::read_to_string(dir.path().join("ran.txt")).unwrap();
+        assert_eq!(ran.lines().count(), 1, "measured twice");
+        assert_eq!(
+            store.lock().await.state().task("t1").unwrap().status,
+            TaskStatus::InProgress
+        );
+    }
+
+    #[test]
+    fn an_escalation_card_leads_with_the_trigger() {
+        let (title, body) = render(&[
+            task("parser", "boom"),
+            Bad::Escalation("net-negative tests", "task t1 ended with 3 passing".into()),
+        ]);
+        assert_eq!(title, "Escalation — net-negative tests");
+        assert!(body.contains("• parser"));
+        assert!(body.contains("• task t1 ended with 3 passing"));
+        // A run outcome still wins the title; the escalation stays in the body.
+        let (title, body) = render(&[
+            Bad::Run("failed"),
+            Bad::Escalation("cost halt (>=1.0x)", "spend crossed cap".into()),
+        ]);
+        assert_eq!(title, "Run failed");
+        assert_eq!(body, "• spend crossed cap");
     }
 
     /* ── Failure cards ─────────────────────────────────────────────────── */

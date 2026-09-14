@@ -34,7 +34,10 @@ Wingman different; this is everything else it does.
   worker agents in isolated worktrees, and opens a PR. Tasks are gated on
   executable acceptance checks (including HTTP responses validated against a
   JSON schema), and every PR gets a security pass (secrets, gitleaks, lockfile
-  license policy, cargo audit) whose summary is posted as a PR comment. See
+  license policy, cargo audit) whose summary is posted as a PR comment. Hard
+  escalation triggers (fewer passing tests than the base commit, 80%/100% of
+  the budget, three failures in a row, a force-push outside `wingman/auto/*`)
+  fire while the run is live and block auto-merge. See
   [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
