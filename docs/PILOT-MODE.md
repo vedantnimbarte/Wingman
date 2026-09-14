@@ -48,7 +48,9 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > worker's reply. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
 > opens real PRs autonomously; validate its trust config safely with
 > `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
-> before enabling it. The **container and vm sandbox tiers** run workers in
+> before enabling it. **Watch mode** (`pilot daemon --watch`) wakes the daemon
+> on file saves and on git hooks that `pilot hooks install` writes. See
+> [Watch mode](#watch-mode). The **container and vm sandbox tiers** run workers in
 > Docker or a Firecracker microVM and apply their diff back, but are
 > **unvalidated against a real daemon**; without a vm backend, pilot still
 > refuses vm-tier tasks. See [Sandbox tiers](#sandbox-tiers).
@@ -212,6 +214,79 @@ used, but quality depends on the local model's tool-use training.
 refuses to start when the planner provider is `unsupported` (no current
 backends are; the tier exists for future providers that can't emit
 tool calls at all).
+
+---
+
+## Watch mode
+
+`wingman pilot daemon` polls every `poll_interval_secs`. With `--watch` it
+still polls, since nothing local announces a new issue or a red CI run, but it
+also wakes early when something happens in the repo:
+
+| Event | Wakes after | Sources asked |
+|-------|-------------|---------------|
+| A file changes in the working tree | `watch_debounce_ms` of quiet | the local ones: `todos`, `coverage_gaps`, `intake`, `ask` |
+| A `pilot hooks` git hook fires (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) | `watch_debounce_ms` of quiet | every configured source |
+| `poll_interval_secs` passes | | every configured source |
+
+An event-woken cycle is an ordinary cycle: candidates are scored, deduplicated
+against the queue, and trust and `max_auto_dispatch_per_cycle` apply
+unchanged. `--cycles N` counts them too.
+
+```toml
+[pilot.daemon]
+enabled           = true
+sources           = ["github_issues", "todos", "intake", "ask"]
+watch_debounce_ms = 1000   # raise it if an editor or build keeps waking the daemon
+```
+
+```bash
+wingman pilot hooks install     # once per clone
+wingman pilot daemon --watch
+wingman pilot hooks uninstall   # removes only the hooks wingman wrote
+```
+
+**What doesn't wake it.** Changes under `.git/`, anything `.gitignore`
+excludes (asked of `git check-ignore`, so build output doesn't trigger
+cycles), and the daemon's own `.wingman/` state. The exceptions under
+`.wingman/` are the intake directory, when the `intake` source is on, and
+the hook signals.
+
+**`ASK:` comments.** The `ask` source finds `// ASK: <question>` and
+`# ASK: <question>` comments with `git grep`, untracked files included. Each
+becomes the goal "answer it with a reply comment beside it, then remove the
+marker". Under `--watch`, saving the file surfaces it within the debounce
+window. ASKs are always proposals, never auto-run: the daemon cannot tell a
+comment you typed from one that came in with a `git pull`.
+
+**The hooks.** They are not shell scripts. Each hook's `#!` line is the path
+of the wingman binary that installed it, so git runs wingman directly and
+wingman writes a timestamp to `.wingman/watch/<hook>`, which the watcher
+notices. Consequences:
+
+- **Windows.** Git for Windows uses only the interpreter's file name and
+  looks it up on `PATH`, so `wingman.exe` must be on `PATH`.
+  `pilot hooks install` warns when it isn't.
+- **Linux and macOS.** The kernel reads the path as written, so it can't
+  contain whitespace. `install` refuses such a path rather than write a hook
+  that never runs.
+- **Moving the binary.** If you move or reinstall wingman somewhere else,
+  run `install` again. It rewrites its own hooks.
+- **Existing hooks.** A hook wingman didn't write (husky, pre-commit, your
+  own) is left alone and reported as skipped. The hook directory comes from
+  `git rev-parse --git-path hooks`, so `core.hooksPath` is respected.
+- **Post-hooks only.** Git ignores their exit status, so a missing or broken
+  wingman never blocks a commit.
+- **Linked worktrees.** A hook firing in a linked worktree records nothing.
+  Pilot's own task worktrees share the repo's hooks, and their commits are
+  the daemon's own work.
+
+**Limits.** Webhook-driven reactions from the original J13 design (a
+dependabot PR going green, a labelled issue arriving) are not part of watch
+mode. Those still arrive on the poll, or sooner through
+[intake](#capability-tiers) or `wingman serve`'s goals endpoint. The watch is
+one recursive watch over the whole repo, so on Linux a very large tree can
+exhaust `fs.inotify.max_user_watches`.
 
 ---
 

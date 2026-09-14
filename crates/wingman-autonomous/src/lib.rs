@@ -51,6 +51,7 @@ pub mod severity;
 pub mod skillpack;
 pub mod store;
 pub mod tools;
+pub mod watcher;
 pub mod worker;
 pub mod worktree;
 

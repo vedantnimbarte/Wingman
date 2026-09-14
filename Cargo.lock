@@ -5110,6 +5110,7 @@ dependencies = [
  "chrono",
  "futures",
  "globset",
+ "notify-debouncer-mini",
  "regex",
  "serde",
  "serde_json",

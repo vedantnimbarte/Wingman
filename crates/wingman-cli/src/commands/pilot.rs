@@ -1825,8 +1825,14 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64, ascii: bool) -> Res
 /// to `<project>/.wingman/daemon-queue.jsonl` for follow-up. `cycles == 0`
 /// runs forever (Ctrl-C to stop); a positive value runs that many cycles
 /// then exits (used for one-shot triage / CI).
-pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCode> {
+///
+/// J13 — `watch` keeps the poll but also wakes on debounced file changes
+/// (local sources only) and on `pilot hooks install` git hooks (every
+/// source); see `wingman_autonomous::watcher`. Event-woken cycles count
+/// towards `cycles` and go through the same queue, trust and cap.
+pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> Result<ExitCode> {
     use std::time::Duration;
+    use wingman_autonomous::watcher::{self, Wake};
 
     let pilot = &cfg.pilot;
     if !pilot.daemon.enabled && cycles == 0 {
@@ -1847,6 +1853,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
         "dependabot",
         "coverage_gaps",
         "intake",
+        "ask",
     ];
     for s in &pilot.daemon.sources {
         if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
@@ -1864,11 +1871,32 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let queue_path = project.root.join(".wingman").join("daemon-queue.jsonl");
     let interval = Duration::from_secs(pilot.daemon.poll_interval_secs.max(1));
 
+    let mut watcher = if watch {
+        let intake = pilot
+            .daemon
+            .sources
+            .iter()
+            .any(|s| s == "intake")
+            .then(|| project.root.join(&pilot.daemon.intake_dir));
+        let debounce = Duration::from_millis(pilot.daemon.watch_debounce_ms);
+        Some(
+            watcher::Watcher::start(&project.root, intake, debounce)
+                .map_err(|e| anyhow::anyhow!("pilot daemon --watch: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     eprintln!(
-        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s){}",
+        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s{}){}",
         pilot.daemon.sources,
         pilot.daemon.auto_threshold,
         pilot.daemon.poll_interval_secs,
+        if watch {
+            ", watching files and git hooks"
+        } else {
+            ""
+        },
         if cycles == 0 {
             " — Ctrl-C to stop".to_string()
         } else {
@@ -1882,11 +1910,19 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let mut seen: std::collections::HashSet<String> = load_queued_keys(&queue_path);
 
     let mut n = 0usize;
+    // The first cycle, and every poll, asks every source.
+    let mut wake = Wake::Poll;
+    let mut next_poll = tokio::time::Instant::now() + interval;
     loop {
+        if wake == Wake::Poll {
+            next_poll = tokio::time::Instant::now() + interval;
+        } else {
+            eprintln!("[pilot] daemon cycle {n}: woken by {wake:?}");
+        }
         let results = wingman_autonomous::daemon::run_cycle(
             &runner,
             &project.root,
-            &pilot.daemon,
+            &watcher::cycle_config(&pilot.daemon, wake),
             propose_floor,
         );
         if results.is_empty() {
@@ -1977,7 +2013,8 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
 
         if deferred > 0 {
             eprintln!(
-                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a                  later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
+                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a \
+                 later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
             );
         }
 
@@ -1986,8 +2023,83 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
             eprintln!("[pilot] daemon: completed {n} cycle(s), exiting.");
             return Ok(ExitCode::SUCCESS);
         }
-        tokio::time::sleep(interval).await;
+        wake = match watcher.as_mut() {
+            Some(w) => w.wait(&runner, next_poll).await,
+            None => {
+                tokio::time::sleep(interval).await;
+                Wake::Poll
+            }
+        };
     }
+}
+
+/// J13 — install the git hooks that wake `pilot daemon --watch`.
+pub async fn hooks_install() -> Result<ExitCode> {
+    let root = ProjectPaths::discover(&std::env::current_dir()?).root;
+    let exe = std::env::current_exe().context("locating the wingman binary")?;
+    let result = wingman_autonomous::watcher::install_hooks(
+        &wingman_autonomous::pr::SystemCommandRunner,
+        &root,
+        &exe,
+    )
+    .map_err(|e| anyhow::anyhow!("pilot hooks install: {e}"))?;
+    for path in &result.installed {
+        println!("installed {}", path.display());
+    }
+    for path in &result.skipped {
+        eprintln!(
+            "[pilot] hooks: skipped {}: a hook wingman did not write is already there",
+            path.display()
+        );
+    }
+    // Git for Windows ignores the directory in a `#!` line and looks the
+    // binary's file name up on PATH; say so now rather than let every hook
+    // fail silently later.
+    if cfg!(windows) {
+        let name = exe.file_name().unwrap_or_default();
+        let on_path = std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()));
+        if !on_path {
+            eprintln!(
+                "[pilot] hooks: {} is not on PATH; Git for Windows finds the hooks' \
+                 interpreter there, so they will not run until it is",
+                name.to_string_lossy()
+            );
+        }
+    }
+    if !result.installed.is_empty() {
+        println!("Run `wingman pilot daemon --watch` to react to them.");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J13 — remove the git hooks `hooks_install` wrote.
+pub async fn hooks_uninstall() -> Result<ExitCode> {
+    let root = ProjectPaths::discover(&std::env::current_dir()?).root;
+    let removed = wingman_autonomous::watcher::uninstall_hooks(
+        &wingman_autonomous::pr::SystemCommandRunner,
+        &root,
+    )
+    .map_err(|e| anyhow::anyhow!("pilot hooks uninstall: {e}"))?;
+    if removed.is_empty() {
+        eprintln!("[pilot] hooks: no wingman hooks installed in this repo");
+    }
+    for path in &removed {
+        println!("removed {}", path.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J13 — the body of an installed git hook: record that `hook` fired for a
+/// watching daemon. Always exits 0; git ignores a post-hook's status anyway,
+/// and a failure here must never look like a failed commit.
+pub fn record_hook(hook: &str) -> ExitCode {
+    let recorded = std::env::current_dir()
+        .and_then(|cwd| wingman_autonomous::watcher::record_hook_event(&cwd, hook));
+    if let Err(e) = recorded {
+        eprintln!("wingman: {hook} hook: {e}");
+    }
+    ExitCode::SUCCESS
 }
 
 /// R2 — post-merge feedback poll. Each cycle walks every recorded run that

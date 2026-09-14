@@ -491,7 +491,15 @@ behaviour today.
   `// ASK: <question>` comment → research. The listeners (fs-watch, git hook,
   webhook) were never built. It also carried the tree's only `#!/bin/sh` git
   hook, which does not run on Windows — anything reviving this must install a
-  hook that works on all three platforms.
+  hook that works on all three platforms. **Revived as watch mode:**
+  `pilot daemon --watch` wakes the daemon on debounced file changes (the
+  local sources, including a new `ask` source for `// ASK:` comments) and on
+  git hooks from `pilot hooks install`, whose `#!` line is the wingman binary
+  itself rather than a shell. Reactions go through the daemon's existing
+  score, trust and dispatch cap instead of a separate event → action table.
+  An ASK is proposed as a pilot goal rather than answered by a dedicated
+  research worker, and the webhook legs (green dependabot PR, labelled issue)
+  are not built. See [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
 - **`toolsynth.rs` (J7 — tool synthesis).** Parsed a `ToolProposal` from an
   agent, validated it (name shape, JSON schema, duplicate detection), and
   deduplicated a batch of proposals. It only ever emitted scaffolds plus a

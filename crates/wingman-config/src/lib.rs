@@ -2980,6 +2980,11 @@ pub struct PilotDaemonConfig {
     /// needed. An optional first line `author: <name>` sets trust.
     #[serde(default = "default_intake_dir")]
     pub intake_dir: String,
+    /// J13 — under `pilot daemon --watch`, how long file and git-hook events
+    /// must go quiet before they wake a cycle. One save or one `git pull`
+    /// arrives as a burst of events; this collapses each burst into a single
+    /// cycle. Raise it if an editor or build tool keeps waking the daemon.
+    pub watch_debounce_ms: u64,
 }
 
 fn default_intake_dir() -> String {
@@ -3006,11 +3011,12 @@ impl Default for PilotDaemonConfig {
             auto_dispatch: false,
             max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
-            // coverage_gaps, intake. The default advertises only
+            // coverage_gaps, intake, ask. The default advertises only
             // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
+            watch_debounce_ms: 1000,
         }
     }
 }

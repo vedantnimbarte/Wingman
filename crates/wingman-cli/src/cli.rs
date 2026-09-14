@@ -645,6 +645,17 @@ pub enum PilotAction {
         /// letting the daemon act on its own.
         #[arg(long)]
         dry_run: bool,
+        /// J13 — also wake between polls: a file change runs the local
+        /// sources (todos, coverage_gaps, intake, ask), a git hook installed
+        /// by `pilot hooks install` runs every source.
+        #[arg(long)]
+        watch: bool,
+    },
+    /// J13 — git hooks that wake `pilot daemon --watch` on commit, merge,
+    /// checkout and rewrite. They run the wingman binary directly, no shell.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
     },
     /// J12 — skill packs: install (with dependencies and signature checks),
     /// search the index, list and re-verify installs. Bare `pilot skills`
@@ -759,6 +770,16 @@ pub enum IntakeChannel {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksAction {
+    /// Write post-commit, post-merge, post-checkout and post-rewrite hooks
+    /// into this repo's hooks directory. An existing hook that wingman did
+    /// not write is left alone and reported.
+    Install,
+    /// Remove the hooks `install` wrote, and nothing else.
+    Uninstall,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1080,6 +1101,15 @@ static REASONING_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::ne
 static PRESET_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub async fn run() -> Result<ExitCode> {
+    // Git running a `pilot hooks install` hook: the hook file's `#!` line is
+    // this binary, so argv is `wingman <hook-file> <git args>`, which clap
+    // would reject. Handled before parsing, and before config or logging, so
+    // a hook costs one small file write.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(hook) = wingman_autonomous::watcher::hook_invocation(&args) {
+        return Ok(commands::pilot::record_hook(hook));
+    }
+
     let cli = Cli::parse();
     if let Some(r) = cli.reasoning.clone() {
         let _ = REASONING_OVERRIDE.set(r);
@@ -1415,10 +1445,18 @@ pub async fn run() -> Result<ExitCode> {
                     out,
                 }) => commands::pilot::skills_digest(spec, dir, deps, out).await,
             },
-            PilotAction::Daemon { cycles, dry_run } => {
+            PilotAction::Daemon {
+                cycles,
+                dry_run,
+                watch,
+            } => {
                 let cfg = load_config()?;
-                commands::pilot::daemon(cfg, cycles, dry_run).await
+                commands::pilot::daemon(cfg, cycles, dry_run, watch).await
             }
+            PilotAction::Hooks { action } => match action {
+                HooksAction::Install => commands::pilot::hooks_install().await,
+                HooksAction::Uninstall => commands::pilot::hooks_uninstall().await,
+            },
             PilotAction::Abort { run_id, task } => {
                 commands::pilot::control_abort(run_id, task).await
             }

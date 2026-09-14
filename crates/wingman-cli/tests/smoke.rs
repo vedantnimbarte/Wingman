@@ -302,6 +302,59 @@ fn pilot_status_without_runs_does_not_panic() {
     );
 }
 
+/// J13 — the installed hooks are run by real git, through the real binary,
+/// with no shell script in between. This is the only test that proves the
+/// `#!<wingman>` hook actually executes on each CI platform (Git for Windows
+/// resolves the interpreter on PATH, hence the PATH prefix).
+#[test]
+fn pilot_hooks_signal_the_watcher_from_a_real_commit() {
+    let s = Scratch::new();
+    let bin_dir = PathBuf::from(env!("CARGO_BIN_EXE_wingman"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&s.dir)
+            .env("PATH", &path)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+
+    let out = wingman()
+        .args(["pilot", "hooks", "install"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot hooks install");
+    assert!(out.status.success(), "hooks install: {out:?}");
+    let hook = s.dir.join(".git").join("hooks").join("post-commit");
+    assert!(hook.is_file());
+
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+    let signal = s.dir.join(".wingman").join("watch").join("post-commit");
+    assert!(
+        signal.is_file(),
+        "the post-commit hook did not run wingman: {:?}",
+        std::fs::read_to_string(&hook)
+    );
+
+    let out = wingman()
+        .args(["pilot", "hooks", "uninstall"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot hooks uninstall");
+    assert!(out.status.success(), "hooks uninstall: {out:?}");
+    assert!(!hook.exists());
+}
+
 #[test]
 fn mcp_serve_answers_initialize() {
     // End-to-end MCP server check: spawn `wingman mcp-serve`, send one

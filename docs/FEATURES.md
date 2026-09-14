@@ -285,6 +285,13 @@ Wingman different; this is everything else it does.
   `autopilot` in a trusted project, otherwise `wingman pilot tools approve`.
   Synthesized tools run under `run_shell`'s own guards. Unvalidated against a
   live provider. See [PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
+- **Watch mode.** `wingman pilot daemon --watch` wakes the discovery daemon
+  between polls. A saved file runs the local sources, including `// ASK:`
+  comments. A commit, merge, checkout or rebase runs every source, through
+  hooks `wingman pilot hooks install` writes. The hooks run the wingman binary
+  directly on every platform, no shell script. Candidates go through the same
+  queue, trust and per-cycle dispatch cap. See
+  [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
 - **Skill packs.** `wingman pilot skills install | search | list | verify`
   shares pilot roles as versioned packs from a git-hosted index, resolving
   dependencies with caret rules and refusing unsigned packs unless told
