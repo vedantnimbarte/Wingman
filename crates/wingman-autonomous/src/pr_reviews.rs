@@ -28,6 +28,9 @@ use crate::store::RunStore;
 /// Marks a comment pilot posted, so its own replies (which carry the
 /// operator's `gh` login, usually a trusted author) never read as new review
 /// feedback, and so a thread whose last word is pilot's is not re-worked.
+/// Only honoured on a comment the `gh` user wrote (`viewerDidAuthor`): anyone
+/// can type the marker, and a stranger's copy must not hide a trusted
+/// reviewer's earlier ask.
 pub const REPLY_MARKER: &str = "<!-- wingman-pilot-review-round -->";
 
 /// Candidate `source` prefix; the daemon routes these to the rework path.
@@ -40,7 +43,7 @@ const MAX_CANDIDATES: usize = 20;
 // past that is not one to rework unattended; page when one shows up.
 const THREADS_QUERY: &str = "query($url: URI!) { resource(url: $url) { ... on PullRequest { \
     state headRefName headRefOid reviewThreads(first: 100) { nodes { id isResolved path line \
-    comments(first: 100) { nodes { databaseId author { login } body } } } } } } }";
+    comments(first: 100) { nodes { databaseId author { login } body viewerDidAuthor } } } } } } }";
 
 const REPLY_MUTATION: &str = "mutation($id: ID!, $body: String!) { \
     addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) \
@@ -125,7 +128,10 @@ pub fn parse_threads(pr: &serde_json::Value, trusted: &[String]) -> Vec<ReviewTh
         };
         let start = comments
             .iter()
-            .rposition(|c| body(c).contains(REPLY_MARKER))
+            .rposition(|c| {
+                c.get("viewerDidAuthor").and_then(|v| v.as_bool()) == Some(true)
+                    && body(c).contains(REPLY_MARKER)
+            })
             .map_or(0, |i| i + 1);
         let mut fresh = Vec::new();
         let mut latest = 0;
@@ -607,7 +613,7 @@ mod tests {
                 {"id": "T5", "isResolved": false, "path": "src/e.rs",
                  "comments": {"nodes": [
                     {"databaseId": 50, "author": {"login": "vedant"}, "body": "fix"},
-                    {"databaseId": 51, "author": {"login": "vedant"},
+                    {"databaseId": 51, "author": {"login": "vedant"}, "viewerDidAuthor": true,
                      "body": format!("{REPLY_MARKER}\nnot changed")}
                  ]}}
             ]}
@@ -640,8 +646,15 @@ mod tests {
         let v = serde_json::json!({"reviewThreads": {"nodes": [
             {"id": "T", "isResolved": false, "path": "x.rs", "comments": {"nodes": [
                 {"databaseId": 1, "author": {"login": "vedant"}, "body": "old ask"},
-                {"databaseId": 2, "author": {"login": "vedant"}, "body": REPLY_MARKER},
+                {"databaseId": 2, "author": {"login": "vedant"}, "body": REPLY_MARKER,
+                 "viewerDidAuthor": true},
                 {"databaseId": 3, "author": {"login": "vedant"}, "body": "still wrong"}
+            ]}},
+            // A stranger pasting the marker does not hide the trusted ask.
+            {"id": "U", "isResolved": false, "path": "y.rs", "comments": {"nodes": [
+                {"databaseId": 4, "author": {"login": "vedant"}, "body": "fix y"},
+                {"databaseId": 5, "author": {"login": "stranger"}, "body": REPLY_MARKER,
+                 "viewerDidAuthor": false}
             ]}}
         ]}});
         let threads = parse_threads(&v, &trusted());
@@ -650,6 +663,10 @@ mod tests {
             [("vedant".to_string(), "still wrong".to_string())]
         );
         assert_eq!(threads[0].latest_comment, 3);
+        assert_eq!(
+            threads[1].comments,
+            [("vedant".to_string(), "fix y".to_string())]
+        );
     }
 
     async fn pilot_run(root: &Path, branch: &str, pr_url: &str) -> PathBuf {
