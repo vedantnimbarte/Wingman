@@ -42,10 +42,13 @@ impl Selection {
 /// `class` in `repo`. `None` when learned routing is off, when no model has
 /// enough samples yet, or when `learn.db` cannot be read — never an error,
 /// because the static choice it would have replaced still stands.
-pub fn learned_model(min_samples: Option<u32>, class: &str, repo: &str) -> Option<String> {
-    let min_samples = min_samples?;
-    let winner = wingman_learn::StatsStore::open_default()
-        .and_then(|store| store.learned_winner(class, repo, min_samples));
+pub fn learned_model(cfg: &Config, class: &str, repo: &str) -> Option<String> {
+    let min_samples = cfg.router.learned_min_samples?;
+    let winner = wingman_learn::StatsStore::open_default().and_then(|store| {
+        store.learned_winner(class, repo, min_samples, |spec| {
+            learned_model_usable(cfg, spec)
+        })
+    });
     match winner {
         Ok(Some(model)) => {
             tracing::info!("learned routing: class '{class}' -> {model}");
@@ -57,6 +60,18 @@ pub fn learned_model(min_samples: Option<u32>, class: &str, repo: &str) -> Optio
             None
         }
     }
+}
+
+/// Whether a recorded `provider/model` can still run under `cfg`. Without
+/// this, a winner whose provider was since removed would be handed whole to
+/// the default provider as a model id, and one on a cloud provider would fail
+/// every session once `[privacy].local_only` is on.
+fn learned_model_usable(cfg: &Config, spec: &str) -> bool {
+    spec.split_once('/').is_some_and(|(provider, model)| {
+        !model.is_empty()
+            && cfg.providers.contains_key(provider)
+            && (!cfg.privacy.local_only || provider_is_local(cfg, provider))
+    })
 }
 
 /// Parse a model string. Either `provider/model` (preferred) or bare
@@ -847,8 +862,13 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
             // A live `indexd` owns this database and keeps writing to it.
             // Deleting it here would pull the file out from under the daemon
             // (or fail outright on Windows), so leave its index alone and let
-            // the user restart the daemon with the embedder they want.
-            if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir) {
+            // the user restart the daemon with the embedder they want. The
+            // daemon itself claims the pidfile before it opens the index, so
+            // its own pid is not a reason to refuse: it is the one restarted
+            // to do this rebuild.
+            if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir)
+                .filter(|&pid| pid != std::process::id())
+            {
                 eprintln!(
                     "wingman: the semantic index kept by indexd (pid {pid}) was built by a \
                      different embedder ({e}); `semantic_search` is disabled this session. \
@@ -2258,5 +2278,31 @@ mod affected_tests_tests {
         // A changed non-rs file contributes no crate.
         std::fs::write(root.join("README.md"), "x").unwrap();
         assert_eq!(changed_rust_crates(root), vec!["foo".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod learned_routing_tests {
+    use super::*;
+
+    #[test]
+    fn a_learned_pick_must_still_run_under_this_config() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "anthropic".into(),
+            wingman_config::ProviderConfig::default(),
+        );
+        cfg.providers
+            .insert("ollama".into(), wingman_config::ProviderConfig::default());
+        assert!(learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
+        // A provider since removed, or a bare id from before rows carried one.
+        assert!(!learned_model_usable(&cfg, "openai/gpt-4.1"));
+        assert!(!learned_model_usable(&cfg, "claude-opus"));
+        assert!(!learned_model_usable(&cfg, "anthropic/"));
+        // local_only rules out the cloud winner, not the local one.
+        cfg.privacy.local_only = true;
+        assert!(!learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
     }
 }

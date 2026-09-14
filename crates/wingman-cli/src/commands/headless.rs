@@ -34,11 +34,7 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     // configured default.
     let learned = match opts.model_override {
         Some(_) => None,
-        None => runtime::learned_model(
-            cfg.router.learned_min_samples,
-            wingman_learn::stats::SESSION_CLASS,
-            &repo,
-        ),
+        None => runtime::learned_model(&cfg, wingman_learn::stats::SESSION_CLASS, &repo),
     };
     let selection =
         runtime::resolve_selection(&cfg, opts.model_override.as_deref().or(learned.as_deref()))?;

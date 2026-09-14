@@ -315,7 +315,8 @@ pub fn durability_facts(
         // Lines the PR added that `git blame` still attributes to it. A squash
         // merge is one commit (the merge commit); a merge commit keeps the
         // PR's own. ponytail: a rebase merge re-hashes every commit but the
-        // last, so its surviving lines undercount; pilot merges squash.
+        // last, so its surviving lines undercount; pilot merges squash. A file
+        // a later commit renamed reads as deleted, and so as rewritten.
         let added: u64 = files.iter().filter_map(|f| f["additions"].as_u64()).sum();
         let mut ours: std::collections::HashSet<&str> = pr["commits"]
             .as_array()
@@ -324,18 +325,27 @@ pub fn durability_facts(
             .filter_map(|c| c["oid"].as_str())
             .collect();
         ours.insert(merge_sha);
-        let mut surviving = 0u64;
+        let mut surviving = Some(0u64);
         for path in &paths {
-            // A file gone from the base branch keeps none of its lines, and
-            // blame on it fails — which counts it as zero, correctly.
-            if let Some(out) = git(&["blame", "--line-porcelain", &base_ref, "--", path]) {
-                surviving += out
-                    .lines()
-                    .filter(|l| l.split(' ').next().is_some_and(|sha| ours.contains(sha)))
-                    .count() as u64;
+            match git(&["blame", "--line-porcelain", &base_ref, "--", path]) {
+                Some(out) => {
+                    if let Some(n) = surviving.as_mut() {
+                        *n += out
+                            .lines()
+                            .filter(|l| l.split(' ').next().is_some_and(|sha| ours.contains(sha)))
+                            .count() as u64;
+                    }
+                }
+                // Blame failing on a file that is still there is a question
+                // left unanswered, not proof the lines are gone.
+                None if git(&["cat-file", "-e", &format!("{base_ref}:{path}")]).is_some() => {
+                    surviving = None;
+                }
+                // A file gone from the base branch keeps none of its lines.
+                None => {}
             }
         }
-        facts.rewritten = Some(surviving * 2 < added);
+        facts.rewritten = surviving.map(|n| n * 2 < added);
 
         let ci_red = |sha: &str| -> Option<bool> {
             let body = gh_stdout(
@@ -718,6 +728,9 @@ mod tests {
         touched: &'static str,
         /// Lines of `a.rs` blame still attributes to the merge commit, of 10 added.
         surviving: usize,
+        /// Whether `git blame` runs, and whether `a.rs` is still on the base.
+        blame_ok: bool,
+        file_on_base: bool,
         /// `gh run list --commit` per sha.
         ci: Vec<(&'static str, &'static str)>,
         issue_state: Option<&'static str>,
@@ -732,6 +745,8 @@ mod tests {
                 log: "",
                 touched: "c1\n",
                 surviving: 8,
+                blame_ok: true,
+                file_on_base: true,
                 ci: vec![("m1", r#"[{"conclusion":"success"}]"#)],
                 issue_state: Some("CLOSED"),
             }
@@ -781,7 +796,8 @@ mod tests {
                 ("git", ["log", "--format=%H", ..]) => ok(self.touched.into()),
                 ("git", ["log", ..]) => ok(self.log.into()),
                 ("git", ["rev-list", ..]) => ok("c1\nc2\n".into()),
-                ("git", ["blame", ..]) => {
+                ("git", ["cat-file", ..]) if self.file_on_base => ok(String::new()),
+                ("git", ["blame", ..]) if self.blame_ok && self.file_on_base => {
                     let mut out = String::new();
                     for i in 0..10 {
                         let sha = if i < self.surviving { "m1" } else { "c1" };
@@ -856,6 +872,21 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(judge(&h), Some(Durability::Reverted));
+        // A file deleted since keeps none of its lines.
+        let deleted = History {
+            file_on_base: false,
+            ..Default::default()
+        };
+        assert_eq!(judge(&deleted), Some(Durability::Reverted));
+    }
+
+    #[test]
+    fn a_blame_that_fails_on_a_present_file_is_unanswered_not_rewritten() {
+        let h = History {
+            blame_ok: false,
+            ..Default::default()
+        };
+        assert_eq!(judge(&h), Some(Durability::Unknown));
     }
 
     #[test]

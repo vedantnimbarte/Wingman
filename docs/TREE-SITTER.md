@@ -93,7 +93,9 @@ When `treesitter` feature is enabled:
 | `imports`             | Module paths a file imports (`use`, `import`, `require`). |
 | `ParserPool`          | Reusable thread-local parser cache.                       |
 
-When feature disabled, all return empty Vec/None (inert fallbacks).
+When feature disabled, the symbol functions return empty Vec/None (inert
+fallbacks). `imports` has no fallback: its caller (`read_file` prefetch)
+gates on the feature and warms only siblings without it.
 
 ## Integration Points
 

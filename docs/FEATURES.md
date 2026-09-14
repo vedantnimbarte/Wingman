@@ -261,7 +261,8 @@ Wingman different; this is everything else it does.
   this repo, the best of them (skipping any whose PRs were reverted more often
   than they held) serves that class — the session model when no `--model` is
   given, and each pilot worker role's first attempt. Off by default; it only
-  chooses among models that have already run the class.
+  chooses among models that have already run the class and whose provider is
+  still configured (and local, under `[privacy].local_only`).
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
   why it matters" walkthrough of the working diff (routed as the `summarize`
   class, which is the fast model unless `[router.classes]` says otherwise),

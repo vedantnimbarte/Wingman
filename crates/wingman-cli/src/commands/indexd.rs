@@ -402,6 +402,21 @@ mod tests {
         assert_eq!(read_pid(&pidfile(dir.path())), Some(std::process::id()));
     }
 
+    /// The daemon claims the pidfile before opening the index, so a mismatch
+    /// guard that only asked "is indexd live?" made a restarted daemon refuse
+    /// the very rebuild its restart was for.
+    #[test]
+    fn the_daemon_itself_rebuilds_an_index_from_another_embedder() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::from_root(dir.path().to_path_buf());
+        std::fs::create_dir_all(&paths.dir).unwrap();
+        drop(wingman_rag::IndexStore::open(&paths.index_db, "some-other-embedder", 3).unwrap());
+        let Ok(_guard) = claim_pidfile(&paths.dir).unwrap() else {
+            panic!("claim refused");
+        };
+        assert!(runtime::build_indexer(&paths).unwrap().is_some());
+    }
+
     #[tokio::test]
     async fn stop_request_file_is_consumed() {
         let dir = tempfile::tempdir().unwrap();

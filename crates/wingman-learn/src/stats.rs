@@ -423,7 +423,8 @@ impl StatsStore {
         let ts = Utc::now().to_rfc3339();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO routing_outcome(task_class, model, repo, ts, passed, session_id)              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO routing_outcome(task_class, model, repo, ts, passed, session_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![task_class, model, repo, ts, passed as i64, session_id],
         )?;
         Ok(())
@@ -456,7 +457,10 @@ impl StatsStore {
             n += conn.execute(
                 // `ON CONFLICT DO NOTHING`, not `OR IGNORE`: the latter also
                 // swallows the CHECK on `verdict`, and a typo would vanish.
-                "INSERT INTO routing_verdict(pr, task_class, model, repo, ts, verdict)                  SELECT DISTINCT ?1, task_class, model, repo, ?2, ?3                  FROM routing_outcome WHERE session_id = ?4                  ON CONFLICT DO NOTHING",
+                "INSERT INTO routing_verdict(pr, task_class, model, repo, ts, verdict) \
+                 SELECT DISTINCT ?1, task_class, model, repo, ?2, ?3 \
+                 FROM routing_outcome WHERE session_id = ?4 \
+                 ON CONFLICT DO NOTHING",
                 params![pr, ts, verdict, session_id],
             )?;
         }
@@ -471,7 +475,21 @@ impl StatsStore {
         let conn = self.conn.lock().unwrap();
         // `?1 IS NULL` short-circuits the repo filter when no repo is given.
         let mut stmt = conn.prepare(
-            "SELECT o.task_class, o.model, o.passes, o.total,                     COALESCE(v.held, 0), COALESCE(v.reverted, 0), COALESCE(v.unknown, 0)              FROM (SELECT task_class, model, SUM(passed) AS passes, COUNT(*) AS total                    FROM routing_outcome                    WHERE (?1 IS NULL OR repo = ?1)                    GROUP BY task_class, model) o              LEFT JOIN (SELECT task_class, model,                           SUM(verdict = 'held') AS held,                           SUM(verdict = 'reverted') AS reverted,                           SUM(verdict = 'unknown') AS unknown                         FROM routing_verdict                         WHERE (?1 IS NULL OR repo = ?1)                         GROUP BY task_class, model) v                ON v.task_class = o.task_class AND v.model = o.model              ORDER BY o.task_class ASC, (CAST(o.passes AS REAL) / o.total) DESC, o.total DESC",
+            "SELECT o.task_class, o.model, o.passes, o.total, \
+                    COALESCE(v.held, 0), COALESCE(v.reverted, 0), COALESCE(v.unknown, 0) \
+             FROM (SELECT task_class, model, SUM(passed) AS passes, COUNT(*) AS total \
+                   FROM routing_outcome \
+                   WHERE (?1 IS NULL OR repo = ?1) \
+                   GROUP BY task_class, model) o \
+             LEFT JOIN (SELECT task_class, model, \
+                          SUM(verdict = 'held') AS held, \
+                          SUM(verdict = 'reverted') AS reverted, \
+                          SUM(verdict = 'unknown') AS unknown \
+                        FROM routing_verdict \
+                        WHERE (?1 IS NULL OR repo = ?1) \
+                        GROUP BY task_class, model) v \
+               ON v.task_class = o.task_class AND v.model = o.model \
+             ORDER BY o.task_class ASC, (CAST(o.passes AS REAL) / o.total) DESC, o.total DESC",
         )?;
         let rows = stmt.query_map(params![repo], |r| {
             let count = |i: usize| r.get::<_, i64>(i).map(|n| n as u32);
@@ -495,18 +513,24 @@ impl StatsStore {
     /// The model learned routing picks for `task_class` in `repo`: the best
     /// gate pass-rate among models with at least `min_samples` gate results
     /// there, passing over any whose merged PRs were reverted more often than
-    /// they held. `None` until some model has enough samples.
+    /// they held, and over any this session cannot run (`usable` is false:
+    /// its provider has since left the config, say). `None` until some usable
+    /// model has enough samples.
     pub fn learned_winner(
         &self,
         task_class: &str,
         repo: &str,
         min_samples: u32,
+        usable: impl Fn(&str) -> bool,
     ) -> Result<Option<String>> {
         Ok(self
             .routing_summary(Some(repo))?
             .into_iter()
             .find(|s| {
-                s.task_class == task_class && s.total >= min_samples.max(1) && s.reverted <= s.held
+                s.task_class == task_class
+                    && s.total >= min_samples.max(1)
+                    && s.reverted <= s.held
+                    && usable(&s.model)
             })
             .map(|s| s.model))
     }
@@ -960,27 +984,28 @@ mod tests {
         rec("big", "s2", true);
         rec("big", "s2", false);
 
-        assert_eq!(store.learned_winner("default", "r", 5).unwrap(), None);
+        let any = |_: &str| true;
+        let win = |class: &str, repo: &str, n: u32| store.learned_winner(class, repo, n, any);
+        assert_eq!(win("default", "r", 5).unwrap(), None);
+        assert_eq!(win("default", "r", 3).unwrap().as_deref(), Some("big"));
+        assert_eq!(win("default", "r", 1).unwrap().as_deref(), Some("fast"));
+        // Other classes and repos are not evidence for this one.
+        assert_eq!(win("tester", "r", 1).unwrap(), None);
+        assert_eq!(win("default", "x", 1).unwrap(), None);
+        // A model this session cannot run gives way to the next best.
         assert_eq!(
-            store.learned_winner("default", "r", 3).unwrap().as_deref(),
+            store
+                .learned_winner("default", "r", 1, |m| m != "fast")
+                .unwrap()
+                .as_deref(),
             Some("big")
         );
-        assert_eq!(
-            store.learned_winner("default", "r", 1).unwrap().as_deref(),
-            Some("fast")
-        );
-        // Other classes and repos are not evidence for this one.
-        assert_eq!(store.learned_winner("tester", "r", 1).unwrap(), None);
-        assert_eq!(store.learned_winner("default", "x", 1).unwrap(), None);
 
         // Green gates do not rescue a model whose merged work did not hold.
         store
             .record_verdict("pr/1", &["s1".to_string()], "reverted")
             .unwrap();
-        assert_eq!(
-            store.learned_winner("default", "r", 1).unwrap().as_deref(),
-            Some("big")
-        );
+        assert_eq!(win("default", "r", 1).unwrap().as_deref(), Some("big"));
         let _ = std::fs::remove_file(&p);
     }
 

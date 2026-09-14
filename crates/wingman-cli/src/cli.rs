@@ -1415,7 +1415,7 @@ pub async fn run() -> Result<ExitCode> {
             // explicit --model always wins.
             let model_flag = cli.model.clone().or_else(|| {
                 crate::runtime::learned_model(
-                    cfg.router.learned_min_samples,
+                    &cfg,
                     wingman_learn::stats::SESSION_CLASS,
                     &project.root.to_string_lossy(),
                 )

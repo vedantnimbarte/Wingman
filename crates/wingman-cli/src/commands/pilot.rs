@@ -1522,12 +1522,16 @@ pub async fn resume(
     Ok(ExitCode::SUCCESS)
 }
 
-/// `[router].learned_min_samples` paired with the repo key routing rows are
-/// recorded under, or `None` when learned routing is off.
-fn learned_routing(cfg: &Config, project_root: &std::path::Path) -> Option<(u32, String)> {
+/// The config learned routing reads (`[router].learned_min_samples`, and the
+/// providers a pick must still resolve to) paired with the repo key routing
+/// rows are recorded under, or `None` when learned routing is off.
+fn learned_routing(
+    cfg: &Config,
+    project_root: &std::path::Path,
+) -> Option<std::sync::Arc<(Config, String)>> {
     cfg.router
         .learned_min_samples
-        .map(|n| (n, project_root.to_string_lossy().to_string()))
+        .map(|_| std::sync::Arc::new((cfg.clone(), project_root.to_string_lossy().to_string())))
 }
 
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
@@ -1542,14 +1546,14 @@ fn learned_routing(cfg: &Config, project_root: &std::path::Path) -> Option<(u32,
 /// threshold is dispatched straight to the capable model instead of
 /// burning a first attempt that history says will fail.
 ///
-/// `learned` is `[router].learned_min_samples` and the repo it reads
-/// `learn.db` for. When set, and a model has won the task's role there, that
-/// model takes the base attempt ahead of the E6 choice.
+/// `learned` is the config with `[router].learned_min_samples` set and the
+/// repo it reads `learn.db` for. When set, and a model has won the task's role
+/// there, that model takes the base attempt ahead of the E6 choice.
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
-    learned: Option<(u32, String)>,
+    learned: Option<std::sync::Arc<(Config, String)>>,
     task_timeout: std::time::Duration,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
@@ -1568,9 +1572,7 @@ fn build_real_worker_spawner(
                 // learned routing, then E6 adaptive routing, picks the base
                 // model per role.
                 let learned_pick = match (&learned, ctx.escalate_model) {
-                    (Some((n, repo)), false) => {
-                        runtime::learned_model(Some(*n), ctx.task.role.as_str(), repo)
-                    }
+                    (Some(l), false) => runtime::learned_model(&l.0, ctx.task.role.as_str(), &l.1),
                     _ => None,
                 };
                 let model = if ctx.escalate_model {
