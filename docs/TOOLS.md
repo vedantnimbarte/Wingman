@@ -507,13 +507,23 @@ definition line itself. Args: `name` (required), `glob`, `limit`.
 
 **Returns:**
 ```
+(via whole-word name match (heuristic: may include same-named symbols))
 crates/wingman-ts/src/parse.rs:257  [in fn semantic_chunks]  let symbols = extract_symbols(lang, src);
 crates/wingman-ts/src/parse.rs:370  [in fn outline]          let symbols = extract_symbols(lang, src);
 ```
 
 **Notes:**
-- Whole-word, case-sensitive name match — a name-based heuristic, not resolved
-  references, so it can over-report same-named symbols and miss dynamic calls.
+- The first line names the method that produced the answer. Tree-sitter finds
+  the definitions of `name` (up to five), and when a language server is on
+  `PATH` for a defining file the tool asks it, in order:
+  `callHierarchy/incomingCalls` (resolved callers, `[in <caller>]` named by the
+  server), then `textDocument/references` (resolved, mentions as well as
+  calls). The first method with a non-empty answer wins.
+- With no server, a server that declines both methods or stops answering, or
+  an empty resolved answer (a cold server still indexing looks the same as no
+  callers), it falls back to a whole-word, case-sensitive name match, which
+  can over-report same-named symbols and miss dynamic calls.
+- `glob` filters the reported sites, not where the definition may live.
 - Pair with `find_symbol` (definition) for the full picture of a symbol.
 
 ### `outline`

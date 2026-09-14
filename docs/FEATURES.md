@@ -208,7 +208,9 @@ Wingman different; this is everything else it does.
   typescript-language-server, gopls) — the semantic upgrade over the
   tree-sitter heuristics. Tools `lsp_definition`, `lsp_references`, `lsp_hover`,
   `lsp_diagnostics`, `lsp_rename` degrade gracefully to the heuristic tools when
-  no server is installed. See [LSP.md](LSP.md).
+  no server is installed. `who_calls` answers from the server's call hierarchy
+  (then its references) when one is installed, and says which method it used.
+  See [LSP.md](LSP.md).
 - **LSP-backed verification receipts.** The post-edit turn gate can fold the
   language server's diagnostics for the *changed* files into the verdict
   (`[verify].lsp_diagnostics`), so a change that introduces a type error the

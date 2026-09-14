@@ -24,6 +24,11 @@ When no server is installed for a file's language, the LSP tools return a short
 note telling the agent to fall back to `find_symbol` / `who_calls` — a graceful
 degrade, not an error.
 
+`who_calls` itself uses the server when one is there: it asks for
+`callHierarchy/incomingCalls` at the symbol's definition, then
+`textDocument/references`, and only then name-matches. Its first output line
+says which of the three answered.
+
 The client (`wingman-lsp`) speaks JSON-RPC over stdio directly (raw wire JSON,
 no protocol-types dependency), performs the `initialize`/`initialized`
 handshake, opens documents on demand, and keeps one warm server per language per
