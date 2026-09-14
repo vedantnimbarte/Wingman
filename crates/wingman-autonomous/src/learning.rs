@@ -44,7 +44,8 @@ pub struct StatRecord {
     /// Coarse task category for finer routing (e.g. "edit", "refactor").
     #[serde(default)]
     pub task_kind: Option<String>,
-    /// Did the task pass acceptance on the first worker turn?
+    /// Did the task pass on its first worker attempt, with no retry rung?
+    /// See [`first_try_ok`].
     pub first_try_ok: bool,
     /// Post-merge outcome, once R2's poller observes it. `None` until then.
     #[serde(default)]
@@ -200,6 +201,32 @@ pub fn stats_path(home: &Path) -> PathBuf {
 pub fn append_stat(path: &Path, rec: &StatRecord) -> io::Result<()> {
     let line = serde_json::to_string(rec).map_err(io::Error::other)?;
     wingman_config::append_line(path, &line)
+}
+
+/// Did `task` pass on its first worker attempt, with no retry-ladder rung?
+///
+/// Read from the run's `task.attempt` events: true when the task finished in
+/// Review or Done (the pipeline merges Review tasks and marks them Done) and
+/// every attempt recorded for it ran on rung 0 without failing. A retry, a
+/// model escalation, a split, or a reviewer rework (which is retried) all
+/// leave a failed attempt or a later rung behind. A task with no recorded
+/// attempt never ran a worker, so it is not a first-try success.
+pub fn first_try_ok(events: &[crate::model::Event], task: &crate::model::Task) -> bool {
+    use crate::model::{Event, TaskStatus};
+    let attempts: Vec<(u32, TaskStatus)> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::TaskAttempt {
+                id, rung, status, ..
+            } if *id == task.id => Some((*rung, *status)),
+            _ => None,
+        })
+        .collect();
+    matches!(task.status, TaskStatus::Review | TaskStatus::Done)
+        && !attempts.is_empty()
+        && attempts
+            .iter()
+            .all(|&(rung, status)| rung == 0 && status != TaskStatus::Failed)
 }
 
 /// Load all records, tolerating blank/corrupt lines (skips them). Returns
@@ -397,6 +424,36 @@ pub fn render_priming(goal: &str, past: &[StatRecord], k: usize) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_try_needs_one_clean_rung_zero_run() {
+        use crate::model::{Event, Role, Task, TaskStatus};
+        let attempt = |rung: u32, status: TaskStatus| Event::TaskAttempt {
+            t: String::new(),
+            id: "t1".into(),
+            agent: "a".into(),
+            rung,
+            model: None,
+            status,
+            summary: String::new(),
+            tests: Default::default(),
+        };
+        let mut task = Task::new("t1", Role::Developer, "x");
+        task.status = TaskStatus::Review;
+        assert!(first_try_ok(&[attempt(0, TaskStatus::Review)], &task));
+        // Never ran a worker.
+        assert!(!first_try_ok(&[], &task));
+        // A reviewer rework is retried on the next rung.
+        let reworked = [
+            attempt(0, TaskStatus::Review),
+            attempt(1, TaskStatus::Review),
+        ];
+        task.status = TaskStatus::Done;
+        assert!(!first_try_ok(&reworked, &task));
+        // Green once, but the task did not finish.
+        task.status = TaskStatus::Blocked;
+        assert!(!first_try_ok(&[attempt(0, TaskStatus::Review)], &task));
+    }
 
     fn rec(
         run: &str,

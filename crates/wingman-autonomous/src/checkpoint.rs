@@ -1,11 +1,12 @@
 //! E11 — mandatory checkpoint hygiene.
 //!
-//! The worker system prompt mandates `wingman checkpoint` before any
-//! multi-file edit and after each acceptance-green milestone, so a bad
-//! turn is recoverable (and the E5 turn-gate has a snapshot to roll back
-//! to). This module is the orchestrator's *verifier*: before a task is
-//! allowed to enter `review`, confirm — from the recorded `task.tool`
-//! event stream — that the worker actually checkpointed.
+//! The worker system prompt mandates the `checkpoint` tool
+//! ([`crate::tools::Checkpoint`]) before any multi-file edit and after each
+//! acceptance-green milestone, so a bad turn is recoverable. This module is
+//! the *verifier*: with the `checkpoint_hygiene` capability on, the worker
+//! supervisor ([`crate::worker::run_worker`]) confirms from the attempt's
+//! recorded `task.tool` events that the worker actually checkpointed before
+//! it lets the task enter `review`, and fails the attempt otherwise.
 //!
 //! Two rules:
 //!
@@ -110,9 +111,16 @@ pub fn verify(calls: &[ToolCall]) -> CheckpointVerdict {
     CheckpointVerdict::Ok
 }
 
-/// Extract a task's tool calls (in order) from a slice of run events.
+/// Extract the tool calls (in order) of a task's latest attempt from a slice
+/// of run events: those recorded since its last `task.assign`, or all of them
+/// when it was never assigned. An earlier attempt's edits say nothing about
+/// whether this one checkpointed.
 pub fn tool_calls_for_task(events: &[Event], task_id: &str) -> Vec<ToolCall> {
-    events
+    let since = events
+        .iter()
+        .rposition(|e| matches!(e, Event::TaskAssign { id, .. } if id == task_id))
+        .map_or(0, |i| i + 1);
+    events[since..]
         .iter()
         .filter_map(|e| match e {
             Event::TaskTool { id, tool, file, .. } if id == task_id => Some(ToolCall {
@@ -518,5 +526,38 @@ mod tests {
         assert_eq!(calls[0].tool, "edit_file");
         assert_eq!(calls[0].file.as_deref(), Some("a.rs"));
         assert_eq!(calls[1].tool, "checkpoint");
+    }
+
+    /// A retry that checkpointed is not failed for the attempt before it.
+    #[test]
+    fn tool_calls_for_task_reads_only_the_latest_attempt() {
+        let tool = |name: &str, file: Option<&str>| Event::TaskTool {
+            t: "t".into(),
+            id: "t1".into(),
+            agent: "a".into(),
+            tool: name.into(),
+            input_hash: None,
+            file: file.map(String::from),
+            ok: true,
+        };
+        let assign = |agent: &str| Event::TaskAssign {
+            t: "t".into(),
+            id: "t1".into(),
+            agent: agent.into(),
+            worktree: "wt".into(),
+        };
+        let events = vec![
+            assign("a1"),
+            tool("edit_file", Some("a.rs")),
+            tool("edit_file", Some("b.rs")),
+            assign("a2"),
+            tool("checkpoint", None),
+            tool("edit_file", Some("a.rs")),
+            tool("edit_file", Some("b.rs")),
+        ];
+        let calls = tool_calls_for_task(&events, "t1");
+        assert_eq!(calls.len(), 3);
+        assert!(verify(&calls).is_ok());
+        assert!(!verify(&tool_calls_for_task(&events[..3], "t1")).is_ok());
     }
 }

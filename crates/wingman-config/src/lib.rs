@@ -2581,10 +2581,22 @@ pub struct PilotConfig {
     /// ladder as exhausted when it had barely started.
     #[serde(default = "default_max_retries_per_task")]
     pub max_retries_per_task: u32,
-    /// Model for the per-task reviewer / critic. Defaults to `default_model`
-    /// when unset — point it at a stronger model for tougher review.
+    /// Model for the per-task reviewer, and for the critic when `critic_model`
+    /// is unset. Defaults to `default_model` when unset — point it at a
+    /// stronger model for tougher review.
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// J10 — model for the critic agent (`provider/model_id`). Defaults to
+    /// `reviewer_model`, then `default_model`. Choose one from another family
+    /// than `worker_model`: a critic with the workers' blind spots agrees
+    /// with them.
+    #[serde(default)]
+    pub critic_model: Option<String>,
+    /// J10 — refuse to start a run whose critic shares `worker_model`'s model
+    /// family, or whose family (either side) Wingman cannot tell from the
+    /// name. Checked only while the `critic` capability is on.
+    #[serde(default)]
+    pub critic_other_family: bool,
     pub max_concurrent_agents: u32,
     pub max_usd: f64,
     /// Hard cap on total tokens (in + out) for a pilot run. 0 disables.
@@ -2648,6 +2660,8 @@ impl Default for PilotConfig {
             worker_model: None,
             max_retries_per_task: default_max_retries_per_task(),
             reviewer_model: None,
+            critic_model: None,
+            critic_other_family: false,
             max_concurrent_agents: 4,
             max_usd: 10.0,
             max_total_tokens: default_max_total_tokens(),

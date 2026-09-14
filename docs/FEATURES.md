@@ -44,8 +44,12 @@ Wingman different; this is everything else it does.
   A merge conflict the one-shot resolver cannot clear goes to merge-fixer
   workers before the run stops. After each merged run the project knowledge
   layer (architecture summary, decisions, merge hotspots) is updated, by a
-  knowledge-keeper agent on autopilot, and the planner reads it back.
-  See [PILOT-MODE.md](PILOT-MODE.md).
+  knowledge-keeper agent on autopilot, and the planner reads it back. On
+  autopilot, multi-file work that never called the `checkpoint` tool is failed
+  before review. A critic model, which can be required to come from a different
+  model family than the workers, adds guardrail tasks to the plan and can veto
+  auto-merge. Cross-run stats count a task as a first-try success only when no
+  retry rung ran. See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
   freshness.

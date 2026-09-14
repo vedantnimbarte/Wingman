@@ -74,6 +74,10 @@ pub struct WorkerSpec {
     /// restores the worktree to the last state that passed the gate. 0 turns
     /// rollback off. Forwarded as `--turn-rollback-after`.
     pub turn_rollback_after: u32,
+    /// E11 — hold the attempt out of Review unless its recorded tool calls
+    /// satisfy checkpoint hygiene ([`crate::checkpoint::verify`]), and tell the
+    /// worker so in its prompt. Forwarded as `--checkpoint-hygiene`.
+    pub checkpoint_hygiene: bool,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -145,6 +149,9 @@ pub async fn run_worker(
         sc.command_mut()
             .arg("--turn-rollback-after")
             .arg(spec.turn_rollback_after.to_string());
+    }
+    if spec.checkpoint_hygiene {
+        sc.command_mut().arg("--checkpoint-hygiene");
     }
 
     let mut supervisor = sc.spawn()?;
@@ -422,7 +429,7 @@ pub async fn run_worker(
     // E3 gate: if the task declared acceptance checks, the worker MUST
     // have returned green results in order to move to Review. Otherwise
     // the task lands in Failed for the retry watchdog to pick up.
-    let final_status = compute_final_status(
+    let mut final_status = compute_final_status(
         &outcome,
         status.success(),
         &spec.task.acceptance,
@@ -436,6 +443,19 @@ pub async fn run_worker(
             summary = %crate::acceptance::summarize(&acceptance),
             "acceptance checks failed; gating to Failed (E3)"
         );
+    }
+
+    // E11 gate: green multi-file work that never checkpointed does not enter
+    // Review either. It fails like a red check, so the retry ladder hands the
+    // next attempt the reason.
+    let hygiene_violation = if spec.checkpoint_hygiene && acceptance_green {
+        checkpoint_violation(store, &spec.task.id).await
+    } else {
+        None
+    };
+    if let Some(reason) = &hygiene_violation {
+        tracing::warn!(target: "pilot::worker", task = %spec.task.id, "{reason}; gating to Failed (E11)");
+        final_status = TaskStatus::Failed;
     }
 
     // A worker that fails the E3 gate without calling `task_complete` has no
@@ -453,6 +473,20 @@ pub async fn run_worker(
             files_changed: crate::worktree::changed_files(&spec.worktree),
         }),
         (None, _) => None,
+    };
+    let recorded_outcome = match hygiene_violation {
+        Some(reason) => Some(TaskOutcome {
+            summary: format!(
+                "{reason}; the work itself reported: {}",
+                recorded_outcome
+                    .as_ref()
+                    .map_or("nothing", |o| o.summary.as_str())
+            ),
+            files_changed: recorded_outcome
+                .map(|o| o.files_changed)
+                .unwrap_or_default(),
+        }),
+        None => recorded_outcome,
     };
 
     record_attempt(
@@ -501,6 +535,32 @@ pub async fn run_worker(
         outcome: recorded_outcome,
         exit_code,
     })
+}
+
+/// E11 — why the latest attempt on `task_id` may not enter Review under
+/// checkpoint hygiene, or `None` when it may. Reads the attempt's `task.tool`
+/// events, which the stdout parser has finished writing by the time the
+/// attempt ends. An unreadable log lets the attempt through: the gate is about
+/// recoverability, and failing finished work over a log read would cost more
+/// than it protects.
+async fn checkpoint_violation(
+    store: &tokio::sync::Mutex<RunStore>,
+    task_id: &str,
+) -> Option<String> {
+    let events = match store.lock().await.read_events().await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(target: "pilot::worker", task = %task_id, "checkpoint hygiene not checked: {e}");
+            return None;
+        }
+    };
+    match crate::checkpoint::verify(&crate::checkpoint::tool_calls_for_task(&events, task_id)) {
+        crate::checkpoint::CheckpointVerdict::Ok => None,
+        crate::checkpoint::CheckpointVerdict::Violation { reason } => Some(format!(
+            "checkpoint hygiene: {reason}. Call the `checkpoint` tool before editing a second \
+             file"
+        )),
+    }
 }
 
 /// Record a task failure that carries an explanation.
@@ -1221,6 +1281,7 @@ mod tests {
             cmd_rx: None,
             rung: 2,
             turn_rollback_after: 0,
+            checkpoint_hygiene: false,
         };
         record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 
@@ -1244,6 +1305,54 @@ mod tests {
         let status = log.find("\"ev\":\"task.status\"").expect("status recorded");
         assert!(attempt < status, "{log}");
         assert!(log.contains("\"rung\":2") && log.contains("\"model\":\"haiku\""));
+    }
+
+    /// E11: multi-file work reaches Review only when this attempt checkpointed.
+    #[tokio::test]
+    async fn checkpoint_violation_reads_the_attempts_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::create(dir.path(), "r1", "goal", "base", "branch")
+            .await
+            .unwrap();
+        let store = tokio::sync::Mutex::new(store);
+        let tool = |name: &str, file: &str| Event::TaskTool {
+            t: RunStore::now(),
+            id: "t1".into(),
+            agent: "agent-0001".into(),
+            tool: name.into(),
+            input_hash: None,
+            file: Some(file.into()),
+            ok: true,
+        };
+        for ev in [tool("edit_file", "a.rs"), tool("write_file", "b.rs")] {
+            store.lock().await.append(ev).await.unwrap();
+        }
+        let reason = checkpoint_violation(&store, "t1").await.expect("violation");
+        assert!(
+            reason.contains("rule 1") && reason.contains("`checkpoint` tool"),
+            "{reason}"
+        );
+
+        // The retry checkpoints first and passes.
+        store
+            .lock()
+            .await
+            .append(Event::TaskAssign {
+                t: RunStore::now(),
+                id: "t1".into(),
+                agent: "agent-0002".into(),
+                worktree: "wt".into(),
+            })
+            .await
+            .unwrap();
+        for ev in [
+            tool("checkpoint", ""),
+            tool("edit_file", "a.rs"),
+            tool("write_file", "b.rs"),
+        ] {
+            store.lock().await.append(ev).await.unwrap();
+        }
+        assert_eq!(checkpoint_violation(&store, "t1").await, None);
     }
 
     /// Observed on run 2026-08-21-1920-xoyw4q: t1 declared three acceptance

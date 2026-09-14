@@ -83,9 +83,11 @@ pub struct PipelineInputs {
     pub disabled_tools: Vec<String>,
     /// E7 — run a per-task reviewer agent after the run. Off by default.
     pub run_reviewer: bool,
-    /// J10 — run a critic agent before the auto-merge gate. Off by default.
-    pub run_critic: bool,
-    /// Model the reviewer/critic agents run on (usually `default_model`).
+    /// J10 — the critic agent that runs before the auto-merge gate; `None`
+    /// skips it. The CLI resolves it from `[pilot].critic_model`, so it can
+    /// sit on another provider than the manager.
+    pub critic: Option<AuxAgent>,
+    /// Model the reviewer agent runs on (usually `default_model`).
     pub reviewer_model: String,
     /// J11 default sandbox tier ("host" | "container" | "vm"); per-task
     /// tiers are escalated from this floor by `sandbox::select_tier`.
@@ -100,13 +102,13 @@ pub struct PipelineInputs {
     /// J8 — run the knowledge-keeper agent after the PR opens. `None` keeps
     /// only the deterministic knowledge upkeep (module map, hotspots, one
     /// decision record per run).
-    pub knowledge_keeper: Option<KnowledgeKeeper>,
+    pub knowledge_keeper: Option<AuxAgent>,
 }
 
-/// J8 — where the knowledge-keeper pass runs: the CLI routes it through the
-/// `summarize` task class (`[router.classes]`), so it lands on the fast model
-/// when one is configured.
-pub struct KnowledgeKeeper {
+/// The provider and model one of the pipeline's side agents runs on: the J8
+/// knowledge-keeper (routed through the `summarize` task class, so usually the
+/// fast model) or the J10 critic (`[pilot].critic_model`).
+pub struct AuxAgent {
     pub provider: Arc<dyn Provider>,
     pub model: String,
 }
@@ -185,8 +187,8 @@ pub async fn run_to_completion(
         })
         .await?;
 
-    // Keep a handle to the provider for the post-run critic (J10) pass and
-    // the E7 inline reviewer — `build_manager` consumes the original Arc.
+    // Keep a handle to the provider for the E7 inline reviewer and the E4
+    // conflict resolver — `build_manager` consumes the original Arc.
     let aux_provider = inputs.provider.clone();
 
     // E7 — build the inline reviewer that gates each task's finalize. When
@@ -313,7 +315,12 @@ pub async fn run_to_completion(
     // E6 — record one cross-run stat per task so the adaptive router and
     // J9 estimator have history to learn from on later runs.
     if let Some(stats_path) = &inputs.stats_path {
-        record_run_stats(stats_path, &final_state, &inputs.worker_model);
+        record_run_stats(
+            stats_path,
+            &final_state,
+            &read_run_events(&run_dir).await,
+            &inputs.worker_model,
+        );
     }
 
     // J11 — compute the sandbox tier each task should run in, escalating
@@ -667,18 +674,20 @@ pub async fn run_to_completion(
 
     // J10 — critic pass (opt-in). A high+ risk vetoes auto-merge.
     let mut critic_usage = wingman_core::Usage::default();
-    let critic_vetoed = if inputs.run_critic {
-        run_critic_pass(
-            aux_provider.as_ref(),
-            &inputs.reviewer_model,
-            &snapshot_for_pr,
-            &mut critic_usage,
-        )
-        .await
-    } else {
-        false
+    let critic_vetoed = match &inputs.critic {
+        Some(critic) => {
+            let vetoed = run_critic_pass(
+                critic.provider.as_ref(),
+                &critic.model,
+                &snapshot_for_pr,
+                &mut critic_usage,
+            )
+            .await;
+            record_phase_usage(&mut store, "critic", &critic.model, &critic_usage).await;
+            vetoed
+        }
+        None => false,
     };
-    record_phase_usage(&mut store, "critic", &inputs.reviewer_model, &critic_usage).await;
 
     // E8 — auto-merge gate. Combine the available signals and decide
     // whether to merge automatically. When it decides Merge and the PR was
@@ -1820,6 +1829,7 @@ async fn compute_checkpoint_violations(
 fn record_run_stats(
     stats_path: &std::path::Path,
     state: &crate::model::RunState,
+    events: &[Event],
     worker_model: &str,
 ) {
     for task in &state.tasks {
@@ -1828,10 +1838,7 @@ fn record_run_stats(
             role: task.role.as_str().to_string(),
             model: worker_model.to_string(),
             task_kind: None,
-            // Proxy: a task that reached Done passed; refinement (true
-            // first-try detection) lands when the retry ladder records
-            // attempt counts.
-            first_try_ok: task.status == TaskStatus::Done,
+            first_try_ok: crate::learning::first_try_ok(events, task),
             pr_outcome: None, // R2 poller backfills this later
             goal: state.goal.clone(),
             t: RunStore::now(),
@@ -1905,7 +1912,7 @@ async fn maintain_knowledge(
     project_root: &std::path::Path,
     state: &crate::model::RunState,
     events: &[Event],
-    keeper: Option<&KnowledgeKeeper>,
+    keeper: Option<&AuxAgent>,
     usage: &mut wingman_core::Usage,
 ) {
     use crate::knowledge;
@@ -1977,7 +1984,7 @@ const KEEPER_MAX_DECISIONS: usize = 3;
 /// architectural decisions the run made. `None` on a failed call or a reply
 /// that does not parse.
 async fn run_knowledge_keeper(
-    keeper: &KnowledgeKeeper,
+    keeper: &AuxAgent,
     state: &crate::model::RunState,
     crates: &[(String, Vec<String>)],
     previous_summary: Option<&str>,
@@ -2820,7 +2827,6 @@ mod tests {
                 max_usd: 0.0,
                 max_total_tokens: 0,
                 max_retries_per_task: 0,
-                enforce_checkpoint_hygiene: false,
                 desktop_inbox: None,
                 sample_host_load: false,
                 speculative_prespawn: false,
@@ -2835,7 +2841,7 @@ mod tests {
             security_config: wingman_config::PilotSecurityConfig::default(),
             disabled_tools: Vec::new(),
             run_reviewer: false,
-            run_critic: false,
+            critic: None,
             reviewer_model: "stub".into(),
             sandbox_default_tier: "host".into(),
             dangerous_paths: Vec::new(),
@@ -3015,23 +3021,49 @@ mod tests {
         }
     }
 
+    /// First-try is read from the attempts, not the final status: t1 passed on
+    /// its only rung-0 attempt, t2 reached Done only after a retry, and t3 was
+    /// split after failing (the splitter marks the parent Done).
     #[test]
     fn e6_record_run_stats_writes_one_per_task() {
         let dir = tempdir().unwrap();
         let stats = dir.path().join("stats.jsonl");
         let mut state = crate::model::RunState::new("r1", "the goal", "abc", "b");
-        let mut t1 = Task::new("t1", Role::Developer, "x");
-        t1.status = TaskStatus::Done;
-        let mut t2 = Task::new("t2", Role::Tester, "y");
-        t2.status = TaskStatus::Done;
-        state.tasks = vec![t1, t2];
+        let mut tasks = Vec::new();
+        for (id, role) in [
+            ("t1", Role::Developer),
+            ("t2", Role::Tester),
+            ("t3", Role::Developer),
+        ] {
+            let mut t = Task::new(id, role, "x");
+            t.status = TaskStatus::Done;
+            tasks.push(t);
+        }
+        state.tasks = tasks;
+        let attempt = |id: &str, rung: u32, status: TaskStatus| Event::TaskAttempt {
+            t: String::new(),
+            id: id.into(),
+            agent: format!("{id}-{rung}"),
+            rung,
+            model: None,
+            status,
+            summary: String::new(),
+            tests: Default::default(),
+        };
+        let events = vec![
+            attempt("t1", 0, TaskStatus::Review),
+            attempt("t2", 0, TaskStatus::Failed),
+            attempt("t2", 1, TaskStatus::Review),
+            attempt("t3", 0, TaskStatus::Failed),
+        ];
 
-        record_run_stats(&stats, &state, "haiku");
+        record_run_stats(&stats, &state, &events, "haiku");
 
         let loaded = crate::learning::load_stats(&stats).unwrap();
-        assert_eq!(loaded.len(), 2);
-        assert!(loaded.iter().all(|r| r.first_try_ok && r.model == "haiku"));
-        assert!(loaded.iter().any(|r| r.role == "developer"));
+        assert_eq!(loaded.len(), 3);
+        assert!(loaded.iter().all(|r| r.model == "haiku"));
+        let first_try: Vec<bool> = loaded.iter().map(|r| r.first_try_ok).collect();
+        assert_eq!(first_try, vec![true, false, false]);
         assert!(loaded.iter().any(|r| r.role == "tester"));
     }
 
@@ -4091,7 +4123,7 @@ mod tests {
                 files: vec!["src/parse.rs".into()],
             },
         ];
-        let keeper = |text: &str| KnowledgeKeeper {
+        let keeper = |text: &str| AuxAgent {
             provider: Arc::new(CannedTextProvider { text: text.into() }),
             model: "fast".into(),
         };

@@ -818,6 +818,16 @@ the task carries acceptance checks; each result's `passed_tests` count, when
 Only registered for pilot workers — it is not part of an ordinary session's
 tool set. See [PILOT-MODE.md](PILOT-MODE.md).
 
+### `checkpoint`
+
+Commits every change in a pilot worker's worktree onto its task branch, except
+`.wingman/`, with commit hooks skipped, so a bad edit can be undone with git.
+Args: `label` (optional, goes in the commit message). A clean tree commits
+nothing. Needs write and shell permission. With the `checkpoint_hygiene`
+capability on, a worker that edits a second file without calling it first is
+failed before review, and the worker refuses to start when `[tools]` removals
+exclude it. Pilot workers only.
+
 ## User-Defined Tools
 
 ### `[[tools.custom]]`
@@ -902,6 +912,7 @@ faster model while the parent session keeps the strongest one. An explicit
 | `update_tasks`      | —    | —     | —     | always     | Visible checklist; replaces whole list |
 | `ask_user`          | —    | —     | —     | always     | Pause and ask at a real fork   |
 | `task_complete`     | —    | —     | —     | always     | Pilot workers only; ends the task |
+| `checkpoint`        | —    | Y     | Y     | mode       | Pilot workers only; commits the worktree |
 | `save_memory`       | —    | Y     | —     | always     | Persist across sessions        |
 | `recall_memory`     | Y    | —     | —     | always     | Fetch memory body              |
 | `forget_memory`     | —    | Y     | —     | always     | Delete memory                  |

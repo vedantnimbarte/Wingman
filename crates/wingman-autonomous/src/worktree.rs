@@ -274,62 +274,51 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wor
     Ok(())
 }
 
-/// Belt-and-braces: if the worker left uncommitted changes in the
-/// worktree, commit them. Workers are expected to commit themselves, but
-/// this guarantees the squash-merge has *something* to merge.
-pub fn commit_residual_changes(
+/// E11 — commit everything the worker has changed in `worktree_path` onto its
+/// task branch, as a checkpoint it can return to with git. `.wingman/` is left
+/// out, as in [`snapshot_tree`]. Returns the new commit, or `None` when there
+/// was nothing to commit.
+///
+/// Hooks are skipped: a checkpoint is taken mid-edit, when a pre-commit lint
+/// or format hook is expected to fail, and the squash merge that lands the
+/// task's work is where the repository's own rules apply.
+pub fn commit_checkpoint(
     worktree_path: &Path,
-    fallback_message: &str,
+    message: &str,
 ) -> Result<Option<String>, WorktreeError> {
-    let dirty = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("status")
-        .arg("--porcelain")
-        .output()?;
-    if !dirty.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&dirty.stderr).trim()
-        )));
+    let git = |args: &[&str]| -> Result<std::process::Output, WorktreeError> {
+        Ok(Command::new("git")
+            .arg("-C")
+            .arg(worktree_path)
+            .args(args)
+            // Workers may not have user.email / user.name configured in their
+            // worktree; supply defaults so the commit doesn't fail on a vanilla
+            // machine.
+            .env("GIT_AUTHOR_NAME", "wingman pilot")
+            .env("GIT_AUTHOR_EMAIL", "pilot@wingman.local")
+            .env("GIT_COMMITTER_NAME", "wingman pilot")
+            .env("GIT_COMMITTER_EMAIL", "pilot@wingman.local")
+            .output()?)
+    };
+    let failed = |what: &str, out: &std::process::Output| {
+        WorktreeError::Git(format!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    };
+    let add = git(&["add", "-A", "--", ".", ":(exclude).wingman"])?;
+    if !add.status.success() {
+        return Err(failed("git add -A", &add));
     }
-    if dirty.stdout.is_empty() {
+    // Exit 0 means nothing is staged.
+    if git(&["diff", "--cached", "--quiet"])?.status.success() {
         return Ok(None);
     }
-    let add = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("add")
-        .arg("-A")
-        .output()?;
-    if !add.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git add -A failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        )));
-    }
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("commit")
-        .arg("-m")
-        .arg(fallback_message)
-        // Workers may not have user.email / user.name configured in their
-        // worktree; supply env-level defaults so the commit doesn't fail
-        // on a vanilla machine.
-        .env("GIT_AUTHOR_NAME", "wingman pilot")
-        .env("GIT_AUTHOR_EMAIL", "pilot@wingman.local")
-        .env("GIT_COMMITTER_NAME", "wingman pilot")
-        .env("GIT_COMMITTER_EMAIL", "pilot@wingman.local")
-        .output()?;
+    let commit = git(&["commit", "-q", "--no-verify", "-m", message])?;
     if !commit.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        )));
+        return Err(failed("git commit", &commit));
     }
-    let sha = rev_parse(worktree_path, "HEAD")?;
-    Ok(Some(sha))
+    rev_parse(worktree_path, "HEAD").map(Some)
 }
 
 /// Paths the worker left modified in `worktree_path`, committed or not.

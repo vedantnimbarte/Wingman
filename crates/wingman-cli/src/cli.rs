@@ -107,6 +107,12 @@ pub struct Cli {
     #[arg(long, hide = true, value_name = "N")]
     pub turn_rollback_after: Option<u32>,
 
+    /// E11 — with `--worker-mode`, tell the worker checkpoints are enforced:
+    /// multi-file work that never called `checkpoint` is failed at review.
+    /// Passed by the orchestrator when the `checkpoint_hygiene` capability is on.
+    #[arg(long, hide = true)]
+    pub checkpoint_hygiene: bool,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -1040,6 +1046,7 @@ pub async fn run() -> Result<ExitCode> {
             worktree: cli.worktree,
             model_override: cli.model,
             turn_rollback_after: cli.turn_rollback_after.unwrap_or(0),
+            checkpoint_hygiene: cli.checkpoint_hygiene,
         };
         return commands::worker::run(cfg, opts).await;
     }

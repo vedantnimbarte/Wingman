@@ -62,8 +62,6 @@ pub enum OrchestratorError {
     Aborting,
     #[error("worker spawn failed: {0}")]
     Spawn(String),
-    #[error("task {0} failed checkpoint hygiene: {1}")]
-    CheckpointViolation(String, String),
     #[error("task {0} sent back for rework by the inline reviewer (E7)")]
     ReviewRework(String),
     #[error("invalid task graph: {0}")]
@@ -375,12 +373,6 @@ pub struct OrchestratorConfig {
     /// at most one initial attempt + 3 retries before the task is
     /// marked Blocked.
     pub max_retries_per_task: u32,
-    /// E11 — when true, a task cannot leave Review for Done unless its
-    /// recorded tool stream satisfies checkpoint hygiene (multi-file work
-    /// checkpointed at least once). A violation makes `finalize_task` fail,
-    /// bouncing the task back for rework. Default false so the gate is
-    /// opt-in (copilot+ turns it on via the `checkpoint_hygiene` capability).
-    pub enforce_checkpoint_hygiene: bool,
     /// Where to write desktop notification cards for failures, or `None` to
     /// write none. The caller resolves this through
     /// [`crate::notify::desktop_target`] so routing and the on/off switch stay
@@ -413,7 +405,6 @@ impl Default for OrchestratorConfig {
             max_usd: 10.0,
             max_total_tokens: 20_000_000,
             max_retries_per_task: 3,
-            enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
             sample_host_load: false,
             speculative_prespawn: false,
@@ -1495,14 +1486,8 @@ async fn run_actor(
                 merge_commit,
                 reply,
             } => {
-                let result = handle_finalize(
-                    &store,
-                    &task_id,
-                    merge_commit,
-                    cfg.enforce_checkpoint_hygiene,
-                    reviewer.as_ref(),
-                )
-                .await;
+                let result =
+                    handle_finalize(&store, &task_id, merge_commit, reviewer.as_ref()).await;
                 let _ = reply.send(result);
             }
             OrchestratorCommand::AbortTask { task_id, reply } => {
@@ -2319,11 +2304,12 @@ async fn handle_finalize(
     store: &Arc<Mutex<RunStore>>,
     task_id: &str,
     merge_commit: Option<String>,
-    enforce_checkpoint_hygiene: bool,
     reviewer: Option<&Reviewer>,
 ) -> Result<(), OrchestratorError> {
-    // Phase 1 — validate the transition + E11 gate under the lock, and clone
-    // the task for the (async, lock-free) reviewer call.
+    // Phase 1 — validate the transition under the lock, and clone the task
+    // for the (async, lock-free) reviewer call. Checkpoint hygiene (E11) is
+    // not checked here: the worker supervisor already kept any attempt that
+    // failed it out of Review.
     let task = {
         let store = store.lock().await;
         let task = store
@@ -2337,23 +2323,6 @@ async fn handle_finalize(
                 task.status,
                 "finalize",
             ));
-        }
-        // E11 hard gate — a Review task may not become Done until its recorded
-        // tool stream satisfies checkpoint hygiene. Rejecting finalize leaves
-        // the task in Review so the manager reworks it instead of merging
-        // unchecked multi-file work. Same `checkpoint::verify` the advisory
-        // pipeline pass uses — one shared verdict, enforced here.
-        if enforce_checkpoint_hygiene {
-            let events = store.read_events().await.unwrap_or_default();
-            let calls = crate::checkpoint::tool_calls_for_task(&events, task_id);
-            if let crate::checkpoint::CheckpointVerdict::Violation { reason } =
-                crate::checkpoint::verify(&calls)
-            {
-                return Err(OrchestratorError::CheckpointViolation(
-                    task_id.to_string(),
-                    reason,
-                ));
-            }
         }
         task
     };
@@ -2748,7 +2717,6 @@ mod tests {
             max_usd: 0.0,
             max_total_tokens: 0,     // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
-            enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
             sample_host_load: false,
             speculative_prespawn: false,
@@ -4383,107 +4351,6 @@ mod tests {
             None,
             Some(approve),
         );
-        handle.finalize_task("t1", None).await.unwrap();
-        assert_eq!(
-            handle.snapshot().await.unwrap().task("t1").unwrap().status,
-            TaskStatus::Done
-        );
-        handle.shutdown().await;
-        let _ = join.await;
-    }
-
-    /// E11 hard gate — a Review task that edited two files without a
-    /// checkpoint is refused finalize when the flag is on, and accepted when
-    /// it's off. Seeds the event stream directly, then drives finalize.
-    #[tokio::test]
-    async fn e11_finalize_blocks_unchecked_multifile_task() {
-        async fn seed(dir: &std::path::Path) -> RunStore {
-            let mut store = RunStore::create(
-                dir.join(".wingman/autonomous/e11-run"),
-                "e11-run",
-                "g",
-                "abc",
-                "wingman/auto/e11-run",
-            )
-            .await
-            .unwrap();
-            for ev in [
-                Event::TaskCreate {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    role: Role::Developer,
-                    title: "t1".into(),
-                    goal: String::new(),
-                    deps: vec![],
-                    writes: vec![],
-                    acceptance: vec![],
-                    reversibility: Default::default(),
-                    reversibility_reason: None,
-                },
-                Event::TaskAssign {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    worktree: "wt".into(),
-                },
-                Event::TaskStatus {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    status: TaskStatus::InProgress,
-                    outcome: None,
-                },
-                Event::TaskTool {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    tool: "edit_file".into(),
-                    input_hash: None,
-                    file: None,
-                    ok: true,
-                },
-                Event::TaskTool {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    tool: "edit_file".into(),
-                    input_hash: None,
-                    file: None,
-                    ok: true,
-                },
-                Event::TaskStatus {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    status: TaskStatus::Review,
-                    outcome: None,
-                },
-            ] {
-                store.append(ev).await.unwrap();
-            }
-            store
-        }
-
-        // enforce on → violation is refused, task stays in Review.
-        let dir = tempdir().unwrap();
-        let store = seed(dir.path()).await;
-        let mut c = cfg(dir.path().to_path_buf());
-        c.enforce_checkpoint_hygiene = true;
-        let (handle, join) = spawn(store, c, fake_happy_spawner());
-        let err = handle.finalize_task("t1", None).await.unwrap_err();
-        assert!(
-            matches!(err, OrchestratorError::CheckpointViolation(ref id, _) if id == "t1"),
-            "got {err:?}"
-        );
-        assert_eq!(
-            handle.snapshot().await.unwrap().task("t1").unwrap().status,
-            TaskStatus::Review
-        );
-        handle.shutdown().await;
-        let _ = join.await;
-
-        // enforce off → same task finalizes to Done.
-        let dir = tempdir().unwrap();
-        let store = seed(dir.path()).await;
-        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
         handle.finalize_task("t1", None).await.unwrap();
         assert_eq!(
             handle.snapshot().await.unwrap().task("t1").unwrap().status,

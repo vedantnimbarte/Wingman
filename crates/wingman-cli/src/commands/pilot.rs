@@ -310,6 +310,17 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     );
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
         .with_context(|| format!("building provider for {}", selection.provider_id))?;
+    // J10 — resolved before planning, so a critic that breaks
+    // `critic_other_family` stops the run before any model is paid for.
+    let critic = critic(
+        &cfg,
+        &pilot,
+        pilot.worker_model.as_deref().unwrap_or(&selection.model),
+        wingman_autonomous::pipeline::AuxAgent {
+            provider: provider.clone(),
+            model: selection.model.clone(),
+        },
+    )?;
 
     // J1 — goal refinement & negotiation (autopilot, or wherever the
     // `goal_refinement` capability is enabled). Runs a refinement agent
@@ -402,7 +413,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         (Some(p), Some(k)) => Some(format!("{p}\n\n{k}")),
         (p, k) => p.or(k),
     };
-    let plan = wingman_autonomous::planner::plan_from_goal_with_priming(
+    let mut plan = wingman_autonomous::planner::plan_from_goal_with_priming(
         &llm as &dyn PlannerLlm,
         &goal,
         &project.root,
@@ -410,6 +421,27 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     )
     .await
     .context("planner call failed")?;
+
+    // J10 — the critic reads the plan before anyone approves it; its medium+
+    // risks become guardrail tasks that run after the plan's own.
+    if let Some(critic) = &critic {
+        eprintln!("[pilot] critic reviewing the plan ({})…", critic.model);
+        let critic_llm = ProviderLlm {
+            provider: critic.provider.as_ref(),
+            model: critic.model.clone(),
+            max_tokens: 4096,
+        };
+        match wingman_autonomous::critic::review_plan(&critic_llm, &goal, &plan).await {
+            Some(report) => {
+                let added = wingman_autonomous::critic::append_guardrails(&mut plan, &report);
+                eprintln!(
+                    "[pilot] critic: {} risk(s), {added} guardrail task(s) added.",
+                    report.risks.len()
+                );
+            }
+            None => eprintln!("[pilot] critic: no usable plan review; no guardrails added."),
+        }
+    }
 
     eprintln!(
         "[pilot] proposed {} task(s) (run id: {run_id}).",
@@ -651,7 +683,6 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         max_usd: pilot.max_usd,
         max_total_tokens: pilot.max_total_tokens,
         max_retries_per_task: pilot.max_retries_per_task,
-        enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
         desktop_inbox: wingman_autonomous::notify::desktop_target(
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &pilot.notifications,
@@ -673,6 +704,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             routing,
             std::time::Duration::from_secs(pilot.task_timeout_secs),
             turn_rollback_after(&pilot),
+            capability_on(&pilot, "checkpoint_hygiene"),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -691,7 +723,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         security_config: pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&pilot, "per_task_reviewer"),
-        run_critic: capability_on(&pilot, "critic"),
+        critic,
         // Resolve through the same provider/model split the manager uses so a
         // `provider/model` config value (e.g. `openrouter/deepseek/…`) becomes
         // the bare model id the provider's API expects — the prefixed string
@@ -712,7 +744,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         knowledge_keeper: knowledge_keeper(
             &cfg,
             &pilot,
-            wingman_autonomous::pipeline::KnowledgeKeeper {
+            wingman_autonomous::pipeline::AuxAgent {
                 provider,
                 model: selection.model.clone(),
             },
@@ -774,6 +806,11 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             trigger.short_label(),
             trigger.render()
         );
+    }
+    // E11 — finished tasks that skipped checkpoints. With `checkpoint_hygiene`
+    // on they were failed before review instead, so this is the advisory view.
+    for (task, reason) in &outcome.checkpoint_violations {
+        eprintln!("[pilot] checkpoint hygiene (advisory): {task}: {reason}");
     }
     // A packet with no failed task is a run blocked on a trigger (a refused
     // force-push), which is not a finished run either.
@@ -957,8 +994,9 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
     match key {
         // Per-task reviewer (E7): on for copilot and autopilot.
         "per_task_reviewer" => matches!(pilot.tier, Copilot | Autopilot),
-        // Mandatory checkpoint hygiene (E11): on for copilot and autopilot.
-        "checkpoint_hygiene" => matches!(pilot.tier, Copilot | Autopilot),
+        // Mandatory checkpoint hygiene (E11): fails multi-file work that never
+        // checkpointed, so autopilot-only by default.
+        "checkpoint_hygiene" => matches!(pilot.tier, Autopilot),
         // Critic (J10): autopilot-only by default.
         "critic" => matches!(pilot.tier, Autopilot),
         // Goal refinement / negotiation (J1): autopilot-only by default.
@@ -988,8 +1026,8 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
 fn knowledge_keeper(
     cfg: &Config,
     pilot: &wingman_config::PilotConfig,
-    manager: wingman_autonomous::pipeline::KnowledgeKeeper,
-) -> Option<wingman_autonomous::pipeline::KnowledgeKeeper> {
+    manager: wingman_autonomous::pipeline::AuxAgent,
+) -> Option<wingman_autonomous::pipeline::AuxAgent> {
     if !capability_on(pilot, "knowledge_keeper") {
         return None;
     }
@@ -999,9 +1037,7 @@ fn knowledge_keeper(
         .and_then(|spec| cfg.resolve_model_spec(&spec))
         .and_then(
             |(provider_id, model)| match runtime::build_provider(cfg, &provider_id) {
-                Ok(provider) => {
-                    Some(wingman_autonomous::pipeline::KnowledgeKeeper { provider, model })
-                }
+                Ok(provider) => Some(wingman_autonomous::pipeline::AuxAgent { provider, model }),
                 Err(e) => {
                     eprintln!(
                         "[pilot] knowledge-keeper: cannot build provider {provider_id} for the \
@@ -1012,6 +1048,59 @@ fn knowledge_keeper(
             },
         );
     Some(routed.unwrap_or(manager))
+}
+
+/// J10 — the critic agent, while its capability is on. It runs on
+/// `[pilot].critic_model`, else `reviewer_model`, else `default_model`, and
+/// only without any of those on `manager`. With `critic_other_family` set, a
+/// critic from `worker_model`'s family, or one whose family (either side) the
+/// name does not tell, refuses the run: without that check the critic would
+/// quietly share the workers' blind spots.
+fn critic(
+    cfg: &Config,
+    pilot: &wingman_config::PilotConfig,
+    worker_model: &str,
+    manager: wingman_autonomous::pipeline::AuxAgent,
+) -> Result<Option<wingman_autonomous::pipeline::AuxAgent>> {
+    if !capability_on(pilot, "critic") {
+        return Ok(None);
+    }
+    let spec = pilot
+        .critic_model
+        .as_ref()
+        .or(pilot.reviewer_model.as_ref())
+        .or(pilot.default_model.as_ref());
+    let critic = match spec {
+        Some(spec) => {
+            let sel = runtime::resolve_selection(cfg, Some(spec))
+                .with_context(|| format!("resolving the critic model {spec}"))?;
+            let provider = runtime::build_provider(cfg, &sel.provider_id)
+                .with_context(|| format!("building provider {} for the critic", sel.provider_id))?;
+            wingman_autonomous::pipeline::AuxAgent {
+                provider,
+                model: sel.model,
+            }
+        }
+        None => manager,
+    };
+    if pilot.critic_other_family {
+        use wingman_autonomous::critic::model_family;
+        match (model_family(&critic.model), model_family(worker_model)) {
+            (Some(c), Some(w)) if c != w => {}
+            (c, w) => {
+                return Err(anyhow!(
+                    "[pilot].critic_other_family is set, but the critic `{}` ({}) is not from \
+                     another model family than the workers' `{worker_model}` ({}). Set \
+                     [pilot].critic_model to a model from another family, or turn \
+                     critic_other_family off.",
+                    critic.model,
+                    c.unwrap_or("unknown family"),
+                    w.unwrap_or("unknown family"),
+                ))
+            }
+        }
+    }
+    Ok(Some(critic))
 }
 
 /// E5.5 — the `--turn-rollback-after` a worker gets: `[pilot].turn_rollback_after`
@@ -1543,7 +1632,6 @@ pub async fn resume(
         max_usd: cfg.pilot.max_usd,
         max_total_tokens: cfg.pilot.max_total_tokens,
         max_retries_per_task: cfg.pilot.max_retries_per_task,
-        enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
         desktop_inbox: wingman_autonomous::notify::desktop_target(
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &cfg.pilot.notifications,
@@ -1568,6 +1656,7 @@ pub async fn resume(
             routing,
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
             turn_rollback_after(&cfg.pilot),
+            capability_on(&cfg.pilot, "checkpoint_hygiene"),
         )?,
         base_branch,
         project_root: project.root,
@@ -1589,7 +1678,18 @@ pub async fn resume(
         security_config: cfg.pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&cfg.pilot, "per_task_reviewer"),
-        run_critic: capability_on(&cfg.pilot, "critic"),
+        critic: critic(
+            &cfg,
+            &cfg.pilot,
+            cfg.pilot
+                .worker_model
+                .as_deref()
+                .unwrap_or(&selection.model),
+            wingman_autonomous::pipeline::AuxAgent {
+                provider: provider.clone(),
+                model: selection.model.clone(),
+            },
+        )?,
         // See the run() path: strip the provider prefix so the reviewer model
         // is a bare id the provider's API accepts.
         reviewer_model: match cfg
@@ -1609,7 +1709,7 @@ pub async fn resume(
         knowledge_keeper: knowledge_keeper(
             &cfg,
             &cfg.pilot,
-            wingman_autonomous::pipeline::KnowledgeKeeper {
+            wingman_autonomous::pipeline::AuxAgent {
                 provider,
                 model: selection.model.clone(),
             },
@@ -1665,6 +1765,7 @@ fn build_real_worker_spawner(
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
     task_timeout: std::time::Duration,
     turn_rollback_after: u32,
+    checkpoint_hygiene: bool,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1723,6 +1824,7 @@ fn build_real_worker_spawner(
                     cmd_rx,
                     rung: ctx.rung,
                     turn_rollback_after,
+                    checkpoint_hygiene,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
@@ -2418,11 +2520,13 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(turn_rollback_after(&pilot), 0);
+        assert!(!capability_on(&pilot, "checkpoint_hygiene"));
         assert!(capability_on(&pilot, "speculative_prespawn"));
         assert!(capability_on(&pilot, "adaptive_concurrency"));
 
         pilot.tier = wingman_config::PilotTier::Autopilot;
         assert_eq!(turn_rollback_after(&pilot), 3);
+        assert!(capability_on(&pilot, "checkpoint_hygiene"));
 
         pilot.capabilities.insert("turn_rollback".into(), false);
         assert_eq!(turn_rollback_after(&pilot), 0);
@@ -2448,7 +2552,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let manager = || wingman_autonomous::pipeline::KnowledgeKeeper {
+        let manager = || wingman_autonomous::pipeline::AuxAgent {
             provider: runtime::build_provider(&cfg, "ollama").unwrap(),
             model: "manager".into(),
         };
@@ -2473,6 +2577,58 @@ mod tests {
 
         pilot.capabilities.insert("knowledge_keeper".into(), false);
         assert!(knowledge_keeper(&routed, &pilot, manager()).is_none());
+    }
+
+    /// J10: the critic is autopilot's; `critic_model` wins over the reviewer
+    /// and manager models; `critic_other_family` refuses a critic from the
+    /// workers' family and one whose family the name does not tell.
+    #[test]
+    fn critic_follows_the_tier_and_can_require_another_family() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            "#,
+        )
+        .unwrap();
+        let manager = || wingman_autonomous::pipeline::AuxAgent {
+            provider: runtime::build_provider(&cfg, "ollama").unwrap(),
+            model: "manager".into(),
+        };
+        let worker = "ollama/llama3.2";
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert!(critic(&cfg, &pilot, worker, manager()).unwrap().is_none());
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(
+            critic(&cfg, &pilot, worker, manager())
+                .unwrap()
+                .unwrap()
+                .model,
+            "manager"
+        );
+        pilot.reviewer_model = Some("ollama/llama3.1:70b".into());
+        pilot.critic_model = Some("ollama/qwen2.5-coder".into());
+        assert_eq!(
+            critic(&cfg, &pilot, worker, manager())
+                .unwrap()
+                .unwrap()
+                .model,
+            "qwen2.5-coder"
+        );
+
+        pilot.critic_other_family = true;
+        assert!(critic(&cfg, &pilot, worker, manager()).is_ok());
+        pilot.critic_model = None;
+        let err = critic(&cfg, &pilot, worker, manager()).err().unwrap();
+        assert!(err.to_string().contains("(meta)"), "{err}");
+        pilot.critic_model = Some("ollama/house-model".into());
+        let err = critic(&cfg, &pilot, worker, manager()).err().unwrap();
+        assert!(err.to_string().contains("unknown family"), "{err}");
+
+        pilot.capabilities.insert("critic".into(), false);
+        assert!(critic(&cfg, &pilot, worker, manager()).unwrap().is_none());
     }
 
     #[test]

@@ -359,6 +359,54 @@ merge_fixer      = true    # copilot and autopilot
 knowledge_keeper = true    # autopilot only by default
 ```
 
+## Checkpoints, critic and first-try stats
+
+**Checkpoint hygiene.** Workers have a `checkpoint` tool that commits the
+worktree's changes (not `.wingman/`) onto the task branch, skipping commit
+hooks, so a bad edit can be undone with git. With the `checkpoint_hygiene`
+capability (autopilot by default) its use is enforced. The worker prompt
+requires a checkpoint before a second file is edited and after each green
+`run_acceptance`, and the worker supervisor checks the attempt's recorded tool
+calls before letting the task into review. If the attempt edited a second file
+before any checkpoint, the task is failed instead, even with every acceptance
+check green. The reason goes to the next rung of the retry ladder. Only the
+latest attempt's calls count, and single-file work is exempt. Before this
+check, the gate ran at `finalize_task`, and the end-of-run merge skipped it for
+tasks the manager never finalized. Without the capability the pipeline still
+prints violations at the end of `pilot run`, but they block nothing.
+
+**Critic.** With the `critic` capability (autopilot by default) a critic model
+reads the plan before the approval gate. Up to three of its medium-or-worse
+risks, worst first, become `guardrail-N` developer tasks that depend on every
+planned task, so they are part of what you approve. The same critic runs again
+before the auto-merge gate, where a high-or-worse risk vetoes the merge. It
+runs on `critic_model`, then `reviewer_model`, then `default_model`, and each
+can name its own provider. A critic from the workers' model family tends to
+miss what they miss. `critic_other_family = true` makes that a hard rule: the
+run refuses to start when the critic and `worker_model` share a family, or when
+either family cannot be told from the model name (Claude, GPT/o-series,
+Gemini/Gemma, Llama, Mistral, DeepSeek, Qwen, Grok, Kimi, GLM, Phi, Command).
+A reply the critic cannot turn into a report adds no guardrails and vetoes
+nothing.
+
+**First-try stats.** Each run appends one record per task to
+`~/.wingman/stats.jsonl`, and adaptive routing reads them back. `first_try_ok`
+is true only when the task finished in review or done and every `task.attempt`
+recorded for it ran on rung 0 without failing. A retry, an escalated model, a
+split, or a reviewer rework all make it false. Before, a task counted as a
+first-try success whenever it ended Done, however many rungs that took.
+
+```toml
+[pilot]
+worker_model        = "anthropic/claude-haiku-4-5"
+critic_model        = "openai/gpt-5"   # defaults to reviewer_model, then default_model
+critic_other_family = true             # refuse a critic from the workers' family
+
+[pilot.capabilities]
+checkpoint_hygiene = true    # autopilot only by default
+critic             = true    # autopilot only by default
+```
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The

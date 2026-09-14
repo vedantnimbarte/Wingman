@@ -40,6 +40,9 @@ pub struct WorkerOptions {
     /// E5.5 — consecutive turn-gate failures before rolling the worktree back
     /// to its last green checkpoint. 0 keeps rollback off.
     pub turn_rollback_after: u32,
+    /// E11 — checkpoints are enforced at review: require the `checkpoint`
+    /// tool and say so in the prompt.
+    pub checkpoint_hygiene: bool,
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
@@ -109,19 +112,27 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let registry = Arc::new(registry);
     registry.register_arc(Arc::new(wingman_tools::builtin::TaskComplete));
     registry.register_arc(Arc::new(wingman_autonomous::tools::RunAcceptance));
+    registry.register_arc(Arc::new(wingman_autonomous::tools::Checkpoint));
 
-    // The removals now bind these two as well, and a worker without them
-    // cannot report its result — it would run the whole task and then fail in
-    // a way that looks like a model problem. Say so up front instead.
-    for required in ["task_complete", "run_acceptance"] {
+    // The removals now bind these as well, and a worker without them cannot
+    // report its result — it would run the whole task and then fail in a way
+    // that looks like a model problem. Say so up front instead. `checkpoint` is
+    // required only while checkpoint hygiene fails multi-file work without it.
+    let mut required = vec!["task_complete", "run_acceptance"];
+    if opts.checkpoint_hygiene {
+        required.push("checkpoint");
+    }
+    for required in required {
         if !registry.tool_names().iter().any(|n| n == required) {
             anyhow::bail!(
-                "`{required}` is excluded by [tools].disabled_tools or [tools].preset, but the                  pilot worker cannot report a result without it. Remove it from that list, or                  narrow the setting to the tools you meant."
+                "`{required}` is excluded by [tools].disabled_tools or [tools].preset, but the \
+                 pilot worker cannot report a result without it. Remove it from that list, or \
+                 narrow the setting to the tools you meant."
             );
         }
     }
 
-    let system = compose_worker_system_prompt(&role, &task);
+    let system = compose_worker_system_prompt(&role, &task, opts.checkpoint_hygiene);
     let user_prompt = compose_worker_user_prompt(&task);
 
     // E5.5 — per-turn sanity gate. When `[pilot].turn_gate_cmd` is set, the
@@ -428,7 +439,7 @@ impl wingman_core::LearningHook for IpcInjector {
     }
 }
 
-fn compose_worker_system_prompt(role: &Role, task: &Task) -> String {
+fn compose_worker_system_prompt(role: &Role, task: &Task, checkpoint_hygiene: bool) -> String {
     // E6 — fold this role's accumulated lessons (from prior reverted /
     // rewritten work) onto the base role prompt so the worker doesn't
     // repeat a mistake the same role already learned from.
@@ -452,6 +463,15 @@ fn compose_worker_system_prompt(role: &Role, task: &Task) -> String {
         for a in &task.acceptance {
             s.push_str(&format!("- {}\n", render_acceptance(a)));
         }
+    }
+    if checkpoint_hygiene {
+        // E11 — the supervisor fails multi-file work that skipped this.
+        s.push_str(
+            "\n## Checkpoints (enforced)\n\nCall the `checkpoint` tool before you edit a second \
+             file, and again each time `run_acceptance` comes back green. A task that edits \
+             more than one file without calling `checkpoint` before the second edit is failed \
+             at review, however good the work is.\n",
+        );
     }
     s.push_str(
         "\n## When finished\n\nCommit your changes on this worktree, then call \
@@ -517,6 +537,17 @@ fn parse_role(s: &str) -> Result<Role> {
 mod tests {
     use super::*;
     use wingman_core::LearningHook;
+
+    /// E11: the checkpoint mandate is in the prompt exactly when it is enforced.
+    #[test]
+    fn the_checkpoint_mandate_follows_the_hygiene_flag() {
+        let task = Task::new("t1", Role::Developer, "two files");
+        let enforced = compose_worker_system_prompt(&Role::Developer, &task, true);
+        assert!(enforced.contains("## Checkpoints (enforced)"), "{enforced}");
+        assert!(enforced.contains("`checkpoint` tool"));
+        let off = compose_worker_system_prompt(&Role::Developer, &task, false);
+        assert!(!off.contains("Checkpoints (enforced)"));
+    }
 
     /// The worker is the unattended path, so `[tools].disabled_tools` matters
     /// more there, not less. It used to build its registry by hand and never
