@@ -70,6 +70,10 @@ pub struct WorkerSpec {
     /// E5 retry-ladder rung this attempt runs on (`SpawnContext::rung`),
     /// recorded in the attempt's `task.attempt` event.
     pub rung: u32,
+    /// E5.5 — consecutive failures of the worker's turn gate after which it
+    /// restores the worktree to the last state that passed the gate. 0 turns
+    /// rollback off. Forwarded as `--turn-rollback-after`.
+    pub turn_rollback_after: u32,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -134,6 +138,13 @@ pub async fn run_worker(
     // read as `opts.model_override` by worker-mode.
     if let Some(model) = &spec.model {
         sc.command_mut().arg("--model").arg(model);
+    }
+    // Like the model, the tier that decides this lives in project config the
+    // worker cannot see from inside its worktree.
+    if spec.turn_rollback_after > 0 {
+        sc.command_mut()
+            .arg("--turn-rollback-after")
+            .arg(spec.turn_rollback_after.to_string());
     }
 
     let mut supervisor = sc.spawn()?;
@@ -277,6 +288,21 @@ pub async fn run_worker(
                 } => {
                     outcome = Some(o);
                     acceptance = a;
+                }
+                WorkerLine::RateLimited {
+                    status,
+                    retry_after_secs,
+                } => {
+                    let _ = store
+                        .lock()
+                        .await
+                        .append(Event::AgentRateLimited {
+                            t: RunStore::now(),
+                            agent: agent_id.to_string(),
+                            status,
+                            retry_after_secs,
+                        })
+                        .await;
                 }
                 WorkerLine::Unknown => {
                     tracing::debug!(target: "pilot::worker", "unrecognised worker line: {line}");
@@ -565,6 +591,12 @@ enum WorkerLine {
         outcome: TaskOutcome,
         acceptance: Vec<crate::acceptance::AcceptanceResult>,
     },
+    /// E9 — the worker's provider answered 429 / 529. Emitted by the worker
+    /// shim for every such response, including ones the provider retried.
+    RateLimited {
+        status: u16,
+        retry_after_secs: Option<u32>,
+    },
     Unknown,
 }
 
@@ -698,6 +730,13 @@ fn parse_line(line: &str) -> WorkerLine {
                         acceptance,
                     }
                 }
+                "rate_limited" => WorkerLine::RateLimited {
+                    status: v.get("status").and_then(|x| x.as_u64()).unwrap_or(429) as u16,
+                    retry_after_secs: v
+                        .get("retry_after_secs")
+                        .and_then(|x| x.as_u64())
+                        .map(|n| n.min(u64::from(u32::MAX)) as u32),
+                },
                 _ => WorkerLine::Unknown,
             };
         }
@@ -849,7 +888,7 @@ pub async fn drive_stdout_for_test(
             WorkerLine::TaskComplete { outcome: o, .. } => {
                 outcome = Some(o);
             }
-            WorkerLine::Unknown => {}
+            WorkerLine::RateLimited { .. } | WorkerLine::Unknown => {}
         }
     }
     let final_status = if outcome.is_some() {
@@ -1116,6 +1155,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_recognises_rate_limited() {
+        match parse_line(r#"{"event":"rate_limited","status":529,"retry_after_secs":12}"#) {
+            WorkerLine::RateLimited {
+                status,
+                retry_after_secs,
+            } => {
+                assert_eq!(status, 529);
+                assert_eq!(retry_after_secs, Some(12));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(matches!(
+            parse_line(r#"{"event":"rate_limited","status":429}"#),
+            WorkerLine::RateLimited {
+                retry_after_secs: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_line_handles_agent_event() {
         let line = r#"{"type":"text_delta","text":"hello"}"#;
         match parse_line(line) {
@@ -1132,6 +1192,7 @@ mod tests {
                 WorkerLine::AgentEvent(_) => write!(f, "AgentEvent"),
                 WorkerLine::WorkerStart { .. } => write!(f, "WorkerStart"),
                 WorkerLine::TaskComplete { .. } => write!(f, "TaskComplete"),
+                WorkerLine::RateLimited { .. } => write!(f, "RateLimited"),
                 WorkerLine::Unknown => write!(f, "Unknown"),
             }
         }
@@ -1159,6 +1220,7 @@ mod tests {
             timeout: Duration::from_secs(1800),
             cmd_rx: None,
             rung: 2,
+            turn_rollback_after: 0,
         };
         record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 

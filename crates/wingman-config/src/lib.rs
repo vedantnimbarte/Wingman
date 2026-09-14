@@ -438,6 +438,12 @@ fn default_max_total_tokens() -> u64 {
     20_000_000
 }
 
+/// Two red gates in a row is where re-prompting has stopped paying: the model
+/// is now patching its own patches.
+fn default_turn_rollback_after() -> u32 {
+    2
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -2611,6 +2617,13 @@ pub struct PilotConfig {
     /// Shell command run between worker turns as a sanity gate (E5).
     /// Empty disables the per-turn check.
     pub turn_gate_cmd: String,
+    /// E5.5 — how many times in a row `turn_gate_cmd` may fail before the
+    /// worker restores its worktree to the last state that passed it. Only
+    /// used while the `turn_rollback` capability is on (autopilot by
+    /// default). Each rollback also buys the worker a fresh round of gate
+    /// retries.
+    #[serde(default = "default_turn_rollback_after")]
+    pub turn_rollback_after: u32,
 
     pub approval: PilotApprovalConfig,
     pub pr: PilotPrConfig,
@@ -2642,6 +2655,7 @@ impl Default for PilotConfig {
             worker_max_turns: default_worker_max_turns(),
             max_manager_ticks: default_max_manager_ticks(),
             turn_gate_cmd: "cargo check --workspace".into(),
+            turn_rollback_after: default_turn_rollback_after(),
             approval: PilotApprovalConfig::default(),
             pr: PilotPrConfig::default(),
             sandbox: PilotSandboxConfig::default(),
@@ -3556,6 +3570,7 @@ max_retries_per_task = 1
         assert!((cfg.max_usd - 10.0).abs() < 1e-9);
         assert_eq!(cfg.task_timeout_secs, 1800);
         assert_eq!(cfg.turn_gate_cmd, "cargo check --workspace");
+        assert_eq!(cfg.turn_rollback_after, 2);
         // Auto-merge is opt-in: nothing merges to the base branch without the
         // user having asked for it in config.
         assert!(!cfg.pr.auto_merge);

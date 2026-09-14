@@ -208,6 +208,10 @@ pub enum OrchestratorCommand {
     Snapshot {
         reply: oneshot::Sender<crate::model::RunState>,
     },
+    /// E9 — re-evaluate speculative worktrees against the current plan. Sent
+    /// by the speculation watchdog whenever a task is created or changes
+    /// status.
+    Speculate,
     Shutdown,
 }
 
@@ -383,6 +387,18 @@ pub struct OrchestratorConfig {
     /// in one place; `None` skips spawning the watchdog entirely, exactly as a
     /// zero budget skips the budget watchdog.
     pub desktop_inbox: Option<PathBuf>,
+    /// E9 — sample host CPU load in the background and narrow the live
+    /// concurrency cap as it rises. Off for unit tests, whose caps must not
+    /// depend on how busy the machine running them is.
+    pub sample_host_load: bool,
+    /// E9 — create the worktree of a task that is about to become ready (its
+    /// deps are all in Review or Done) before the manager assigns it, and run
+    /// `warm_cmd` there, so the worker starts on a built tree. Discarded if
+    /// the plan changes first. Needs real worktrees.
+    pub speculative_prespawn: bool,
+    /// Shell command that warms a speculative worktree, typically the build
+    /// the worker's turn gate runs anyway. Empty only creates the worktree.
+    pub warm_cmd: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -399,6 +415,9 @@ impl Default for OrchestratorConfig {
             max_retries_per_task: 3,
             enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
+            sample_host_load: false,
+            speculative_prespawn: false,
+            warm_cmd: String::new(),
         }
     }
 }
@@ -416,6 +435,27 @@ struct RetryState {
 /// commit, keyed by the check's result label; `None` when that run printed no
 /// summary. Filled once per check per run by [`measure_test_baselines`].
 type TestBaselines = Arc<std::sync::Mutex<HashMap<String, Option<u32>>>>;
+
+/// E9 — inputs to the live concurrency cap that run state does not hold.
+#[derive(Default)]
+struct HostSignals {
+    /// Provider rate limits the run's workers reported (`agent.rate_limit`).
+    rate_limits: std::sync::Mutex<crate::concurrency::RateLimitWindow>,
+    /// Latest host CPU load, in thousandths; 0 until first sampled.
+    cpu_load_milli: std::sync::atomic::AtomicU32,
+}
+
+/// How often the host CPU load is re-read, when sampling is on.
+const CPU_SAMPLE_EVERY: Duration = Duration::from_secs(10);
+
+/// E9 — a worktree created for a task before the manager assigned it.
+struct Prewarm {
+    worktree: PathBuf,
+    /// Dropping or firing this stops the warm command.
+    cancel: oneshot::Sender<()>,
+    /// The warm command; finished once it exits, times out or is cancelled.
+    warm: tokio::task::JoinHandle<()>,
+}
 
 /// Run the orchestrator actor on the current Tokio runtime. Returns the
 /// handle and a `JoinHandle` for the actor task — the caller awaits the
@@ -454,8 +494,27 @@ pub fn spawn_full(
     let retry_rx = store.subscribe();
     let notify_rx = store.subscribe();
     let escalation_rx = store.subscribe();
+    let host_rx = store.subscribe();
+    let speculate_rx = store.subscribe();
     let store = Arc::new(Mutex::new(store));
     let baselines = TestBaselines::default();
+    let signals = Arc::new(HostSignals::default());
+
+    // E9 — rate limits from workers, and host load when sampling is on, feed
+    // the concurrency cap `handle_assign` enforces.
+    tokio::spawn(host_signal_watchdog(
+        host_rx,
+        signals.clone(),
+        cfg.sample_host_load,
+        tx.clone(),
+    ));
+
+    // E9 — speculative pre-spawn needs a base commit to branch worktrees from.
+    if cfg.speculative_prespawn && cfg.use_real_worktrees && !cfg.base_commit.is_empty() {
+        tokio::spawn(speculation_watchdog(speculate_rx, tx.clone()));
+    } else {
+        drop(speculate_rx);
+    }
 
     // J15 escalation watchdog: the runtime triggers fire while the run is
     // live, not only once the PR is open. Always on — J15 has no off switch.
@@ -538,7 +597,7 @@ pub fn spawn_full(
     }
 
     let join = tokio::spawn(run_actor(
-        store, cfg, spawner, splitter, reviewer, baselines, rx,
+        store, cfg, spawner, splitter, reviewer, baselines, signals, rx,
     ));
     (handle, join)
 }
@@ -954,6 +1013,270 @@ async fn budget_watchdog(
     }
 }
 
+/// Background task: feed the E9 concurrency cap what run state does not hold.
+/// Each `agent.rate_limit` a worker reports goes into the rate-limit window;
+/// with `sample_cpu`, host CPU load is re-read every [`CPU_SAMPLE_EVERY`].
+async fn host_signal_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    signals: Arc<HostSignals>,
+    sample_cpu: bool,
+    orch: mpsc::Sender<OrchestratorCommand>,
+) {
+    let mut sampler = Some(crate::concurrency::CpuSampler::default());
+    let mut ticker = tokio::time::interval(CPU_SAMPLE_EVERY);
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(Event::AgentRateLimited { retry_after_secs, .. }) => {
+                    signals
+                        .rate_limits
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record(std::time::Instant::now(), retry_after_secs);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
+            _ = ticker.tick(), if sample_cpu => {
+                if orch.is_closed() {
+                    return;
+                }
+                // Off the runtime: macOS reads the load by running `sysctl`.
+                let Some(mut s) = sampler.take() else { return };
+                let Ok((s, load)) = tokio::task::spawn_blocking(move || {
+                    let load = s.sample();
+                    (s, load)
+                })
+                .await
+                else {
+                    return;
+                };
+                sampler = Some(s);
+                if let Some(load) = load {
+                    signals
+                        .cpu_load_milli
+                        .store((load * 1000.0).round() as u32, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Background task: ask the actor to re-evaluate speculative worktrees (E9)
+/// whenever a task is created or changes status.
+async fn speculation_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    orch: mpsc::Sender<OrchestratorCommand>,
+) {
+    loop {
+        match events.recv().await {
+            Ok(Event::TaskStatus { .. } | Event::TaskCreate { .. }) => {
+                if orch.send(OrchestratorCommand::Speculate).await.is_err() {
+                    return;
+                }
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// E9 — the live concurrency cap: `max_concurrent_agents`, narrowed by recent
+/// provider rate limits, host CPU load and budget burn.
+fn live_cap(
+    state: &crate::model::RunState,
+    cfg: &OrchestratorConfig,
+    signals: &HostSignals,
+) -> u32 {
+    let (recent_rate_limit_hits, active_retry_after_secs) = signals
+        .rate_limits
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sample(std::time::Instant::now());
+    crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
+        max_agents: cfg.max_concurrent_agents,
+        min_agents: 1,
+        recent_rate_limit_hits,
+        active_retry_after_secs,
+        cpu_load: f64::from(
+            signals
+                .cpu_load_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ) / 1000.0,
+        usd_spent: state.totals.usd,
+        max_usd: cfg.max_usd,
+    })
+}
+
+/// E9 — speculative pre-spawn. Discard the speculative worktrees whose task is
+/// no longer waiting on deps in Review or Done (it was replanned, blocked, or
+/// split away), then create one for each task that is about to become ready
+/// (every dep in Review or Done, at least one still in Review), as far as the
+/// concurrency cap has room once running and warming tasks are counted.
+///
+/// The worktree is exactly what `handle_assign` would create, since every
+/// worktree branches from the base commit whatever the deps did, so the
+/// assignment takes it over as is.
+async fn handle_speculate(
+    store: &Arc<Mutex<RunStore>>,
+    cfg: &OrchestratorConfig,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
+) {
+    fn waiting(state: &crate::model::RunState, task: &Task) -> bool {
+        matches!(task.status, TaskStatus::Pending | TaskStatus::Todo)
+            && !task.deps.is_empty()
+            && task.deps.iter().all(|d| {
+                state
+                    .task(d)
+                    .is_some_and(|d| matches!(d.status, TaskStatus::Review | TaskStatus::Done))
+            })
+    }
+
+    let stale: Vec<String> = {
+        let store = store.lock().await;
+        let state = store.state();
+        prewarms
+            .keys()
+            .filter(|id| !state.task(id).is_some_and(|t| waiting(state, t)))
+            .cloned()
+            .collect()
+    };
+    for id in stale {
+        if let Some(prewarm) = prewarms.remove(&id) {
+            discard_prewarm(cfg, &id, prewarm).await;
+        }
+    }
+
+    let fresh: Vec<String> = {
+        let store = store.lock().await;
+        let state = store.state();
+        let busy = state
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::InProgress)
+            .count()
+            + prewarms.values().filter(|p| !p.warm.is_finished()).count();
+        let room = (live_cap(state, cfg, signals) as usize).saturating_sub(busy);
+        state
+            .tasks
+            .iter()
+            .filter(|t| {
+                !prewarms.contains_key(&t.id)
+                    && waiting(state, t)
+                    && t.deps.iter().any(|d| {
+                        state
+                            .task(d)
+                            .is_some_and(|d| d.status == TaskStatus::Review)
+                    })
+            })
+            .take(room)
+            .map(|t| t.id.clone())
+            .collect()
+    };
+    for id in fresh {
+        let worktree = crate::worktree_dir(&cfg.project_root, &cfg.run_id, &id);
+        let (repo, base, run_id, task_id, path) = (
+            cfg.project_root.clone(),
+            cfg.base_commit.clone(),
+            cfg.run_id.clone(),
+            id.clone(),
+            worktree.clone(),
+        );
+        let created = tokio::task::spawn_blocking(move || {
+            crate::worktree::create_worktree(&repo, &base, &run_id, &task_id, &path)
+        })
+        .await;
+        if let Ok(Err(e)) = &created {
+            tracing::warn!(target: "pilot::speculate", task = %id, error = %e, "speculative worktree not created");
+        }
+        if !matches!(created, Ok(Ok(_))) {
+            continue;
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        let warm = tokio::spawn(warm_worktree(
+            cfg.warm_cmd.clone(),
+            worktree.clone(),
+            cfg.task_timeout,
+            cancelled,
+        ));
+        tracing::info!(target: "pilot::speculate", task = %id, "created worktree ahead of assignment");
+        prewarms.insert(
+            id,
+            Prewarm {
+                worktree,
+                cancel,
+                warm,
+            },
+        );
+    }
+}
+
+/// Run `cmd` in a speculative worktree until it exits, `budget` passes, or
+/// the worktree is discarded (`cancelled` fires or its sender is dropped). The
+/// supervisor kills the command's whole process tree when it is dropped early.
+async fn warm_worktree(
+    cmd: String,
+    worktree: PathBuf,
+    budget: Duration,
+    mut cancelled: oneshot::Receiver<()>,
+) {
+    if cmd.trim().is_empty() {
+        return;
+    }
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut sc = crate::child_process::SupervisedCommand::new(shell);
+    sc.command_mut()
+        .arg(flag)
+        .arg(&cmd)
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut supervisor = match sc.spawn() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "pilot::speculate", error = %e, "warm command did not start");
+            return;
+        }
+    };
+    let Some(mut child) = supervisor.take_child() else {
+        return;
+    };
+    tokio::select! {
+        status = child.wait() => {
+            tracing::debug!(target: "pilot::speculate", ?status, worktree = %worktree.display(), "warm command finished");
+        }
+        _ = &mut cancelled => {}
+        _ = tokio::time::sleep(budget) => {
+            tracing::warn!(target: "pilot::speculate", worktree = %worktree.display(), "warm command timed out");
+        }
+    }
+}
+
+/// Stop a speculative worktree's warm command and remove the worktree and its
+/// branch.
+async fn discard_prewarm(cfg: &OrchestratorConfig, task_id: &str, prewarm: Prewarm) {
+    let _ = prewarm.cancel.send(());
+    let _ = prewarm.warm.await;
+    let (repo, run_id, id, path) = (
+        cfg.project_root.clone(),
+        cfg.run_id.clone(),
+        task_id.to_string(),
+        prewarm.worktree,
+    );
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::worktree::discard_worktree(&repo, &run_id, &id, &path)
+    })
+    .await;
+    tracing::info!(target: "pilot::speculate", task = %task_id, "discarded speculative worktree");
+}
+
 /// Background task: when a task transitions to Failed, fire a Reassign.
 /// The actor owns the per-task retry state; this watchdog is now
 /// stateless, just a "Failed → Reassign" pump.
@@ -1082,6 +1405,7 @@ async fn control_watchdog(run_dir: PathBuf, orch: mpsc::Sender<OrchestratorComma
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     store: Arc<Mutex<RunStore>>,
     cfg: OrchestratorConfig,
@@ -1089,6 +1413,7 @@ async fn run_actor(
     splitter: Option<TaskSplitter>,
     reviewer: Option<Reviewer>,
     baselines: TestBaselines,
+    signals: Arc<HostSignals>,
     mut rx: mpsc::Receiver<OrchestratorCommand>,
 ) {
     // Track active worker tasks so we can enforce the concurrency cap and
@@ -1109,6 +1434,8 @@ async fn run_actor(
     // pump (fired by the retry watchdog on the tasks we just failed) is
     // ignored, so the drive loop sees an all-terminal state and exits.
     let mut aborting = false;
+    // E9 — speculative worktrees not yet taken over by an assignment.
+    let mut prewarms: HashMap<String, Prewarm> = HashMap::new();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -1133,6 +1460,8 @@ async fn run_actor(
                     &mut next_agent_seq,
                     &retries,
                     &baselines,
+                    &signals,
+                    &mut prewarms,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -1155,6 +1484,8 @@ async fn run_actor(
                     &mut retries,
                     &mut next_task_seq,
                     &baselines,
+                    &signals,
+                    &mut prewarms,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -1238,8 +1569,18 @@ async fn run_actor(
                 let snapshot = store.lock().await.state().clone();
                 let _ = reply.send(snapshot);
             }
+            OrchestratorCommand::Speculate => {
+                if !aborting {
+                    handle_speculate(&store, &cfg, &signals, &mut prewarms).await;
+                }
+            }
             OrchestratorCommand::Shutdown => break,
         }
+    }
+
+    // A speculative worktree nothing took over is not work anyone did.
+    for (id, prewarm) in prewarms.drain() {
+        discard_prewarm(&cfg, &id, prewarm).await;
     }
 
     // Drain remaining active tasks so their final events land in the log
@@ -1295,6 +1636,8 @@ async fn handle_assign(
     next_agent_seq: &mut u64,
     retries: &HashMap<String, RetryState>,
     baselines: &TestBaselines,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
 ) -> Result<String, OrchestratorError> {
     let (task, agent_id, worktree, session_id) = {
         let store_g = store.lock().await;
@@ -1356,22 +1699,10 @@ async fn handle_assign(
             .iter()
             .filter(|t| t.status == TaskStatus::InProgress)
             .count() as u32;
-        // E9 — adaptive cap: scale the live ceiling down as the run's budget
-        // burns, rather than always allowing `max_concurrent_agents`. Rate-
-        // limit and CPU signals aren't sampled yet, so those inputs are 0 (a
-        // no-op); budget burn is real (`totals.usd` vs `max_usd`).
-        // ponytail: no 429 counter or host-load sampler wired from workers
-        // yet — add them to tighten the cap under provider backoff.
-        let cap =
-            crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
-                max_agents: cfg.max_concurrent_agents,
-                min_agents: 1,
-                recent_rate_limit_hits: 0,
-                active_retry_after_secs: 0,
-                cpu_load: 0.0,
-                usd_spent: store_g.state().totals.usd,
-                max_usd: cfg.max_usd,
-            });
+        // E9 — adaptive cap: rather than always allowing
+        // `max_concurrent_agents`, narrow the ceiling while workers' providers
+        // are rate limiting, the host is busy, or the budget burns down.
+        let cap = live_cap(store_g.state(), cfg, signals);
         if live >= cap {
             return Err(OrchestratorError::ConcurrencyCap(cap));
         }
@@ -1413,9 +1744,13 @@ async fn handle_assign(
         (task, agent_id, worktree, session_id)
     };
 
+    // E9 — a worktree created for this task ahead of time is taken over as
+    // it is: it branches from the same base commit a fresh one would.
+    let adopted = prewarms.remove(task_id);
+
     // Optionally create a real git worktree. Disabled in unit tests so
     // they don't have to set up a temp repo just to drive the actor.
-    if cfg.use_real_worktrees && !cfg.base_commit.is_empty() {
+    if cfg.use_real_worktrees && !cfg.base_commit.is_empty() && adopted.is_none() {
         let repo_root = cfg.project_root.clone();
         let base = cfg.base_commit.clone();
         let run_id = cfg.run_id.clone();
@@ -1508,6 +1843,24 @@ async fn handle_assign(
     let handle = tokio::spawn(async move {
         use futures::FutureExt;
         let task_id = task_id_for_log;
+        if let Some(Prewarm { cancel, warm, .. }) = adopted {
+            // Let the warm command finish what the worker would otherwise
+            // start by repeating. Busy meanwhile, as for the baselines below.
+            if !warm.is_finished() {
+                let _ = store_for_fail
+                    .lock()
+                    .await
+                    .append(Event::TaskStatus {
+                        t: RunStore::now(),
+                        id: task_id.clone(),
+                        status: TaskStatus::InProgress,
+                        outcome: None,
+                    })
+                    .await;
+            }
+            let _ = warm.await;
+            drop(cancel);
+        }
         if let Some((task, worktree, budget, baselines)) = baseline {
             measure_test_baselines(&store_for_fail, &task, worktree, budget, &baselines).await;
         }
@@ -1622,6 +1975,8 @@ async fn handle_reassign(
     retries: &mut HashMap<String, RetryState>,
     next_task_seq: &mut u64,
     baselines: &TestBaselines,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
 ) -> Result<String, OrchestratorError> {
     // E5 ladder. Advance the rung and pick the action.
     //
@@ -1767,6 +2122,8 @@ async fn handle_reassign(
         next_agent_seq,
         retries,
         baselines,
+        signals,
+        prewarms,
     )
     .await
 }
@@ -2393,6 +2750,9 @@ mod tests {
             max_retries_per_task: 0, // most tests assert single-shot behaviour
             enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
+            sample_host_load: false,
+            speculative_prespawn: false,
+            warm_cmd: String::new(),
         }
     }
 
@@ -4129,6 +4489,186 @@ mod tests {
             handle.snapshot().await.unwrap().task("t1").unwrap().status,
             TaskStatus::Done
         );
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /* ── E9 adaptive concurrency and speculative pre-spawn ──────────────── */
+
+    /// A provider's `Retry-After`, reported by a worker, holds the cap at the
+    /// floor: with one task running, a second is refused while it lasts.
+    #[tokio::test]
+    async fn a_reported_retry_after_holds_the_cap_at_one() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        // A worker that starts, hits a 429 with Retry-After, and keeps going.
+        let rate_limited: WorkerSpawner = Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    for ev in [
+                        Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        },
+                        Event::AgentRateLimited {
+                            t: RunStore::now(),
+                            agent: ctx.agent_id.clone(),
+                            status: 429,
+                            retry_after_secs: Some(30),
+                        },
+                    ] {
+                        let _ = store.append(ev).await;
+                    }
+                }
+                futures::future::pending::<()>().await;
+                unreachable!("never resumed")
+            })
+        });
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), rate_limited);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        // Overlapping writes: until the hit is recorded, t2 is refused for the
+        // write conflict (checked after the cap) instead of being assigned.
+        let mut t2 = dev_task("t2", vec![]);
+        t2.writes = vec!["file-t1.rs".into()];
+        handle.add_task(t2).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+
+        // The watchdog records the hit asynchronously; wait for it to bite.
+        let mut last = None;
+        for _ in 0..200 {
+            match handle.assign_task("t2").await {
+                Err(OrchestratorError::ConcurrencyCap(1)) => {
+                    join.abort();
+                    return;
+                }
+                other => last = Some(other),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected ConcurrencyCap(1) under Retry-After, got {last:?}");
+    }
+
+    /// A one-commit git repo with a run store under it, and a config that
+    /// pre-spawns with `warm_cmd`. `None` without git.
+    async fn speculative_run(dir: &std::path::Path) -> Option<(RunStore, OrchestratorConfig)> {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+        };
+        git(&["init", "-q"]).ok()?;
+        for kv in [
+            ["user.email", "t@t.t"],
+            ["user.name", "t"],
+            ["core.autocrlf", "false"],
+        ] {
+            git(&["config", kv[0], kv[1]]).unwrap();
+        }
+        std::fs::write(
+            dir.join(".gitignore"),
+            ".wingman/
+",
+        )
+        .unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        let head = String::from_utf8(git(&["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        let store = RunStore::create(
+            dir.join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            head.trim(),
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let mut c = cfg(dir.to_path_buf());
+        c.base_commit = head.trim().to_string();
+        c.use_real_worktrees = true;
+        c.speculative_prespawn = true;
+        c.warm_cmd = "echo warm> warm.txt".into();
+        Some((store, c))
+    }
+
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Once t1 reaches Review, t2 (which waits only on t1) gets its worktree
+    /// and warm-up early, and assigning t2 takes that worktree over instead of
+    /// recreating it.
+    #[tokio::test]
+    async fn a_task_about_to_be_ready_gets_its_worktree_early_and_keeps_it() {
+        let dir = tempdir().unwrap();
+        let Some((store, c)) = speculative_run(dir.path()).await else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let t2_warm = crate::worktree_dir(dir.path(), "test-run", "t2").join("warm.txt");
+        let (handle, join) = spawn(store, c, fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+
+        wait_until("t2's warm-up", || t2_warm.exists()).await;
+
+        for _ in 0..200 {
+            if handle.snapshot().await.unwrap().task("t1").unwrap().status == TaskStatus::Review {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.finalize_task("t1", None).await.unwrap();
+        handle.assign_task("t2").await.unwrap();
+        // A fresh `create_worktree` would have wiped the warm-up's output.
+        assert!(t2_warm.exists(), "the assignment recreated the worktree");
+        handle.shutdown().await;
+        let _ = join.await;
+        // Adopted, so shutdown leaves it for the merge.
+        assert!(t2_warm.exists());
+    }
+
+    /// Replanning a waiting task onto a dep that has not started means it is
+    /// no longer about to run: its speculative worktree is removed.
+    #[tokio::test]
+    async fn a_plan_change_discards_the_speculative_worktree() {
+        let dir = tempdir().unwrap();
+        let Some((store, c)) = speculative_run(dir.path()).await else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let t2_dir = crate::worktree_dir(dir.path(), "test-run", "t2");
+        let (handle, join) = spawn(store, c, fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
+        handle.add_task(dev_task("t3", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_until("t2's worktree", || t2_dir.join("warm.txt").exists()).await;
+
+        handle
+            .add_task(dev_task("t2", vec!["t1", "t3"]))
+            .await
+            .unwrap();
+        wait_until("the discard", || !t2_dir.exists()).await;
         handle.shutdown().await;
         let _ = join.await;
     }

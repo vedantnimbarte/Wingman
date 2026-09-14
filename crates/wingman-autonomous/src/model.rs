@@ -515,6 +515,18 @@ pub enum Event {
         usd: f64,
     },
 
+    /// E9 — a worker's provider pushed back for capacity (HTTP 429 / 529).
+    /// The orchestrator narrows its live concurrency cap while these are
+    /// recent, and holds it at the floor while a `Retry-After` is in effect.
+    #[serde(rename = "agent.rate_limit")]
+    AgentRateLimited {
+        t: String,
+        agent: String,
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u32>,
+    },
+
     /// Run-level status transition.
     #[serde(rename = "run.status")]
     RunStatusEv { t: String, status: RunStatus },
@@ -588,6 +600,7 @@ impl Event {
             | Event::AgentSpawn { t, .. }
             | Event::AgentStatus { t, .. }
             | Event::AgentUsd { t, .. }
+            | Event::AgentRateLimited { t, .. }
             | Event::RunStatusEv { t, .. }
             | Event::RunMergeStart { t, .. }
             | Event::RunMergeTask { t, .. }
@@ -752,6 +765,8 @@ pub fn apply(state: &mut RunState, event: &Event) {
         }
         // Telemetry: read off the log by the R3 packet, not projected.
         Event::TaskAttempt { .. } => {}
+        // Read live by the orchestrator's concurrency cap, not projected.
+        Event::AgentRateLimited { .. } => {}
         Event::TaskCommit { id, sha, .. } => {
             if let Some(t) = state.task_mut(id) {
                 t.commits.push(sha.clone());

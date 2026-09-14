@@ -534,6 +534,10 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
             Info,
             format!("{short_ts}  agent.usd    {} +${usd:.4}", nm(agent)),
         ),
+        Event::AgentRateLimited { agent, status, .. } => (
+            Warn,
+            format!("{short_ts}  agent.rate_limit {} HTTP {status}", nm(agent)),
+        ),
         Event::RunStatusEv { status, .. } => {
             let sev = match status {
                 RunStatus::Failed | RunStatus::Aborted => Error,

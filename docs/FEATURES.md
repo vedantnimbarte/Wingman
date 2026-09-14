@@ -37,8 +37,11 @@ Wingman different; this is everything else it does.
   license policy, cargo audit) whose summary is posted as a PR comment. Hard
   escalation triggers (fewer passing tests than the base commit, 80%/100% of
   the budget, three failures in a row, a force-push outside `wingman/auto/*`)
-  fire while the run is live and block auto-merge. See
-  [PILOT-MODE.md](PILOT-MODE.md).
+  fire while the run is live and block auto-merge. The concurrency cap narrows
+  under provider rate limits and host CPU load, a task about to become ready
+  gets its worktree created and built ahead of assignment, and on autopilot a
+  worker whose turn gate keeps failing is rolled back to its last green state.
+  See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
   freshness.

@@ -127,6 +127,150 @@ pub fn tool_calls_for_task(events: &[Event], task_id: &str) -> Vec<ToolCall> {
         .collect()
 }
 
+/// E5.5 — per-turn rollback to the last green checkpoint.
+///
+/// Wraps the worker's turn gate. Every time the gate passes, the worktree's
+/// files are captured as that checkpoint ([`crate::worktree::snapshot_tree`]).
+/// When the gate fails `after` times in a row, the worktree is restored to it
+/// and the model is told its edits since then are gone, rather than being
+/// asked, yet again, to repair a tree it has already failed to repair.
+///
+/// Before the gate has ever passed, the tree the worker started from is the
+/// candidate: it is restored and re-checked, and if it fails the gate too
+/// (the base itself is red) the worker's edits are put back, since there is
+/// nothing green to return to.
+pub struct RollbackGate {
+    inner: std::sync::Arc<dyn wingman_core::TurnGate>,
+    root: std::path::PathBuf,
+    after: u32,
+    state: tokio::sync::Mutex<RollbackState>,
+}
+
+#[derive(Default)]
+struct RollbackState {
+    /// The worktree's tree the last time the gate passed.
+    green: Option<String>,
+    /// The tree the worker started from, until it is proven red.
+    start: Option<String>,
+    /// Consecutive gate failures since the last pass or rollback.
+    failures: u32,
+}
+
+impl RollbackGate {
+    /// Capture the starting tree of the worktree at `root`. Rolls back after
+    /// `after` consecutive failures (at least one).
+    pub fn new(
+        inner: std::sync::Arc<dyn wingman_core::TurnGate>,
+        root: std::path::PathBuf,
+        after: u32,
+    ) -> Self {
+        let start = crate::worktree::snapshot_tree(&root)
+            .map_err(|e| tracing::warn!(target: "pilot::rollback", "no starting checkpoint: {e}"))
+            .ok();
+        Self {
+            inner,
+            root,
+            after: after.max(1),
+            state: tokio::sync::Mutex::new(RollbackState {
+                start,
+                ..Default::default()
+            }),
+        }
+    }
+
+    async fn snapshot(&self) -> Result<String, String> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || crate::worktree::snapshot_tree(&root))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    async fn restore(&self, tree: String) -> Result<String, String> {
+        let root = self.root.clone();
+        tokio::task::spawn_blocking(move || crate::worktree::restore_tree(&root, &tree))
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+
+    /// Restore the last green checkpoint and say what happened, for the model.
+    async fn roll_back(&self, state: &mut RollbackState) -> String {
+        let rolled_back = format!(
+            "[wingman rollback] The gate failed {} times in a row, so the worktree was \
+             restored to the last state that passed it. Every edit since then is gone: \
+             re-read files before editing them, and take a different approach from the \
+             one that failed.",
+            self.after
+        );
+        if let Some(green) = state.green.clone() {
+            return match self.restore(green).await {
+                Ok(_) => rolled_back,
+                Err(e) => {
+                    format!("[wingman rollback] could not restore the last green checkpoint: {e}")
+                }
+            };
+        }
+        let Some(start) = state.start.clone() else {
+            return "[wingman rollback] there is no green checkpoint to return to; your edits \
+                    are kept."
+                .into();
+        };
+        let broken = match self.restore(start.clone()).await {
+            Ok(broken) => broken,
+            Err(e) => {
+                return format!("[wingman rollback] could not restore the starting tree: {e}")
+            }
+        };
+        if self.inner.check().await.passed {
+            state.green = Some(start);
+            return rolled_back;
+        }
+        // The base is red too. Put the worker's edits back and stop trying.
+        state.start = None;
+        if let Err(e) = self.restore(broken).await {
+            return format!(
+                "[wingman rollback] could not put your edits back after checking the starting \
+                 tree: {e}"
+            );
+        }
+        "[wingman rollback] the tree this task started from fails the gate as well, so there is \
+         no green checkpoint to return to; your edits are kept."
+            .into()
+    }
+}
+
+#[async_trait::async_trait]
+impl wingman_core::TurnGate for RollbackGate {
+    fn label(&self) -> String {
+        self.inner.label()
+    }
+
+    async fn check(&self) -> wingman_core::GateReport {
+        let report = self.inner.check().await;
+        let mut state = self.state.lock().await;
+        if report.passed {
+            state.failures = 0;
+            match self.snapshot().await {
+                Ok(tree) => state.green = Some(tree),
+                Err(e) => tracing::warn!(target: "pilot::rollback", "checkpoint not captured: {e}"),
+            }
+            return report;
+        }
+        state.failures += 1;
+        if state.failures < self.after {
+            return report;
+        }
+        state.failures = 0;
+        let note = self.roll_back(&mut state).await;
+        tracing::warn!(target: "pilot::rollback", "{note}");
+        wingman_core::GateReport {
+            passed: false,
+            summary: format!("{}\n\n{note}", report.summary),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +360,126 @@ mod tests {
             call("write_file", Some("README.md")),
         ];
         assert!(verify(&calls).is_ok());
+    }
+
+    /* ── E5.5 rollback gate ─────────────────────────────────────────────── */
+
+    /// A gate that answers from a script.
+    struct ScriptedGate(std::sync::Mutex<std::collections::VecDeque<bool>>);
+
+    #[async_trait::async_trait]
+    impl wingman_core::TurnGate for ScriptedGate {
+        fn label(&self) -> String {
+            "scripted".into()
+        }
+        async fn check(&self) -> wingman_core::GateReport {
+            let passed = self
+                .0
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("unscripted check");
+            wingman_core::GateReport {
+                passed,
+                summary: if passed { "ok" } else { "red" }.into(),
+            }
+        }
+    }
+
+    /// A one-commit repo holding `lib.rs`, or `None` without git.
+    fn repo_with(file: &str) -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(args)
+                .output()
+        };
+        git(&["init", "-q"]).ok()?;
+        for kv in [
+            ["user.email", "t@t.t"],
+            ["user.name", "t"],
+            ["core.autocrlf", "false"],
+        ] {
+            git(&["config", kv[0], kv[1]]).unwrap();
+        }
+        std::fs::write(dir.path().join("lib.rs"), file).unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        Some(dir)
+    }
+
+    fn gate(dir: &std::path::Path, script: &[bool], after: u32) -> RollbackGate {
+        RollbackGate::new(
+            std::sync::Arc::new(ScriptedGate(std::sync::Mutex::new(
+                script.iter().copied().collect(),
+            ))),
+            dir.to_path_buf(),
+            after,
+        )
+    }
+
+    #[tokio::test]
+    async fn repeated_gate_failures_roll_back_to_the_last_green_checkpoint() {
+        use wingman_core::TurnGate;
+        let Some(dir) = repo_with("base\n") else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let read = || std::fs::read_to_string(dir.path().join("lib.rs")).unwrap();
+        let g = gate(dir.path(), &[true, false, false], 2);
+
+        std::fs::write(dir.path().join("lib.rs"), "green\n").unwrap();
+        assert!(g.check().await.passed);
+
+        std::fs::write(dir.path().join("lib.rs"), "broken\n").unwrap();
+        std::fs::write(dir.path().join("extra.rs"), "worse\n").unwrap();
+        // The first failure is only reported.
+        let first = g.check().await;
+        assert!(!first.passed && !first.summary.contains("rollback"));
+        assert_eq!(read(), "broken\n");
+        // The second rolls back and says so.
+        let second = g.check().await;
+        assert!(!second.passed);
+        assert!(
+            second
+                .summary
+                .contains("restored to the last state that passed"),
+            "{}",
+            second.summary
+        );
+        assert_eq!(read(), "green\n");
+        assert!(!dir.path().join("extra.rs").exists());
+    }
+
+    #[tokio::test]
+    async fn before_any_pass_the_starting_tree_is_used_only_if_it_is_green() {
+        use wingman_core::TurnGate;
+        let Some(dir) = repo_with("base\n") else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let read = || std::fs::read_to_string(dir.path().join("lib.rs")).unwrap();
+
+        // Red twice, then the restored base passes: keep the base.
+        let g = gate(dir.path(), &[false, false, true], 2);
+        std::fs::write(dir.path().join("lib.rs"), "broken\n").unwrap();
+        g.check().await;
+        assert!(g.check().await.summary.contains("restored"));
+        assert_eq!(read(), "base\n");
+
+        // Red twice, and the base is red as well: the edits come back.
+        let g = gate(dir.path(), &[false, false, false], 2);
+        std::fs::write(dir.path().join("lib.rs"), "wip\n").unwrap();
+        g.check().await;
+        let report = g.check().await;
+        assert!(
+            report.summary.contains("your edits are kept"),
+            "{}",
+            report.summary
+        );
+        assert_eq!(read(), "wip\n");
     }
 
     #[test]

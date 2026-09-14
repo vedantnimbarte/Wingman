@@ -37,6 +37,9 @@ pub struct WorkerOptions {
     pub session_id: Option<String>,
     pub worktree: Option<String>,
     pub model_override: Option<String>,
+    /// E5.5 — consecutive turn-gate failures before rolling the worktree back
+    /// to its last green checkpoint. 0 keeps rollback off.
+    pub turn_rollback_after: u32,
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
@@ -126,20 +129,36 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     // failures back to the model (bounded by gate_max_retries) so it
     // self-corrects before reporting the task complete. Fail-open: a gate
     // that can't spawn passes. Empty cmd disables it.
-    // ponytail: this is the "gate progress" half. True per-turn rollback of a
-    // failed turn needs a checkpoint snapshot/restore primitive that doesn't
-    // exist yet (E11 verifies checkpoints but never captures a restorable
-    // one); until then the loop re-prompts rather than reverts.
+    //
+    // With `--turn-rollback-after N` the gate also keeps a checkpoint of the
+    // worktree each time it passes, and after N failures in a row restores
+    // it, so the model starts again from green instead of patching patches.
+    // The retry budget covers two such rounds.
+    let rollback_after = opts.turn_rollback_after;
     let gate: Option<Arc<dyn wingman_core::TurnGate>> = {
         let cmd = cfg.pilot.turn_gate_cmd.trim();
         if cmd.is_empty() {
             None
         } else {
-            Some(Arc::new(runtime::ShellTurnGate::new(
+            let shell: Arc<dyn wingman_core::TurnGate> = Arc::new(runtime::ShellTurnGate::new(
                 cmd.to_string(),
                 paths.root.clone(),
-            )))
+            ));
+            Some(if rollback_after > 0 {
+                Arc::new(wingman_autonomous::checkpoint::RollbackGate::new(
+                    shell,
+                    paths.root.clone(),
+                    rollback_after,
+                ))
+            } else {
+                shell
+            })
         }
+    };
+    let gate_max_retries = if rollback_after > 0 && gate.is_some() {
+        rollback_after as usize * 2
+    } else {
+        AgentConfig::default().gate_max_retries
     };
 
     // E10 — mid-run manager→worker injections (pivot / clarify). The stdin
@@ -160,6 +179,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             ..Default::default()
         },
         gate,
+        gate_max_retries,
         // Not the interactive default: a worker has to read, edit, build,
         // read errors, fix, re-build and only then report. Sixteen turns ran
         // out mid-task and the worker exited cleanly without calling
@@ -283,9 +303,20 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         });
     }
 
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
+    // Not held locked for the run: the rate-limit observer below writes its
+    // own lines from whichever thread the provider's retry runs on. Each
+    // `writeln!` still takes the lock for its whole line.
+    let mut stdout = std::io::stdout();
     let mut exit = ExitCode::SUCCESS;
+
+    // E9 — tell the orchestrator about every 429 / 529 the provider gets,
+    // retried or not, so it can stop spawning into the backoff.
+    wingman_providers::observe_rate_limits(|hit| {
+        let line = rate_limited_line(hit);
+        let mut out = std::io::stdout();
+        writeln!(out, "{line}").ok();
+        out.flush().ok();
+    });
 
     // Emit a synthetic worker_start event so the supervisor can correlate
     // session-id, role, and the task without having to peek at the rest of
@@ -363,6 +394,16 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     }
 
     Ok(exit)
+}
+
+/// The NDJSON line a rate-limit hit becomes on the worker's stdout, parsed by
+/// the supervisor as `rate_limited`.
+fn rate_limited_line(hit: wingman_providers::RateLimitHit) -> serde_json::Value {
+    serde_json::json!({
+        "event": "rate_limited",
+        "status": hit.status,
+        "retry_after_secs": hit.retry_after_secs.map(|s| s.ceil() as u64),
+    })
 }
 
 /// Compose the worker's system prompt: role prompt + the task spec, so the
@@ -536,6 +577,18 @@ mod tests {
         assert!(
             !reg.tool_names().iter().any(|n| n == "task_complete"),
             "an excluded control tool was registered anyway"
+        );
+    }
+
+    #[test]
+    fn rate_limit_hits_become_the_line_the_supervisor_parses() {
+        let line = rate_limited_line(wingman_providers::RateLimitHit {
+            status: 429,
+            retry_after_secs: Some(2.5),
+        });
+        assert_eq!(
+            line,
+            serde_json::json!({"event": "rate_limited", "status": 429, "retry_after_secs": 3})
         );
     }
 

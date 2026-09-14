@@ -175,6 +175,83 @@ fn prune_stale_worktree(repo_root: &Path, worktree_path: &Path, branch: &str) {
         .output();
 }
 
+/// E9 — throw away a worktree speculatively created for `task_id` that no
+/// worker ended up using: the directory and its branch, both best-effort.
+pub fn discard_worktree(repo_root: &Path, run_id: &str, task_id: &str, worktree_path: &Path) {
+    prune_stale_worktree(repo_root, worktree_path, &task_branch(run_id, task_id));
+}
+
+/// E5.5 — capture every file in the worktree at `root` as a git tree object
+/// and return its id. Untracked files are included and ignored ones are not,
+/// as `git add -A` sees them; `.wingman/` is left out, since it holds the
+/// worker's own bookkeeping rather than its work.
+///
+/// Goes through a private index file beside the worktree's own, so neither
+/// HEAD nor whatever the worker staged is touched. That index persists between
+/// calls (seeded from the real one the first time) so git re-hashes only the
+/// files that changed.
+pub fn snapshot_tree(root: &Path) -> Result<String, WorktreeError> {
+    let index = rollback_index(root)?;
+    git_with_index(
+        root,
+        &index,
+        &["add", "-A", "--", ".", ":(exclude).wingman"],
+    )?;
+    git_with_index(root, &index, &["write-tree"])
+}
+
+/// E5.5 — make the worktree at `root` match `tree` (from [`snapshot_tree`]):
+/// files that differ are rewritten, files added since are deleted, and
+/// anything identical is left alone so build tools do not see it as changed.
+/// Returns the tree the worktree held before, so the caller can undo this.
+pub fn restore_tree(root: &Path, tree: &str) -> Result<String, WorktreeError> {
+    let current = snapshot_tree(root)?;
+    let index = rollback_index(root)?;
+    // The two-tree form is a checkout: it moves the index and the files from
+    // `current` to `tree`, touching only what differs between them.
+    git_with_index(root, &index, &["read-tree", "-m", "-u", &current, tree])?;
+    Ok(current)
+}
+
+fn rollback_index(root: &Path) -> Result<PathBuf, WorktreeError> {
+    let git_path = |name: &str| -> Result<PathBuf, WorktreeError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--git-path", name])
+            .output()?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "git rev-parse --git-path {name} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(root.join(String::from_utf8_lossy(&out.stdout).trim()))
+    };
+    let index = git_path("wingman-rollback.index")?;
+    if !index.exists() {
+        let _ = std::fs::copy(git_path("index")?, &index);
+    }
+    Ok(index)
+}
+
+fn git_with_index(root: &Path, index: &Path, args: &[&str]) -> Result<String, WorktreeError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()?;
+    if !out.status.success() {
+        return Err(WorktreeError::Git(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Remove a worktree (and its branch reference under
 /// `.git/worktrees/`). Force-removes so workers that left a dirty tree
 /// don't strand the worktree forever.
@@ -842,6 +919,104 @@ mod tests {
             .trim()
             .to_string();
         Some((root, head))
+    }
+
+    /// E5.5: a restore puts back what the snapshot held, deletes what was
+    /// added since, keeps ignored files, and leaves HEAD and the real index
+    /// alone.
+    #[test]
+    fn restore_tree_returns_the_worktree_to_its_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, head)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        std::fs::write(
+            repo.join(".gitignore"),
+            "target/
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("seed.txt"),
+            "green
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("kept.txt"),
+            "untracked but green
+",
+        )
+        .unwrap();
+        let green = snapshot_tree(&repo).unwrap();
+
+        std::fs::write(
+            repo.join("seed.txt"),
+            "broken
+",
+        )
+        .unwrap();
+        std::fs::remove_file(repo.join("kept.txt")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src/new.rs"),
+            "fn broken(
+",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/build.out"), "cache").unwrap();
+        std::fs::create_dir_all(repo.join(".wingman")).unwrap();
+        std::fs::write(repo.join(".wingman/task.json"), "{}").unwrap();
+
+        let broken = restore_tree(&repo, &green).unwrap();
+        assert_ne!(broken, green);
+        let read = |p: &str| std::fs::read_to_string(repo.join(p)).unwrap();
+        assert_eq!(
+            read("seed.txt"),
+            "green
+"
+        );
+        assert_eq!(
+            read("kept.txt"),
+            "untracked but green
+"
+        );
+        assert!(!repo.join("src/new.rs").exists());
+        assert_eq!(read("target/build.out"), "cache");
+        assert_eq!(read(".wingman/task.json"), "{}");
+        // HEAD did not move, and the real index still has only the seed.
+        assert_eq!(rev_parse(&repo, "HEAD").unwrap(), head);
+        let staged = git(&repo, &["diff", "--cached", "--name-only"]);
+        assert!(staged.stdout.is_empty(), "{staged:?}");
+
+        // And the returned tree undoes the restore.
+        restore_tree(&repo, &broken).unwrap();
+        assert_eq!(
+            read("seed.txt"),
+            "broken
+"
+        );
+        assert!(repo.join("src/new.rs").exists());
+    }
+
+    /// E9: a discarded speculative worktree takes its branch with it, so the
+    /// real assignment can create both afresh.
+    #[test]
+    fn discard_worktree_removes_directory_and_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, head)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let wt = repo.join(".wingman/worktrees/auto-r-t2");
+        create_worktree(&repo, &head, "r", "t2", &wt).unwrap();
+        assert!(wt.exists());
+        discard_worktree(&repo, "r", "t2", &wt);
+        assert!(!wt.exists());
+        let branches = git(&repo, &["branch", "--list", &task_branch("r", "t2")]);
+        assert!(branches.stdout.is_empty());
     }
 
     /// E4 rebase-as-you-go: `rebase_branch_onto` replays a non-conflicting

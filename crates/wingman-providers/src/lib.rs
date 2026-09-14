@@ -22,4 +22,5 @@ pub use cohere::CohereProvider;
 pub use gemini::GeminiProvider;
 pub use openai_compat::{OpenAiCompatProvider, Variant as OpenAiVariant};
 pub use probe::probe;
+pub use retry::{observe_rate_limits, RateLimitHit};
 pub use watsonx::{WatsonxCredential, WatsonxProvider};

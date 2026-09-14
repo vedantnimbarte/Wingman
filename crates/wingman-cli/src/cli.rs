@@ -101,6 +101,12 @@ pub struct Cli {
     #[arg(long, hide = true, value_name = "PATH")]
     pub worktree: Option<String>,
 
+    /// E5.5 — with `--worker-mode`, restore the worktree to the last state
+    /// that passed the turn gate after this many consecutive gate failures.
+    /// Passed by the orchestrator when the `turn_rollback` capability is on.
+    #[arg(long, hide = true, value_name = "N")]
+    pub turn_rollback_after: Option<u32>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -1033,6 +1039,7 @@ pub async fn run() -> Result<ExitCode> {
             session_id: cli.session_id,
             worktree: cli.worktree,
             model_override: cli.model,
+            turn_rollback_after: cli.turn_rollback_after.unwrap_or(0),
         };
         return commands::worker::run(cfg, opts).await;
     }

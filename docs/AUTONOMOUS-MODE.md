@@ -128,6 +128,7 @@ Each autonomous run creates:
 {"t":"…","ev":"task.attempt","id":"t1","agent":"agent-7f3a","rung":0,"model":"…","status":"review","summary":"…","tests":{"shell: cargo test":212}}
 {"t":"…","ev":"task.status","id":"t1","status":"review","outcome":{"summary":"…","files_changed":4}}
 {"t":"…","ev":"agent.usd","agent":"agent-7f3a","usd":0.07}
+{"t":"…","ev":"agent.rate_limit","agent":"agent-7f3a","status":429,"retry_after_secs":20}
 {"t":"…","ev":"task.status","id":"t1","status":"done"}
 {"t":"…","ev":"run.merge.task","id":"t1","strategy":"squash","commit":"abc123"}
 {"t":"…","ev":"run.pr","url":"https://…/pull/42"}

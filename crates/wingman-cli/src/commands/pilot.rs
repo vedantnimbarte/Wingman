@@ -647,6 +647,9 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &pilot.notifications,
         ),
+        sample_host_load: capability_on(&pilot, "adaptive_concurrency"),
+        speculative_prespawn: capability_on(&pilot, "speculative_prespawn"),
+        warm_cmd: pilot.turn_gate_cmd.clone(),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
@@ -660,6 +663,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             &selection.model,
             routing,
             std::time::Duration::from_secs(pilot.task_timeout_secs),
+            turn_rollback_after(&pilot),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -941,8 +945,26 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
         "critic" => matches!(pilot.tier, Autopilot),
         // Goal refinement / negotiation (J1): autopilot-only by default.
         "goal_refinement" => matches!(pilot.tier, Autopilot),
+        // Host-load-aware concurrency cap (E9): every tier. Rate limits and
+        // budget burn narrow the cap regardless.
+        "adaptive_concurrency" => true,
+        // Speculative worktree pre-spawn (E9): on for copilot and autopilot.
+        "speculative_prespawn" => matches!(pilot.tier, Copilot | Autopilot),
+        // Per-turn rollback to the last green checkpoint (E5.5): discards
+        // worker edits, so autopilot-only by default.
+        "turn_rollback" => matches!(pilot.tier, Autopilot),
         // Unknown capability defaults off.
         _ => false,
+    }
+}
+
+/// E5.5 — the `--turn-rollback-after` a worker gets: `[pilot].turn_rollback_after`
+/// while the `turn_rollback` capability is on, 0 (off) otherwise.
+fn turn_rollback_after(pilot: &wingman_config::PilotConfig) -> u32 {
+    if capability_on(pilot, "turn_rollback") {
+        pilot.turn_rollback_after
+    } else {
+        0
     }
 }
 
@@ -1470,6 +1492,9 @@ pub async fn resume(
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &cfg.pilot.notifications,
         ),
+        sample_host_load: capability_on(&cfg.pilot, "adaptive_concurrency"),
+        speculative_prespawn: capability_on(&cfg.pilot, "speculative_prespawn"),
+        warm_cmd: cfg.pilot.turn_gate_cmd.clone(),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
@@ -1486,6 +1511,7 @@ pub async fn resume(
             &selection.model,
             routing,
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+            turn_rollback_after(&cfg.pilot),
         )?,
         base_branch,
         project_root: project.root,
@@ -1573,6 +1599,7 @@ fn build_real_worker_spawner(
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
     task_timeout: std::time::Duration,
+    turn_rollback_after: u32,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1630,6 +1657,7 @@ fn build_real_worker_spawner(
                     timeout: task_timeout,
                     cmd_rx,
                     rung: ctx.rung,
+                    turn_rollback_after,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
@@ -2314,6 +2342,31 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use wingman_autonomous::control::{append, ControlCommand};
+
+    /// Rollback discards a worker's edits, so it is autopilot's by default and
+    /// an explicit capability wins either way; the threshold only travels to
+    /// the worker while it is on.
+    #[test]
+    fn turn_rollback_follows_the_tier_unless_overridden() {
+        let mut pilot = wingman_config::PilotConfig {
+            turn_rollback_after: 3,
+            ..Default::default()
+        };
+        assert_eq!(turn_rollback_after(&pilot), 0);
+        assert!(capability_on(&pilot, "speculative_prespawn"));
+        assert!(capability_on(&pilot, "adaptive_concurrency"));
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(turn_rollback_after(&pilot), 3);
+
+        pilot.capabilities.insert("turn_rollback".into(), false);
+        assert_eq!(turn_rollback_after(&pilot), 0);
+
+        pilot.tier = wingman_config::PilotTier::Assist;
+        assert!(!capability_on(&pilot, "speculative_prespawn"));
+        pilot.capabilities.insert("turn_rollback".into(), true);
+        assert_eq!(turn_rollback_after(&pilot), 3);
+    }
 
     #[test]
     fn r4_eval_gate_flags_regression_and_passes_on_parity() {

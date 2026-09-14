@@ -246,6 +246,60 @@ is refused, and the run stops with an escalation packet instead of a PR.
 model, outcome, test counts). The escalation packet's "What was tried" section
 lists them for the blocked task.
 
+## Throughput and turn rollback
+
+**Adaptive concurrency.** `max_concurrent_agents` is a ceiling, not a target.
+Before each assignment the orchestrator narrows it from three signals:
+
+- **Rate limits.** A worker reports every `429 Too Many Requests` and
+  `529 overloaded` its provider answers, including ones the provider then
+  retried, as an `agent.rate_limit` event. Each hit in the last minute takes
+  25% off the headroom above one worker, and while a `Retry-After` is still
+  running the cap is one.
+- **Host CPU load**, re-read every 10 seconds (`/proc/stat` on Linux,
+  `GetSystemTimes` on Windows, the load average on macOS): at 50% busy half
+  the headroom is left. Where it cannot be read, it is ignored. Capability
+  `adaptive_concurrency`, on at every tier.
+- **Budget burn**: spend against `max_usd`.
+
+A narrower cap never stops a running worker; the next assignment is refused
+until the cap has room again.
+
+**Speculative pre-spawn.** When every dependency of a waiting task is in
+review or done, the orchestrator creates that task's worktree before the
+manager assigns it and runs `turn_gate_cmd` there, so the worker starts on a
+tree that is already built. Every worktree branches from the run's base
+commit, so the early one is exactly what the assignment would create, and the
+assignment takes it over (waiting for the warm-up to finish first). If the
+plan changes first (the task is replanned onto work that has not reached
+review, a dependency is sent back for rework, or the task is blocked or split
+away) the warm-up is killed and the worktree and its branch are removed; the
+same happens to any still unused when the run ends. Speculation only uses the
+room the cap leaves once running tasks and unfinished warm-ups are counted.
+Capability `speculative_prespawn`, on for copilot and autopilot.
+
+**Turn rollback.** A worker's turn gate (`turn_gate_cmd`) feeds its failures
+back to the model. With the `turn_rollback` capability (autopilot by default)
+the worker also records the worktree's files each time the gate passes, and
+after `turn_rollback_after` failures in a row restores that last green state
+and tells the model its edits since then are gone. Before the gate has ever
+passed, the tree the task started from is restored instead, but only if it
+passes the gate; if the base is red as well, the edits are put back. Untracked
+files count, ignored files and `.wingman/` do not, and HEAD is not moved.
+Each rollback buys a fresh round of retries: the gate gets
+`2 × turn_rollback_after` failures before the worker gives up.
+
+```toml
+[pilot]
+turn_gate_cmd       = "cargo check --workspace"  # also warms speculative worktrees
+turn_rollback_after = 2
+
+[pilot.capabilities]
+adaptive_concurrency = true    # host-load sampling (every tier)
+speculative_prespawn = true    # copilot and autopilot
+turn_rollback        = true    # autopilot only by default
+```
+
 ## Provider support for pilot mode
 
 Pilot mode requires the model to emit structured tool-use blocks. The
