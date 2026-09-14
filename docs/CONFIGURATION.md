@@ -36,6 +36,13 @@ fast_model = "anthropic/claude-haiku-4-5-20251001"
 # shows the table; an explicit --model always wins.
 # learned_min_samples = 20
 
+[learn]
+allow_global_memory_writes = false   # may the agent write ~/.wingman/memory/
+# Search escalation: before each user turn, the top index hits for the
+# request (file, line range, symbol) are added to the turn, best first, until
+# the next would pass this many tokens. 0 turns it off.
+search_hint_tokens = 300
+
 [tui]
 theme = "default"
 show_token_usage = true

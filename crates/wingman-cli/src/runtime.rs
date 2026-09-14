@@ -803,11 +803,21 @@ const PENDING_DRAIN_LIMIT: usize = 25;
 ///
 /// Returns `None` (with a warning) if the store can't be opened, so a broken
 /// `.wingman/` degrades to a session without memory rather than a hard failure.
-pub fn build_learn(paths: &ProjectPaths, session_id: String) -> Option<Arc<LearnHandles>> {
-    let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+pub fn build_learn(
+    cfg: &Config,
+    paths: &ProjectPaths,
+    session_id: String,
+) -> Option<Arc<LearnHandles>> {
+    let mut learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+    learn_cfg.search_hint_tokens = cfg.learn.search_hint_tokens;
     // Give the learn hook the project index so it can inject relevant code
-    // locations per turn (search escalation). Cheap: opens the store, no reindex.
-    let learn_indexer = build_indexer(paths).ok().flatten();
+    // locations per turn (search escalation). Cheap: opens the store, no
+    // reindex. Not opened at all when `[learn].search_hint_tokens = 0`.
+    let learn_indexer = if learn_cfg.search_hint_tokens == 0 {
+        None
+    } else {
+        build_indexer(paths).ok().flatten()
+    };
     match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
         Ok(h) => Some(Arc::new(h)),
         Err(e) => {
@@ -840,7 +850,9 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
             // the user restart the daemon with the embedder they want.
             if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir) {
                 eprintln!(
-                    "wingman: the semantic index kept by indexd (pid {pid}) was built by a                      different embedder ({e}); `semantic_search` is disabled this session.                      Restart it with `wingman indexd stop` then `wingman indexd start`."
+                    "wingman: the semantic index kept by indexd (pid {pid}) was built by a \
+                     different embedder ({e}); `semantic_search` is disabled this session. \
+                     Restart it with `wingman indexd stop` then `wingman indexd start`."
                 );
                 return Ok(None);
             }
@@ -1717,7 +1729,7 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let spill = build_spill(cfg, &paths, &session_id);
-    let learn = build_learn(&paths, session_id);
+    let learn = build_learn(cfg, &paths, session_id);
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
 
@@ -2038,6 +2050,8 @@ fn base_prompt(mode: PermissionMode, cwd: &str) -> String {
          - For \"where is X\" or \"how does Y work\" questions, call `semantic_search` first \
          to find the relevant chunks, then `read_file` the specific line range you need. \
          Avoid reading whole files when a targeted range will do.\n\
+         - When the turn already lists \"Relevant code from the project index\", read \
+         those locations before searching again.\n\
          - Use `grep` for exact-string lookups and `glob` for filename patterns; \
          use `semantic_search` for conceptual / fuzzy queries.\n\
          - Edit with `edit_file` and include enough surrounding context that `old_string` is unique.\n\

@@ -33,7 +33,8 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
     // `recall_session` and `read_session`, so a connected client saw a
     // registry missing exactly the half this command's docs advertise.
     // Writes stay gated by `mode` (read-only by default), not by absence.
-    let learn = crate::runtime::build_learn(&paths, format!("mcp-serve-{}", std::process::id()));
+    let learn =
+        crate::runtime::build_learn(&cfg, &paths, format!("mcp-serve-{}", std::process::id()));
     let registry = crate::runtime::build_registry_with_learn(&cfg, mode, learn).await?;
 
     eprintln!(

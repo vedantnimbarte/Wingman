@@ -646,7 +646,7 @@ pub struct ServePushConfig {
 }
 
 /// Settings for the memory / skills loop.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct LearnConfig {
@@ -659,6 +659,22 @@ pub struct LearnConfig {
     /// project-scoped memories freely, and you can always write global ones
     /// yourself (they are plain markdown files).
     pub allow_global_memory_writes: bool,
+    /// Search escalation: before each user turn, search the project index
+    /// with the request and hand the agent the top matching files, line
+    /// ranges and symbols, so it starts reading instead of grepping. This is
+    /// the token budget for that block (estimated at ~4 chars/token); hits
+    /// that would overflow it are dropped. `0` turns it off and the index is
+    /// not opened for it.
+    pub search_hint_tokens: u32,
+}
+
+impl Default for LearnConfig {
+    fn default() -> Self {
+        Self {
+            allow_global_memory_writes: false,
+            search_hint_tokens: 300,
+        }
+    }
 }
 
 /// Fully-local, air-gapped operation. When `local_only` is on, Wingman refuses
@@ -1097,6 +1113,20 @@ impl RouterConfig {
             Some("local") => self.local_model.clone(),
             Some("default") | None => None,
             Some(explicit) => Some(explicit.to_string()),
+        }
+    }
+
+    /// The model for a cheap one-shot side call of `class` (`wingman
+    /// distill`, `wingman explain`). A class listed in `[router.classes]`
+    /// resolves as [`resolve_class`](Self::resolve_class) does, so `summarize
+    /// = "local"` keeps it on the machine and `"default"` keeps it on the
+    /// session model; an unlisted class uses `fast_model`. `None` means the
+    /// session model.
+    pub fn resolve_side_call(&self, class: &str) -> Option<String> {
+        if self.classes.contains_key(class) {
+            self.resolve_class(class)
+        } else {
+            self.fast_model.clone()
         }
     }
 }
@@ -3645,6 +3675,36 @@ max_retries_per_task = 1
         "#;
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.router.resolve_class("search"), None);
+    }
+
+    #[test]
+    fn side_calls_follow_their_class_before_the_fast_model() {
+        let mut r = RouterConfig {
+            fast_model: Some("anthropic/haiku".into()),
+            local_model: Some("ollama/llama3.1".into()),
+            ..Default::default()
+        };
+        // Unlisted: the fast model, as these calls always used.
+        assert_eq!(
+            r.resolve_side_call("summarize").as_deref(),
+            Some("anthropic/haiku")
+        );
+        r.classes.insert("summarize".into(), "local".into());
+        assert_eq!(
+            r.resolve_side_call("summarize").as_deref(),
+            Some("ollama/llama3.1")
+        );
+        // "default" means the session model, not a fall back to fast.
+        r.classes.insert("summarize".into(), "default".into());
+        assert_eq!(r.resolve_side_call("summarize"), None);
+    }
+
+    #[test]
+    fn search_hints_are_on_by_default_and_zero_turns_them_off() {
+        assert_eq!(Config::default().learn.search_hint_tokens, 300);
+        let cfg: Config = toml::from_str("[learn]\nsearch_hint_tokens = 0\n").unwrap();
+        assert_eq!(cfg.learn.search_hint_tokens, 0);
+        assert!(!cfg.learn.allow_global_memory_writes);
     }
 
     #[test]
