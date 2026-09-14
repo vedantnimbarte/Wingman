@@ -436,6 +436,38 @@ pub fn api_key_env_var(provider_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Why `provider_id` has no credential to call with, or `None` when it has one
+/// (or, like a local server, needs none). Looks where [`build_provider`] looks
+/// (config value, keyring marker, environment) without building anything,
+/// because the OpenAI-compatible adapter builds fine with no key and only
+/// fails on its first request. `env` stands in for `std::env::var`.
+pub fn missing_credential(
+    cfg: &Config,
+    provider_id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let from_config = cfg
+        .providers
+        .get(provider_id)
+        .and_then(|pc| pc.api_key.as_deref());
+    if check_config_value(from_config).is_some() {
+        return None;
+    }
+    let set = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+    let found = match provider_id {
+        "chatgpt" => {
+            set("CHATGPT_ACCESS_TOKEN") || secrets::load("chatgpt").ok().flatten().is_some()
+        }
+        "gemini" => set("GOOGLE_API_KEY") || set("GEMINI_API_KEY"),
+        "watsonx" => set("WATSONX_API_KEY") || set("WATSONX_ACCESS_TOKEN"),
+        id => api_key_env_var(id).is_none_or(set),
+    };
+    (!found).then(|| match api_key_env_var(provider_id) {
+        Some(name) => format!("no credential: set {name} or run `wingman login {provider_id}`"),
+        None => format!("no credential: run `wingman login {provider_id}`"),
+    })
+}
+
 fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> {
     if let Some(key) = check_config_value(from_config) {
         return Ok(key);
@@ -2276,5 +2308,33 @@ mod synthesized_tool_tests {
         let mut no_shell = Config::default();
         no_shell.tools.disabled_tools = vec!["run_shell".into()];
         assert!(approved_synthesized_tools(&worktree, &no_shell, approve).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn missing_credential_checks_config_then_env_and_lets_local_servers_through() {
+        let mut cfg = Config::default();
+        for id in ["anthropic", "openai", "ollama", "gemini"] {
+            cfg.providers.insert(id.into(), Default::default());
+        }
+        cfg.providers.get_mut("anthropic").unwrap().api_key = Some("sk-in-config".into());
+        // A `${VAR}` placeholder the loader could not fill is not a key.
+        cfg.providers.get_mut("openai").unwrap().api_key = Some("${OPENAI_API_KEY}".into());
+        let no_env = |_: &str| None;
+
+        assert_eq!(missing_credential(&cfg, "anthropic", &no_env), None);
+        assert_eq!(missing_credential(&cfg, "ollama", &no_env), None);
+        let why = missing_credential(&cfg, "openai", &no_env).unwrap();
+        assert!(why.contains("OPENAI_API_KEY"), "{why}");
+
+        let env = |k: &str| (k == "OPENAI_API_KEY" || k == "GEMINI_API_KEY").then(|| "k".into());
+        assert_eq!(missing_credential(&cfg, "openai", &env), None);
+        assert_eq!(missing_credential(&cfg, "gemini", &env), None);
+        let blank = |_: &str| Some("  ".into());
+        assert!(missing_credential(&cfg, "openai", &blank).is_some());
     }
 }

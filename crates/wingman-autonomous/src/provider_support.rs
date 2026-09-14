@@ -18,10 +18,9 @@
 //! | `Unsupported`| Known not to emit tool calls at all (none right now —     |
 //! |              | placeholder for future backends).                         |
 //!
-//! Phase 8 ships the table and the warning/error logic. Actual live
-//! validation across all nine providers (running the canned plan and
-//! confirming end-to-end success) needs API keys and is documented in
-//! README as something the user runs themselves.
+//! This is the static half. The live half is `wingman pilot
+//! validate-providers` ([`crate::provider_matrix`]), which runs a canned plan
+//! against each configured provider and reports this tier next to the result.
 
 use std::fmt;
 

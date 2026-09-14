@@ -215,6 +215,43 @@ refuses to start when the planner provider is `unsupported` (no current
 backends are; the tier exists for future providers that can't emit
 tool calls at all).
 
+### Validating your providers
+
+The tier column above is a static classification. To see which of *your*
+providers actually carry a pilot run, run:
+
+```bash
+wingman pilot validate-providers                     # every [providers.*] section
+wingman pilot validate-providers --provider anthropic --provider openrouter
+```
+
+For each provider it runs one canned plan: a single developer task that adds a
+`--version-only` flag to a tiny `src/main.rs`, with a `grep` acceptance check.
+The planner is skipped so every provider gets the same plan; the manager and
+worker still have to use tool calls (`assign_task`, file edits,
+`run_acceptance`, `task_complete`, `finalize_task`). Each run gets its own
+scratch git repo under the system temp directory, `--no-pr`, no retries, no
+reviewer or critic, and stays out of the adaptive-routing stats. The workers
+are real `wingman --worker-mode` processes running `[providers.<id>].model`,
+in the sandbox tier `[pilot.sandbox]` selects.
+
+| Result    | Meaning                                                                                   |
+| --------- | ----------------------------------------------------------------------------------------- |
+| `pass`    | The run finished and `src/main.rs` on its integration branch contains `--version-only`.   |
+| `fail`    | Anything else: a task failed or was aborted by the cap, the pipeline errored, or the flag never landed. The scratch repo is kept and its path is in the detail. |
+| `skipped` | No model configured, no credential (config value, keyring or the provider's env var), an `unsupported` tier, or the provider could not be built (e.g. `[privacy].local_only`). Local servers need no credential, so they run and fail if nothing is listening. |
+
+Each provider is capped by `--max-usd` (default $0.50) and `--max-tokens`
+(default 400000, the bound that holds for models missing from the price
+table). The spend lands in `wingman cost` like any pilot run. The matrix is
+printed and written to `.wingman/provider-validation/matrix.md` and
+`matrix.json` (`--out <dir>` to change). Exit status is 1 if any provider
+failed, 2 if none could run, 0 otherwise.
+
+Workers read the global config, so a provider defined only in a project's
+`.wingman/config.toml` builds for the manager but not for its worker; that
+row fails rather than passes.
+
 ---
 
 ## Watch mode

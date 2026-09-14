@@ -2677,6 +2677,206 @@ fn write_eval_results(
     Ok(())
 }
 
+/// Phase 8.4 — `pilot validate-providers`: run the canned `--version-only`
+/// plan ([`wingman_autonomous::provider_matrix`]) against each configured
+/// provider with credentials, one scratch repo each, under `max_usd` and
+/// `max_tokens`, and write `matrix.md` + `matrix.json`.
+///
+/// Exit 1 when any provider failed, 2 when none could run, 0 otherwise.
+pub async fn validate_providers(
+    cfg: Config,
+    only: Vec<String>,
+    max_usd: f64,
+    max_tokens: u64,
+    out: Option<std::path::PathBuf>,
+) -> Result<ExitCode> {
+    use wingman_autonomous::provider_matrix::{self, MatrixReport, MatrixRow, Verdict};
+    // A cap of 0 means "no cap" everywhere else in pilot; here it would mean
+    // an unbounded bill per provider.
+    if max_usd <= 0.0 || max_tokens == 0 {
+        return Err(anyhow!(
+            "--max-usd and --max-tokens must both be above 0: every provider run spends real money"
+        ));
+    }
+    // Workers are real child processes; Ctrl+C must take them down too.
+    crate::shutdown::install();
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let out_dir = out.unwrap_or_else(|| project.root.join(".wingman").join("provider-validation"));
+
+    // The same vm gate a real run applies, over the canned task.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &cfg.pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    let canned: Vec<wingman_autonomous::Task> = provider_matrix::canned_plan()
+        .into_iter()
+        .map(|p| {
+            let mut t = wingman_autonomous::Task::new(p.id, p.role, p.title);
+            t.writes = p.writes;
+            t.acceptance = p.acceptance;
+            t.reversibility = p.reversibility;
+            t
+        })
+        .collect();
+    if refuse_unisolated_vm_tasks(&cfg.pilot.sandbox, &sandbox_avail, &canned) {
+        return Ok(ExitCode::from(2));
+    }
+
+    let ids = if only.is_empty() {
+        cfg.providers.keys().cloned().collect()
+    } else {
+        only
+    };
+    let env = |k: &str| std::env::var(k).ok();
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let model = match validation_target(&cfg, &id, &env) {
+            Ok(model) => model,
+            Err((model, reason)) => {
+                eprintln!("[pilot] validate: {id}: skipped ({reason})");
+                rows.push(MatrixRow::skipped(&id, model, reason));
+                continue;
+            }
+        };
+        let provider = match runtime::build_provider(&cfg, &id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[pilot] validate: {id}: skipped ({e})");
+                rows.push(MatrixRow::skipped(&id, Some(model), e.to_string()));
+                continue;
+            }
+        };
+        eprintln!("[pilot] validate: {id}/{model}: running the canned plan…");
+        // `provider/model`, so the worker resolves this provider rather than
+        // the default one a bare model id would fall back to.
+        let spec = format!("{id}/{model}");
+        let spawner = build_real_worker_spawner(
+            &spec,
+            &spec,
+            None,
+            std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+            cfg.pilot.sandbox.clone(),
+            sandbox_avail.clone(),
+            None,
+        )?;
+        let scratch =
+            std::env::temp_dir().join(format!("wingman-validate-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let mut row = provider_matrix::run_canned_plan(&scratch, &id, &model, |base| {
+            wingman_autonomous::pipeline::PipelineInputs {
+                provider,
+                manager_model: model.clone(),
+                worker_spawner: spawner,
+                base_branch: cfg.pilot.pr.base_branch.clone(),
+                project_root: scratch.clone(),
+                command_runner: Box::new(wingman_autonomous::pr::SystemCommandRunner),
+                no_pr: true,
+                orchestrator_cfg: wingman_autonomous::orchestrator::OrchestratorConfig {
+                    max_concurrent_agents: 1,
+                    task_timeout: std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+                    project_root: scratch.clone(),
+                    run_id: provider_matrix::RUN_ID.into(),
+                    base_commit: base.into(),
+                    use_real_worktrees: true,
+                    max_usd,
+                    max_total_tokens: max_tokens,
+                    // First-attempt behaviour is what the matrix reports, and
+                    // retries would multiply the spend the cap is meant to bound.
+                    max_retries_per_task: 0,
+                    enforce_checkpoint_hygiene: false,
+                    desktop_inbox: None,
+                },
+                max_ticks: cfg.pilot.max_manager_ticks,
+                tier: wingman_config::PilotTier::Copilot,
+                worker_model: spec.clone(),
+                // Validation runs stay out of the adaptive-routing history.
+                stats_path: None,
+                auto_approved: false,
+                pr_config: cfg.pilot.pr.clone(),
+                security_config: cfg.pilot.security.clone(),
+                disabled_tools: cfg.tools.disabled_tools.clone(),
+                run_reviewer: false,
+                run_critic: false,
+                reviewer_model: model.clone(),
+                sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
+                sandbox_availability: sandbox_avail.clone(),
+                dangerous_paths: Vec::new(),
+            }
+        })
+        .await;
+
+        // Real spend, so `wingman cost` should see it like any pilot run.
+        if let Ok(store) = RunStore::load(&run_dir(&scratch, provider_matrix::RUN_ID)).await {
+            if let Ok(events) = store.read_events().await {
+                let by_model = wingman_autonomous::reporting::tokens_by_model(&events);
+                if !by_model.is_empty() {
+                    wingman_tui::usage_store::LifetimeUsage::load().save_merged(&by_model);
+                }
+            }
+        }
+        if row.verdict == Verdict::Pass {
+            let _ = std::fs::remove_dir_all(&scratch);
+        } else {
+            row.detail = format!("{} (scratch repo kept: {})", row.detail, scratch.display());
+        }
+        eprintln!(
+            "[pilot] validate: {id}/{model}: {:?} (${:.4}, {} tokens) {}",
+            row.verdict, row.usd, row.tokens, row.detail
+        );
+        rows.push(row);
+    }
+
+    let report = MatrixReport {
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        goal: provider_matrix::GOAL.into(),
+        max_usd,
+        max_total_tokens: max_tokens,
+        rows,
+    };
+    let markdown = report.render_markdown();
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    std::fs::write(out_dir.join("matrix.md"), &markdown)?;
+    std::fs::write(
+        out_dir.join("matrix.json"),
+        serde_json::to_string_pretty(&report)?,
+    )?;
+    print!("{markdown}");
+    eprintln!(
+        "[pilot] validate: wrote {}",
+        out_dir.join("matrix.md").display()
+    );
+    if report.any_failed() {
+        Ok(ExitCode::from(1))
+    } else if !report.any_ran() {
+        eprintln!("[pilot] validate: no provider could run; see the skipped reasons above.");
+        Ok(ExitCode::from(2))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// The model to validate `id` with, or why it is skipped (with the model, when
+/// one is configured).
+fn validation_target(
+    cfg: &Config,
+    id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<String, (Option<String>, String)> {
+    let Some(pc) = cfg.providers.get(id) else {
+        return Err((None, format!("no [providers.{id}] section")));
+    };
+    let Some(model) = pc.model.clone().filter(|m| !m.trim().is_empty()) else {
+        return Err((None, format!("no model: set [providers.{id}].model")));
+    };
+    if let Err(why) = wingman_autonomous::provider_support::gate_run(id) {
+        return Err((Some(model), why));
+    }
+    match runtime::missing_credential(cfg, id, env) {
+        Some(why) => Err((Some(model), why)),
+        None => Ok(model),
+    }
+}
+
 /// Load the `source\x01title` keys already present in the daemon queue so a
 /// restarted daemon doesn't re-queue or re-dispatch work it already handled.
 /// Missing/unreadable queue → empty set (nothing seen yet).
@@ -2996,5 +3196,46 @@ mod ask_tests {
     fn a_run_with_no_events_yields_no_answers() {
         let dir = tempfile::tempdir().unwrap();
         assert!(answers(dir.path()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    #[test]
+    fn validation_skips_providers_it_cannot_run_and_says_why() {
+        let mut cfg = Config::default();
+        let section = |model: Option<&str>, key: Option<&str>| wingman_config::ProviderConfig {
+            model: model.map(Into::into),
+            api_key: key.map(Into::into),
+            ..Default::default()
+        };
+        cfg.providers
+            .insert("anthropic".into(), section(Some("claude-x"), Some("sk")));
+        cfg.providers
+            .insert("openai".into(), section(Some("gpt-x"), None));
+        cfg.providers.insert("ollama".into(), section(None, None));
+        let no_env = |_: &str| None;
+
+        assert_eq!(
+            validation_target(&cfg, "anthropic", &no_env),
+            Ok("claude-x".into())
+        );
+        let (model, why) = validation_target(&cfg, "openai", &no_env).unwrap_err();
+        assert_eq!(model.as_deref(), Some("gpt-x"));
+        assert!(why.contains("OPENAI_API_KEY"), "{why}");
+        let (_, why) = validation_target(&cfg, "ollama", &no_env).unwrap_err();
+        assert!(why.contains("[providers.ollama].model"), "{why}");
+        let (_, why) = validation_target(&cfg, "groq", &no_env).unwrap_err();
+        assert!(why.contains("no [providers.groq]"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn validation_refuses_an_uncapped_run() {
+        let err = validate_providers(Config::default(), Vec::new(), 0.0, 1000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("above 0"), "{err}");
     }
 }

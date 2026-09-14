@@ -684,6 +684,26 @@ pub enum PilotAction {
         #[arg(long)]
         update_baseline: bool,
     },
+    /// Run the canned `--version-only` plan against every configured provider
+    /// that has credentials, each in a scratch repo under a strict cap, and
+    /// write the pass/fail matrix as markdown and JSON. Spends real money.
+    ValidateProviders {
+        /// Only these provider ids (repeatable). Default: every
+        /// `[providers.*]` section.
+        #[arg(long = "provider", value_name = "ID")]
+        providers: Vec<String>,
+        /// Spend cap per provider, in USD. Must be above 0.
+        #[arg(long, default_value_t = 0.50)]
+        max_usd: f64,
+        /// Token cap per provider (in + out); holds for unpriced models,
+        /// where the USD cap cannot trip. Must be above 0.
+        #[arg(long, default_value_t = 400_000)]
+        max_tokens: u64,
+        /// Directory for `matrix.md` and `matrix.json`.
+        /// Default: `.wingman/provider-validation/`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
+    },
     /// R2 — post-merge feedback poller: for every run that opened a PR,
     /// query its terminal state (`gh`) and record a `pr.outcome` event the
     /// cross-run learner weights. Requires `gh` auth.
@@ -1418,6 +1438,15 @@ pub async fn run() -> Result<ExitCode> {
             } => {
                 let cfg = load_config()?;
                 commands::pilot::eval(cfg, goals, threshold, update_baseline).await
+            }
+            PilotAction::ValidateProviders {
+                providers,
+                max_usd,
+                max_tokens,
+                out,
+            } => {
+                let cfg = load_config()?;
+                commands::pilot::validate_providers(cfg, providers, max_usd, max_tokens, out).await
             }
             PilotAction::Tools { action } => match action {
                 None | Some(ToolsAction::List) => commands::pilot::tools_list().await,

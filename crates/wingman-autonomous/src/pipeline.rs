@@ -236,7 +236,13 @@ pub async fn run_to_completion(
     // Drive the manager loop. Manager system prompt is loaded inside
     // build_manager; the per-tick state block is injected by
     // drive_to_completion.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| project_root.clone());
+    // The process cwd only when it is inside the project: `pilot
+    // validate-providers` drives a scratch repo from wherever it was started,
+    // and the manager's read tools must not resolve against that directory.
+    let cwd = std::env::current_dir()
+        .ok()
+        .filter(|d| d.starts_with(&project_root))
+        .unwrap_or_else(|| project_root.clone());
     let registry = build_manager_registry(
         handle.clone(),
         cwd,
@@ -1451,7 +1457,7 @@ pub fn pipeline_succeeded(state: &crate::model::RunState) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{Event, Role, RunStatus, Task, TaskStatus};
     use crate::orchestrator::{fake_happy_spawner, OrchestratorConfig};
@@ -1510,12 +1516,12 @@ mod tests {
     /// the appropriate tool-use block. The manager system prompt + the
     /// rendered state block are part of the input so the provider can
     /// branch on what the manager is seeing.
-    struct ScriptedProvider {
+    pub(crate) struct ScriptedProvider {
         call_count: Mutex<u32>,
     }
 
     impl ScriptedProvider {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 call_count: Mutex::new(0),
             }
@@ -1613,6 +1619,22 @@ mod tests {
             let _call = *n;
             drop(n);
 
+            // One scheduling step per tick, like a real manager: once the
+            // step's tool result is back, end the turn. The state text in the
+            // history is still the pre-step picture, so acting on it again
+            // repeats a step the orchestrator has already taken.
+            let answered = req.messages.last().is_some_and(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            });
+            if answered {
+                let events = vec![Ok(StreamEvent::Stop {
+                    reason: StopReason::EndTurn,
+                })];
+                return Ok(Box::pin(stream::iter(events)));
+            }
+
             // Inspect the user prompt to decide what to emit.
             let statuses = parse_state_from_request(&req);
             // For each task, classify Pending/Todo/Review/Done/etc.
@@ -1696,7 +1718,7 @@ mod tests {
 
     /// Mock CommandRunner that simulates a clean gh-present, git-push-ok
     /// environment. Useful for the e2e test below.
-    struct AllOkCommandRunner;
+    pub(crate) struct AllOkCommandRunner;
     impl CommandRunner for AllOkCommandRunner {
         fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
             let _ = (program, args);

@@ -292,6 +292,13 @@ Wingman different; this is everything else it does.
   directly on every platform, no shell script. Candidates go through the same
   queue, trust and per-cycle dispatch cap. See
   [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
+- **Provider validation matrix.** `wingman pilot validate-providers` runs one
+  canned pilot plan (add a `--version-only` flag to a throwaway CLI) against
+  every configured provider that has credentials, each in a scratch repo under
+  a strict USD and token cap, and writes a pass/fail/skipped matrix to
+  `.wingman/provider-validation/matrix.md` and `matrix.json`. A pass means the
+  flag reached the merged integration branch, not that the worker said so.
+  See [PILOT-MODE.md](PILOT-MODE.md#validating-your-providers).
 - **Skill packs.** `wingman pilot skills install | search | list | verify`
   shares pilot roles as versioned packs from a git-hosted index, resolving
   dependencies with caret rules and refusing unsigned packs unless told

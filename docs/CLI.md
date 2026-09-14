@@ -69,6 +69,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
 | `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). `--cycles N`, `--dry-run`, and `--watch` to also wake on file changes and `pilot hooks` git hooks (see [Watch mode](PILOT-MODE.md#watch-mode)). |
+| `pilot validate-providers` | Run the canned `--version-only` pilot plan against every configured provider with credentials, one scratch repo each, and write a pass/fail/skipped matrix (`matrix.md`, `matrix.json`). `--provider <id>` (repeatable), `--max-usd <f>` (default 0.50), `--max-tokens <n>` (default 400000), `--out <dir>` (default `.wingman/provider-validation/`). Exit 1 if any provider failed, 2 if none could run. Spends real money. |
 | `pilot hooks install\|uninstall` | Write (or remove) post-commit/merge/checkout/rewrite hooks that run the wingman binary directly, no shell, and wake `pilot daemon --watch`. Leaves hooks it didn't write alone. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
