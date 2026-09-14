@@ -272,6 +272,12 @@ Wingman different; this is everything else it does.
   (`[team]`), merging non-destructively.
 - **Multi-channel pilot intake.** `wingman pilot intake slack | email`
   turns Slack events or delivered `.eml` files into pilot requests.
+- **Pilot answers review on its own PRs.** With `pr_reviews` in
+  `[pilot.daemon].sources`, the daemon picks up trusted reviewers' unresolved
+  threads on the PRs pilot opened. It fixes them on the same branch, pushes,
+  replies on each thread, and resolves only the threads the push actually
+  changed. Rounds per PR are capped and share `[pilot].max_usd`. See
+  [PILOT-MODE.md](PILOT-MODE.md#review-rounds-on-pilots-prs).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,

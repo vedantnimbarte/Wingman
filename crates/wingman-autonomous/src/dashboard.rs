@@ -557,6 +557,20 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
         Event::PrOutcome { kind, .. } => {
             (Info, format!("{short_ts}  pr.outcome   {}", kind.as_str()))
         }
+        Event::PrReviewRound {
+            round,
+            outcome,
+            addressed,
+            threads,
+            ..
+        } => (
+            Info,
+            format!(
+                "{short_ts}  pr.review   round {round} {outcome} ({}/{} threads)",
+                addressed.len(),
+                threads.len()
+            ),
+        ),
     };
     LogRow { text, severity }
 }

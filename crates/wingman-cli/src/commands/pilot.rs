@@ -250,6 +250,13 @@ pub struct PilotOptions {
     /// Seconds to wait when `await_approval` is set before rejecting.
     pub approval_timeout_secs: u64,
     pub model_override: Option<String>,
+    /// Use this run id instead of minting one. The daemon's `pr_reviews`
+    /// dispatch sets it so it can find the rework run afterwards.
+    pub run_id: Option<String>,
+    /// Stack the run on this existing branch instead of a fresh
+    /// `wingman/auto/<run-id>`. Paired with `base` = the branch head and
+    /// `no_pr`, the work lands as new commits on an open PR's branch.
+    pub rework_branch: Option<String>,
 }
 
 pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
@@ -336,8 +343,11 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let base_commit = resolve_base_commit(&project.root, opts.base.as_deref())?;
     // A detached child inherits the run id its parent minted (so the id it
     // prints and the log path it writes to line up with the child's run).
-    let run_id = resolve_run_id();
-    let integration = integration_branch(&run_id);
+    let run_id = opts.run_id.clone().unwrap_or_else(resolve_run_id);
+    let integration = opts
+        .rework_branch
+        .clone()
+        .unwrap_or_else(|| integration_branch(&run_id));
     let run_path = run_dir(&project.root, &run_id);
 
     eprintln!(
@@ -1751,6 +1761,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
         "dependabot",
         "coverage_gaps",
         "intake",
+        "pr_reviews",
     ];
     for s in &pilot.daemon.sources {
         if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
@@ -1856,6 +1867,13 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
                     );
                     continue;
                 }
+                if let Some(run_id) =
+                    wingman_autonomous::pr_reviews::run_id_from_source(&cand.source)
+                {
+                    dispatched += 1;
+                    rework_pr_reviews(&cfg, &runner, &project.root, run_id).await;
+                    continue;
+                }
                 eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
                 dispatched += 1;
                 let opts = PilotOptions {
@@ -1891,6 +1909,92 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
             return Ok(ExitCode::SUCCESS);
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+/// `pr_reviews` dispatch: rework the trusted review threads on one of pilot's
+/// PRs as a nested run stacked on the PR's own branch (no new PR), then push,
+/// reply on the threads and record the round via `pr_reviews::finish_round`.
+async fn rework_pr_reviews(
+    cfg: &Config,
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    root: &std::path::Path,
+    run_id: &str,
+) {
+    use wingman_autonomous::pr_reviews;
+
+    let pilot = &cfg.pilot;
+    // Re-read live rather than trusting discovery: a reviewer may have
+    // resolved the threads, or the PR merged, since the cycle started.
+    let target = match pr_reviews::load_target(
+        runner,
+        root,
+        &run_dir(root, run_id),
+        &pilot.daemon.trusted_authors,
+        pilot.daemon.max_review_rounds,
+    ) {
+        Ok(Some(t)) => t,
+        Ok(None) => {
+            eprintln!("[pilot] daemon: run {run_id}'s PR has no review threads left to address");
+            return;
+        }
+        Err(e) => {
+            eprintln!("[pilot] daemon: pr_reviews for run {run_id}: {e}");
+            return;
+        }
+    };
+    let Some(budget) = pr_reviews::round_budget(pilot.max_usd, target.spent_usd) else {
+        eprintln!(
+            "[pilot] daemon: {} has spent its review budget (${:.2} of [pilot].max_usd ${:.2})              — leaving its threads to a person",
+            target.pr_url, target.spent_usd, pilot.max_usd
+        );
+        return;
+    };
+    if let Err(e) = pr_reviews::fetch_head(runner, root, &target) {
+        eprintln!("[pilot] daemon: fetching {}: {e}", target.branch);
+        return;
+    }
+
+    let rework_id = new_run_id();
+    eprintln!(
+        "[pilot] daemon: review round {} on {} ({} thread(s)) as run {rework_id}",
+        target.rounds + 1,
+        target.pr_url,
+        target.threads.len()
+    );
+    let opts = PilotOptions {
+        goal: pr_reviews::rework_goal(&target),
+        yes: true, // trusted reviewers only, already scored above threshold
+        no_pr: true,
+        base: Some(target.head_sha.clone()),
+        max_usd: Some(budget),
+        run_id: Some(rework_id.clone()),
+        rework_branch: Some(target.branch.clone()),
+        ..PilotOptions::default()
+    };
+    match run(cfg.clone(), opts).await {
+        Ok(code) => eprintln!("[pilot] daemon: review rework run exited {code:?}"),
+        Err(e) => eprintln!("[pilot] daemon: review rework run failed: {e:#}"),
+    }
+    match pr_reviews::finish_round(
+        runner,
+        root,
+        &target,
+        &rework_id,
+        &run_dir(root, &rework_id),
+    )
+    .await
+    {
+        Ok(o) => {
+            eprintln!(
+                "[pilot] daemon: review round {} on {}: {} — resolved {}/{} thread(s), ${:.2}",
+                o.round, target.pr_url, o.outcome, o.addressed, o.threads, o.usd
+            );
+            for e in &o.errors {
+                eprintln!("[pilot] daemon:   {e}");
+            }
+        }
+        Err(e) => eprintln!("[pilot] daemon: recording review round: {e}"),
     }
 }
 

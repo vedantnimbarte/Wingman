@@ -39,6 +39,7 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod planner;
 pub mod pr;
+pub mod pr_reviews;
 pub mod provider_support;
 pub mod refine;
 pub mod reporting;

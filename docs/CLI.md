@@ -68,7 +68,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). The `pr_reviews` source reworks trusted review threads on pilot's own PRs; `--dry-run` logs what it would dispatch without running, pushing or replying. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |

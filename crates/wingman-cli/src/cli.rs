@@ -1290,6 +1290,8 @@ pub async fn run() -> Result<ExitCode> {
                         await_approval,
                         approval_timeout_secs: approval_timeout,
                         model_override: cli.model,
+                        run_id: None,
+                        rework_branch: None,
                     },
                 )
                 .await
@@ -1384,6 +1386,8 @@ pub async fn run() -> Result<ExitCode> {
                     await_approval: false,
                     approval_timeout_secs: 600,
                     model_override: cli.model,
+                    run_id: None,
+                    rework_branch: None,
                 },
             )
             .await
