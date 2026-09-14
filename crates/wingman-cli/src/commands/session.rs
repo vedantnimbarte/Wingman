@@ -1,4 +1,4 @@
-//! `wingman session …` — list and fork session JSONL files.
+//! `wingman session …` — list, fork, replay and export session JSONL files.
 
 use crate::cli::SessionAction;
 use anyhow::{Context, Result};
@@ -11,7 +11,45 @@ pub async fn run(action: SessionAction) -> Result<ExitCode> {
         SessionAction::List { limit } => list(limit).await,
         SessionAction::Fork { src, at } => fork(src, at).await,
         SessionAction::Replay { src } => replay(src).await,
+        SessionAction::Export { id, format, output } => export(id, format, output),
     }
+}
+
+/// Render a session as a report and print it, or write it to `output`.
+///
+/// `id` is a session id under this project's sessions directory, or a path to
+/// any session JSONL (a worker's, a colleague's), so the same command covers
+/// "the session I just had" and "the transcript someone sent me".
+fn export(id: String, format: String, output: Option<PathBuf>) -> Result<ExitCode> {
+    let format: wingman_session::export::Format = format.parse().map_err(anyhow::Error::msg)?;
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let Some(path) = resolve_session(&project.sessions_dir, &id) else {
+        eprintln!(
+            "wingman: no session '{id}' in {} (and no such file)",
+            project.sessions_dir.display()
+        );
+        return Ok(ExitCode::from(1));
+    };
+    let export = wingman_session::export::export_file(&path)
+        .with_context(|| format!("read session {}", path.display()))?;
+    let text = export.render(format);
+    match output {
+        Some(out) => {
+            std::fs::write(&out, &text).with_context(|| format!("write {}", out.display()))?;
+            eprintln!("exported {} to {}", export.session_id, out.display());
+        }
+        None => print!("{text}"),
+    }
+    if export.redacted > 0 {
+        eprintln!("wingman: redacted {} secret(s)", export.redacted);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// A session id under `sessions_dir` first, then a path.
+fn resolve_session(sessions_dir: &std::path::Path, id: &str) -> Option<PathBuf> {
+    wingman_session::session_path(sessions_dir, id)
+        .or_else(|| Some(PathBuf::from(id)).filter(|p| p.is_file()))
 }
 
 /// Re-run a past session's user prompts against the current code — reproduce
@@ -109,4 +147,23 @@ async fn fork(src: String, at: Option<usize>) -> Result<ExitCode> {
         .context("fork_session")?;
     println!("forked to {}", dest.display());
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_export_names_a_session_by_id_or_by_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("20260914T101500000Z.jsonl");
+        std::fs::write(&log, "").unwrap();
+        assert_eq!(
+            resolve_session(dir.path(), "20260914T101500000Z"),
+            Some(log.clone())
+        );
+        let by_path = log.to_string_lossy().to_string();
+        assert_eq!(resolve_session(dir.path(), &by_path), Some(log));
+        assert_eq!(resolve_session(dir.path(), "nope"), None);
+    }
 }

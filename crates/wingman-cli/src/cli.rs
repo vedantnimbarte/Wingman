@@ -615,6 +615,15 @@ pub enum PilotAction {
         /// Specific run id; defaults to the most recently updated.
         run_id: Option<String>,
     },
+    /// Print a run as a pull-request description: the goal, tasks and cost,
+    /// plus each worker session's files, receipts and tokens. Secrets are
+    /// redacted.
+    Export {
+        /// Specific run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        #[arg(long, default_value = "md", value_parser = ["md", "json"])]
+        format: String,
+    },
     /// Live-watch a run: redraw whenever its state.json changes.
     Watch {
         /// Specific run id; defaults to the most recently updated.
@@ -860,6 +869,18 @@ pub enum SessionAction {
     Replay {
         /// Path to the session JSONL to replay.
         src: String,
+    },
+    /// Export a session as a shareable report: summary, files changed with
+    /// diff stats, verification receipts, cost and tokens, and the tool-call
+    /// timeline. Secrets are redacted.
+    Export {
+        /// Session id (as `session list` names it) or path to a session JSONL.
+        id: String,
+        #[arg(long, default_value = "md", value_parser = ["md", "html", "json"])]
+        format: String,
+        /// Write here instead of stdout.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
     },
 }
 
@@ -1301,6 +1322,9 @@ pub async fn run() -> Result<ExitCode> {
                 .await
             }
             PilotAction::Status { run_id } => commands::pilot::status(run_id).await,
+            PilotAction::Export { run_id, format } => {
+                commands::pilot::export(run_id, format == "json").await
+            }
             PilotAction::Watch {
                 run_id,
                 interval_ms,

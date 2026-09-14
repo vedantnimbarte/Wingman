@@ -48,6 +48,7 @@ wingman [OPTIONS] [COMMAND]
 | `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. `--compare` reprices your volume against other models (provider-cost arbitrage). |
 | `session list`       | List recent session JSONL files for this project.       |
 | `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
+| `session export <id>` | A session as a shareable report: summary, files changed with line counts, verification receipts, cost and tokens, and the tool-call timeline. `<id>` is a session id or a path to any session JSONL. `--format md\|html\|json` (default `md`), `-o <file>`. Secrets are redacted. |
 | `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
 | `worktree list`      | `git worktree list` passthrough.                        |
 | `worktree remove <path>` | Remove a worktree by path.                          |
@@ -68,6 +69,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
+| `pilot export [run-id]` | A run as a pull-request description: goal, tasks and run cost, plus each worker session's files, receipts, tokens and cost. `--format md\|json`. Secrets are redacted. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
 | `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |

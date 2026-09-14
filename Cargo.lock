@@ -5219,6 +5219,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "futures",
+ "regex",
  "rustls",
  "serde",
  "serde_json",

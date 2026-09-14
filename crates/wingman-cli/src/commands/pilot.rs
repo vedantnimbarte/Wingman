@@ -1643,6 +1643,151 @@ pub async fn status(run_id: Option<String>) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `wingman pilot export` — a run as a pull-request description.
+///
+/// The body the orchestrator opens a PR with (goal, tasks, run cost) plus what
+/// only the workers' own transcripts know: which files each changed and by how
+/// much, whether its verification gate passed, and its tokens. Everything
+/// passes through the secret redactor, since the output exists to be pasted
+/// into a PR.
+pub async fn export(run_id: Option<String>, json: bool) -> Result<ExitCode> {
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let pick = pick_run(run_id)?;
+    let state = wingman_autonomous::dashboard::load_state(&pick.dir)?;
+    let workers = worker_exports(&state, &project.sessions_dir);
+    // The title is the goal's first line, already counted in the body's total.
+    let (title, _) = wingman_core::redact::redact_output_secrets(
+        &wingman_autonomous::pr::render_pr_title(&state),
+    );
+    let (body, redacted) = render_run_export(&state, &workers);
+    if json {
+        let workers: Vec<_> = workers
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "agent": w.agent, "task": w.task, "session": w.session,
+                })
+            })
+            .collect();
+        let out = serde_json::json!({
+            "run_id": state.run_id,
+            "status": state.status,
+            "pr_url": state.pr_url,
+            "title": title,
+            "body": body,
+            "workers": workers,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("# {title}\n\n{body}");
+    }
+    if redacted > 0 {
+        eprintln!("[pilot] redacted {redacted} secret(s)");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// One worker's transcript, reduced.
+struct WorkerExport {
+    /// The worker's display name, or its id for runs that predate names.
+    agent: String,
+    task: Option<String>,
+    session: wingman_session::export::SessionExport,
+}
+
+/// Every worker whose transcript is still on disk, in spawn order. A worker
+/// with no session id or a deleted log is left out rather than failing the
+/// export: the run's own summary is still worth having.
+fn worker_exports(
+    state: &wingman_autonomous::RunState,
+    sessions_dir: &std::path::Path,
+) -> Vec<WorkerExport> {
+    state
+        .agents
+        .iter()
+        .filter_map(|a| {
+            let path = wingman_session::session_path(sessions_dir, a.session_id.as_deref()?)?;
+            let session = wingman_session::export::export_file(&path).ok()?;
+            let task = state
+                .tasks
+                .iter()
+                .find(|t| t.agent.as_deref() == Some(&a.id))
+                .map(|t| t.id.clone())
+                .or_else(|| a.current_task.clone());
+            Some(WorkerExport {
+                agent: if a.name.is_empty() {
+                    a.id.clone()
+                } else {
+                    a.name.clone()
+                },
+                task,
+                session,
+            })
+        })
+        .collect()
+}
+
+/// The PR body with a worker-sessions section ahead of its footer, and how
+/// many secrets were redacted from it in total.
+fn render_run_export(
+    state: &wingman_autonomous::RunState,
+    workers: &[WorkerExport],
+) -> (String, usize) {
+    use std::collections::BTreeMap;
+    use std::fmt::Write as _;
+
+    let cell = |s: &str| s.replace('|', "\\|").replace(['\n', '\r'], " ");
+    let mut section = String::new();
+    if !workers.is_empty() {
+        let _ = writeln!(
+            section,
+            "## Worker sessions\n\n\
+             | Worker | Task | Files | Verification | Tokens | Cost |\n\
+             |---|---|---|---|---:|---:|"
+        );
+        let mut files: BTreeMap<&str, (u32, u32)> = BTreeMap::new();
+        for w in workers {
+            let x = &w.session;
+            let _ = writeln!(
+                section,
+                "| {} | {} | {} | {} | {} | {} |",
+                cell(&w.agent),
+                cell(w.task.as_deref().unwrap_or("-")),
+                x.files_line(),
+                x.receipts_line(),
+                x.total_tokens,
+                x.usd.map_or("unpriced".into(), |u| format!("${u:.4}")),
+            );
+            for f in &x.files {
+                let e = files.entry(&f.path).or_default();
+                e.0 += f.added;
+                e.1 += f.removed;
+            }
+        }
+        if !files.is_empty() {
+            let _ = writeln!(
+                section,
+                "\n## Files changed\n\n| File | + | − |\n|---|---:|---:|"
+            );
+            for (path, (added, removed)) in files {
+                let _ = writeln!(section, "| `{}` | {added} | {removed} |", cell(path));
+            }
+        }
+        section.push('\n');
+    }
+
+    let body = wingman_autonomous::pr::render_pr_body(state);
+    // `render_pr_body` ends with its "Opened by wingman pilot" footer.
+    let at = body.rfind("_Opened by wingman pilot").unwrap_or(body.len());
+    let (body, mut redacted) = wingman_core::redact::redact_output_secrets(&format!(
+        "{}{section}{}",
+        &body[..at],
+        &body[at..]
+    ));
+    redacted += workers.iter().map(|w| w.session.redacted).sum::<usize>();
+    (body, redacted)
+}
+
 /// Live-watch a run. Polls `<run-dir>/state.json` mtime every
 /// `interval_ms` and redraws the dashboard whenever it advances. Ctrl-C
 /// to exit.
@@ -2276,6 +2421,82 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use wingman_autonomous::control::{append, ControlCommand};
+
+    /// A worker transcript on disk becomes a row, its files land in the
+    /// union table ahead of the footer, and a key in the goal is redacted.
+    #[test]
+    fn a_run_exports_as_a_pr_description_with_its_workers() {
+        use wingman_autonomous::model::{Agent, AgentStatus, Role, Task};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sessions = tmp.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(
+            sessions.join("pilot-r1-a1.jsonl"),
+            [
+                r#"{"kind":"user","ts":"t","text":"do t1"}"#,
+                r#"{"kind":"assistant","ts":"t","blocks":[{"type":"tool_use","id":"x","name":"write_file","input":{"path":"src/a.rs","content":"one\ntwo"}}]}"#,
+                r#"{"kind":"tool_result","ts":"t","id":"x","output":"wrote","is_error":false}"#,
+                r#"{"kind":"usage_delta","ts":"t","usage":{"input_tokens":10,"output_tokens":5}}"#,
+                r#"{"kind":"stop","ts":"t","reason":"end_turn","verified":true}"#,
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let mut state = wingman_autonomous::RunState::new(
+            "r1",
+            "ship it with sk-abcdefghij0123456789ABCDEF",
+            "0123456789abcdef",
+            "wingman/r1",
+        );
+        let mut task = Task::new("t1", Role::Developer, "write a");
+        task.agent = Some("a1".into());
+        state.tasks.push(task);
+        for (id, session) in [
+            ("a1", Some("pilot-r1-a1")),
+            ("a2", Some("gone")),
+            ("a3", None),
+        ] {
+            state.agents.push(Agent {
+                id: id.into(),
+                name: if id == "a1" {
+                    "brave_otter".into()
+                } else {
+                    String::new()
+                },
+                role: Role::Developer,
+                current_task: None,
+                pid: None,
+                status: AgentStatus::Done,
+                session_id: session.map(str::to_string),
+                spawned_at: None,
+                current_tool: None,
+                usd: 0.0,
+                model: None,
+            });
+        }
+
+        let workers = worker_exports(&state, &sessions);
+        assert_eq!(workers.len(), 1, "missing transcripts are skipped");
+        assert_eq!(workers[0].task.as_deref(), Some("t1"));
+
+        let (body, redacted) = render_run_export(&state, &workers);
+        assert_eq!(redacted, 1);
+        assert!(!body.contains("sk-abcdefghij"), "{body}");
+        assert!(
+            body.contains(
+                "| brave_otter | t1 | +2 −0 across 1 file | 1 of 1 green, last passed | 15 |"
+            ),
+            "{body}"
+        );
+        assert!(body.contains("| `src/a.rs` | 2 | 0 |"), "{body}");
+        let files = body.find("## Files changed").unwrap();
+        assert!(
+            files < body.find("_Opened by wingman pilot").unwrap(),
+            "{body}"
+        );
+    }
 
     #[test]
     fn r4_eval_gate_flags_regression_and_passes_on_parity() {

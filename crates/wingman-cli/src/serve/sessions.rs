@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use wingman_config::PermissionMode;
+use wingman_session::export::Format;
 use wingman_session::{is_valid_session_id, list_sessions, load_session, SessionRecord};
 
 use super::child;
@@ -109,6 +110,53 @@ pub async fn get(project: &Project, id: &str, sock: &mut TcpStream) -> std::io::
         }
         Err(e) => http::write_err(sock, 500, &format!("reading session: {e}")).await,
     }
+}
+
+/// `GET /v1/projects/{p}/sessions/{id}/export?format=md|html|json[&download]`
+///
+/// The same report `wingman session export` prints, secrets redacted.
+/// `download` adds `Content-Disposition: attachment`, which is how the panel
+/// offers a file: a server-sent download needs no `data:` or blob link, which
+/// a sandboxed page cannot open. The report quotes prompts and tool output, so
+/// it is served with `nosniff` and a CSP that allows no script, and the HTML
+/// form cannot run anything even when opened inline.
+pub async fn export(
+    project: &Project,
+    id: &str,
+    req: &Request,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    let format = match req.query_str("format").unwrap_or("md").parse::<Format>() {
+        Ok(f) => f,
+        Err(e) => return http::write_err(sock, 400, &e).await,
+    };
+    let Some(path) = wingman_session::session_path(&sessions_dir(project), id) else {
+        return http::write_err(sock, 404, "no such session").await;
+    };
+    let export = match wingman_session::export::export_file(&path) {
+        Ok(x) => x,
+        Err(e) => return http::write_err(sock, 500, &format!("reading session: {e}")).await,
+    };
+    // `id` passed `session_path`'s validation, so it is safe in a header.
+    let disposition = format!("attachment; filename=\"{id}.{}\"", format.extension());
+    let mut headers = vec![
+        ("X-Content-Type-Options", "nosniff"),
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'",
+        ),
+    ];
+    if req.query_bool("download") {
+        headers.push(("Content-Disposition", disposition.as_str()));
+    }
+    http::write_raw(
+        sock,
+        200,
+        format.content_type(),
+        &headers,
+        export.render(format).as_bytes(),
+    )
+    .await
 }
 
 /// `DELETE /v1/projects/{p}/sessions/{id}`
@@ -276,6 +324,9 @@ pub fn schema() -> Vec<Value> {
                 "returns": "sessions with first prompt, model, turn count, mtime; newest first" }),
         json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}", "auth": true,
                 "returns": "full transcript as SessionRecord[]" }),
+        json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}/export", "auth": true,
+                "query": { "format": "md | html | json (default md)", "download": "bool — send as an attachment" },
+                "returns": "the session report: summary, files changed, receipts, cost, tool calls; secrets redacted" }),
         json!({ "method": "DELETE", "path": "/v1/projects/{project}/sessions/{id}", "auth": true }),
         json!({ "method": "POST", "path": "/v1/projects/{project}/sessions/{id}/turns", "auth": true,
                 "body": { "prompt": "string", "mode": "string?", "model": "string?" },

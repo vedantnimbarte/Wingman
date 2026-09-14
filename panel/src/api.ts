@@ -370,6 +370,24 @@ export type SessionSummary = {
   mtime: number
 }
 
+export type ExportFormat = 'md' | 'html' | 'json'
+
+/**
+ * Where a session's report is served. With `download`, the server answers
+ * with `Content-Disposition: attachment`, so a plain link saves a file — the
+ * panel never builds a `data:` or blob URL, which a sandboxed page cannot
+ * open.
+ */
+export function exportUrl(
+  project: string,
+  id: string,
+  format: ExportFormat,
+  download = false,
+): string {
+  const base = `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}/export`
+  return `${base}?format=${format}${download ? '&download=1' : ''}`
+}
+
 /** A block inside an assistant message. Mirrors `wingman_core::ContentBlock`. */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -770,6 +788,21 @@ export const api = {
     request<{ session_id: string }>(`/v1/projects/${encodeURIComponent(project)}/sessions`, {
       method: 'POST',
     }),
+
+  /**
+   * A session's report as text: summary, files changed, receipts, cost, tool
+   * calls — secrets already redacted by the server. For the clipboard.
+   */
+  exportSession: async (project: string, id: string, format: ExportFormat): Promise<string> => {
+    let res: Response
+    try {
+      res = await fetch(exportUrl(project, id, format), { credentials: 'same-origin' })
+    } catch {
+      throw new ApiError(0, 'No answer from the daemon. Is `wingman serve` running?')
+    }
+    if (!res.ok) throw new ApiError(res.status, await errorText(res))
+    return res.text()
+  },
 
   /** Reports `deindexed` so a partial delete is visible now, not a surprise later. */
   deleteSession: (project: string, id: string) =>

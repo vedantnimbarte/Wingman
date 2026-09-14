@@ -3,6 +3,7 @@ import { copyText } from './a11y'
 import {
   api,
   ApiError,
+  exportUrl,
   type ContentBlock,
   type SessionRecord,
   type SessionSummary,
@@ -355,6 +356,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
           <span className="eyebrow">Conversation</span>
           <h1 className="figure identifier">{isNew ? 'new conversation' : id}</h1>
         </div>
+        {!isNew && <ExportActions project={project} id={id} />}
       </header>
 
       <div className="transcript" ref={scroller} onScroll={onScroll}>
@@ -489,6 +491,66 @@ function Conversation({ project, id }: { project: string; id: string }) {
           </button>
         </div>
       </form>
+    </div>
+  )
+}
+
+/**
+ * Export the session's report — summary, files changed, receipts, cost, tool
+ * calls, secrets redacted server-side.
+ *
+ * Copy puts the Markdown on the clipboard for a PR or an issue; the links
+ * are server downloads (`Content-Disposition: attachment`) rather than
+ * `data:` links, which a sandboxed page cannot open. Copy says when the
+ * browser refuses, for the same reason `Copyable` does.
+ */
+function ExportActions({ project, id }: { project: string; id: string }) {
+  const [state, setState] = useState<'idle' | 'done' | 'failed'>('idle')
+  const [error, setError] = useState<string | null>(null)
+
+  async function copy() {
+    setError(null)
+    try {
+      const ok = await copyText(await api.exportSession(project, id, 'md'))
+      setState(ok ? 'done' : 'failed')
+      window.setTimeout(() => setState('idle'), 1600)
+    } catch (e) {
+      setError(message(e))
+    }
+  }
+
+  return (
+    <div className="actions">
+      <button
+        type="button"
+        className="button button-quiet button-sm"
+        onClick={() => void copy()}
+        title={
+          error ??
+          (state === 'failed'
+            ? 'The browser refused clipboard access — download it instead'
+            : 'Copy the report as Markdown')
+        }
+      >
+        <Icon name={state === 'done' ? 'check' : 'copy'} size={14} />
+        {error
+          ? 'export failed'
+          : state === 'failed'
+            ? 'blocked'
+            : state === 'done'
+              ? 'copied'
+              : 'Copy report'}
+      </button>
+      {(['md', 'html', 'json'] as const).map((f) => (
+        <a
+          key={f}
+          className="button button-quiet button-sm"
+          href={exportUrl(project, id, f, true)}
+          title={`Download the report as ${f}`}
+        >
+          {f}
+        </a>
+      ))}
     </div>
   )
 }

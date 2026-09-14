@@ -305,6 +305,13 @@ display is clamped. It reports a refusal rather than going quiet:
 `navigator.clipboard` is unavailable on a plain-HTTP non-loopback origin, which
 is exactly the phone-on-the-LAN case the panel exists for.
 
+**A conversation exports as a report** — the one `wingman session export`
+prints, with secrets redacted by the server. *Copy report* puts the Markdown on
+the clipboard for a PR or an issue (and says when the browser refuses); the
+`md`, `html` and `json` links are server downloads, sent with
+`Content-Disposition: attachment`, never `data:` or blob links, which a
+sandboxed page cannot open.
+
 Long transcripts render the newest 150 records with the rest one click away, and
 the view stops auto-scrolling the moment you scroll up.
 

@@ -130,6 +130,7 @@ async fn project_route(
         ("POST", ["sessions"]) => sessions::create(sock).await,
         ("GET", ["sessions"]) => sessions::list(project, sock).await,
         ("GET", ["sessions", id]) => sessions::get(project, id, sock).await,
+        ("GET", ["sessions", id, "export"]) => sessions::export(project, id, req, sock).await,
         ("DELETE", ["sessions", id]) => sessions::delete(project, id, sock).await,
         ("POST", ["sessions", id, "turns"]) => {
             sessions::turn(state, project, Some(id), req, sock).await
@@ -758,6 +759,38 @@ mod tests {
         .await;
         assert!(got.starts_with("HTTP/1.1 200"), "{got}");
         assert!(got.contains("session_start"), "{got}");
+
+        let md = round_trip_for(
+            projects.clone(),
+            None,
+            &get("/v1/projects/repo/sessions/20260818T104200000Z/export"),
+        )
+        .await;
+        assert!(md.starts_with("HTTP/1.1 200"), "{md}");
+        assert!(md.contains("text/markdown"), "{md}");
+        assert!(md.contains("> why is the index stale?"), "{md}");
+        assert!(!md.contains("Content-Disposition"), "{md}");
+
+        let html = round_trip_for(
+            projects.clone(),
+            None,
+            &get("/v1/projects/repo/sessions/20260818T104200000Z/export?format=html&download=1"),
+        )
+        .await;
+        assert!(html.contains("text/html"), "{html}");
+        assert!(html.contains("default-src 'none'"), "{html}");
+        assert!(
+            html.contains(r#"attachment; filename="20260818T104200000Z.html""#),
+            "{html}"
+        );
+
+        let bad = round_trip_for(
+            projects.clone(),
+            None,
+            &get("/v1/projects/repo/sessions/20260818T104200000Z/export?format=pdf"),
+        )
+        .await;
+        assert!(bad.starts_with("HTTP/1.1 400"), "{bad}");
 
         let deleted = round_trip_for(
             projects,

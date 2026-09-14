@@ -1071,7 +1071,8 @@ async fn idle_step(
                                 ui.modal = ActiveModal::Mcp(McpView::new(servers));
                             }
                             Cmd::Export(fmt) => {
-                                let path = export_transcript(&ui.transcript, &fmt, project_root);
+                                let path =
+                                    export_session(project_root, session_id_for_feedback, &fmt);
                                 match path {
                                     Ok(p) => ui.transcript.push(TranscriptItem::System(format!(
                                         "exported to {}",
@@ -1932,74 +1933,24 @@ fn resume_session(agent: &mut Option<AgentLoop>, ui: &mut UiState, entry: Sessio
     }
 }
 
-fn export_transcript(
-    transcript: &Transcript,
-    format: &str,
+/// Write this session's report — summary, files changed, verification
+/// receipts, cost and the tool-call timeline, secrets redacted — to
+/// `.wingman/exports/<session>.<ext>`. Built from the session log rather than
+/// the on-screen transcript, so it matches `wingman session export` exactly.
+fn export_session(
     project_root: &std::path::Path,
+    session_id: &str,
+    format: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-    let ext = if format == "json" { "json" } else { "md" };
+    let format: wingman_session::export::Format = format.parse().map_err(anyhow::Error::msg)?;
+    let sessions_dir = project_root.join(".wingman").join("sessions");
+    let log = wingman_session::session_path(&sessions_dir, session_id)
+        .ok_or_else(|| anyhow::anyhow!("this session has no log to export"))?;
+    let export = wingman_session::export::export_file(&log)?;
     let dir = project_root.join(".wingman").join("exports");
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("{ts}.{ext}"));
-
-    if format == "json" {
-        let items: Vec<serde_json::Value> = transcript
-            .items
-            .iter()
-            .map(|item| match item {
-                TranscriptItem::UserPrompt(s) => serde_json::json!({"role": "user", "content": s}),
-                TranscriptItem::AssistantText(s) => {
-                    serde_json::json!({"role": "assistant", "content": s})
-                }
-                TranscriptItem::Thinking(s) => {
-                    serde_json::json!({"role": "thinking", "content": s})
-                }
-                TranscriptItem::ToolCall { name, summary } => {
-                    serde_json::json!({"role": "tool_call", "name": name, "summary": summary})
-                }
-                TranscriptItem::ToolResult { ok, summary } => {
-                    serde_json::json!({"role": "tool_result", "ok": ok, "summary": summary})
-                }
-                TranscriptItem::System(s) => serde_json::json!({"role": "system", "content": s}),
-                TranscriptItem::Error(s) => serde_json::json!({"role": "error", "content": s}),
-            })
-            .collect();
-        std::fs::write(&path, serde_json::to_string_pretty(&items)?)?;
-    } else {
-        let mut md = String::new();
-        for item in &transcript.items {
-            match item {
-                TranscriptItem::UserPrompt(s) => {
-                    md.push_str(&format!("**You:** {s}\n\n"));
-                }
-                TranscriptItem::AssistantText(s) => {
-                    md.push_str(&format!("{s}\n\n"));
-                }
-                // Collapsed in the export too — it is context for the answer,
-                // not the answer.
-                TranscriptItem::Thinking(s) => {
-                    md.push_str(&format!(
-                        "<details><summary>thinking</summary>\n\n{s}\n\n</details>\n\n"
-                    ));
-                }
-                TranscriptItem::ToolCall { name, summary } => {
-                    md.push_str(&format!("> `{name}` {summary}\n"));
-                }
-                TranscriptItem::ToolResult { ok, summary } => {
-                    let glyph = if *ok { "✓" } else { "✗" };
-                    md.push_str(&format!("> {glyph} {summary}\n\n"));
-                }
-                TranscriptItem::System(s) => {
-                    md.push_str(&format!("*{s}*\n"));
-                }
-                TranscriptItem::Error(s) => {
-                    md.push_str(&format!("**Error:** {s}\n\n"));
-                }
-            }
-        }
-        std::fs::write(&path, md)?;
-    }
+    let path = dir.join(format!("{session_id}.{}", format.extension()));
+    std::fs::write(&path, export.render(format))?;
     Ok(path)
 }
 
@@ -2025,7 +1976,7 @@ fn help_text() -> String {
          /mcp                        manage MCP servers (add / connect / remove)\n  \
          /params                     adjust temperature and max_tokens\n  \
          /resume                     resume a previous session\n  \
-         /export [md|json]           export conversation to file\n  \
+         /export [md|html|json]      export this session's report to file\n  \
          /quit                       exit\n\nKeys: \
          Enter submit, Up/Down history, Esc clear input, Ctrl-C exit, \
          PgUp/PgDn or Shift+Up/Down scroll transcript, ? show shortcuts. \

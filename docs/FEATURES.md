@@ -165,6 +165,18 @@ Wingman different; this is everything else it does.
   `~/.wingman/usage.json` and `pricing.rs`.
 - **`wingman session list / fork`.** Browse recent session JSONLs;
   fork an old session (optionally truncating to N records) and resume it.
+- **Session export.** `wingman session export <id> --format md|html|json`
+  reduces a transcript to what a reviewer asks about: the task and the last
+  answer, files changed with lines added and removed (counted from the
+  successful `edit_file`/`edit_symbol` diffs, `apply_patch` patches and
+  `write_file` contents in the log), every verification receipt, cost and
+  tokens, and the tool-call timeline. Everything taken from the model, a
+  tool or the user goes through the same secret redactor as tool output
+  first, and the report says how many it caught. The TUI's `/export [md|html|json]`
+  writes the current session's report to `.wingman/exports/`,
+  `GET /v1/projects/{p}/sessions/{id}/export` serves it, and the panel's
+  conversation view copies it or downloads it. `wingman pilot export` does the
+  same for a pilot run, as a PR description with a row per worker session.
 - **User-defined slash commands.** Drop a markdown file at
   `~/.wingman/commands/<name>.md` (or `<project>/.wingman/commands/`) and
   it becomes `/<name>` in the TUI. `$ARGS` is substituted.

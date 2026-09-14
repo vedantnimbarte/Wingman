@@ -96,6 +96,10 @@ pub const CATALOG: &[Command] = &[
         description: "manage MCP servers",
     },
     Command {
+        name: "/export",
+        description: "write this session's report, secrets redacted · md | html | json",
+    },
+    Command {
         name: "/find",
         description: "search this transcript · /findnext, /findprev",
     },

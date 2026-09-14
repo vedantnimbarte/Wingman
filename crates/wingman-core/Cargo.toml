@@ -17,6 +17,7 @@ futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+regex = "1"
 tracing = { workspace = true }
 # rustls (ring) crypto provider install for reqwest's `rustls-no-provider`
 # feature — keeps us on ring (no aws-lc-rs/OpenSSL), preserving the static

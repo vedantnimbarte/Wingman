@@ -122,8 +122,8 @@ impl HelpModal {
                 Span::raw("Attach file to next prompt"),
             ]),
             Line::from(vec![
-                Span::styled("  /export [md|json]", Style::default().fg(Color::Cyan)),
-                Span::raw("Export conversation"),
+                Span::styled("  /export [md|html|json]", Style::default().fg(Color::Cyan)),
+                Span::raw("Export session report"),
             ]),
             Line::from(vec![
                 Span::styled("  /resume        ", Style::default().fg(Color::Cyan)),
