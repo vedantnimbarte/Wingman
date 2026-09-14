@@ -48,9 +48,10 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > worker's reply. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
 > opens real PRs autonomously; validate its trust config safely with
 > `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
-> before enabling it. Genuinely still open: the **`vm` sandbox tier** (real
-> VM/Firecracker isolation — fail-closed today: pilot refuses vm-tier tasks
-> rather than run them unsandboxed).
+> before enabling it. The **container and vm sandbox tiers** run workers in
+> Docker or a Firecracker microVM and apply their diff back, but are
+> **unvalidated against a real daemon**; without a vm backend, pilot still
+> refuses vm-tier tasks. See [Sandbox tiers](#sandbox-tiers).
 
 Pick a tier in `~/.wingman/config.toml`:
 
@@ -120,14 +121,15 @@ squash-merge, gh PR creation, dashboard, cost-cap enforcement, and the
 provider-support gate). On top of that, the crate now ships the
 `copilot`/`autopilot` machinery: a live control channel (`approve` /
 `veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
-sandbox tiers (`host` / `container` / `vm`, degrading to `host` when no
-Docker daemon is present), and the always-on discovery `daemon` (five
+sandbox tiers (`host` / `container` / `vm`: workers run in Docker or a
+Firecracker microVM against a copy of their worktree; container degrades to
+`host` without Docker, vm fails closed without Firecracker/KVM), and the always-on discovery `daemon` (five
 sources: GitHub issues, TODOs, CI failures, Dependabot PRs, coverage gaps).
 End-to-end `copilot` runs have been validated on a live provider
 (OpenRouter/DeepSeek) — plan through PR; they need real API keys and are
 **user-validated, not CI-validated** (CI runs the unit suite). Remaining
-`autopilot`-only gaps: inbound Slack/email intake, the `vm` sandbox tier,
-and live-validated auto-dispatch.
+`autopilot`-only gaps: inbound Slack/email intake, live validation of the
+container and vm sandbox tiers, and live-validated auto-dispatch.
 
 ## Worker transcripts
 
@@ -212,6 +214,109 @@ backends are; the tier exists for future providers that can't emit
 tool calls at all).
 
 ---
+
+## Sandbox tiers
+
+> **Unvalidated against a real daemon.** Both backends are implemented and
+> tested with mock runners (the `docker` and jailer/Firecracker argv, the
+> Firecracker config, jail staging, the guest script, and patch-back with real
+> git), but neither has been run against a real Docker daemon or a
+> Firecracker/KVM host. Treat the first real run as a trial.
+
+Each task gets a tier from its plan. Dependency or build files, or a risky
+acceptance command (`npm install`, `curl`, `deploy`, ...), mean `container`;
+migrations, infra, Dockerfile/terraform edits or an irreversible goal mean
+`vm`. `[pilot.sandbox].default_tier` (or `pilot run --sandbox`) is a floor
+under both.
+
+| Tier        | Where the worker runs                        | When this machine has no backend for it |
+| ----------- | -------------------------------------------- | --------------------------------------- |
+| `host`      | its git worktree, on your machine            | n/a                                     |
+| `container` | `docker run`, against a copy of the worktree | runs on the host (logged)               |
+| `vm`        | a Firecracker microVM, against a copy        | **refused**: `pilot run` / `pilot resume` exit 2. With `allow_unsandboxed_vm_tasks` it gets `container` if Docker is up, else host |
+
+`wingman doctor` reports which tiers this machine can honour, and why not.
+
+**How a sandboxed task runs.** The worktree, minus `.git`, is copied to a temp
+directory along with a generated `.wingman-sandbox/run.sh`. The script commits
+the copy as a base, runs `wingman --worker-mode` for the task, then writes
+`git diff --binary` against that base (committed and uncommitted work alike)
+followed by a completion line. If the worker reported `task_complete` and
+exited cleanly, the diff is applied to the host worktree with `git apply` and
+committed as `pilot(<task>): sandboxed worker changes`, where the squash-merge
+picks it up. A failed attempt leaves the host worktree untouched, and the
+supervisor does not re-run a sandboxed task's acceptance checks on the host to
+salvage it, because that would run them on the host.
+
+Two things do not come back: anything under the top-level `.wingman/` (the
+worker's session transcript included), and the worker's own commit messages.
+
+The patch is untrusted input. `git apply` refuses paths under `.git` or
+through a symlink, a patch file replaced by a link is refused, a patch without
+its completion line (a failed or truncated diff) is refused rather than
+half-applied, and a VM's patch is read off a raw drive, so no guest filesystem
+is parsed on the host.
+
+```toml
+[pilot.sandbox]
+default_tier     = "host"                    # floor: host | container | vm
+container_image  = "wingman/sandbox:latest"  # needs sh, git and a Linux `wingman`
+cpus             = 2                         # docker --cpus / Firecracker vcpu_count
+memory_mib       = 4096                      # docker --memory / mem_size_mib
+pids_limit       = 512                       # docker --pids-limit
+network          = "bridge"                  # bridge | none | a network you created
+env              = ["ANTHROPIC_API_KEY"]     # forwarded into the sandbox by name
+allow_unsandboxed_vm_tasks = false
+
+[pilot.sandbox.vm]
+firecracker_bin    = "/usr/local/bin/firecracker"  # absolute when use_jailer
+use_jailer         = true                          # the jailer needs root
+jailer_bin         = "jailer"
+chroot_base_dir    = "/srv/jailer"
+jailer_uid         = 65534
+jailer_gid         = 65534
+kernel_image       = "/var/lib/wingman/vmlinux"     # empty = vm tier unavailable
+rootfs_image       = "/var/lib/wingman/rootfs.ext4"
+worktree_drive_mib = 4096
+tap_device         = ""                            # pre-created tap; empty = no NIC
+```
+
+**Credentials and network.** The worker calls its model provider from inside
+the sandbox, so it needs both. The global `config.toml` is copied in, but keys
+kept in the OS keyring are out of reach: list the provider's key variable in
+`env`. A container is attached to `network`, so `"none"` leaves the worker
+unable to reach a hosted provider; a network of your own with egress rules is
+the useful middle. A VM has no NIC unless `tap_device` names one you created
+and routed. Env values forwarded into a VM are written into the guest script
+on the worktree drive, which is deleted when the task ends.
+
+**Container image.** Wingman does not publish one: it needs `sh`, `git` and a
+Linux `wingman` on `PATH`. The container gets `--security-opt
+no-new-privileges` and the CPU, memory and pid limits above; on Linux it runs
+as your uid so its files stay removable. It is removed with `docker rm -f` when
+the task ends, including on timeout.
+
+**VM backend** (Linux only). It needs a read-write `/dev/kvm`, `firecracker`
+(and `jailer` with `use_jailer`), `mke2fs` from e2fsprogs 1.43 or later, and a
+kernel and rootfs you provide. The guest sees `/dev/vda`, the rootfs
+(read-only); `/dev/vdb`, the worktree copy as ext4; and `/dev/vdc`, a raw
+64 MiB drive for the patch. The kernel is booted with
+`init=/sbin/wingman-sandbox-init`, which the rootfs must provide, along these
+lines:
+
+```sh
+#!/bin/sh
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
+mount -t tmpfs tmp /tmp
+mkdir -p /work && mount /dev/vdb /work
+sh /work/.wingman-sandbox/run.sh </dev/console >/dev/console 2>&1
+sync; reboot -f
+```
+
+Firecracker exits when the guest reboots. The worker's NDJSON reaches pilot
+over the serial console, which is Firecracker's stdout; kernel messages on the
+same console are ignored. The guest's exit code does not reach the host, which
+is what the patch's completion line is for.
 
 ## Skill packs
 

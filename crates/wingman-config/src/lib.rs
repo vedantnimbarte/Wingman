@@ -2740,20 +2740,36 @@ pub struct PilotSandboxConfig {
     /// "host" | "container" | "vm" — where workers run by default.
     #[cfg_attr(feature = "schema", schemars(with = "IsolationTierName"))]
     pub default_tier: String,
+    /// Image a container-tier worker runs in. It must provide `sh`, `git` and
+    /// a Linux `wingman` on PATH; Wingman does not publish one.
     pub container_image: String,
-    /// "firecracker" | "qemu" | "cloud".
-    ///
-    /// Currently inert: nothing reads this. `IsolationTier::parse` selects the
-    /// tier and no VM backend consults a provider name, so setting it has no
-    /// effect. Deliberately left as free text rather than given schema choices
-    /// — offering a dropdown would advertise a decision the code never makes.
+    /// "firecracker" is the only vm backend. Any other value keeps the vm
+    /// tier unavailable, which means fail-closed.
     pub vm_provider: String,
-    /// Fail-closed switch for the untrusted/irreversible ("vm") tier.
-    /// Real sandboxed worker execution isn't wired yet, so by default pilot
-    /// *refuses* to run a vm-tier task (migrations, infra, irreversible, or
-    /// untrusted goals) rather than silently executing it unsandboxed on the
-    /// host. Set to true to accept host execution for those tasks.
+    /// Fail-closed switch for the untrusted/irreversible ("vm") tier. When no
+    /// vm backend is available (not Linux, no `/dev/kvm`, no `firecracker`, no
+    /// kernel/rootfs configured), pilot *refuses* to run a vm-tier task rather
+    /// than silently executing it unsandboxed on the host. Set to true to
+    /// accept host execution for those tasks.
     pub allow_unsandboxed_vm_tasks: bool,
+    /// CPUs a sandboxed worker may use (`docker --cpus`, Firecracker
+    /// `vcpu_count`).
+    pub cpus: u32,
+    /// Memory ceiling in MiB (`docker --memory`, Firecracker `mem_size_mib`).
+    pub memory_mib: u32,
+    /// Process ceiling for a container-tier worker (`docker --pids-limit`).
+    pub pids_limit: u32,
+    /// Docker network for a container-tier worker: "bridge", "none", or the
+    /// name of a network you created with its own egress rules. The worker
+    /// calls its model provider from inside the sandbox, so "none" leaves it
+    /// unable to reach anything that isn't also in the container.
+    pub network: String,
+    /// Environment variables forwarded into the sandbox, by name — typically
+    /// the provider API key (`ANTHROPIC_API_KEY`). OS-keyring credentials are
+    /// not reachable from inside a sandbox.
+    pub env: Vec<String>,
+    /// Firecracker settings for the vm tier.
+    pub vm: PilotVmConfig,
 }
 
 impl Default for PilotSandboxConfig {
@@ -2763,6 +2779,57 @@ impl Default for PilotSandboxConfig {
             container_image: "wingman/sandbox:latest".into(),
             vm_provider: "firecracker".into(),
             allow_unsandboxed_vm_tasks: false,
+            cpus: 2,
+            memory_mib: 4096,
+            pids_limit: 512,
+            network: "bridge".into(),
+            env: Vec::new(),
+            vm: PilotVmConfig::default(),
+        }
+    }
+}
+
+/// J11 — Firecracker microVM backend for the vm sandbox tier (Linux + KVM).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotVmConfig {
+    /// `firecracker` binary. Must be an absolute path when `use_jailer` is on.
+    pub firecracker_bin: String,
+    /// Run Firecracker under its `jailer` (chroot, uid/gid drop, cgroups).
+    /// The jailer needs root.
+    pub use_jailer: bool,
+    pub jailer_bin: String,
+    /// Directory the jailer builds its chroots under.
+    pub chroot_base_dir: String,
+    /// Unprivileged uid/gid the jailer drops Firecracker to.
+    pub jailer_uid: u32,
+    pub jailer_gid: u32,
+    /// Uncompressed guest kernel (`vmlinux`). Empty = vm tier unavailable.
+    pub kernel_image: String,
+    /// ext4 root filesystem providing `/sbin/wingman-sandbox-init`, `sh`, `git`
+    /// and `wingman`. Attached read-only. Empty = vm tier unavailable.
+    pub rootfs_image: String,
+    /// Size of the ext4 drive the worktree copy is packed into.
+    pub worktree_drive_mib: u32,
+    /// Pre-created tap device for guest networking. Empty = no network
+    /// interface, so the guest can only reach a provider inside the VM.
+    pub tap_device: String,
+}
+
+impl Default for PilotVmConfig {
+    fn default() -> Self {
+        Self {
+            firecracker_bin: "firecracker".into(),
+            use_jailer: true,
+            jailer_bin: "jailer".into(),
+            chroot_base_dir: "/srv/jailer".into(),
+            jailer_uid: 65534,
+            jailer_gid: 65534,
+            kernel_image: String::new(),
+            rootfs_image: String::new(),
+            worktree_drive_mib: 4096,
+            tap_device: String::new(),
         }
     }
 }

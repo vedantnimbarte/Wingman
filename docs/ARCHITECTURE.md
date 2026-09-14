@@ -456,7 +456,7 @@ as separate agents. The sequence is in the
 | `concurrency` | Adaptive cap from rate-limit headroom, host CPU load, and budget burn. |
 | `pr` | `gh pr create` when `gh` is present and authenticated, otherwise push plus a compare URL — same `run.pr` event either way. |
 | `daemon` | Goal discovery scoring (`value × confidence ÷ risk`) for autopilot. |
-| `sandbox` | Per-task tier; the `vm` tier is fail-closed — pilot refuses those tasks rather than running them unsandboxed. |
+| `sandbox` | Per-task tier. `container` / `vm` run the worker in Docker or Firecracker against a worktree copy and `git apply` its diff back; the `vm` tier is fail-closed without a Firecracker/KVM backend. Unvalidated against a real daemon. |
 
 ### `wingman-board`
 **Purpose:** A persistent kanban board over pilot runs, across every project.

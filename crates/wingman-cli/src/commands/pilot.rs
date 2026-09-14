@@ -592,42 +592,14 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // J11 — fail closed on the untrusted/irreversible ("vm") tier. Real
-    // sandboxed worker execution isn't wired yet, so a vm-tier task
-    // (migrations, infra, Dockerfile/terraform edits, or an irreversible
-    // goal) would otherwise run with full host access. Refuse rather than
-    // silently execute unsandboxed, unless the operator opted in. Container-
-    // tier tasks still degrade to host (annotated post-run) — this gate only
-    // guards the genuinely dangerous top tier.
-    if !pilot.sandbox.allow_unsandboxed_vm_tasks {
-        let default_tier =
-            wingman_autonomous::sandbox::IsolationTier::parse(&pilot.sandbox.default_tier);
-        let vm_tasks: Vec<String> = store
-            .state()
-            .tasks
-            .iter()
-            .filter(|t| {
-                wingman_autonomous::sandbox::select_tier(t, default_tier)
-                    == wingman_autonomous::sandbox::IsolationTier::Vm
-            })
-            .map(|t| t.id.clone())
-            .collect();
-        if !vm_tasks.is_empty() {
-            eprintln!(
-                "[pilot] refusing to run: {} task(s) need vm-tier isolation \
-                 (migrations / infra / irreversible / untrusted) but sandboxed \
-                 execution isn't available — they would run unsandboxed on the host:",
-                vm_tasks.len()
-            );
-            for id in &vm_tasks {
-                eprintln!("[pilot]   - {id}");
-            }
-            eprintln!(
-                "[pilot] relabel/split the task, or set [pilot.sandbox].\
-                 allow_unsandboxed_vm_tasks = true to accept host execution."
-            );
-            return Ok(ExitCode::from(2));
-        }
+    // J11 — probe once which sandbox tiers this machine can honour; the gate
+    // below, the worker spawner and the run report all use this answer.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    if refuse_unisolated_vm_tasks(&pilot.sandbox, &sandbox_avail, &store.state().tasks) {
+        return Ok(ExitCode::from(2));
     }
 
     let base_branch =
@@ -660,6 +632,8 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             &selection.model,
             routing,
             std::time::Duration::from_secs(pilot.task_timeout_secs),
+            pilot.sandbox.clone(),
+            sandbox_avail.clone(),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -694,6 +668,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             None => selection.model.clone(),
         },
         sandbox_default_tier: pilot.sandbox.default_tier.clone(),
+        sandbox_availability: sandbox_avail,
         dangerous_paths: pilot.approval.dangerous_paths.clone(),
     };
 
@@ -1431,6 +1406,26 @@ pub async fn resume(
         .with_context(|| format!("building provider {}", selection.provider_id))?;
 
     let state = store.state().clone();
+    // J11 — the same vm gate as a fresh run, over the tasks a resume can
+    // still execute. Without it a resumed run was the way around fail-closed.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &cfg.pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    let pending: Vec<wingman_autonomous::Task> = state
+        .tasks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.status,
+                wingman_autonomous::TaskStatus::Done | wingman_autonomous::TaskStatus::Review
+            )
+        })
+        .cloned()
+        .collect();
+    if refuse_unisolated_vm_tasks(&cfg.pilot.sandbox, &sandbox_avail, &pending) {
+        return Ok(ExitCode::from(2));
+    }
     let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH")
         .unwrap_or_else(|_| cfg.pilot.pr.base_branch.clone());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
@@ -1464,6 +1459,8 @@ pub async fn resume(
             &selection.model,
             routing,
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+            cfg.pilot.sandbox.clone(),
+            sandbox_avail.clone(),
         )?,
         base_branch,
         project_root: project.root,
@@ -1500,6 +1497,7 @@ pub async fn resume(
             None => selection.model.clone(),
         },
         sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
+        sandbox_availability: sandbox_avail,
         dangerous_paths: cfg.pilot.approval.dangerous_paths.clone(),
     };
 
@@ -1520,6 +1518,72 @@ pub async fn resume(
     Ok(ExitCode::SUCCESS)
 }
 
+/// J11 — refuse to start when a task needs vm-tier isolation this machine
+/// cannot provide, rather than run migrations / infra / irreversible work
+/// with weaker isolation. `[pilot.sandbox].allow_unsandboxed_vm_tasks` opts
+/// out. Returns true (after explaining) when the run must not start.
+fn refuse_unisolated_vm_tasks(
+    sandbox: &wingman_config::PilotSandboxConfig,
+    avail: &wingman_autonomous::sandbox::TierAvailability,
+    tasks: &[wingman_autonomous::Task],
+) -> bool {
+    use wingman_autonomous::sandbox::{select_tier, IsolationTier};
+    let Err(reason) = &avail.vm else {
+        return false;
+    };
+    if sandbox.allow_unsandboxed_vm_tasks {
+        return false;
+    }
+    let default_tier = IsolationTier::parse(&sandbox.default_tier);
+    let vm_tasks: Vec<&str> = tasks
+        .iter()
+        .filter(|t| select_tier(t, default_tier) == IsolationTier::Vm)
+        .map(|t| t.id.as_str())
+        .collect();
+    if vm_tasks.is_empty() {
+        return false;
+    }
+    eprintln!(
+        "[pilot] refusing to run: {} task(s) need vm-tier isolation \
+         (migrations / infra / irreversible / untrusted) but the vm tier is \
+         unavailable here ({reason}):",
+        vm_tasks.len()
+    );
+    for id in &vm_tasks {
+        eprintln!("[pilot]   - {id}");
+    }
+    eprintln!(
+        "[pilot] relabel/split the task, configure [pilot.sandbox.vm], or set \
+         [pilot.sandbox].allow_unsandboxed_vm_tasks = true to accept weaker isolation."
+    );
+    true
+}
+
+/// J11 — the sandbox one task's worker runs in, or `None` for the host.
+fn worker_sandbox_for(
+    task: &wingman_autonomous::Task,
+    sandbox: &wingman_config::PilotSandboxConfig,
+    avail: &wingman_autonomous::sandbox::TierAvailability,
+) -> Option<wingman_autonomous::sandbox::WorkerSandbox> {
+    use wingman_autonomous::sandbox::{resolve_effective_tier, select_tier, IsolationTier};
+    let requested = select_tier(task, IsolationTier::parse(&sandbox.default_tier));
+    let (tier, degraded) = resolve_effective_tier(requested, avail);
+    if degraded {
+        tracing::warn!(
+            target: "pilot::sandbox",
+            task = %task.id,
+            "task wants the {} tier but runs in {}: no backend for it here",
+            requested.as_str(),
+            tier.as_str()
+        );
+    }
+    (tier != IsolationTier::Host).then(|| wingman_autonomous::sandbox::WorkerSandbox {
+        tier,
+        config: sandbox.clone(),
+        global_config: wingman_config::global_config_path().ok(),
+    })
+}
+
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
 /// child processes via [`wingman_autonomous::worker::run_worker`].
 ///
@@ -1531,11 +1595,16 @@ pub async fn resume(
 /// chosen adaptively per role: a role whose cheap-model history is below
 /// threshold is dispatched straight to the capable model instead of
 /// burning a first attempt that history says will fail.
+///
+/// `sandbox` + `avail` pick each task's J11 tier: a container/vm task runs
+/// its worker in that sandbox, degraded to what this machine can honour.
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
     task_timeout: std::time::Duration,
+    sandbox: wingman_config::PilotSandboxConfig,
+    avail: wingman_autonomous::sandbox::TierAvailability,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1546,6 +1615,7 @@ fn build_real_worker_spawner(
             let worker_model = worker_model.clone();
             let manager_model = manager_model.clone();
             let routing = routing.clone();
+            let worker_sandbox = worker_sandbox_for(&ctx.task, &sandbox, &avail);
             Box::pin(async move {
                 // E5 rung 2: escalate to the manager model when the
                 // orchestrator flagged this attempt as needing it. Otherwise
@@ -1592,6 +1662,7 @@ fn build_real_worker_spawner(
                     model,
                     timeout: task_timeout,
                     cmd_rx,
+                    sandbox: worker_sandbox,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
@@ -2444,6 +2515,84 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use wingman_autonomous::control::{append, ControlCommand};
+
+    fn migration_task() -> wingman_autonomous::Task {
+        let mut t = wingman_autonomous::Task::new(
+            "t-mig",
+            wingman_autonomous::model::Role::Developer,
+            "migrate",
+        );
+        t.writes = vec!["db/migrations/001.sql".into()];
+        t
+    }
+
+    fn avail(docker: bool, vm: bool) -> wingman_autonomous::sandbox::TierAvailability {
+        wingman_autonomous::sandbox::TierAvailability {
+            docker,
+            vm: if vm { Ok(()) } else { Err("no kvm".into()) },
+        }
+    }
+
+    #[test]
+    fn vm_tasks_are_refused_unless_isolated_or_opted_out() {
+        let mut cfg = wingman_config::PilotSandboxConfig::default();
+        let plain = wingman_autonomous::Task::new(
+            "t-edit",
+            wingman_autonomous::model::Role::Developer,
+            "edit",
+        );
+        // Docker alone is not a vm: still refused.
+        assert!(refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(true, false),
+            &[migration_task()]
+        ));
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, true),
+            &[migration_task()]
+        ));
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, false),
+            &[plain]
+        ));
+        cfg.allow_unsandboxed_vm_tasks = true;
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, false),
+            &[migration_task()]
+        ));
+    }
+
+    #[test]
+    fn each_worker_gets_the_sandbox_its_tier_resolves_to() {
+        use wingman_autonomous::sandbox::IsolationTier;
+        let cfg = wingman_config::PilotSandboxConfig::default();
+        let plain = wingman_autonomous::Task::new(
+            "t-edit",
+            wingman_autonomous::model::Role::Developer,
+            "edit",
+        );
+        assert!(worker_sandbox_for(&plain, &cfg, &avail(true, true)).is_none());
+        let tier =
+            |t: &wingman_autonomous::Task, a| worker_sandbox_for(t, &cfg, &a).map(|s| s.tier);
+        assert_eq!(
+            tier(&migration_task(), avail(true, true)),
+            Some(IsolationTier::Vm)
+        );
+        assert_eq!(
+            tier(&migration_task(), avail(true, false)),
+            Some(IsolationTier::Container)
+        );
+        assert_eq!(tier(&migration_task(), avail(false, false)), None);
+
+        let mut floor = cfg.clone();
+        floor.default_tier = "container".into();
+        let sb = worker_sandbox_for(&plain, &floor, &avail(true, false)).unwrap();
+        assert_eq!(sb.tier, IsolationTier::Container);
+        assert_eq!(sb.config.container_image, floor.container_image);
+    }
 
     #[test]
     fn r4_eval_gate_flags_regression_and_passes_on_parity() {
