@@ -579,6 +579,20 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
             Warn,
             format!("{short_ts}  escalation   {}", trigger.short_label()),
         ),
+        Event::PrReviewRound {
+            round,
+            outcome,
+            addressed,
+            threads,
+            ..
+        } => (
+            Info,
+            format!(
+                "{short_ts}  pr.review   round {round} {outcome} ({}/{} threads)",
+                addressed.len(),
+                threads.len()
+            ),
+        ),
     };
     LogRow { text, severity }
 }

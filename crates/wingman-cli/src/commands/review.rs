@@ -4,6 +4,10 @@
 //! Falls back to a local `git diff` against a base ref if `--local <base>`
 //! is given (no `gh` required). The review template is intentionally
 //! short — the user can supply their own via `--template <path>`.
+//!
+//! `--comment` asks for findings in the line format `review-multi` parses and
+//! posts them to the PR as one GitHub review with inline comments (see
+//! [`super::review_post`]); `--dry-run` prints that review instead.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -23,7 +27,17 @@ pub async fn run(
     pr: Option<String>,
     local_base: Option<String>,
     template: Option<String>,
+    comment: bool,
+    dry_run: bool,
 ) -> Result<ExitCode> {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    // Resolved before the diff is fetched so the review is pinned to a head
+    // commit no newer than the diff it comments on.
+    let target = match (&pr, comment) {
+        (Some(pr), true) => Some(super::review_post::resolve_pr(&runner, &cwd, pr)?),
+        _ => None,
+    };
     let diff = if let Some(pr) = pr {
         fetch_pr_diff(&pr)?
     } else if let Some(base) = local_base {
@@ -42,13 +56,23 @@ pub async fn run(
         Some(path) => {
             std::fs::read_to_string(&path).with_context(|| format!("reading template {path}"))?
         }
+        None if target.is_some() => super::review_multi::REVIEWER_PROMPT.to_string(),
         None => DEFAULT_TEMPLATE.to_string(),
     };
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let diff = super::diff_annotate::annotate_diff_text(&cwd, &diff);
-    let prompt = format!("{template}\n```\n{diff}\n```");
+    let annotated = super::diff_annotate::annotate_diff_text(&cwd, &diff);
+    let prompt = format!("{template}\n```\n{annotated}\n```");
 
     let cfg = load_config()?;
+    if let Some(target) = target {
+        let selection = crate::runtime::resolve_selection(&cfg, None)?;
+        let text = super::review_multi::run_one(cfg, selection, prompt).await?;
+        println!("{}", text.trim_end());
+        // Anchors come from the raw diff: the annotated one only adds
+        // `// fn foo` labels to hunk headers, but the raw text is what GitHub has.
+        let msg = super::review_post::post(&runner, &cwd, &target, &diff, &text, dry_run)?;
+        eprintln!("{msg}");
+        return Ok(ExitCode::SUCCESS);
+    }
     let mode_override = None;
     let opts = crate::commands::headless::HeadlessOptions {
         prompt,

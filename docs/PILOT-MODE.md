@@ -32,8 +32,9 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > `[pilot.pr].base_branch` (default `main`).
 > `autopilot` is experimental but most of its edges are now wired. The
 > discovery daemon polls `github_issues`, `todos`, `ci_failures`,
-> `dependabot`, `coverage_gaps` (reads an existing `lcov.info`), and
-> `intake`. **Intake** is transport-agnostic: a Slack/email gateway writes
+> `dependabot`, `coverage_gaps` (reads an existing `lcov.info`),
+> `intake`, and `pr_reviews` (review threads on pilot's own PRs — see
+> [Review rounds](#review-rounds-on-pilots-prs)). **Intake** is transport-agnostic: a Slack/email gateway writes
 > `*.md` requests into `[pilot.daemon].intake_dir` and the
 > daemon ingests them with per-author trust — no in-process listener needed.
 > **Notification** delivery is wired via `[pilot.notifications.webhooks]`
@@ -115,6 +116,46 @@ Per-run artefacts land under `<project>/.wingman/autonomous/<run-id>/`:
   state.json    # latest snapshot (rewritten after every event)
 ```
 
+## Review rounds on pilot's PRs
+
+Add `pr_reviews` to `[pilot.daemon].sources` and the daemon answers review on
+the PRs pilot opened, instead of leaving them for you to hand back:
+
+```toml
+[pilot.daemon]
+enabled           = true
+sources           = ["github_issues", "pr_reviews"]
+trusted_authors   = ["your-github-login"]
+auto_dispatch     = true    # without it, review rounds are only queued
+max_review_rounds = 3       # per PR (default 3)
+```
+
+Each cycle it looks at every run on disk whose PR is still open on its
+`wingman/auto/<run-id>` branch and lists the PR's unresolved review threads
+(`gh api graphql`). A thread is work when a `trusted_authors` reviewer
+commented on it since pilot last replied; comments from anyone else are
+dropped — they never reach the rework prompt. With `auto_dispatch`, one round:
+
+1. fetches the PR branch and runs a nested pilot run stacked on the PR's
+   head, with the threads as its goal. It uses the same branch and opens no
+   new PR;
+2. pushes the new commits to that branch. The push is never forced, so if the
+   branch moved in the meantime nothing is claimed. The rework does not go
+   through the pipeline's merge gate, so if GitHub auto-merge is armed on the
+   PR it is turned off first (and nothing is pushed if that fails);
+3. replies on every thread it took on. A thread whose file the push changed
+   gets the commits that touched it and is **resolved**; any other thread gets
+   a reply saying so and **stays open**. Resolution follows what was pushed,
+   not what the model says it did;
+4. appends a `pr.review_round` event (round, rework run id, threads, the
+   resolved ones, outcome, spend) to the log of the run that opened the PR.
+
+Rounds stop at `max_review_rounds`, and together they share one
+`[pilot].max_usd` budget per PR: each round gets what the earlier ones left.
+A failed rework run still counts as a round, but it pushes nothing and
+replies nothing. `wingman pilot daemon --dry-run` lists the rounds it would
+start and does nothing else: no run, no push, no reply.
+
 ## Status
 
 The full M1 pipeline is implemented (RunStore, planner, worker subprocess
@@ -125,8 +166,10 @@ provider-support gate). On top of that, the crate now ships the
 `veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
 sandbox tiers (`host` / `container` / `vm`: workers run in Docker or a
 Firecracker microVM against a copy of their worktree; container degrades to
-`host` without Docker, vm fails closed without Firecracker/KVM), and the always-on discovery `daemon` (five
-sources: GitHub issues, TODOs, CI failures, Dependabot PRs, coverage gaps).
+`host` without Docker, vm fails closed without Firecracker/KVM), and the
+always-on discovery `daemon` (sources: GitHub issues, TODOs, CI failures,
+Dependabot PRs, coverage gaps, file-drop intake, `// ASK:` comments, and review
+threads on pilot's own PRs).
 End-to-end `copilot` runs have been validated on a live provider
 (OpenRouter/DeepSeek) — plan through PR; they need real API keys and are
 **user-validated, not CI-validated** (CI runs the unit suite). Remaining

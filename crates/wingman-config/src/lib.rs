@@ -3058,10 +3058,22 @@ pub struct PilotDaemonConfig {
     /// off; `wingman pilot feedback` still polls on demand.
     #[serde(default = "default_feedback_poll_secs")]
     pub feedback_poll_secs: u64,
+    /// `pr_reviews` source — the most rework rounds the daemon runs on one of
+    /// pilot's own PRs. Each round addresses the trusted reviewers' open
+    /// threads, pushes to the PR branch and replies; a reviewer who keeps
+    /// asking for more past this cap is answered by a human. Rounds also share
+    /// one `[pilot].max_usd` budget per PR, so the cap bounds time and the
+    /// budget bounds spend.
+    #[serde(default = "default_max_review_rounds")]
+    pub max_review_rounds: u32,
 }
 
 fn default_feedback_poll_secs() -> u64 {
     3600
+}
+
+fn default_max_review_rounds() -> u32 {
+    3
 }
 
 fn default_intake_dir() -> String {
@@ -3088,13 +3100,14 @@ impl Default for PilotDaemonConfig {
             auto_dispatch: false,
             max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
-            // coverage_gaps, intake, ask. The default advertises only
+            // coverage_gaps, intake, ask, pr_reviews. The default advertises only
             // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
             feedback_poll_secs: default_feedback_poll_secs(),
             watch_debounce_ms: 1000,
+            max_review_rounds: default_max_review_rounds(),
         }
     }
 }
@@ -3514,6 +3527,17 @@ mod tests {
         // And a config that says nothing about it still gets the cap.
         let bare: PilotDaemonConfig = toml::from_str("").expect("parses");
         assert_eq!(bare.max_auto_dispatch_per_cycle, 1);
+    }
+
+    /// The `pr_reviews` source pushes to PRs with nobody watching, so it is
+    /// off unless named in `sources`, and its rounds are bounded by default.
+    #[test]
+    fn pr_reviews_is_opt_in_and_bounded_by_default() {
+        let d = PilotDaemonConfig::default();
+        assert!(!d.sources.iter().any(|s| s == "pr_reviews"));
+        assert_eq!(d.max_review_rounds, 3);
+        let bare: PilotDaemonConfig = toml::from_str("").expect("parses");
+        assert_eq!(bare.max_review_rounds, 3);
     }
 
     /// The E5 ladder's rungs are 1 retry, 2 escalate model, 3 split. A cap of

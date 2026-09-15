@@ -1,7 +1,8 @@
 //! J2 — autonomous goal discovery (daemon scoring core).
 //!
 //! The daemon polls GitHub issues, failing CI, dependabot PRs, recent
-//! TODO/FIXME comments, coverage gaps, and stale deps. For each candidate
+//! TODO/FIXME comments, coverage gaps, review threads on pilot's own PRs
+//! ([`crate::pr_reviews`]), and stale deps. For each candidate
 //! it computes a `value × confidence ÷ risk` score and decides whether to
 //! auto-run, propose, or ignore. The polling/adapters are I/O (and need
 //! tokens the plan defers to the user); this module is the scoring +
@@ -496,6 +497,11 @@ pub fn run_cycle(
         if let Ok(found) = fetch_ask_candidates(runner, repo_root) {
             candidates.extend(found);
         }
+    }
+    if cfg.sources.iter().any(|s| s == "pr_reviews") {
+        candidates.extend(crate::pr_reviews::fetch_pr_review_candidates(
+            runner, repo_root, cfg,
+        ));
     }
     rank(candidates)
         .into_iter()

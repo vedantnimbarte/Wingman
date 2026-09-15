@@ -221,7 +221,10 @@ Wingman different; this is everything else it does.
 - **Worktree sandbox.** `wingman worktree create <branch>` spins up an
   isolated working copy under `.wingman/worktrees/`.
 - **PR review.** `wingman review <pr#>` (or `--local <base>`) runs a
-  one-shot review prompt against the diff.
+  one-shot review prompt against the diff. `--comment` posts the findings
+  back as one GitHub review with inline comments anchored to their diff
+  lines (via `gh api`), skipping any a previous run already posted;
+  `--dry-run` prints the payload instead of posting.
 - **Local model auto-discovery.** `wingman discover` probes localhost
   Ollama / LM Studio / vLLM and prints available models.
 - **Skill auto-extraction.** `wingman skill extract` scans recent session
@@ -354,6 +357,12 @@ Wingman different; this is everything else it does.
   dependencies with caret rules and refusing unsigned packs unless told
   otherwise; signatures are checked with `ssh-keygen`. See
   [PILOT-MODE.md](PILOT-MODE.md#skill-packs).
+- **Pilot answers review on its own PRs.** With `pr_reviews` in
+  `[pilot.daemon].sources`, the daemon picks up trusted reviewers' unresolved
+  threads on the PRs pilot opened. It fixes them on the same branch, pushes,
+  replies on each thread, and resolves only the threads the push actually
+  changed. Rounds per PR are capped and share `[pilot].max_usd`. See
+  [PILOT-MODE.md](PILOT-MODE.md#review-rounds-on-pilots-prs).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,

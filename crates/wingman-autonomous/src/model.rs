@@ -592,6 +592,29 @@ pub enum Event {
         #[serde(default)]
         hours_to_hotfix: Option<f64>,
     },
+
+    /// One round of the daemon's `pr_reviews` source addressing reviewer
+    /// threads on this run's PR. Appended to the run that *opened* the PR,
+    /// so the round count and the spend that bound the loop live next to it.
+    #[serde(rename = "pr.review_round")]
+    PrReviewRound {
+        t: String,
+        /// 1-based round number for this PR.
+        round: u32,
+        /// Id of the nested pilot run that did the rework.
+        rework_run: String,
+        /// GraphQL ids of the review threads the round took on.
+        #[serde(default)]
+        threads: Vec<String>,
+        /// The subset of `threads` that were replied to and resolved.
+        #[serde(default)]
+        addressed: Vec<String>,
+        /// `pushed` | `no_changes` | `push_failed` | `rework_failed`.
+        outcome: String,
+        /// What the rework run spent.
+        #[serde(default)]
+        usd: f64,
+    },
 }
 
 fn default_strategy() -> String {
@@ -619,6 +642,7 @@ impl Event {
             | Event::RunPr { t, .. }
             | Event::PrOutcome { t, .. }
             | Event::Escalation { t, .. }
+            | Event::PrReviewRound { t, .. }
             | Event::RunDone { t } => t,
         }
     }
@@ -903,6 +927,10 @@ pub fn apply(state: &mut RunState, event: &Event) {
             // It carries no in-run state mutation; the feedback module
             // (R2) reads these directly off the event log when computing
             // weighted stats, so replay is a no-op here.
+        }
+        Event::PrReviewRound { .. } => {
+            // Also recorded after the run ended; `pr_reviews` reads the
+            // rounds straight off the log, so replay is a no-op too.
         }
     }
 }

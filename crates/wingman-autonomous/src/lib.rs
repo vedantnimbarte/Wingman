@@ -40,6 +40,7 @@ pub mod pipeline;
 pub mod planner;
 pub mod pr;
 pub mod provider_matrix;
+pub mod pr_reviews;
 pub mod provider_support;
 pub mod refine;
 pub mod reporting;

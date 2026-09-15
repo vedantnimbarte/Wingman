@@ -57,7 +57,7 @@ wingman [OPTIONS] [COMMAND]
 | `memory sync [<ref>]` | Reconcile team-shared project memory: rebuild `MEMORY.md` from files (resolving index merge conflicts), optionally fold in a git ref's memories. |
 | `memory push` / `memory pull` | Sync memories through a team HTTP endpoint (`[team]`), non-clobbering. |
 | `memory review`      | Review distilled pending memories: list, or `--promote N` / `--discard N` / `--promote-all`. |
-| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
+| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. `--comment` posts the findings to the PR as one GitHub review with inline comments on their diff lines (findings not on a diff line go in the review body; findings a previous run already posted are skipped); add `--dry-run` to print the review payload instead. |
 | `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
 | `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
@@ -71,7 +71,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
 | `pilot feedback`     | Poll every run's opened PR for its terminal state (`gh`) and record a `pr.outcome` event. `--cycles N` (0 = forever). |
 | `pilot eval`         | Score eval results against a baseline and exit 1 on regression. `--goals <file>` runs the goals live first (no PR); `--baseline <file>`, `--threshold <f>` (default 0.10), `--update-baseline`. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). `--cycles N`, `--dry-run`, and `--watch` to also wake on file changes and `pilot hooks` git hooks (see [Watch mode](PILOT-MODE.md#watch-mode)). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). `--cycles N`, `--dry-run`, and `--watch` to also wake on file changes and `pilot hooks` git hooks (see [Watch mode](PILOT-MODE.md#watch-mode)). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. The `pr_reviews` source reworks trusted review threads on pilot's own PRs; `--dry-run` logs what it would dispatch without running, pushing or replying. |
 | `pilot validate-providers` | Run the canned `--version-only` pilot plan against every configured provider with credentials, one scratch repo each, and write a pass/fail/skipped matrix (`matrix.md`, `matrix.json`). `--provider <id>` (repeatable), `--max-usd <f>` (default 0.50), `--max-tokens <n>` (default 400000), `--out <dir>` (default `.wingman/provider-validation/`). Exit 1 if any provider failed, 2 if none could run. Spends real money. |
 | `pilot hooks install\|uninstall` | Write (or remove) post-commit/merge/checkout/rewrite hooks that run the wingman binary directly, no shell, and wake `pilot daemon --watch`. Leaves hooks it didn't write alone. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
