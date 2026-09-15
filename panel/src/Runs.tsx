@@ -18,6 +18,7 @@ import { navigate } from './router'
 import { Transcript } from './Sessions'
 import { message, useEvents } from './state'
 import { Empty, Failed, Icon, Loading, Note, PageHead, Pill } from './ui'
+import { MicButton } from './voice'
 
 /**
  * Pilot runs, live.
@@ -348,7 +349,10 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
     return () => src.close()
   }, [project, runId, load])
 
-  async function control(action: ControlAction, body: { task?: string } = {}) {
+  async function control(
+    action: ControlAction,
+    body: { task?: string; message?: string } = {},
+  ): Promise<boolean> {
     setBusy(action + (body.task ?? ''))
     setActionError(null)
     setSent(null)
@@ -361,8 +365,10 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
       // flipping the status here would be the dishonest alternative.
       setSent(`${action}${body.task ? ` ${body.task}` : ''}`)
       await load()
+      return true
     } catch (e) {
       setActionError(message(e))
+      return false
     } finally {
       setBusy(null)
     }
@@ -505,6 +511,7 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
       {sent && !actionError && (
         <Note tone="is-asserted">
           Sent <code>{sent}</code> — the run applies it on its next check.
+          {sent === 'ask' && ' The answer shows up under Activity.'}
         </Note>
       )}
 
@@ -548,7 +555,74 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
 
       <PilotLogView project={project} runId={run.run_id} />
       <RunLog events={log} live={live} />
+
+      {/* Last in the view so the sticky composer stays pinned to the bottom
+          of the screen for the whole scroll, not just past its own spot. */}
+      {!terminal && (
+        <Steer
+          busy={busy !== null}
+          onSend={(action, text) => control(action, { message: text })}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * `pilot tell` / `pilot ask` from the browser. Every worker holding a task
+ * hears it on its next turn — the CLI's `--task` targeting is left to the
+ * terminal until someone needs it from a phone.
+ */
+function Steer({
+  busy,
+  onSend,
+}: {
+  busy: boolean
+  onSend: (action: 'tell' | 'ask', text: string) => Promise<boolean>
+}) {
+  const [text, setText] = useState('')
+  const empty = text.trim() === ''
+
+  async function send(action: 'tell' | 'ask') {
+    if (empty) return
+    if (await onSend(action, text.trim())) setText('')
+  }
+
+  return (
+    <form
+      className="composer steer"
+      onSubmit={(e) => {
+        e.preventDefault()
+        void send('tell')
+      }}
+    >
+      <label className="sr-only" htmlFor="steer-message">
+        Message to the run's workers
+      </label>
+      <textarea
+        id="steer-message"
+        className="input"
+        rows={2}
+        value={text}
+        placeholder="Tell the workers something, or ask them"
+        onChange={(e) => setText(e.target.value)}
+      />
+      <div className="composer-tools">
+        <span className="composer-hint">Reaches every active worker on its next turn</span>
+        <MicButton value={text} onChange={setText} disabled={busy} />
+        <button
+          type="button"
+          className="button"
+          disabled={busy || empty}
+          onClick={() => void send('ask')}
+        >
+          Ask
+        </button>
+        <button type="submit" className="button button-primary" disabled={busy || empty}>
+          Tell
+        </button>
+      </div>
+    </form>
   )
 }
 
@@ -780,6 +854,15 @@ export function summarise(e: RunLogEvent): string {
     case 'task.status':
       return `${s('id')} → ${s('status')}`
     case 'task.tool':
+      // The reply half of `ask` rides the event log as a tool line.
+      if (s('tool').startsWith('worker_msg:')) {
+        try {
+          const m = JSON.parse(s('tool').slice('worker_msg:'.length)) as { msg?: string; text?: string }
+          if (m.msg === 'answer' || m.msg === 'question') return `${s('id')} ${m.msg}: ${m.text ?? ''}`
+        } catch {
+          /* Not the shape pilot writes. Falls through to the plain line. */
+        }
+      }
       return `${s('id')} ran ${s('tool')}${e.ok === false ? ' (failed)' : ''}${
         s('file') ? ` on ${s('file')}` : ''
       }`
