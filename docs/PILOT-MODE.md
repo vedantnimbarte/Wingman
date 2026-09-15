@@ -137,7 +137,9 @@ dropped — they never reach the rework prompt. With `auto_dispatch`, one round:
    head, with the threads as its goal. It uses the same branch and opens no
    new PR;
 2. pushes the new commits to that branch. The push is never forced, so if the
-   branch moved in the meantime nothing is claimed;
+   branch moved in the meantime nothing is claimed. The rework does not go
+   through the pipeline's merge gate, so if GitHub auto-merge is armed on the
+   PR it is turned off first (and nothing is pushed if that fails);
 3. replies on every thread it took on. A thread whose file the push changed
    gets the commits that touched it and is **resolved**; any other thread gets
    a reply saying so and **stays open**. Resolution follows what was pushed,

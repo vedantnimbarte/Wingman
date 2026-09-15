@@ -42,7 +42,8 @@ const MAX_CANDIDATES: usize = 20;
 // ponytail: first 100 threads / 100 comments per thread, no pagination. A PR
 // past that is not one to rework unattended; page when one shows up.
 const THREADS_QUERY: &str = "query($url: URI!) { resource(url: $url) { ... on PullRequest { \
-    state headRefName headRefOid reviewThreads(first: 100) { nodes { id isResolved path line \
+    state headRefName headRefOid autoMergeRequest { enabledAt } \
+    reviewThreads(first: 100) { nodes { id isResolved path line \
     comments(first: 100) { nodes { databaseId author { login } body viewerDidAuthor } } } } } } }";
 
 const REPLY_MUTATION: &str = "mutation($id: ID!, $body: String!) { \
@@ -77,6 +78,11 @@ pub struct ReviewTarget {
     pub branch: String,
     /// PR head the rework is stacked on.
     pub head_sha: String,
+    /// GitHub auto-merge is armed on the PR. The rework skips the pipeline's
+    /// merge gate (security pass, J15 triggers, critic), so [`finish_round`]
+    /// turns it off before pushing rather than let those commits merge
+    /// unreviewed once pilot resolves the threads.
+    pub auto_merge: bool,
     pub threads: Vec<ReviewThread>,
     /// Rounds already recorded for this PR.
     pub rounds: u32,
@@ -270,6 +276,7 @@ pub fn load_target(
         return Ok(None);
     }
     let head_sha = field("headRefOid").to_string();
+    let auto_merge = pr.get("autoMergeRequest").is_some_and(|a| !a.is_null());
     let threads = parse_threads(pr, trusted);
     if threads.is_empty() || head_sha.is_empty() {
         return Ok(None);
@@ -280,6 +287,7 @@ pub fn load_target(
         pr_url,
         branch: state.integration_branch,
         head_sha,
+        auto_merge,
         threads,
         rounds,
         spent_usd,
@@ -424,7 +432,7 @@ pub async fn finish_round(
             Ok((new_head, changed)) => {
                 for thread in &target.threads {
                     let touched = changed.iter().any(|f| f == &thread.path);
-                    let body = if touched {
+                    let mut body = if touched {
                         let range = format!("{}..{new_head}", target.head_sha);
                         let log = git(
                             runner,
@@ -444,6 +452,12 @@ pub async fn finish_round(
                             thread.path
                         )
                     };
+                    if target.auto_merge {
+                        body.push_str(
+                            "\n\nAuto-merge was turned off for this push: these commits have \
+                             not been through pilot's merge gate.",
+                        );
+                    }
                     let replied = gh_graphql(
                         runner,
                         repo_root,
@@ -514,6 +528,22 @@ fn publish(
     let new_head = git(runner, repo_root, &["rev-parse", &target.branch])?;
     if new_head == target.head_sha {
         return Ok((new_head, Vec::new()));
+    }
+    if target.auto_merge {
+        // Fail closed: if auto-merge stays armed, don't push at all.
+        let out = runner
+            .run(
+                "gh",
+                &["pr", "merge", "--disable-auto", &target.pr_url],
+                repo_root,
+            )
+            .map_err(|e| format!("gh pr merge --disable-auto failed: {e}"))?;
+        if !out.success() {
+            return Err(format!(
+                "turning off auto-merge before pushing failed: {}",
+                out.stderr.trim()
+            ));
+        }
     }
     // Never forced: if the branch moved on the remote meanwhile, the push is
     // rejected and nothing is claimed on the threads.
@@ -778,6 +808,7 @@ mod tests {
             pr_url: URL.into(),
             branch: BRANCH.into(),
             head_sha: HEAD.into(),
+            auto_merge: false,
             threads: parse_threads(v.pointer("/data/resource").unwrap(), &trusted()),
             rounds: 0,
             spent_usd: 0.0,
@@ -905,6 +936,67 @@ mod tests {
         assert_eq!((out.outcome.as_str(), out.round), ("push_failed", 2));
         assert!(out.errors[0].contains("non-fast-forward"));
         assert!(!gh.calls().iter().any(|c| c.starts_with("gh ")));
+    }
+
+    #[tokio::test]
+    async fn armed_auto_merge_is_turned_off_before_the_push_or_nothing_is_pushed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = pilot_run(tmp.path(), BRANCH, URL).await;
+        let done = rework_run(tmp.path(), true).await;
+        let json = serde_json::json!({"data": {"resource": {
+            "state": "OPEN", "headRefName": BRANCH, "headRefOid": HEAD,
+            "autoMergeRequest": {"enabledAt": "2026-09-01T00:00:00Z"},
+            "reviewThreads": {"nodes": [{"id": "T1", "isResolved": false, "path": "src/a.rs",
+                "comments": {"nodes": [{"databaseId": 1, "author": {"login": "vedant"},
+                                        "body": "rename"}]}}]}
+        }}})
+        .to_string();
+        let json: &'static str = Box::leak(json.into_boxed_str());
+        let t = load_target(
+            &Gh::new(vec![("gh", "graphql", ok(json))]),
+            tmp.path(),
+            &dir,
+            &trusted(),
+            3,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(t.auto_merge);
+
+        let gh = Gh::new(vec![
+            ("git", "rev-parse", ok(NEW)),
+            ("gh", "--disable-auto", ok("")),
+            ("git", "push origin", ok("")),
+            ("git", "diff --name-only", ok("src/a.rs\n")),
+            ("git", "log", ok("- bbbbbbb rename")),
+            ("gh", "graphql", ok("{}")),
+        ]);
+        let out = finish_round(&gh, tmp.path(), &t, "rework-1", &done)
+            .await
+            .unwrap();
+        assert_eq!(out.outcome, "pushed");
+        let calls = gh.calls();
+        let disable = calls.iter().position(|c| c.contains("--disable-auto"));
+        let push = calls.iter().position(|c| c.contains("push origin"));
+        assert!(disable.unwrap() < push.unwrap(), "{calls:?}");
+        assert!(calls
+            .iter()
+            .any(|c| c.contains("addPullRequestReviewThreadReply") && c.contains("Auto-merge")));
+
+        // Can't turn it off: nothing pushed, nothing claimed.
+        let gh = Gh::new(vec![
+            ("git", "rev-parse", ok(NEW)),
+            ("gh", "--disable-auto", fail("HTTP 403")),
+        ]);
+        let out = finish_round(&gh, tmp.path(), &t, "rework-2", &done)
+            .await
+            .unwrap();
+        assert_eq!(out.outcome, "push_failed");
+        assert!(out.errors[0].contains("HTTP 403"));
+        let calls = gh.calls();
+        assert!(!calls
+            .iter()
+            .any(|c| c.contains("push") || c.contains("graphql")));
     }
 
     #[tokio::test]
