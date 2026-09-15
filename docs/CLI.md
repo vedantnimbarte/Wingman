@@ -65,6 +65,11 @@ wingman [OPTIONS] [COMMAND]
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
 | `skill import <path>` | Import portable `SKILL.md` skills (a file, its dir, or a dir of them). `--project`, `--force`. |
 | `skill export <name> <dir>` | Export a wingman skill as a portable `<dir>/<name>/SKILL.md` bundle. |
+| `plugin install <dir\|git-url[#ref]>` | Install a Claude Code–format plugin to `~/.wingman/plugins/<name>/` (reinstalling replaces it) and print its commands, skills, skipped parts, and every hook and MCP server it would run. `#ref` is a branch or tag. Refused if it contains a symlink, an unusable name, or a command named like a built-in. See [EXTENDING.md](EXTENDING.md#plugins). |
+| `plugin list`        | Installed plugins: version, enabled/disabled, and whether their hooks/MCP are trusted, untrusted, or lapsed. |
+| `plugin trust <name>` | Let a plugin's hooks and MCP servers run, pinned to a hash of the whole plugin. Any change lapses it. |
+| `plugin enable\|disable <name>` | Turn a plugin's commands, skills, hooks, and MCP servers on or off without removing it. |
+| `plugin remove <name>` | Delete the plugin and its trust record. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |

@@ -11,7 +11,8 @@ pub mod usage_store;
 mod widgets;
 
 pub use app::{
-    run, AgentBuilder, AppCtx, LoginRunner, LogoutRunner, McpListRunner, McpRunner, ModeSetter,
-    ModelsRunner, PlanApprover, ProviderBuilder, RecallHit, RecallRunner, SessionIndexer,
+    is_builtin_command, run, AgentBuilder, AppCtx, LoginRunner, LogoutRunner, McpListRunner,
+    McpRunner, ModeSetter, ModelsRunner, PlanApprover, ProviderBuilder, RecallHit, RecallRunner,
+    SessionIndexer,
 };
 pub use theme::{init as init_theme, Theme};
