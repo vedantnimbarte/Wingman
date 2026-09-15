@@ -1,6 +1,6 @@
 //! `wingman-lsp` — a Language Server Protocol client for real, resolved code
-//! intelligence: go-to-definition, find-references, hover, rename, and live
-//! diagnostics, backed by whatever servers the user has on `PATH`
+//! intelligence: go-to-definition, find-references, call hierarchy, hover,
+//! rename, and live diagnostics, backed by whatever servers the user has on `PATH`
 //! (rust-analyzer, pyright / pylsp, typescript-language-server, gopls).
 //!
 //! This is the semantic upgrade over the tree-sitter heuristics in
@@ -20,7 +20,7 @@ pub mod client;
 pub mod edit;
 pub mod server;
 
-pub use client::{Diagnostic, Location, LspClient, LspError, Position};
+pub use client::{Diagnostic, IncomingCall, Location, LspClient, LspError, Position};
 pub use server::{Lang, ServerSpec};
 
 use std::collections::HashMap;

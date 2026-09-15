@@ -62,7 +62,23 @@ pub enum ContextFact {
     /// Cumulative token usage for the turn.
     Usage { usage: Usage },
     /// The turn ended.
-    Stop { reason: String },
+    ///
+    /// Also carries the two measurements only the loop can take, because they
+    /// are properties of the turn rather than of anything a surface saw:
+    /// how long the model took to start answering, and the verdict of the
+    /// last verification receipt. Not model-visible — they ride on `Stop`
+    /// instead of being facts of their own so the log stays one record per
+    /// thing that happened. `wingman metrics` reads them back.
+    Stop {
+        reason: String,
+        /// Milliseconds from the prompt reaching the loop to the first
+        /// streamed output of any kind (text, reasoning, or a tool call).
+        /// `None` when the model produced nothing before the turn ended.
+        first_output_ms: Option<u64>,
+        /// The last verification receipt of the turn: `Some(true)` green,
+        /// `Some(false)` red, `None` when the gate did not run.
+        verified: Option<bool>,
+    },
 }
 
 /// Somewhere to put [`ContextFact`]s. Implemented over the session log.

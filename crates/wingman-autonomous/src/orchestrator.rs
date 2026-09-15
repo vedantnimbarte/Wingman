@@ -62,8 +62,6 @@ pub enum OrchestratorError {
     Aborting,
     #[error("worker spawn failed: {0}")]
     Spawn(String),
-    #[error("task {0} failed checkpoint hygiene: {1}")]
-    CheckpointViolation(String, String),
     #[error("task {0} sent back for rework by the inline reviewer (E7)")]
     ReviewRework(String),
     #[error("invalid task graph: {0}")]
@@ -208,6 +206,10 @@ pub enum OrchestratorCommand {
     Snapshot {
         reply: oneshot::Sender<crate::model::RunState>,
     },
+    /// E9 — re-evaluate speculative worktrees against the current plan. Sent
+    /// by the speculation watchdog whenever a task is created or changes
+    /// status.
+    Speculate,
     Shutdown,
 }
 
@@ -371,18 +373,24 @@ pub struct OrchestratorConfig {
     /// at most one initial attempt + 3 retries before the task is
     /// marked Blocked.
     pub max_retries_per_task: u32,
-    /// E11 — when true, a task cannot leave Review for Done unless its
-    /// recorded tool stream satisfies checkpoint hygiene (multi-file work
-    /// checkpointed at least once). A violation makes `finalize_task` fail,
-    /// bouncing the task back for rework. Default false so the gate is
-    /// opt-in (copilot+ turns it on via the `checkpoint_hygiene` capability).
-    pub enforce_checkpoint_hygiene: bool,
     /// Where to write desktop notification cards for failures, or `None` to
     /// write none. The caller resolves this through
     /// [`crate::notify::desktop_target`] so routing and the on/off switch stay
     /// in one place; `None` skips spawning the watchdog entirely, exactly as a
     /// zero budget skips the budget watchdog.
     pub desktop_inbox: Option<PathBuf>,
+    /// E9 — sample host CPU load in the background and narrow the live
+    /// concurrency cap as it rises. Off for unit tests, whose caps must not
+    /// depend on how busy the machine running them is.
+    pub sample_host_load: bool,
+    /// E9 — create the worktree of a task that is about to become ready (its
+    /// deps are all in Review or Done) before the manager assigns it, and run
+    /// `warm_cmd` there, so the worker starts on a built tree. Discarded if
+    /// the plan changes first. Needs real worktrees.
+    pub speculative_prespawn: bool,
+    /// Shell command that warms a speculative worktree, typically the build
+    /// the worker's turn gate runs anyway. Empty only creates the worktree.
+    pub warm_cmd: String,
 }
 
 impl Default for OrchestratorConfig {
@@ -397,8 +405,10 @@ impl Default for OrchestratorConfig {
             max_usd: 10.0,
             max_total_tokens: 20_000_000,
             max_retries_per_task: 3,
-            enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
+            sample_host_load: false,
+            speculative_prespawn: false,
+            warm_cmd: String::new(),
         }
     }
 }
@@ -410,6 +420,32 @@ struct RetryState {
     rung: u32,
     escalate_model: bool,
     failure_history: Vec<String>,
+}
+
+/// J15 — passing tests per test-running acceptance check at the run's base
+/// commit, keyed by the check's result label; `None` when that run printed no
+/// summary. Filled once per check per run by [`measure_test_baselines`].
+type TestBaselines = Arc<std::sync::Mutex<HashMap<String, Option<u32>>>>;
+
+/// E9 — inputs to the live concurrency cap that run state does not hold.
+#[derive(Default)]
+struct HostSignals {
+    /// Provider rate limits the run's workers reported (`agent.rate_limit`).
+    rate_limits: std::sync::Mutex<crate::concurrency::RateLimitWindow>,
+    /// Latest host CPU load, in thousandths; 0 until first sampled.
+    cpu_load_milli: std::sync::atomic::AtomicU32,
+}
+
+/// How often the host CPU load is re-read, when sampling is on.
+const CPU_SAMPLE_EVERY: Duration = Duration::from_secs(10);
+
+/// E9 — a worktree created for a task before the manager assigned it.
+struct Prewarm {
+    worktree: PathBuf,
+    /// Dropping or firing this stops the warm command.
+    cancel: oneshot::Sender<()>,
+    /// The warm command; finished once it exits, times out or is cancelled.
+    warm: tokio::task::JoinHandle<()>,
 }
 
 /// Run the orchestrator actor on the current Tokio runtime. Returns the
@@ -448,7 +484,44 @@ pub fn spawn_full(
     let budget_rx = store.subscribe();
     let retry_rx = store.subscribe();
     let notify_rx = store.subscribe();
+    let escalation_rx = store.subscribe();
+    let host_rx = store.subscribe();
+    let speculate_rx = store.subscribe();
     let store = Arc::new(Mutex::new(store));
+    let baselines = TestBaselines::default();
+    let signals = Arc::new(HostSignals::default());
+
+    // E9 — rate limits from workers, and host load when sampling is on, feed
+    // the concurrency cap `handle_assign` enforces.
+    tokio::spawn(host_signal_watchdog(
+        host_rx,
+        signals.clone(),
+        cfg.sample_host_load,
+        tx.clone(),
+    ));
+
+    // E9 — speculative pre-spawn needs a base commit to branch worktrees from.
+    if cfg.speculative_prespawn && cfg.use_real_worktrees && !cfg.base_commit.is_empty() {
+        tokio::spawn(speculation_watchdog(speculate_rx, tx.clone()));
+    } else {
+        drop(speculate_rx);
+    }
+
+    // J15 escalation watchdog: the runtime triggers fire while the run is
+    // live, not only once the PR is open. Always on — J15 has no off switch.
+    // Skipped for the in-memory unit-test config, which has no run history.
+    let prior_runs = if cfg.project_root.as_os_str().is_empty() {
+        Vec::new()
+    } else {
+        recent_run_outcomes(&cfg.project_root, &cfg.run_id)
+    };
+    tokio::spawn(escalation_watchdog(
+        escalation_rx,
+        store.clone(),
+        baselines.clone(),
+        cfg.max_usd,
+        prior_runs,
+    ));
 
     // Failure watchdog: one subscriber rather than an emit at each of the ten-
     // plus places that write `TaskStatus::Failed`. The broadcast channel is
@@ -514,8 +587,174 @@ pub fn spawn_full(
         drop(retry_rx);
     }
 
-    let join = tokio::spawn(run_actor(store, cfg, spawner, splitter, reviewer, rx));
+    let join = tokio::spawn(run_actor(
+        store, cfg, spawner, splitter, reviewer, baselines, signals, rx,
+    ));
     (handle, join)
+}
+
+/// Background task: evaluate the J15 runtime triggers
+/// ([`crate::escalation::check_runtime`]) while the run is live and record each
+/// new one as a `run.escalation` event. The failure watchdog turns those into
+/// desktop cards; the pipeline folds them into the merge gate and the R3
+/// packet.
+///
+/// As the run starts: the last three runs before it all failed. On every
+/// `agent.usd`: spend against the 0.8x / 1.0x cap. On every finished attempt
+/// (`task.attempt`): net-negative tests against the base-commit baselines (for
+/// an attempt that reached Review), an irreversible task having run, and three
+/// consecutive failed attempts in this run.
+async fn escalation_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    store: Arc<Mutex<RunStore>>,
+    baselines: TestBaselines,
+    max_usd: f64,
+    prior_runs: Vec<(String, bool)>,
+) {
+    record_escalations(&store, |state| {
+        crate::escalation::check_runtime(&crate::escalation::RuntimeSignals {
+            state,
+            task: None,
+            tests_before: None,
+            tests_after: None,
+            max_usd: 0.0,
+            recent_run_outcomes: &prior_runs,
+        })
+    })
+    .await;
+    let mut attempts: Vec<(String, bool)> = Vec::new();
+    loop {
+        let (task_id, tests) = match events.recv().await {
+            Ok(Event::AgentUsd { .. }) => (None, None),
+            Ok(Event::TaskAttempt {
+                id,
+                rung,
+                status,
+                tests,
+                ..
+            }) => {
+                attempts.push((
+                    format!("{id} (rung {rung})"),
+                    !matches!(status, TaskStatus::Failed | TaskStatus::Blocked),
+                ));
+                let counts = (status == TaskStatus::Review)
+                    .then(|| {
+                        let before = baselines.lock().unwrap_or_else(|e| e.into_inner());
+                        crate::acceptance::net_test_counts(&before, &tests)
+                    })
+                    .flatten();
+                (Some(id), counts)
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        record_escalations(&store, |state| {
+            crate::escalation::check_runtime(&crate::escalation::RuntimeSignals {
+                state,
+                task: task_id.as_deref().and_then(|id| state.task(id)),
+                tests_before: tests.map(|(before, _)| before),
+                tests_after: tests.map(|(_, after)| after),
+                max_usd,
+                recent_run_outcomes: if task_id.is_some() { &attempts } else { &[] },
+            })
+        })
+        .await;
+    }
+}
+
+/// Append a `run.escalation` event for each trigger `evaluate` finds that the
+/// run has not already recorded as the same incident.
+async fn record_escalations(
+    store: &Arc<Mutex<RunStore>>,
+    evaluate: impl FnOnce(&crate::model::RunState) -> Vec<crate::escalation::EscalationTrigger>,
+) {
+    let mut store = store.lock().await;
+    let state = store.state();
+    let fresh: Vec<_> = evaluate(state)
+        .into_iter()
+        .filter(|t| !state.escalations.iter().any(|e| e.duplicates(t)))
+        .collect();
+    for trigger in fresh {
+        tracing::warn!(
+            target: "pilot::escalation",
+            trigger = trigger.short_label(),
+            "{}",
+            trigger.render()
+        );
+        let _ = store
+            .append(Event::Escalation {
+                t: RunStore::now(),
+                trigger,
+            })
+            .await;
+    }
+}
+
+/// J15 — the (run_id, ok) outcome of every earlier run in this project, oldest
+/// first, excluding `current_run_id`. Feeds the RepeatedFailures trigger as a
+/// run starts. Reads what `dashboard::load_all_run_states` already persists —
+/// no new store.
+fn recent_run_outcomes(
+    project_root: &std::path::Path,
+    current_run_id: &str,
+) -> Vec<(String, bool)> {
+    let mut states = crate::dashboard::load_all_run_states(project_root);
+    // run ids are timestamp-prefixed, so a lexical sort is chronological.
+    states.sort_by(|a, b| a.run_id.cmp(&b.run_id));
+    states
+        .into_iter()
+        .filter(|s| s.run_id != current_run_id)
+        .map(|s| (s.run_id, s.status == RunStatus::Done))
+        .collect()
+}
+
+/// J15 — count the passing tests each of `task`'s test-running checks reports
+/// at the base commit, once per check per run. Runs in the attempt's freshly
+/// created worktree before its worker starts: the tree is still exactly the
+/// base commit, and the build it leaves behind is the one the worker's own
+/// checks then reuse, so the extra cost is one test run per distinct check.
+async fn measure_test_baselines(
+    store: &Arc<Mutex<RunStore>>,
+    task: &Task,
+    worktree: PathBuf,
+    budget: Duration,
+    baselines: &TestBaselines,
+) {
+    let pending: Vec<crate::model::Acceptance> = {
+        let known = baselines.lock().unwrap_or_else(|e| e.into_inner());
+        task.acceptance
+            .iter()
+            .filter(|c| {
+                crate::acceptance::test_check_label(c).is_some_and(|l| !known.contains_key(&l))
+            })
+            .cloned()
+            .collect()
+    };
+    if pending.is_empty() {
+        return;
+    }
+    // The task is busy from here, though its worker has not started: the
+    // concurrency cap and the write-set scheduler count `in_progress`.
+    let _ = store
+        .lock()
+        .await
+        .append(Event::TaskStatus {
+            t: RunStore::now(),
+            id: task.id.clone(),
+            status: TaskStatus::InProgress,
+            outcome: None,
+        })
+        .await;
+    let results = tokio::task::spawn_blocking(move || {
+        crate::acceptance::run_acceptance_checks_within(&pending, &worktree, budget)
+    })
+    .await
+    .unwrap_or_default();
+    let mut known = baselines.lock().unwrap_or_else(|e| e.into_inner());
+    for r in results {
+        known.entry(r.label).or_insert(r.passed_tests);
+    }
 }
 
 /// How long a failure waits for company before its card is written.
@@ -533,10 +772,12 @@ enum Bad {
     Task(String, String),
     /// The run itself ended badly: `failed` or `aborted`.
     Run(&'static str),
+    /// A J15 escalation trigger fired: its short label and its rendering.
+    Escalation(&'static str, String),
 }
 
-/// Background task: writes desktop cards for task failures and for a run that
-/// ends badly. Runs until the broadcast channel closes.
+/// Background task: writes desktop cards for task failures, J15 escalations,
+/// and a run that ends badly. Runs until the broadcast channel closes.
 ///
 /// Failures inside one [`COALESCE`] window become a single card. That is worth
 /// more than it sounds: the common shape is one broken dependency failing three
@@ -633,6 +874,9 @@ async fn next_bad(
                     outcome.map(|o| o.summary).unwrap_or_default(),
                 ));
             }
+            Ok(Event::Escalation { trigger, .. }) => {
+                return Some(Bad::Escalation(trigger.short_label(), trigger.render()))
+            }
             Ok(Event::RunStatusEv {
                 status: RunStatus::Failed,
                 ..
@@ -654,7 +898,8 @@ async fn next_bad(
 ///
 /// The run outcome wins the title when it is in the batch — "run failed" is
 /// what the reader needs first, and the tasks that caused it belong in the
-/// body underneath it.
+/// body underneath it. Short of that, a J15 escalation wins: it is one of the
+/// lines a run must not cross unseen, and a task failure beside it is context.
 fn render(batch: &[Bad]) -> (String, String) {
     let run = batch.iter().find_map(|b| match b {
         Bad::Run(word) => Some(*word),
@@ -667,33 +912,41 @@ fn render(batch: &[Bad]) -> (String, String) {
             _ => None,
         })
         .collect();
-
-    match (run, tasks.as_slice()) {
-        // A run failure on its own, or with the tasks that explain it.
-        (Some(word), []) => (format!("Run {word}"), String::new()),
-        (Some(word), many) => (
-            format!("Run {word} — {} task(s) did not finish", many.len()),
-            many.iter()
-                .map(|(label, _)| format!("• {label}"))
-                .collect::<Vec<_>>()
-                .join(
-                    "
+    let escalations: Vec<(&str, String)> = batch
+        .iter()
+        .filter_map(|b| match b {
+            Bad::Escalation(label, detail) => Some((*label, format!("• {detail}"))),
+            _ => None,
+        })
+        .collect();
+    let bullets = |tasks: &[(&String, &String)]| {
+        tasks
+            .iter()
+            .map(|(label, _)| format!("• {label}"))
+            .chain(escalations.iter().map(|(_, line)| line.clone()))
+            .collect::<Vec<_>>()
+            .join(
+                "
 ",
-                ),
+            )
+    };
+
+    match (run, tasks.as_slice(), escalations.as_slice()) {
+        // A run failure on its own, or with the tasks that explain it.
+        (Some(word), [], _) => (format!("Run {word}"), bullets(&[])),
+        (Some(word), many, _) => (
+            format!("Run {word} — {} task(s) did not finish", many.len()),
+            bullets(many),
+        ),
+        (None, _, [(label, _)]) => (format!("Escalation — {label}"), bullets(&tasks)),
+        (None, _, [_, ..]) => (
+            format!("{} escalations", escalations.len()),
+            bullets(&tasks),
         ),
         // One task, and room to say what went wrong with it.
-        (None, [(label, summary)]) => (format!("Task failed — {label}"), (*summary).clone()),
+        (None, [(label, summary)], []) => (format!("Task failed — {label}"), (*summary).clone()),
         // Several: the list is more use than any one summary.
-        (None, many) => (
-            format!("{} tasks failed", many.len()),
-            many.iter()
-                .map(|(label, _)| format!("• {label}"))
-                .collect::<Vec<_>>()
-                .join(
-                    "
-",
-                ),
-        ),
+        (None, many, []) => (format!("{} tasks failed", many.len()), bullets(many)),
     }
 }
 
@@ -749,6 +1002,270 @@ async fn budget_watchdog(
             Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
         }
     }
+}
+
+/// Background task: feed the E9 concurrency cap what run state does not hold.
+/// Each `agent.rate_limit` a worker reports goes into the rate-limit window;
+/// with `sample_cpu`, host CPU load is re-read every [`CPU_SAMPLE_EVERY`].
+async fn host_signal_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    signals: Arc<HostSignals>,
+    sample_cpu: bool,
+    orch: mpsc::Sender<OrchestratorCommand>,
+) {
+    let mut sampler = Some(crate::concurrency::CpuSampler::default());
+    let mut ticker = tokio::time::interval(CPU_SAMPLE_EVERY);
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Ok(Event::AgentRateLimited { retry_after_secs, .. }) => {
+                    signals
+                        .rate_limits
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record(std::time::Instant::now(), retry_after_secs);
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
+            _ = ticker.tick(), if sample_cpu => {
+                if orch.is_closed() {
+                    return;
+                }
+                // Off the runtime: macOS reads the load by running `sysctl`.
+                let Some(mut s) = sampler.take() else { return };
+                let Ok((s, load)) = tokio::task::spawn_blocking(move || {
+                    let load = s.sample();
+                    (s, load)
+                })
+                .await
+                else {
+                    return;
+                };
+                sampler = Some(s);
+                if let Some(load) = load {
+                    signals
+                        .cpu_load_milli
+                        .store((load * 1000.0).round() as u32, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// Background task: ask the actor to re-evaluate speculative worktrees (E9)
+/// whenever a task is created or changes status.
+async fn speculation_watchdog(
+    mut events: tokio::sync::broadcast::Receiver<Event>,
+    orch: mpsc::Sender<OrchestratorCommand>,
+) {
+    loop {
+        match events.recv().await {
+            Ok(Event::TaskStatus { .. } | Event::TaskCreate { .. }) => {
+                if orch.send(OrchestratorCommand::Speculate).await.is_err() {
+                    return;
+                }
+            }
+            Ok(_) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// E9 — the live concurrency cap: `max_concurrent_agents`, narrowed by recent
+/// provider rate limits, host CPU load and budget burn.
+fn live_cap(
+    state: &crate::model::RunState,
+    cfg: &OrchestratorConfig,
+    signals: &HostSignals,
+) -> u32 {
+    let (recent_rate_limit_hits, active_retry_after_secs) = signals
+        .rate_limits
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sample(std::time::Instant::now());
+    crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
+        max_agents: cfg.max_concurrent_agents,
+        min_agents: 1,
+        recent_rate_limit_hits,
+        active_retry_after_secs,
+        cpu_load: f64::from(
+            signals
+                .cpu_load_milli
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ) / 1000.0,
+        usd_spent: state.totals.usd,
+        max_usd: cfg.max_usd,
+    })
+}
+
+/// E9 — speculative pre-spawn. Discard the speculative worktrees whose task is
+/// no longer waiting on deps in Review or Done (it was replanned, blocked, or
+/// split away), then create one for each task that is about to become ready
+/// (every dep in Review or Done, at least one still in Review), as far as the
+/// concurrency cap has room once running and warming tasks are counted.
+///
+/// The worktree is exactly what `handle_assign` would create, since every
+/// worktree branches from the base commit whatever the deps did, so the
+/// assignment takes it over as is.
+async fn handle_speculate(
+    store: &Arc<Mutex<RunStore>>,
+    cfg: &OrchestratorConfig,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
+) {
+    fn waiting(state: &crate::model::RunState, task: &Task) -> bool {
+        matches!(task.status, TaskStatus::Pending | TaskStatus::Todo)
+            && !task.deps.is_empty()
+            && task.deps.iter().all(|d| {
+                state
+                    .task(d)
+                    .is_some_and(|d| matches!(d.status, TaskStatus::Review | TaskStatus::Done))
+            })
+    }
+
+    let stale: Vec<String> = {
+        let store = store.lock().await;
+        let state = store.state();
+        prewarms
+            .keys()
+            .filter(|id| !state.task(id).is_some_and(|t| waiting(state, t)))
+            .cloned()
+            .collect()
+    };
+    for id in stale {
+        if let Some(prewarm) = prewarms.remove(&id) {
+            discard_prewarm(cfg, &id, prewarm).await;
+        }
+    }
+
+    let fresh: Vec<String> = {
+        let store = store.lock().await;
+        let state = store.state();
+        let busy = state
+            .tasks
+            .iter()
+            .filter(|t| t.status == TaskStatus::InProgress)
+            .count()
+            + prewarms.values().filter(|p| !p.warm.is_finished()).count();
+        let room = (live_cap(state, cfg, signals) as usize).saturating_sub(busy);
+        state
+            .tasks
+            .iter()
+            .filter(|t| {
+                !prewarms.contains_key(&t.id)
+                    && waiting(state, t)
+                    && t.deps.iter().any(|d| {
+                        state
+                            .task(d)
+                            .is_some_and(|d| d.status == TaskStatus::Review)
+                    })
+            })
+            .take(room)
+            .map(|t| t.id.clone())
+            .collect()
+    };
+    for id in fresh {
+        let worktree = crate::worktree_dir(&cfg.project_root, &cfg.run_id, &id);
+        let (repo, base, run_id, task_id, path) = (
+            cfg.project_root.clone(),
+            cfg.base_commit.clone(),
+            cfg.run_id.clone(),
+            id.clone(),
+            worktree.clone(),
+        );
+        let created = tokio::task::spawn_blocking(move || {
+            crate::worktree::create_worktree(&repo, &base, &run_id, &task_id, &path)
+        })
+        .await;
+        if let Ok(Err(e)) = &created {
+            tracing::warn!(target: "pilot::speculate", task = %id, error = %e, "speculative worktree not created");
+        }
+        if !matches!(created, Ok(Ok(_))) {
+            continue;
+        }
+        let (cancel, cancelled) = oneshot::channel();
+        let warm = tokio::spawn(warm_worktree(
+            cfg.warm_cmd.clone(),
+            worktree.clone(),
+            cfg.task_timeout,
+            cancelled,
+        ));
+        tracing::info!(target: "pilot::speculate", task = %id, "created worktree ahead of assignment");
+        prewarms.insert(
+            id,
+            Prewarm {
+                worktree,
+                cancel,
+                warm,
+            },
+        );
+    }
+}
+
+/// Run `cmd` in a speculative worktree until it exits, `budget` passes, or
+/// the worktree is discarded (`cancelled` fires or its sender is dropped). The
+/// supervisor kills the command's whole process tree when it is dropped early.
+async fn warm_worktree(
+    cmd: String,
+    worktree: PathBuf,
+    budget: Duration,
+    mut cancelled: oneshot::Receiver<()>,
+) {
+    if cmd.trim().is_empty() {
+        return;
+    }
+    let (shell, flag) = if cfg!(windows) {
+        ("cmd", "/C")
+    } else {
+        ("sh", "-c")
+    };
+    let mut sc = crate::child_process::SupervisedCommand::new(shell);
+    sc.command_mut()
+        .arg(flag)
+        .arg(&cmd)
+        .current_dir(&worktree)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut supervisor = match sc.spawn() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(target: "pilot::speculate", error = %e, "warm command did not start");
+            return;
+        }
+    };
+    let Some(mut child) = supervisor.take_child() else {
+        return;
+    };
+    tokio::select! {
+        status = child.wait() => {
+            tracing::debug!(target: "pilot::speculate", ?status, worktree = %worktree.display(), "warm command finished");
+        }
+        _ = &mut cancelled => {}
+        _ = tokio::time::sleep(budget) => {
+            tracing::warn!(target: "pilot::speculate", worktree = %worktree.display(), "warm command timed out");
+        }
+    }
+}
+
+/// Stop a speculative worktree's warm command and remove the worktree and its
+/// branch.
+async fn discard_prewarm(cfg: &OrchestratorConfig, task_id: &str, prewarm: Prewarm) {
+    let _ = prewarm.cancel.send(());
+    let _ = prewarm.warm.await;
+    let (repo, run_id, id, path) = (
+        cfg.project_root.clone(),
+        cfg.run_id.clone(),
+        task_id.to_string(),
+        prewarm.worktree,
+    );
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::worktree::discard_worktree(&repo, &run_id, &id, &path)
+    })
+    .await;
+    tracing::info!(target: "pilot::speculate", task = %task_id, "discarded speculative worktree");
 }
 
 /// Background task: when a task transitions to Failed, fire a Reassign.
@@ -879,12 +1396,15 @@ async fn control_watchdog(run_dir: PathBuf, orch: mpsc::Sender<OrchestratorComma
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     store: Arc<Mutex<RunStore>>,
     cfg: OrchestratorConfig,
     spawner: WorkerSpawner,
     splitter: Option<TaskSplitter>,
     reviewer: Option<Reviewer>,
+    baselines: TestBaselines,
+    signals: Arc<HostSignals>,
     mut rx: mpsc::Receiver<OrchestratorCommand>,
 ) {
     // Track active worker tasks so we can enforce the concurrency cap and
@@ -905,6 +1425,8 @@ async fn run_actor(
     // pump (fired by the retry watchdog on the tasks we just failed) is
     // ignored, so the drive loop sees an all-terminal state and exits.
     let mut aborting = false;
+    // E9 — speculative worktrees not yet taken over by an assignment.
+    let mut prewarms: HashMap<String, Prewarm> = HashMap::new();
 
     while let Some(cmd) = rx.recv().await {
         match cmd {
@@ -928,6 +1450,9 @@ async fn run_actor(
                     &task_id,
                     &mut next_agent_seq,
                     &retries,
+                    &baselines,
+                    &signals,
+                    &mut prewarms,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -949,6 +1474,9 @@ async fn run_actor(
                     &mut next_agent_seq,
                     &mut retries,
                     &mut next_task_seq,
+                    &baselines,
+                    &signals,
+                    &mut prewarms,
                 )
                 .await;
                 let _ = reply.send(result);
@@ -958,14 +1486,8 @@ async fn run_actor(
                 merge_commit,
                 reply,
             } => {
-                let result = handle_finalize(
-                    &store,
-                    &task_id,
-                    merge_commit,
-                    cfg.enforce_checkpoint_hygiene,
-                    reviewer.as_ref(),
-                )
-                .await;
+                let result =
+                    handle_finalize(&store, &task_id, merge_commit, reviewer.as_ref()).await;
                 let _ = reply.send(result);
             }
             OrchestratorCommand::AbortTask { task_id, reply } => {
@@ -1032,8 +1554,18 @@ async fn run_actor(
                 let snapshot = store.lock().await.state().clone();
                 let _ = reply.send(snapshot);
             }
+            OrchestratorCommand::Speculate => {
+                if !aborting {
+                    handle_speculate(&store, &cfg, &signals, &mut prewarms).await;
+                }
+            }
             OrchestratorCommand::Shutdown => break,
         }
+    }
+
+    // A speculative worktree nothing took over is not work anyone did.
+    for (id, prewarm) in prewarms.drain() {
+        discard_prewarm(&cfg, &id, prewarm).await;
     }
 
     // Drain remaining active tasks so their final events land in the log
@@ -1088,6 +1620,9 @@ async fn handle_assign(
     task_id: &str,
     next_agent_seq: &mut u64,
     retries: &HashMap<String, RetryState>,
+    baselines: &TestBaselines,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
 ) -> Result<String, OrchestratorError> {
     let (task, agent_id, worktree, session_id) = {
         let store_g = store.lock().await;
@@ -1149,22 +1684,10 @@ async fn handle_assign(
             .iter()
             .filter(|t| t.status == TaskStatus::InProgress)
             .count() as u32;
-        // E9 — adaptive cap: scale the live ceiling down as the run's budget
-        // burns, rather than always allowing `max_concurrent_agents`. Rate-
-        // limit and CPU signals aren't sampled yet, so those inputs are 0 (a
-        // no-op); budget burn is real (`totals.usd` vs `max_usd`).
-        // ponytail: no 429 counter or host-load sampler wired from workers
-        // yet — add them to tighten the cap under provider backoff.
-        let cap =
-            crate::concurrency::recommended_concurrency(&crate::concurrency::ConcurrencySignals {
-                max_agents: cfg.max_concurrent_agents,
-                min_agents: 1,
-                recent_rate_limit_hits: 0,
-                active_retry_after_secs: 0,
-                cpu_load: 0.0,
-                usd_spent: store_g.state().totals.usd,
-                max_usd: cfg.max_usd,
-            });
+        // E9 — adaptive cap: rather than always allowing
+        // `max_concurrent_agents`, narrow the ceiling while workers' providers
+        // are rate limiting, the host is busy, or the budget burns down.
+        let cap = live_cap(store_g.state(), cfg, signals);
         if live >= cap {
             return Err(OrchestratorError::ConcurrencyCap(cap));
         }
@@ -1206,9 +1729,34 @@ async fn handle_assign(
         (task, agent_id, worktree, session_id)
     };
 
+    // An assigned task stays `Todo` until its worker records `InProgress`. A
+    // manager tick inside that window saw an assignable task, and this used to
+    // start a second worker in the same worktree. Reassign is unaffected: it
+    // removes the old handle before it gets here.
+    if task.status == TaskStatus::Todo {
+        if let Some(previous) = &task.agent {
+            if active
+                .lock()
+                .await
+                .get(previous)
+                .is_some_and(|h| !h.is_finished())
+            {
+                return Err(OrchestratorError::BadTransition(
+                    task_id.to_string(),
+                    task.status,
+                    "assign (its worker is still starting)",
+                ));
+            }
+        }
+    }
+
+    // E9 — a worktree created for this task ahead of time is taken over as
+    // it is: it branches from the same base commit a fresh one would.
+    let adopted = prewarms.remove(task_id);
+
     // Optionally create a real git worktree. Disabled in unit tests so
     // they don't have to set up a temp repo just to drive the actor.
-    if cfg.use_real_worktrees && !cfg.base_commit.is_empty() {
+    if cfg.use_real_worktrees && !cfg.base_commit.is_empty() && adopted.is_none() {
         let repo_root = cfg.project_root.clone();
         let base = cfg.base_commit.clone();
         let run_id = cfg.run_id.clone();
@@ -1263,6 +1811,17 @@ async fn handle_assign(
     }
 
     let retry = retries.get(task_id).cloned().unwrap_or_default();
+    let rung = retry.rung;
+    // J15 baselines need a worktree still at the base commit; the in-memory
+    // test config has none.
+    let baseline = (cfg.use_real_worktrees && !cfg.base_commit.is_empty()).then(|| {
+        (
+            task.clone(),
+            worktree.clone(),
+            cfg.task_timeout,
+            baselines.clone(),
+        )
+    });
     let ctx = SpawnContext {
         task,
         agent_id: agent_id.clone(),
@@ -1290,6 +1849,27 @@ async fn handle_assign(
     let handle = tokio::spawn(async move {
         use futures::FutureExt;
         let task_id = task_id_for_log;
+        if let Some(Prewarm { cancel, warm, .. }) = adopted {
+            // Let the warm command finish what the worker would otherwise
+            // start by repeating. Busy meanwhile, as for the baselines below.
+            if !warm.is_finished() {
+                let _ = store_for_fail
+                    .lock()
+                    .await
+                    .append(Event::TaskStatus {
+                        t: RunStore::now(),
+                        id: task_id.clone(),
+                        status: TaskStatus::InProgress,
+                        outcome: None,
+                    })
+                    .await;
+            }
+            let _ = warm.await;
+            drop(cancel);
+        }
+        if let Some((task, worktree, budget, baselines)) = baseline {
+            measure_test_baselines(&store_for_fail, &task, worktree, budget, &baselines).await;
+        }
         match std::panic::AssertUnwindSafe(spawner(ctx))
             .catch_unwind()
             .await
@@ -1299,11 +1879,25 @@ async fn handle_assign(
             }
             Ok(Err(e)) => {
                 tracing::warn!(target: "pilot::orch", task = %task_id, error = %e, "worker spawn failed");
-                mark_worker_failed(&store_for_fail, &task_id, &agent_for_fail).await;
+                mark_worker_failed(
+                    &store_for_fail,
+                    &task_id,
+                    &agent_for_fail,
+                    rung,
+                    format!("worker spawn failed: {e}"),
+                )
+                .await;
             }
             Err(_panic) => {
                 tracing::error!(target: "pilot::orch", task = %task_id, "worker task panicked; marking task Failed");
-                mark_worker_failed(&store_for_fail, &task_id, &agent_for_fail).await;
+                mark_worker_failed(
+                    &store_for_fail,
+                    &task_id,
+                    &agent_for_fail,
+                    rung,
+                    "worker task panicked".into(),
+                )
+                .await;
             }
         }
         senders_for_cleanup.lock().await.remove(&agent_for_cleanup);
@@ -1324,7 +1918,13 @@ async fn handle_assign(
 /// Mark a task Failed (and its agent Failed) when its worker future errored or
 /// panicked, so the retry watchdog reassigns it instead of the task hanging in
 /// InProgress forever. Best-effort — a failed append is logged and swallowed.
-async fn mark_worker_failed(store: &Arc<Mutex<RunStore>>, task_id: &str, agent_id: &str) {
+async fn mark_worker_failed(
+    store: &Arc<Mutex<RunStore>>,
+    task_id: &str,
+    agent_id: &str,
+    rung: u32,
+    summary: String,
+) {
     let mut g = store.lock().await;
     // Skip if the worker already recorded a terminal status (it may have
     // written Failed/Review before a late panic in teardown).
@@ -1336,6 +1936,21 @@ async fn mark_worker_failed(store: &Arc<Mutex<RunStore>>, task_id: &str, agent_i
             return;
         }
     }
+    // The worker never got to record its own attempt; do it for it, ahead of
+    // the Failed status for the same reason `worker::record_attempt` is.
+    let model = g.state().agent(agent_id).and_then(|a| a.model.clone());
+    let _ = g
+        .append(Event::TaskAttempt {
+            t: RunStore::now(),
+            id: task_id.to_string(),
+            agent: agent_id.to_string(),
+            rung,
+            model,
+            status: TaskStatus::Failed,
+            summary,
+            tests: Default::default(),
+        })
+        .await;
     let _ = g
         .append(Event::TaskStatus {
             t: RunStore::now(),
@@ -1365,6 +1980,9 @@ async fn handle_reassign(
     next_agent_seq: &mut u64,
     retries: &mut HashMap<String, RetryState>,
     next_task_seq: &mut u64,
+    baselines: &TestBaselines,
+    signals: &HostSignals,
+    prewarms: &mut HashMap<String, Prewarm>,
 ) -> Result<String, OrchestratorError> {
     // E5 ladder. Advance the rung and pick the action.
     //
@@ -1509,6 +2127,9 @@ async fn handle_reassign(
         task_id,
         next_agent_seq,
         retries,
+        baselines,
+        signals,
+        prewarms,
     )
     .await
 }
@@ -1704,11 +2325,12 @@ async fn handle_finalize(
     store: &Arc<Mutex<RunStore>>,
     task_id: &str,
     merge_commit: Option<String>,
-    enforce_checkpoint_hygiene: bool,
     reviewer: Option<&Reviewer>,
 ) -> Result<(), OrchestratorError> {
-    // Phase 1 — validate the transition + E11 gate under the lock, and clone
-    // the task for the (async, lock-free) reviewer call.
+    // Phase 1 — validate the transition under the lock, and clone the task
+    // for the (async, lock-free) reviewer call. Checkpoint hygiene (E11) is
+    // not checked here: the worker supervisor already kept any attempt that
+    // failed it out of Review.
     let task = {
         let store = store.lock().await;
         let task = store
@@ -1722,23 +2344,6 @@ async fn handle_finalize(
                 task.status,
                 "finalize",
             ));
-        }
-        // E11 hard gate — a Review task may not become Done until its recorded
-        // tool stream satisfies checkpoint hygiene. Rejecting finalize leaves
-        // the task in Review so the manager reworks it instead of merging
-        // unchecked multi-file work. Same `checkpoint::verify` the advisory
-        // pipeline pass uses — one shared verdict, enforced here.
-        if enforce_checkpoint_hygiene {
-            let events = store.read_events().await.unwrap_or_default();
-            let calls = crate::checkpoint::tool_calls_for_task(&events, task_id);
-            if let crate::checkpoint::CheckpointVerdict::Violation { reason } =
-                crate::checkpoint::verify(&calls)
-            {
-                return Err(OrchestratorError::CheckpointViolation(
-                    task_id.to_string(),
-                    reason,
-                ));
-            }
         }
         task
     };
@@ -2133,8 +2738,10 @@ mod tests {
             max_usd: 0.0,
             max_total_tokens: 0,     // disabled in unit tests
             max_retries_per_task: 0, // most tests assert single-shot behaviour
-            enforce_checkpoint_hygiene: false,
             desktop_inbox: None,
+            sample_host_load: false,
+            speculative_prespawn: false,
+            warm_cmd: String::new(),
         }
     }
 
@@ -2738,6 +3345,42 @@ mod tests {
         }
         handle.shutdown().await;
         let _ = join.await;
+    }
+
+    /// A worker that has been assigned but not yet recorded `InProgress`
+    /// leaves the task `Todo`; a second assign in that window must not start
+    /// another worker in the same worktree.
+    #[tokio::test]
+    async fn assign_refuses_a_task_whose_worker_is_still_starting() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let starting: WorkerSpawner = Arc::new(|_ctx: SpawnContext| {
+            Box::pin(async move {
+                futures::future::pending::<()>().await;
+                unreachable!("never resumed")
+            })
+        });
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), starting);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Todo
+        );
+        match handle.assign_task("t1").await {
+            Err(OrchestratorError::BadTransition(id, TaskStatus::Todo, _)) => assert_eq!(id, "t1"),
+            other => panic!("expected BadTransition, got {other:?}"),
+        }
+        // The worker never returns, so don't await `join`.
+        join.abort();
     }
 
     /// Phase 8.1 acceptance: when a task hits Failed, the retry watchdog
@@ -3774,105 +4417,451 @@ mod tests {
         let _ = join.await;
     }
 
-    /// E11 hard gate — a Review task that edited two files without a
-    /// checkpoint is refused finalize when the flag is on, and accepted when
-    /// it's off. Seeds the event stream directly, then drives finalize.
+    /* ── E9 adaptive concurrency and speculative pre-spawn ──────────────── */
+
+    /// A provider's `Retry-After`, reported by a worker, holds the cap at the
+    /// floor: with one task running, a second is refused while it lasts.
     #[tokio::test]
-    async fn e11_finalize_blocks_unchecked_multifile_task() {
-        async fn seed(dir: &std::path::Path) -> RunStore {
-            let mut store = RunStore::create(
-                dir.join(".wingman/autonomous/e11-run"),
-                "e11-run",
-                "g",
-                "abc",
-                "wingman/auto/e11-run",
-            )
+    async fn a_reported_retry_after_holds_the_cap_at_one() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        // A worker that starts, hits a 429 with Retry-After, and keeps going.
+        let rate_limited: WorkerSpawner = Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    for ev in [
+                        Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        },
+                        Event::AgentRateLimited {
+                            t: RunStore::now(),
+                            agent: ctx.agent_id.clone(),
+                            status: 429,
+                            retry_after_secs: Some(30),
+                        },
+                    ] {
+                        let _ = store.append(ev).await;
+                    }
+                }
+                futures::future::pending::<()>().await;
+                unreachable!("never resumed")
+            })
+        });
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), rate_limited);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        // Overlapping writes: until the hit is recorded, t2 is refused for the
+        // write conflict (checked after the cap) instead of being assigned.
+        let mut t2 = dev_task("t2", vec![]);
+        t2.writes = vec!["file-t1.rs".into()];
+        handle.add_task(t2).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+
+        // The watchdog records the hit asynchronously; wait for it to bite.
+        let mut last = None;
+        for _ in 0..200 {
+            match handle.assign_task("t2").await {
+                Err(OrchestratorError::ConcurrencyCap(1)) => {
+                    join.abort();
+                    return;
+                }
+                other => last = Some(other),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected ConcurrencyCap(1) under Retry-After, got {last:?}");
+    }
+
+    /// A one-commit git repo with a run store under it, and a config that
+    /// pre-spawns with `warm_cmd`. `None` without git.
+    async fn speculative_run(dir: &std::path::Path) -> Option<(RunStore, OrchestratorConfig)> {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+        };
+        git(&["init", "-q"]).ok()?;
+        for kv in [
+            ["user.email", "t@t.t"],
+            ["user.name", "t"],
+            ["core.autocrlf", "false"],
+        ] {
+            git(&["config", kv[0], kv[1]]).unwrap();
+        }
+        std::fs::write(
+            dir.join(".gitignore"),
+            ".wingman/
+",
+        )
+        .unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        let head = String::from_utf8(git(&["rev-parse", "HEAD"]).unwrap().stdout).unwrap();
+        let store = RunStore::create(
+            dir.join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            head.trim(),
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let mut c = cfg(dir.to_path_buf());
+        c.base_commit = head.trim().to_string();
+        c.use_real_worktrees = true;
+        c.speculative_prespawn = true;
+        c.warm_cmd = "echo warm> warm.txt".into();
+        Some((store, c))
+    }
+
+    async fn wait_until(what: &str, mut done: impl FnMut() -> bool) {
+        for _ in 0..500 {
+            if done() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Once t1 reaches Review, t2 (which waits only on t1) gets its worktree
+    /// and warm-up early, and assigning t2 takes that worktree over instead of
+    /// recreating it.
+    #[tokio::test]
+    async fn a_task_about_to_be_ready_gets_its_worktree_early_and_keeps_it() {
+        let dir = tempdir().unwrap();
+        let Some((store, c)) = speculative_run(dir.path()).await else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let t2_warm = crate::worktree_dir(dir.path(), "test-run", "t2").join("warm.txt");
+        let (handle, join) = spawn(store, c, fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+
+        wait_until("t2's warm-up", || t2_warm.exists()).await;
+
+        for _ in 0..200 {
+            if handle.snapshot().await.unwrap().task("t1").unwrap().status == TaskStatus::Review {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        handle.finalize_task("t1", None).await.unwrap();
+        handle.assign_task("t2").await.unwrap();
+        // A fresh `create_worktree` would have wiped the warm-up's output.
+        assert!(t2_warm.exists(), "the assignment recreated the worktree");
+        handle.shutdown().await;
+        let _ = join.await;
+        // Adopted, so shutdown leaves it for the merge.
+        assert!(t2_warm.exists());
+    }
+
+    /// Replanning a waiting task onto a dep that has not started means it is
+    /// no longer about to run: its speculative worktree is removed.
+    #[tokio::test]
+    async fn a_plan_change_discards_the_speculative_worktree() {
+        let dir = tempdir().unwrap();
+        let Some((store, c)) = speculative_run(dir.path()).await else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let t2_dir = crate::worktree_dir(dir.path(), "test-run", "t2");
+        let (handle, join) = spawn(store, c, fake_happy_spawner());
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.add_task(dev_task("t2", vec!["t1"])).await.unwrap();
+        handle.add_task(dev_task("t3", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        wait_until("t2's worktree", || t2_dir.join("warm.txt").exists()).await;
+
+        handle
+            .add_task(dev_task("t2", vec!["t1", "t3"]))
             .await
             .unwrap();
-            for ev in [
-                Event::TaskCreate {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    role: Role::Developer,
-                    title: "t1".into(),
-                    goal: String::new(),
-                    deps: vec![],
-                    writes: vec![],
-                    acceptance: vec![],
-                    reversibility: Default::default(),
-                    reversibility_reason: None,
-                },
-                Event::TaskAssign {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    worktree: "wt".into(),
-                },
-                Event::TaskStatus {
-                    t: RunStore::now(),
-                    id: "t1".into(),
+        wait_until("the discard", || !t2_dir.exists()).await;
+        handle.shutdown().await;
+        let _ = join.await;
+    }
+
+    /* ── J15 runtime escalations ────────────────────────────────────────── */
+
+    async fn wait_for_escalations(store: &Arc<Mutex<RunStore>>, n: usize) -> Vec<String> {
+        for _ in 0..200 {
+            let labels: Vec<String> = store
+                .lock()
+                .await
+                .state()
+                .escalations
+                .iter()
+                .map(|t| t.short_label().to_string())
+                .collect();
+            if labels.len() >= n {
+                return labels;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fewer than {n} escalations recorded");
+    }
+
+    fn attempt(id: &str, rung: u32, status: TaskStatus, tests: &[(&str, u32)]) -> Event {
+        Event::TaskAttempt {
+            t: RunStore::now(),
+            id: id.into(),
+            agent: "agent-0001".into(),
+            rung,
+            model: None,
+            status,
+            summary: String::new(),
+            tests: tests.iter().map(|(l, n)| (l.to_string(), *n)).collect(),
+        }
+    }
+
+    /// The runtime triggers fire as the run goes, each recorded once: prior
+    /// failed runs as it starts, spend on `agent.usd`, and on a finished
+    /// attempt fewer passing tests than the base commit and a failure streak.
+    #[tokio::test]
+    async fn j15_escalation_watchdog_fires_during_the_run() {
+        use crate::escalation::EscalationTrigger;
+
+        let dir = tempdir().unwrap();
+        let mut store = RunStore::create(dir.path(), "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        store
+            .append(Event::TaskCreate {
+                t: RunStore::now(),
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "x".into(),
+                goal: String::new(),
+                deps: Vec::new(),
+                writes: Vec::new(),
+                acceptance: Vec::new(),
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            })
+            .await
+            .unwrap();
+        let events = store.subscribe();
+        let store = Arc::new(Mutex::new(store));
+        let baselines = TestBaselines::default();
+        baselines
+            .lock()
+            .unwrap()
+            .insert("shell: cargo test".into(), Some(120));
+        let prior = vec![
+            ("r-a".to_string(), false),
+            ("r-b".to_string(), false),
+            ("r-c".to_string(), false),
+        ];
+        tokio::spawn(escalation_watchdog(
+            events,
+            store.clone(),
+            baselines,
+            10.0,
+            prior,
+        ));
+        assert_eq!(
+            wait_for_escalations(&store, 1).await,
+            ["3 consecutive failures"]
+        );
+
+        let append = |ev: Event| {
+            let store = store.clone();
+            async move { store.lock().await.append(ev).await.unwrap() }
+        };
+        append(Event::AgentUsd {
+            t: RunStore::now(),
+            agent: "agent-0001".into(),
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            usd: 8.5,
+        })
+        .await;
+        wait_for_escalations(&store, 2).await;
+        // Still over 80%: the same incident, not a second card.
+        append(Event::AgentUsd {
+            t: RunStore::now(),
+            agent: "agent-0001".into(),
+            model: "m".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            usd: 0.1,
+        })
+        .await;
+        // A failed attempt with fewer tests is not compared; a Review one is.
+        append(attempt(
+            "t1",
+            0,
+            TaskStatus::Failed,
+            &[("shell: cargo test", 1)],
+        ))
+        .await;
+        append(attempt(
+            "t1",
+            1,
+            TaskStatus::Review,
+            &[("shell: cargo test", 115)],
+        ))
+        .await;
+        wait_for_escalations(&store, 3).await;
+
+        let recorded = store.lock().await.state().escalations.clone();
+        assert!(recorded.contains(&EscalationTrigger::NetNegativeTests {
+            task_id: "t1".into(),
+            before: 120,
+            after: 115,
+        }));
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|t| matches!(t, EscalationTrigger::CostWarn { .. }))
+                .count(),
+            1
+        );
+        let log = std::fs::read_to_string(store.lock().await.log_path()).unwrap();
+        assert!(log.contains(r#""ev":"run.escalation""#));
+    }
+
+    /// Three failed attempts in a row inside the run trip the streak trigger,
+    /// and the watchdog is wired into every spawned orchestrator.
+    #[tokio::test]
+    async fn j15_three_failed_attempts_escalate_through_a_spawned_orchestrator() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(dir.path(), "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        let spawner: WorkerSpawner = Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                let mut store = ctx.store.lock().await;
+                for rung in 0..3 {
+                    let _ = store
+                        .append(attempt(&ctx.task.id, rung, TaskStatus::Failed, &[]))
+                        .await;
+                }
+                Ok(WorkerSpawnResult {
+                    agent_id: ctx.agent_id,
                     status: TaskStatus::InProgress,
                     outcome: None,
-                },
-                Event::TaskTool {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    tool: "edit_file".into(),
-                    input_hash: None,
-                    file: None,
-                    ok: true,
-                },
-                Event::TaskTool {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    agent: "a1".into(),
-                    tool: "edit_file".into(),
-                    input_hash: None,
-                    file: None,
-                    ok: true,
-                },
-                Event::TaskStatus {
-                    t: RunStore::now(),
-                    id: "t1".into(),
-                    status: TaskStatus::Review,
-                    outcome: None,
-                },
-            ] {
-                store.append(ev).await.unwrap();
+                })
+            })
+        });
+        let (handle, join) = spawn(store, cfg(PathBuf::new()), spawner);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        let mut fired = false;
+        for _ in 0..200 {
+            let state = handle.snapshot().await.unwrap();
+            if state.escalations.iter().any(|t| {
+                matches!(
+                    t,
+                    crate::escalation::EscalationTrigger::RepeatedFailures { related_runs }
+                        if related_runs.len() == 3
+                )
+            }) {
+                fired = true;
+                break;
             }
-            store
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-
-        // enforce on → violation is refused, task stays in Review.
-        let dir = tempdir().unwrap();
-        let store = seed(dir.path()).await;
-        let mut c = cfg(dir.path().to_path_buf());
-        c.enforce_checkpoint_hygiene = true;
-        let (handle, join) = spawn(store, c, fake_happy_spawner());
-        let err = handle.finalize_task("t1", None).await.unwrap_err();
-        assert!(
-            matches!(err, OrchestratorError::CheckpointViolation(ref id, _) if id == "t1"),
-            "got {err:?}"
-        );
-        assert_eq!(
-            handle.snapshot().await.unwrap().task("t1").unwrap().status,
-            TaskStatus::Review
-        );
+        assert!(fired, "no RepeatedFailures escalation recorded");
         handle.shutdown().await;
         let _ = join.await;
+    }
 
-        // enforce off → same task finalizes to Done.
+    /// Base-commit counts are measured once per check per run, and the task
+    /// reads as busy while they are.
+    #[tokio::test]
+    async fn j15_baselines_are_measured_once_per_check() {
         let dir = tempdir().unwrap();
-        let store = seed(dir.path()).await;
-        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), fake_happy_spawner());
-        handle.finalize_task("t1", None).await.unwrap();
+        let mut store =
+            RunStore::create(dir.path().join("run"), "r1", "g", "base", "wingman/auto/r1")
+                .await
+                .unwrap();
+        store
+            .append(Event::TaskCreate {
+                t: RunStore::now(),
+                id: "t1".into(),
+                role: Role::Developer,
+                title: "x".into(),
+                goal: String::new(),
+                deps: Vec::new(),
+                writes: Vec::new(),
+                acceptance: Vec::new(),
+                reversibility: Default::default(),
+                reversibility_reason: None,
+            })
+            .await
+            .unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let cmd = if cfg!(windows) {
+            "echo x>>ran.txt & echo test result: ok. 7 passed; 0 failed;"
+        } else {
+            "echo x >> ran.txt; echo 'test result: ok. 7 passed; 0 failed;'"
+        };
+        let mut task = Task::new("t1", Role::Developer, "x");
+        task.acceptance = vec![
+            Acceptance::Shell { cmd: cmd.into() },
+            // Not a test run: never measured.
+            Acceptance::Shell {
+                cmd: "cargo check".into(),
+            },
+        ];
+        let baselines = TestBaselines::default();
+        for _ in 0..2 {
+            measure_test_baselines(
+                &store,
+                &task,
+                dir.path().to_path_buf(),
+                Duration::from_secs(30),
+                &baselines,
+            )
+            .await;
+        }
+        let label = format!("shell: {cmd}");
         assert_eq!(
-            handle.snapshot().await.unwrap().task("t1").unwrap().status,
-            TaskStatus::Done
+            baselines.lock().unwrap().clone(),
+            HashMap::from([(label, Some(7))])
         );
-        handle.shutdown().await;
-        let _ = join.await;
+        let ran = std::fs::read_to_string(dir.path().join("ran.txt")).unwrap();
+        assert_eq!(ran.lines().count(), 1, "measured twice");
+        assert_eq!(
+            store.lock().await.state().task("t1").unwrap().status,
+            TaskStatus::InProgress
+        );
+    }
+
+    #[test]
+    fn an_escalation_card_leads_with_the_trigger() {
+        let (title, body) = render(&[
+            task("parser", "boom"),
+            Bad::Escalation("net-negative tests", "task t1 ended with 3 passing".into()),
+        ]);
+        assert_eq!(title, "Escalation — net-negative tests");
+        assert!(body.contains("• parser"));
+        assert!(body.contains("• task t1 ended with 3 passing"));
+        // A run outcome still wins the title; the escalation stays in the body.
+        let (title, body) = render(&[
+            Bad::Run("failed"),
+            Bad::Escalation("cost halt (>=1.0x)", "spend crossed cap".into()),
+        ]);
+        assert_eq!(title, "Run failed");
+        assert_eq!(body, "• spend crossed cap");
     }
 
     /* ── Failure cards ─────────────────────────────────────────────────── */

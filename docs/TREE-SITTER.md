@@ -7,7 +7,7 @@ Wingman integrates tree-sitter (`wingman-ts` crate) for language-aware code unde
 The `wingman-ts` crate provides a minimal facade over tree-sitter and language grammars, hiding transitive dependencies and allowing feature-gated opt-out for builds that don't need parsing.
 
 **Supported languages:**
-- Rust, Python, JavaScript, TypeScript, Go
+- Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin
 
 **Core abstractions:**
 - `Language` enum — file path → detected language.
@@ -32,15 +32,38 @@ pub enum Language {
     Python,
     JavaScript,
     TypeScript,
+    Tsx,
     Go,
-    Unknown,
+    Cpp,
+    Java,
+    Kotlin,
 }
 
 impl Language {
-    pub fn from_path(path: &Path) -> Self;
-    pub fn from_content(content: &str) -> Self; // fallback: detect shebang
+    pub fn from_path(path: &Path) -> Option<Self>;  // None for unknown extensions
+    pub fn from_extension(ext: &str) -> Option<Self>;
 }
 ```
+
+**What each language extracts:**
+
+| Language | Extensions | Symbols |
+|----------|------------|---------|
+| Rust | `rs` | fn, struct, enum, trait, impl, mod, const/static, type |
+| Python | `py`, `pyi` | def, class |
+| JavaScript / TypeScript / TSX | `js`, `jsx`, `mjs`, `cjs`, `ts`, `mts`, `cts`, `tsx` | function, method, class, interface, type alias |
+| Go | `go` | func, method, type |
+| C++ | `cc`, `cpp`, `cxx`, `hpp`, `hh`, `hxx` | function definitions and prototypes, methods (in-class and `Foo::bar` out-of-class), class, struct/union, enum, namespace, `using`/`typedef` aliases |
+| Java | `java` | class, record, interface, `@interface`, enum, method, constructor |
+| Kotlin | `kt`, `kts` | fun (extension functions by their own name), class, interface, enum class, object, typealias |
+
+`.h` is deliberately unmapped: it is as often C as C++, and C is not a parsed
+language. Functions nested in a class, struct, enum, impl, or namespace are reported as
+methods; a forward declaration (`class Foo;`) is not a symbol. A Java or Kotlin signature starts
+after the declaration's annotations, a C++ template's span (and chunk) starts at
+its `template <...>` line, and `replace_function_body` skips bodyless
+declarations (interface or abstract methods, `= default`) to reach the
+definition.
 
 **`SymbolKind` enum** (`crates/wingman-ts/src/symbol.rs`):
 ```rust
@@ -90,9 +113,14 @@ When `treesitter` feature is enabled:
 | `outline`             | Generate a markdown outline (one symbol per line).        |
 | `enclosing_symbol`    | Find the function/class containing a given line number.   |
 | `replace_function_body` | Refactor a named function's body in-place.             |
+| `imports`             | Module paths a file imports (`use`, `import`, `require`). |
 | `ParserPool`          | Reusable thread-local parser cache.                       |
+| `TreeCache`           | Per-file parse trees; `semantic_chunks` reparses incrementally. |
+| `highlight::highlight` | Scope spans for a source string (`highlight` feature).  |
 
-When feature disabled, all return empty Vec/None (inert fallbacks).
+When feature disabled, the symbol functions return empty Vec/None (inert
+fallbacks). `imports` has no fallback: its caller (`read_file` prefetch)
+gates on the feature and warms only siblings without it.
 
 ## Integration Points
 
@@ -117,7 +145,9 @@ Insert into SQLite with embedding vector
 ```
 
 **Relevant code:**
-- `crates/wingman-rag/src/index.rs` — calls `wingman_ts::semantic_chunks()`.
+- `crates/wingman-rag/src/chunker.rs` — `Chunker` holds a `TreeCache`, so the
+  watcher's re-chunk of a file that changed (an `edit_file` write, a save in an
+  editor) reparses incrementally from the tree it kept for that file.
 - RAG index queries return chunks with symbol context (e.g., "in function foo()").
 
 ### 2. Tool Layer (`wingman-tools`)
@@ -144,16 +174,24 @@ Insert into SQLite with embedding vector
 - `crates/wingman-cli/src/commands/diff.rs` — interactive hunk review.
 - `crates/wingman-cli/src/commands/diff_annotate.rs` — tree-sitter outline generation.
 
-### 4. TUI Sidebar (`wingman-tui`)
+### 4. TUI Syntax Highlighting (`wingman-tui`)
 
-**Purpose:** File sidebar shows code outline (symbols in the open file).
+**Purpose:** Code in the terminal UI is coloured by syntax scope.
 
 **Features:**
-- Quick jump to function/class definitions.
-- Symbol kind icons (fn, struct, class, etc.).
+- Fenced code blocks in the transcript, by the fence's info string
+  (`rust`, `rs`, `c++`, `kotlin`, or any extension `Language` knows).
+- The file view: `v` on a file in the `Ctrl+B` sidebar opens it read-only,
+  line-numbered and highlighted by extension (the first 512 KiB).
+- Scopes map onto the theme: `default` and `light` have their own palettes,
+  `mono` and `NO_COLOR` tell scopes apart by bold/italic/dim only.
+- A `diff` fence is not highlighted: added and removed lines in green and red
+  would read as passed and failed (see decisions/0016).
 
 **Relevant code:**
-- `crates/wingman-tui/src/views/sidebar.rs` — calls `wingman_ts::outline()`.
+- `crates/wingman-ts/src/highlight.rs` — runs `tree-sitter-highlight` with each grammar's bundled query.
+- `crates/wingman-tui/src/widgets/code.rs` — maps scopes to styles from the theme.
+- `crates/wingman-tui/src/modal/file_view.rs` — the file view.
 
 ### 5. Learning Loop (`wingman-learn`)
 
@@ -248,6 +286,21 @@ let symbols2 = pool.extract_symbols(Language::Rust, src2)?;
 // Parser for Rust is reused; second call is faster.
 ```
 
+### Incremental Reparse
+
+`TreeCache` keeps the last tree for each file (up to 4 MiB of source across
+all files, least recently parsed dropped first). When a file comes back
+changed, the text between the unchanged prefix and suffix is described to the
+old tree as one `tree_sitter::InputEdit`, and the parser reuses every subtree
+outside it. Tests compare each incremental tree with a from-scratch parse of
+the same text (`to_sexp`, and the resulting chunks) across inserts, deletes,
+broken-then-repaired syntax and multi-byte text. To see the time saved on a
+3000-function file:
+
+```bash
+cargo test -p wingman-ts incremental_reparse_timing -- --nocapture
+```
+
 ### Embedding Cost
 
 Tree-sitter parsing adds ~5-10ms per file (typical sizes <10KB). For projects with thousands of files, semantic chunking is deferred to a background task (e.g., at agent startup).
@@ -273,9 +326,7 @@ Test cases cover:
 
 ## Future Enhancements
 
-- **Incremental parsing** — diff-based parser updates for performance.
-- **Syntax highlighting** — tree-sitter-highlight for pretty-printed code in TUI.
-- **Language expansion** — add C++, Java, Kotlin, etc.
+- **Language expansion** — add C, C#, Ruby, etc.
 - **Custom queries** — user-defined tree-sitter queries for domain-specific extraction.
 
 ## Troubleshooting
@@ -301,9 +352,9 @@ This removes the C toolchain dependency. All tree-sitter functions become no-ops
 ### Q: Can I add support for language X?
 
 **A:** Yes. In `crates/wingman-ts/src/lang.rs`:
-1. Add variant to `Language` enum.
-2. Update `from_path()` and `from_content()`.
-3. Add grammar crate to `Cargo.toml` (behind `treesitter` feature).
-4. Update language detection in `crates/wingman-ts/src/parse.rs`.
+1. Add variant to `Language` enum and its extensions to `from_extension()`.
+2. Add a grammar crate built against the workspace's `tree-sitter` version to `Cargo.toml` (behind `treesitter` feature) and note it in `docs/DEPENDENCIES.md`.
+3. In `crates/wingman-ts/src/parse.rs`: the grammar in `ts_language()`, a `<lang>_symbol()` mapping node kinds to `SymbolKind`, container kinds in `descends_into()`, and function kinds in `is_function_like()`.
+4. Add its highlight query to `config_for()` in `highlight.rs`.
 
 The rest of the codebase is language-agnostic.

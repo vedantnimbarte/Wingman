@@ -4,7 +4,7 @@
 //!   The default is [`FastembedEmbedder`] (BAAI/bge-small-en-v1.5 via
 //!   `fastembed-rs`); a tiny deterministic [`HashEmbedder`] ships for tests
 //!   and for users who can't run ONNX.
-//! - [`Chunker`] splits source files into overlapping line windows.
+//! - [`Chunker`] splits source files on symbol edges (line windows otherwise).
 //! - [`IndexStore`] persists chunks + embeddings to SQLite under
 //!   `.wingman/index.db` and serves cosine-similarity queries.
 //! - [`Indexer`] orchestrates walker + chunker + embedder + store and is

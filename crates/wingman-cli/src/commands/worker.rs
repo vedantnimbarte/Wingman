@@ -6,7 +6,7 @@
 //! 2. Loads the role's system prompt (`~/.wingman/agents/<role>.md` or the
 //!    built-in default shipped with `wingman-autonomous`).
 //! 3. Spins up the standard agent loop in `auto-edit` mode with the
-//!    configured `pilot.worker_model`.
+//!    model the parent passed as `--model` (else `pilot.worker_model`).
 //! 4. Streams every `AgentEvent` to stdout as NDJSON — the parent
 //!    supervisor parses each line.
 //! 5. Registers the `task_complete` tool, which the worker is prompted to
@@ -37,6 +37,13 @@ pub struct WorkerOptions {
     pub session_id: Option<String>,
     pub worktree: Option<String>,
     pub model_override: Option<String>,
+    /// E5.5 — consecutive turn-gate failures before rolling the worktree back
+    /// to its last green checkpoint. 0 keeps rollback off.
+    pub turn_rollback_after: u32,
+    /// E11 — checkpoints are enforced at review: require the `checkpoint`
+    /// tool and say so in the prompt.
+    pub checkpoint_hygiene: bool,
+    pub tool_synthesis: Option<String>,
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
@@ -53,15 +60,25 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let task: Task = serde_json::from_str(&task_json)
         .with_context(|| format!("parsing task file {} as JSON", opts.task_file))?;
     let role = parse_role(&opts.role)?;
+    let tool_synthesis = opts
+        .tool_synthesis
+        .as_deref()
+        .map(str::parse::<wingman_autonomous::approval::ApprovalTier>)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--tool-synthesis: {e}"))?;
 
-    // Resolve the worker model — prefer pilot.worker_model, then --model,
-    // then the global default. We deliberately don't fall back to
-    // pilot.default_model: workers should be the cheap tier.
-    let model_string = cfg
-        .pilot
-        .worker_model
+    // Resolve the worker model — prefer --model, then pilot.worker_model,
+    // then the global default. `--model` comes first because the parent has
+    // already resolved it from the project config this worker cannot see (see
+    // `worker_args`), and it carries the E5 escalation to the manager model, a
+    // learned-routing pick, and `pilot validate-providers`' choice of provider;
+    // a `pilot.worker_model` in global config used to override all of them. We
+    // deliberately don't fall back to pilot.default_model: workers should be
+    // the cheap tier.
+    let model_string = opts
+        .model_override
         .clone()
-        .or_else(|| opts.model_override.clone())
+        .or_else(|| cfg.pilot.worker_model.clone())
         .or_else(|| cfg.default_model.clone());
     let selection = runtime::resolve_selection(&cfg, model_string.as_deref())?;
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
@@ -106,19 +123,34 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let registry = Arc::new(registry);
     registry.register_arc(Arc::new(wingman_tools::builtin::TaskComplete));
     registry.register_arc(Arc::new(wingman_autonomous::tools::RunAcceptance));
+    registry.register_arc(Arc::new(wingman_autonomous::tools::Checkpoint));
+    // J7 — last, so it knows every name a proposal may not take.
+    if let Some(tier) = tool_synthesis {
+        registry.register_arc(Arc::new(wingman_autonomous::tools::ProposeTool::new(
+            tier,
+            registry.tool_names(),
+        )));
+    }
 
-    // The removals now bind these two as well, and a worker without them
-    // cannot report its result — it would run the whole task and then fail in
-    // a way that looks like a model problem. Say so up front instead.
-    for required in ["task_complete", "run_acceptance"] {
+    // The removals now bind these as well, and a worker without them cannot
+    // report its result — it would run the whole task and then fail in a way
+    // that looks like a model problem. Say so up front instead. `checkpoint` is
+    // required only while checkpoint hygiene fails multi-file work without it.
+    let mut required = vec!["task_complete", "run_acceptance"];
+    if opts.checkpoint_hygiene {
+        required.push("checkpoint");
+    }
+    for required in required {
         if !registry.tool_names().iter().any(|n| n == required) {
             anyhow::bail!(
-                "`{required}` is excluded by [tools].disabled_tools or [tools].preset, but the                  pilot worker cannot report a result without it. Remove it from that list, or                  narrow the setting to the tools you meant."
+                "`{required}` is excluded by [tools].disabled_tools or [tools].preset, but the \
+                 pilot worker cannot report a result without it. Remove it from that list, or \
+                 narrow the setting to the tools you meant."
             );
         }
     }
 
-    let system = compose_worker_system_prompt(&role, &task);
+    let system = compose_worker_system_prompt(&role, &task, opts.checkpoint_hygiene);
     let user_prompt = compose_worker_user_prompt(&task);
 
     // E5.5 — per-turn sanity gate. When `[pilot].turn_gate_cmd` is set, the
@@ -126,20 +158,36 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     // failures back to the model (bounded by gate_max_retries) so it
     // self-corrects before reporting the task complete. Fail-open: a gate
     // that can't spawn passes. Empty cmd disables it.
-    // ponytail: this is the "gate progress" half. True per-turn rollback of a
-    // failed turn needs a checkpoint snapshot/restore primitive that doesn't
-    // exist yet (E11 verifies checkpoints but never captures a restorable
-    // one); until then the loop re-prompts rather than reverts.
+    //
+    // With `--turn-rollback-after N` the gate also keeps a checkpoint of the
+    // worktree each time it passes, and after N failures in a row restores
+    // it, so the model starts again from green instead of patching patches.
+    // The retry budget covers two such rounds.
+    let rollback_after = opts.turn_rollback_after;
     let gate: Option<Arc<dyn wingman_core::TurnGate>> = {
         let cmd = cfg.pilot.turn_gate_cmd.trim();
         if cmd.is_empty() {
             None
         } else {
-            Some(Arc::new(runtime::ShellTurnGate::new(
+            let shell: Arc<dyn wingman_core::TurnGate> = Arc::new(runtime::ShellTurnGate::new(
                 cmd.to_string(),
                 paths.root.clone(),
-            )))
+            ));
+            Some(if rollback_after > 0 {
+                Arc::new(wingman_autonomous::checkpoint::RollbackGate::new(
+                    shell,
+                    paths.root.clone(),
+                    rollback_after,
+                ))
+            } else {
+                shell
+            })
         }
+    };
+    let gate_max_retries = if rollback_after > 0 && gate.is_some() {
+        rollback_after as usize * 2
+    } else {
+        AgentConfig::default().gate_max_retries
     };
 
     // E10 — mid-run manager→worker injections (pivot / clarify). The stdin
@@ -160,6 +208,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             ..Default::default()
         },
         gate,
+        gate_max_retries,
         // Not the interactive default: a worker has to read, edit, build,
         // read errors, fix, re-build and only then report. Sixteen turns ran
         // out mid-task and the worker exited cleanly without calling
@@ -283,9 +332,30 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         });
     }
 
-    let stdout = std::io::stdout();
-    let mut stdout = stdout.lock();
+    // Gate results are recorded per role against the model that ran them —
+    // the per-class signal `wingman router stats` and learned routing read,
+    // and the rows `wingman router backfill` later attaches this task's PR
+    // verdict to. Keyed by the owning project, as the transcript is: the
+    // worktree path is gone once the run cleans up.
+    let routing_stats = wingman_learn::StatsStore::open_default().ok();
+    let routing_repo = wingman_config::find_owning_project_root(&paths.root)
+        .to_string_lossy()
+        .to_string();
+
+    // Not held locked for the run: the rate-limit observer below writes its
+    // own lines from whichever thread the provider's retry runs on. Each
+    // `writeln!` still takes the lock for its whole line.
+    let mut stdout = std::io::stdout();
     let mut exit = ExitCode::SUCCESS;
+
+    // E9 — tell the orchestrator about every 429 / 529 the provider gets,
+    // retried or not, so it can stop spawning into the backoff.
+    wingman_providers::observe_rate_limits(|hit| {
+        let line = rate_limited_line(hit);
+        let mut out = std::io::stdout();
+        writeln!(out, "{line}").ok();
+        out.flush().ok();
+    });
 
     // Emit a synthetic worker_start event so the supervisor can correlate
     // session-id, role, and the task without having to peek at the rest of
@@ -346,6 +416,17 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             break;
         }
         match event {
+            AgentEvent::Verification { passed, .. } => {
+                if let Some(st) = &routing_stats {
+                    let _ = st.record_routing(
+                        role.as_str(),
+                        &selection.spec(),
+                        &routing_repo,
+                        opts.session_id.as_deref(),
+                        passed,
+                    );
+                }
+            }
             AgentEvent::Error { .. } => {
                 exit = ExitCode::from(1);
             }
@@ -363,6 +444,16 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     }
 
     Ok(exit)
+}
+
+/// The NDJSON line a rate-limit hit becomes on the worker's stdout, parsed by
+/// the supervisor as `rate_limited`.
+fn rate_limited_line(hit: wingman_providers::RateLimitHit) -> serde_json::Value {
+    serde_json::json!({
+        "event": "rate_limited",
+        "status": hit.status,
+        "retry_after_secs": hit.retry_after_secs.map(|s| s.ceil() as u64),
+    })
 }
 
 /// Compose the worker's system prompt: role prompt + the task spec, so the
@@ -387,7 +478,7 @@ impl wingman_core::LearningHook for IpcInjector {
     }
 }
 
-fn compose_worker_system_prompt(role: &Role, task: &Task) -> String {
+fn compose_worker_system_prompt(role: &Role, task: &Task, checkpoint_hygiene: bool) -> String {
     // E6 — fold this role's accumulated lessons (from prior reverted /
     // rewritten work) onto the base role prompt so the worker doesn't
     // repeat a mistake the same role already learned from.
@@ -411,6 +502,15 @@ fn compose_worker_system_prompt(role: &Role, task: &Task) -> String {
         for a in &task.acceptance {
             s.push_str(&format!("- {}\n", render_acceptance(a)));
         }
+    }
+    if checkpoint_hygiene {
+        // E11 — the supervisor fails multi-file work that skipped this.
+        s.push_str(
+            "\n## Checkpoints (enforced)\n\nCall the `checkpoint` tool before you edit a second \
+             file, and again each time `run_acceptance` comes back green. A task that edits \
+             more than one file without calling `checkpoint` before the second edit is failed \
+             at review, however good the work is.\n",
+        );
     }
     s.push_str(
         "\n## When finished\n\nCommit your changes on this worktree, then call \
@@ -477,6 +577,17 @@ mod tests {
     use super::*;
     use wingman_core::LearningHook;
 
+    /// E11: the checkpoint mandate is in the prompt exactly when it is enforced.
+    #[test]
+    fn the_checkpoint_mandate_follows_the_hygiene_flag() {
+        let task = Task::new("t1", Role::Developer, "two files");
+        let enforced = compose_worker_system_prompt(&Role::Developer, &task, true);
+        assert!(enforced.contains("## Checkpoints (enforced)"), "{enforced}");
+        assert!(enforced.contains("`checkpoint` tool"));
+        let off = compose_worker_system_prompt(&Role::Developer, &task, false);
+        assert!(!off.contains("Checkpoints (enforced)"));
+    }
+
     /// The worker is the unattended path, so `[tools].disabled_tools` matters
     /// more there, not less. It used to build its registry by hand and never
     /// apply removals at all, so naming a tool did nothing — the same shape of
@@ -536,6 +647,18 @@ mod tests {
         assert!(
             !reg.tool_names().iter().any(|n| n == "task_complete"),
             "an excluded control tool was registered anyway"
+        );
+    }
+
+    #[test]
+    fn rate_limit_hits_become_the_line_the_supervisor_parses() {
+        let line = rate_limited_line(wingman_providers::RateLimitHit {
+            status: 429,
+            retry_after_secs: Some(2.5),
+        });
+        assert_eq!(
+            line,
+            serde_json::json!({"event": "rate_limited", "status": 429, "retry_after_secs": 3})
         );
     }
 

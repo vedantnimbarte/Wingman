@@ -125,10 +125,13 @@ Each autonomous run creates:
 {"t":"…","ev":"task.assign","id":"t1","agent":"agent-7f3a","worktree":"auto-…-t1"}
 {"t":"…","ev":"task.status","id":"t1","status":"in_progress"}
 {"t":"…","ev":"task.tool","id":"t1","agent":"agent-7f3a","tool":"edit_file","ok":true}
+{"t":"…","ev":"task.attempt","id":"t1","agent":"agent-7f3a","rung":0,"model":"…","status":"review","summary":"…","tests":{"shell: cargo test":212}}
 {"t":"…","ev":"task.status","id":"t1","status":"review","outcome":{"summary":"…","files_changed":4}}
 {"t":"…","ev":"agent.usd","agent":"agent-7f3a","usd":0.07}
+{"t":"…","ev":"agent.rate_limit","agent":"agent-7f3a","status":429,"retry_after_secs":20}
 {"t":"…","ev":"task.status","id":"t1","status":"done"}
 {"t":"…","ev":"run.merge.task","id":"t1","strategy":"squash","commit":"abc123"}
+{"t":"…","ev":"run.conflict","id":"t2","files":["src/lib.rs"]}
 {"t":"…","ev":"run.pr","url":"https://…/pull/42"}
 {"t":"…","ev":"run.done"}
 ```
@@ -491,12 +494,26 @@ behaviour today.
   `// ASK: <question>` comment → research. The listeners (fs-watch, git hook,
   webhook) were never built. It also carried the tree's only `#!/bin/sh` git
   hook, which does not run on Windows — anything reviving this must install a
-  hook that works on all three platforms.
+  hook that works on all three platforms. **Revived as watch mode:**
+  `pilot daemon --watch` wakes the daemon on debounced file changes (the
+  local sources, including a new `ask` source for `// ASK:` comments) and on
+  git hooks from `pilot hooks install`, whose `#!` line is the wingman binary
+  itself rather than a shell. Reactions go through the daemon's existing
+  score, trust and dispatch cap instead of a separate event → action table.
+  An ASK is proposed as a pilot goal rather than answered by a dedicated
+  research worker, and the webhook legs (green dependabot PR, labelled issue)
+  are not built. See [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
 - **`toolsynth.rs` (J7 — tool synthesis).** Parsed a `ToolProposal` from an
   agent, validated it (name shape, JSON schema, duplicate detection), and
   deduplicated a batch of proposals. It only ever emitted scaffolds plus a
   registry line — never a live, callable tool — which is the gap any revival
-  has to close first.
+  has to close first. **Revived with that gap closed:** the worker tool
+  `propose_tool` writes a `[[tools.custom]]`-shaped definition to
+  `.wingman/tools/`, approval records it in the trust store, and the shared
+  registry builder loads it for the next worker. The `tool-smith` role that
+  would *write* a tool's implementation is still not built; a proposal names a
+  command that already works. See
+  [PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
 - **`interject.rs` (J4 — mid-run interjection).** Parsed `tell <run> <msg>` /
   `ask <run> <msg>` into a `Dispatch` over the E10 IPC channel. **Superseded:**
   `pilot tell` / `pilot ask` now ship as real subcommands (see "Controlling a

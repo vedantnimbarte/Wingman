@@ -29,10 +29,15 @@ use wingman_config::PilotTier;
 
 /// One non-negotiable trigger. Each kind carries enough context for the
 /// R3 escalation packet to surface the issue to the user.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialised as the payload of a `run.escalation` event, so a trigger that
+/// fired mid-run survives into `state.json`, a resume, and the PR-time gate.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum EscalationTrigger {
-    /// `cargo test` returned fewer passing tests after this task than
-    /// before. Caller computes the diff; this module just packages it.
+    /// A task's test-running acceptance checks reported fewer passing tests
+    /// than the same checks at the base commit. Caller computes the diff;
+    /// this module just packages it.
     NetNegativeTests {
         task_id: String,
         before: u32,
@@ -48,13 +53,13 @@ pub enum EscalationTrigger {
     CostWarn { spent: f64, cap: f64 },
     /// Cumulative spend has crossed the halt (1.0x) threshold.
     CostHalt { spent: f64, cap: f64 },
-    /// Three consecutive failed runs on goals with overlapping keywords.
-    /// Caller supplies the run-id chain.
+    /// Three consecutive failures: prior runs (checked as a run starts) or
+    /// worker attempts within this run. Caller supplies the id chain.
     RepeatedFailures { related_runs: Vec<String> },
     /// A worker tried to modify a license / copyright header.
     LicenseHeaderModified { file: String },
-    /// A worker tried to force-push to a branch outside the
-    /// `wingman/auto/*` namespace.
+    /// A push needed a force-push to a branch outside the `wingman/auto/*`
+    /// namespace, and was refused.
     ForcePushOutsideNamespace { branch: String },
     /// R1: an `irreversible` task ran without explicit prompt approval.
     /// Surfaces only when classification + tier disagree.
@@ -69,7 +74,7 @@ impl EscalationTrigger {
             Self::SecretsDetected { .. } => "secrets detected",
             Self::CostWarn { .. } => "cost warn (>=0.8x)",
             Self::CostHalt { .. } => "cost halt (>=1.0x)",
-            Self::RepeatedFailures { .. } => "3 consecutive related failures",
+            Self::RepeatedFailures { .. } => "3 consecutive failures",
             Self::LicenseHeaderModified { .. } => "license header modified",
             Self::ForcePushOutsideNamespace { .. } => "force-push outside wingman/auto",
             Self::IrreversibleTaskUnapproved { .. } => "irreversible task unapproved",
@@ -83,6 +88,19 @@ impl EscalationTrigger {
     /// blocks.
     pub fn blocks_auto_merge(&self) -> bool {
         !matches!(self, Self::CostWarn { .. })
+    }
+
+    /// True when `other` is the same incident as `self`, so recording it again
+    /// would only repeat the page. Spend and failure streaks keep moving after
+    /// they first cross the line, so those kinds are one incident per run;
+    /// every other kind is identified by its contents.
+    pub fn duplicates(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::CostWarn { .. }, Self::CostWarn { .. })
+            | (Self::CostHalt { .. }, Self::CostHalt { .. })
+            | (Self::RepeatedFailures { .. }, Self::RepeatedFailures { .. }) => true,
+            _ => self == other,
+        }
     }
 
     /// Plain-text rendering for the R3 escalation packet + the
@@ -119,14 +137,14 @@ impl EscalationTrigger {
                 "spend ${spent:.2} crossed cap ${cap:.2} — halting"
             ),
             Self::RepeatedFailures { related_runs } => format!(
-                "three consecutive related runs failed: {}",
+                "three consecutive failures: {}",
                 related_runs.join(", ")
             ),
             Self::LicenseHeaderModified { file } => {
                 format!("worker tried to modify a license header in `{file}`")
             }
             Self::ForcePushOutsideNamespace { branch } => format!(
-                "worker tried to force-push to `{branch}` (outside wingman/auto/*)"
+                "refused to force-push `{branch}` (outside wingman/auto/*)"
             ),
             Self::IrreversibleTaskUnapproved { task_id } => format!(
                 "task {task_id} is classified `irreversible` but ran without explicit prompt approval"
@@ -738,5 +756,45 @@ mod tests {
         }
         .blocks_auto_merge());
         assert!(EscalationTrigger::LicenseHeaderModified { file: "z".into() }.blocks_auto_merge());
+    }
+
+    #[test]
+    fn spend_and_streaks_are_one_incident_per_run() {
+        let warn = |spent| EscalationTrigger::CostWarn { spent, cap: 10.0 };
+        assert!(warn(8.1).duplicates(&warn(9.5)));
+        let streak = |id: &str| EscalationTrigger::RepeatedFailures {
+            related_runs: vec![id.into()],
+        };
+        assert!(streak("a").duplicates(&streak("b")));
+        let tests = |after| EscalationTrigger::NetNegativeTests {
+            task_id: "t1".into(),
+            before: 10,
+            after,
+        };
+        assert!(tests(8).duplicates(&tests(8)));
+        assert!(!tests(8).duplicates(&tests(7)));
+        assert!(!warn(8.1).duplicates(&EscalationTrigger::CostHalt {
+            spent: 8.1,
+            cap: 10.0
+        }));
+    }
+
+    /// Triggers ride in `run.escalation` events, so they must round-trip —
+    /// including `SecretsDetected`, whose own `kind` field rules out a `kind` tag.
+    #[test]
+    fn triggers_round_trip_through_json() {
+        for t in [
+            EscalationTrigger::SecretsDetected {
+                kind: "aws".into(),
+                file: "a.rs".into(),
+            },
+            EscalationTrigger::CostHalt {
+                spent: 11.0,
+                cap: 10.0,
+            },
+        ] {
+            let json = serde_json::to_string(&t).unwrap();
+            assert_eq!(serde_json::from_str::<EscalationTrigger>(&json).unwrap(), t);
+        }
     }
 }

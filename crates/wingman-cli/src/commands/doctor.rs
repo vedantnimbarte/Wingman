@@ -97,6 +97,41 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         }
     }
 
+    // 1c. Pilot sandbox tiers (J11). A missing backend is a warning, not a
+    // failure: most machines have neither, and pilot degrades or refuses
+    // accordingly.
+    section("pilot sandbox tiers");
+    {
+        let sandbox = &cfg.pilot.sandbox;
+        let avail = wingman_autonomous::sandbox::TierAvailability::probe(
+            sandbox,
+            &wingman_autonomous::pr::SystemCommandRunner,
+        );
+        emit(Status::Ok("host — always available".into()));
+        emit(if avail.docker {
+            Status::Ok(format!(
+                "container — Docker daemon reachable; workers run in {} (unvalidated against a real daemon)",
+                sandbox.container_image
+            ))
+        } else {
+            Status::Warn(
+                "container — no Docker daemon reachable; container-tier tasks run on the host"
+                    .into(),
+            )
+        });
+        emit(match &avail.vm {
+            Ok(()) => {
+                Status::Ok("vm — Firecracker ready (unvalidated against a real KVM host)".into())
+            }
+            Err(why) if sandbox.allow_unsandboxed_vm_tasks => Status::Warn(format!(
+                "vm — unavailable ({why}); allow_unsandboxed_vm_tasks lets vm-tier tasks run with weaker isolation"
+            )),
+            Err(why) => Status::Warn(format!(
+                "vm — unavailable ({why}); pilot refuses vm-tier tasks"
+            )),
+        });
+    }
+
     // 2. Providers + credentials.
     section("providers");
     if cfg.providers.is_empty() {
@@ -181,8 +216,17 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         )));
     } else {
         emit(Status::Warn(
-            "no index yet — it builds on first TUI run (or `wingman indexd`)".into(),
+            "no index yet — it builds on first TUI run (or `wingman indexd start`)".into(),
         ));
+    }
+    match crate::commands::indexd::live_pid(&paths.dir) {
+        Some(pid) => emit(Status::Ok(format!(
+            "indexd running (pid {pid}) — sessions open with its warm index"
+        ))),
+        None => emit(Status::Warn(
+            "indexd not running — `wingman indexd start` keeps the index warm between sessions"
+                .into(),
+        )),
     }
 
     // 5. Language servers on PATH.

@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use wingman_config::PermissionMode;
+use wingman_core::checkpoint;
+use wingman_session::export::Format;
 use wingman_session::{is_valid_session_id, list_sessions, load_session, SessionRecord};
 
 use super::child;
@@ -111,6 +113,53 @@ pub async fn get(project: &Project, id: &str, sock: &mut TcpStream) -> std::io::
     }
 }
 
+/// `GET /v1/projects/{p}/sessions/{id}/export?format=md|html|json[&download]`
+///
+/// The same report `wingman session export` prints, secrets redacted.
+/// `download` adds `Content-Disposition: attachment`, which is how the panel
+/// offers a file: a server-sent download needs no `data:` or blob link, which
+/// a sandboxed page cannot open. The report quotes prompts and tool output, so
+/// it is served with `nosniff` and a CSP that allows no script, and the HTML
+/// form cannot run anything even when opened inline.
+pub async fn export(
+    project: &Project,
+    id: &str,
+    req: &Request,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    let format = match req.query_str("format").unwrap_or("md").parse::<Format>() {
+        Ok(f) => f,
+        Err(e) => return http::write_err(sock, 400, &e).await,
+    };
+    let Some(path) = wingman_session::session_path(&sessions_dir(project), id) else {
+        return http::write_err(sock, 404, "no such session").await;
+    };
+    let export = match wingman_session::export::export_file(&path) {
+        Ok(x) => x,
+        Err(e) => return http::write_err(sock, 500, &format!("reading session: {e}")).await,
+    };
+    // `id` passed `session_path`'s validation, so it is safe in a header.
+    let disposition = format!("attachment; filename=\"{id}.{}\"", format.extension());
+    let mut headers = vec![
+        ("X-Content-Type-Options", "nosniff"),
+        (
+            "Content-Security-Policy",
+            "default-src 'none'; style-src 'unsafe-inline'",
+        ),
+    ];
+    if req.query_bool("download") {
+        headers.push(("Content-Disposition", disposition.as_str()));
+    }
+    http::write_raw(
+        sock,
+        200,
+        format.content_type(),
+        &headers,
+        export.render(format).as_bytes(),
+    )
+    .await
+}
+
 /// `DELETE /v1/projects/{p}/sessions/{id}`
 ///
 /// Removes the transcript *and* whatever was indexed from it. A finished turn
@@ -135,6 +184,200 @@ pub async fn delete(project: &Project, id: &str, sock: &mut TcpStream) -> std::i
         }
     };
     http::write_json(sock, 200, &json!({ "deleted": id, "deindexed": deindexed })).await
+}
+
+/// This session's points on the project's rewind timeline, newest first, and
+/// the session's transcript path and turns. `None` when the session has no log.
+fn rewind_points(
+    project: &Project,
+    id: &str,
+) -> Option<(
+    std::path::PathBuf,
+    Vec<checkpoint::Point>,
+    Vec<wingman_session::TurnStart>,
+)> {
+    let path = wingman_session::session_path(&sessions_dir(project), id)?;
+    let turns = wingman_session::turn_starts(&load_session(&path).unwrap_or_default());
+    let points = checkpoint::timeline(&project.root)
+        .into_iter()
+        .filter(|p| p.session.as_deref() == Some(id))
+        .collect();
+    Some((path, points, turns))
+}
+
+/// `GET /v1/projects/{p}/sessions/{id}/rewind` — the edits each turn of this
+/// session made, and its restores, newest first.
+pub async fn rewind_timeline(
+    project: &Project,
+    id: &str,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    let Some((_, points, turns)) = rewind_points(project, id) else {
+        return http::write_err(sock, 404, "no such session").await;
+    };
+    let points: Vec<Value> = points
+        .iter()
+        .map(|p| {
+            json!({
+                "seq": p.seq,
+                "turn": p.turn,
+                "prompt": p.turn.and_then(|t| turns.get(t)).map(|t| &t.prompt),
+                "restore": p.restore,
+                "ts": p.ts,
+                "files": p.files,
+            })
+        })
+        .collect();
+    http::write_json(sock, 200, &json!({ "session_id": id, "points": points })).await
+}
+
+/// The point `seq` names, if it is one of this session's.
+fn find_point(points: Vec<checkpoint::Point>, seq: &str) -> Option<checkpoint::Point> {
+    let seq: u64 = seq.parse().ok()?;
+    points.into_iter().find(|p| p.seq == seq)
+}
+
+/// `GET /v1/projects/{p}/sessions/{id}/rewind/{seq}` — what restoring to
+/// before that point would change, file by file. Writes nothing.
+///
+/// The diffs are of files in the repo, which is where a `.env` lives, so they
+/// pass through the tool-output secret redactor like everything else this
+/// server hands a phone.
+pub async fn rewind_preview(
+    project: &Project,
+    id: &str,
+    seq: &str,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    let Some((_, points, _)) = rewind_points(project, id) else {
+        return http::write_err(sock, 404, "no such session").await;
+    };
+    let Some(point) = find_point(points, seq) else {
+        return http::write_err(sock, 404, "no such point in this session's timeline").await;
+    };
+    let changes = match checkpoint::preview(&project.root, point.seq) {
+        Ok(c) => c,
+        Err(e) => return http::write_err(sock, 409, &e).await,
+    };
+    let mut redacted = 0;
+    let changes: Vec<Value> = changes
+        .into_iter()
+        .map(|c| {
+            let (diff, n) = wingman_core::redact::redact_output_secrets(&c.diff);
+            redacted += n;
+            json!({
+                "path": c.path,
+                "exists_now": c.exists_now,
+                "exists_after": c.exists_after,
+                "diff": diff,
+            })
+        })
+        .collect();
+    http::write_json(
+        sock,
+        200,
+        &json!({ "seq": point.seq, "changes": changes, "redacted": redacted }),
+    )
+    .await
+}
+
+/// Body for a restore.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct RewindBody {
+    /// Also fork the conversation to before this turn. Explicit, and off
+    /// unless asked: the files and the conversation are separate choices.
+    pub truncate: bool,
+}
+
+/// `POST /v1/projects/{p}/sessions/{id}/rewind/{seq}` — put the files back as
+/// they were before that point.
+///
+/// The restore is itself checkpointed, so it lands on the timeline and can be
+/// undone; no checkpoint is deleted. With `truncate`, the conversation is
+/// forked to before the point's turn — a new session, the original untouched
+/// — and its id comes back as `forked_session`.
+pub async fn rewind(
+    state: &Arc<ServeState>,
+    project: &Project,
+    id: &str,
+    seq: &str,
+    req: &Request,
+    sock: &mut TcpStream,
+) -> std::io::Result<()> {
+    // Restoring rewrites files, so a server that may not write may not do it.
+    if super::rank(state.ceiling) < super::rank(PermissionMode::AutoEdit) {
+        return http::write_err(
+            sock,
+            403,
+            &format!(
+                "restoring files is a write, which this server's ceiling '{}' does not allow",
+                state.ceiling
+            ),
+        )
+        .await;
+    }
+    let body: RewindBody = match req.json::<Option<RewindBody>>() {
+        Ok(b) => b.unwrap_or_default(),
+        Err(e) => return http::write_err(sock, 400, &e).await,
+    };
+    let Some((path, points, turns)) = rewind_points(project, id) else {
+        return http::write_err(sock, 404, "no such session").await;
+    };
+    let Some(point) = find_point(points, seq) else {
+        return http::write_err(sock, 404, "no such point in this session's timeline").await;
+    };
+    // Checked before anything is written, so a truncate that cannot happen
+    // does not leave the files restored and the conversation not.
+    let truncate = match (body.truncate, point.turn) {
+        (false, _) => None,
+        (true, Some(turn)) if turn < turns.len() => Some(turn),
+        (true, _) => {
+            return http::write_err(
+                sock,
+                400,
+                "only a turn in this session's transcript can truncate the conversation",
+            )
+            .await
+        }
+    };
+    // A turn in flight is writing both the files and the transcript.
+    if !try_claim(id).await {
+        return http::write_err(sock, 409, "this session has a turn in flight").await;
+    }
+    let result = match checkpoint::restore_to(&project.root, point.seq, Some(id)) {
+        Err(e) => http::write_err(sock, 409, &e).await,
+        Ok(restored) => {
+            let forked = match truncate {
+                None => Ok(None),
+                Some(turn) => wingman_session::fork_before_turn(&path, turn).await,
+            };
+            match forked {
+                Ok(fork) => {
+                    let fork = fork
+                        .as_deref()
+                        .and_then(|p| p.file_stem())
+                        .map(|s| s.to_string_lossy());
+                    http::write_json(
+                        sock,
+                        200,
+                        &json!({ "restored": restored, "forked_session": fork }),
+                    )
+                    .await
+                }
+                Err(e) => {
+                    http::write_err(
+                        sock,
+                        500,
+                        &format!("files restored, but the conversation was not truncated: {e}"),
+                    )
+                    .await
+                }
+            }
+        }
+    };
+    release(id).await;
+    result
 }
 
 /// Body for a turn.
@@ -276,7 +519,17 @@ pub fn schema() -> Vec<Value> {
                 "returns": "sessions with first prompt, model, turn count, mtime; newest first" }),
         json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}", "auth": true,
                 "returns": "full transcript as SessionRecord[]" }),
+        json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}/export", "auth": true,
+                "query": { "format": "md | html | json (default md)", "download": "bool — send as an attachment" },
+                "returns": "the session report: summary, files changed, receipts, cost, tool calls; secrets redacted" }),
         json!({ "method": "DELETE", "path": "/v1/projects/{project}/sessions/{id}", "auth": true }),
+        json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}/rewind", "auth": true,
+                "returns": "{session_id, points: [{seq, turn, prompt, restore, ts, files}]} — this session's edits per turn and its restores, newest first" }),
+        json!({ "method": "GET", "path": "/v1/projects/{project}/sessions/{id}/rewind/{seq}", "auth": true,
+                "returns": "{seq, changes: [{path, exists_now, exists_after, diff}], redacted} — what restoring to before the point would change; writes nothing" }),
+        json!({ "method": "POST", "path": "/v1/projects/{project}/sessions/{id}/rewind/{seq}", "auth": true,
+                "body": { "truncate": "bool — also fork the conversation to before this turn" },
+                "returns": "{restored: string[], forked_session: string|null} — the restore is itself checkpointed; needs a ceiling of auto-edit or above" }),
         json!({ "method": "POST", "path": "/v1/projects/{project}/sessions/{id}/turns", "auth": true,
                 "body": { "prompt": "string", "mode": "string?", "model": "string?" },
                 "returns": "text/event-stream of agent events, then 'end'" }),

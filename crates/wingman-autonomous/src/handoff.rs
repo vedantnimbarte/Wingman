@@ -17,19 +17,56 @@ use std::path::{Path, PathBuf};
 use wingman_config::PilotTier;
 
 use crate::escalation::EscalationTrigger;
-use crate::model::{RunState, Task};
+use crate::model::{Event, RunState, Task};
 
 /// One rung of the E5 retry ladder, as it played out for the blocked task.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttemptRecord {
-    /// Retry-ladder rung (1 = same worker, 2 = escalate model, 3 = split).
-    pub rung: u8,
+    /// Retry-ladder rung (0 = first attempt, 1 = retry, 2 = escalated model).
+    /// Rung 3 splits the task rather than running it again.
+    pub rung: u32,
     /// Model the attempt ran on.
     pub model: String,
     /// One-line description of what the attempt did.
     pub summary: String,
     /// What went wrong (acceptance failure, check error, etc.).
     pub outcome: String,
+}
+
+/// The attempt history of `task_id`, oldest first, from the `task.attempt`
+/// events the worker supervisor records as each E5 ladder attempt ends.
+pub fn attempts_for(events: &[Event], task_id: &str) -> Vec<AttemptRecord> {
+    events
+        .iter()
+        .filter_map(|ev| match ev {
+            Event::TaskAttempt {
+                id,
+                rung,
+                model,
+                status,
+                summary,
+                tests,
+                ..
+            } if id == task_id => {
+                let mut outcome = format!("{status:?}").to_lowercase();
+                if !tests.is_empty() {
+                    let passed: u32 = tests.values().sum();
+                    outcome.push_str(&format!("; {passed} test(s) passed"));
+                }
+                Some(AttemptRecord {
+                    rung: *rung,
+                    model: model.clone().unwrap_or_else(|| "unknown".into()),
+                    summary: if summary.is_empty() {
+                        "no summary recorded".into()
+                    } else {
+                        summary.clone()
+                    },
+                    outcome,
+                })
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Everything the packet renderer needs. Borrows from the live run so the
@@ -279,5 +316,46 @@ mod tests {
         let body = fs::read_to_string(&path).unwrap();
         assert!(body.contains("# Escalation:"));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R3 — the packet's "What was tried" comes from the ladder's recorded
+    /// attempts, not an empty list.
+    #[test]
+    fn attempts_come_from_task_attempt_events() {
+        let attempt =
+            |id: &str, rung: u32, status: TaskStatus, tests: &[(&str, u32)]| Event::TaskAttempt {
+                t: "2026-09-14T10:00:00Z".into(),
+                id: id.into(),
+                agent: "agent-0001".into(),
+                rung,
+                model: Some(if rung >= 2 { "opus" } else { "haiku" }.into()),
+                status,
+                summary: format!("attempt {rung}"),
+                tests: tests.iter().map(|(l, n)| (l.to_string(), *n)).collect(),
+            };
+        let events = vec![
+            attempt("t2", 0, TaskStatus::Failed, &[]),
+            attempt("t1", 0, TaskStatus::Review, &[]),
+            attempt("t2", 2, TaskStatus::Failed, &[("shell: cargo test", 118)]),
+        ];
+        let got = attempts_for(&events, "t2");
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].rung, got[0].model.as_str()), (0, "haiku"));
+        assert_eq!(got[0].outcome, "failed");
+        assert_eq!((got[1].rung, got[1].model.as_str()), (2, "opus"));
+        assert_eq!(got[1].outcome, "failed; 118 test(s) passed");
+
+        let s = state_with_tasks();
+        let md = render(&HandoffPacket {
+            state: &s,
+            tier: PilotTier::Copilot,
+            blocked_task: s.task("t2"),
+            triggers: &[],
+            attempts: &got,
+            why_stuck: None,
+            suggested_next: None,
+        });
+        assert!(md.contains("rung 2, model `opus`): attempt 2"), "{md}");
+        assert!(!md.contains("No retry-ladder attempts recorded"));
     }
 }

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use wingman_core::{ContentBlock, LearningHook, Message, Role};
+use wingman_core::{estimate_tokens, ContentBlock, LearningHook, Message, Role};
 use wingman_rag::Indexer;
 
 use crate::{
@@ -29,6 +29,9 @@ pub struct LearnConfig {
     /// Threshold for the persistence nudge: how many sessions in a row can
     /// the user go without saving before we start nudging the agent.
     pub nudge_after_n_quiet: i64,
+    /// Token budget for the per-turn search-escalation block
+    /// (`[learn].search_hint_tokens`). `0` injects nothing.
+    pub search_hint_tokens: u32,
 }
 
 impl LearnConfig {
@@ -38,6 +41,7 @@ impl LearnConfig {
             session_id,
             enabled: true,
             nudge_after_n_quiet: proposal::NUDGE_AFTER_N_QUIET_SESSIONS,
+            search_hint_tokens: 300,
         }
     }
 }
@@ -174,25 +178,27 @@ impl LearnHook {
 
     /// Search escalation: pull the top index hits for the latest request and
     /// render their locations, so the agent starts from the right files
-    /// instead of spending tool turns grepping. Returns `None` when there's
-    /// no index, no useful query, or no hits.
+    /// instead of spending tool turns grepping. Hits go in best-first until
+    /// the next would overflow `search_hint_tokens`. Returns `None` when it's
+    /// off, there's no index, no useful query, or nothing fits.
     async fn retrieval_block(&self, history: &[Message]) -> Option<String> {
+        let budget = self.cfg.search_hint_tokens;
+        if budget == 0 {
+            return None;
+        }
         let indexer = self.indexer.as_ref()?;
         let query = Self::latest_user_text(history)?;
         // Very short prompts ("yes", "go on") aren't concept queries.
         if query.trim().len() < 8 {
             return None;
         }
-        let hits = match indexer.search(query.trim(), 4).await {
+        let hits = match indexer.search(query.trim(), 8).await {
             Ok(h) => h,
             Err(e) => {
                 tracing::debug!("search-escalation retrieval failed: {e}");
                 return None;
             }
         };
-        if hits.is_empty() {
-            return None;
-        }
         let mut lines = vec![
             "Relevant code from the project index (semantic search on the latest request). \
              Prefer reading these locations over a fresh grep:"
@@ -208,6 +214,13 @@ impl LearnHook {
                 "- {}:{}-{}{}",
                 h.path, h.start_line, h.end_line, sym
             ));
+            if estimate_tokens(&lines.join("\n")) > budget {
+                lines.pop();
+                break;
+            }
+        }
+        if lines.len() == 1 {
+            return None;
         }
         Some(lines.join("\n"))
     }
@@ -400,5 +413,60 @@ mod tests {
             "expected retrieval block to cite parser.rs, got: {out}"
         );
         assert!(out.contains("project index"), "got: {out}");
+    }
+
+    /// A hook over a tiny indexed project whose files all match the query.
+    async fn hook_over_parsers(root: &std::path::Path, budget: u32) -> LearnHook {
+        for i in 0..6 {
+            std::fs::write(
+                root.join(format!("parser_{i}.rs")),
+                format!("fn parse_symbols_{i}(src: &str) {{ /* parse symbols */ }}\n"),
+            )
+            .unwrap();
+        }
+        let embedder = Arc::new(HashEmbedder::new(64));
+        let store =
+            IndexStore::open(&root.join("index.db"), embedder.id(), embedder.dim()).unwrap();
+        let indexer = Arc::new(Indexer::new(root.to_path_buf(), embedder, Arc::new(store)));
+        indexer.reindex_repo().await.unwrap();
+        let mut cfg = LearnConfig::new(root.to_path_buf(), "test-session".into());
+        cfg.search_hint_tokens = budget;
+        LearnHook::new(
+            cfg,
+            Arc::new(MemoryStore::new(root.to_path_buf())),
+            Arc::new(StatsStore::open(&root.join("learn.db")).unwrap()),
+        )
+        .with_indexer(Some(indexer))
+    }
+
+    #[tokio::test]
+    async fn retrieval_block_stays_inside_its_token_budget() {
+        let history = vec![user("where do we parse symbols in this project")];
+
+        let dir = tempfile::tempdir().unwrap();
+        let roomy = hook_over_parsers(dir.path(), 10_000).await;
+        let all = roomy.retrieval_block(&history).await.expect("hits");
+        let all_hits = all.lines().count() - 1;
+        assert!(all_hits >= 3, "got: {all}");
+
+        // Room for the header and a couple of hits, not all of them.
+        let budget = estimate_tokens(all.lines().next().unwrap()) + 20;
+        let dir = tempfile::tempdir().unwrap();
+        let tight = hook_over_parsers(dir.path(), budget).await;
+        let some = tight.retrieval_block(&history).await.expect("hits");
+        assert!(estimate_tokens(&some) <= budget, "over budget: {some}");
+        let some_hits = some.lines().count() - 1;
+        assert!(some_hits >= 1 && some_hits < all_hits, "got: {some}");
+
+        // A budget the header alone overflows injects nothing at all.
+        let dir = tempfile::tempdir().unwrap();
+        let starved = hook_over_parsers(dir.path(), 10).await;
+        assert_eq!(starved.retrieval_block(&history).await, None);
+
+        // 0 is off.
+        let dir = tempfile::tempdir().unwrap();
+        let off = hook_over_parsers(dir.path(), 0).await;
+        let out = off.before_turn(&history).await.unwrap_or_default();
+        assert!(!out.contains("project index"), "got: {out}");
     }
 }

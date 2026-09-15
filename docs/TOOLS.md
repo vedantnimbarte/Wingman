@@ -66,6 +66,11 @@ Read a file and return its content with line numbers.
   instead of returning an empty string a model would read as an empty
   document. Behind the default-on `pdf` build feature.
 - Output truncated per `tool_output_max_lines` (head + tail).
+- After a read, the files it is likely to be followed by are pre-read in the
+  background to warm the OS page cache: first the project files it imports
+  (resolved with tree-sitter for Rust, Python, JS/TS and Go, never outside the
+  project root), then its same-directory siblings. Nothing is returned to the
+  model; it only makes the next read faster.
 
 **Example:**
 ```
@@ -157,8 +162,9 @@ Replace the body of a named function or method using tree-sitter. Args:
 
 Safer than `edit_file` when the same text appears in several places, because
 it targets the symbol rather than a string. `new_body` excludes the outer
-braces for brace-delimited languages; for Python, supply the indented block.
-Supported languages: rust, python, javascript, typescript, tsx, go.
+braces for brace-delimited languages; for Python, supply the indented block;
+for a Kotlin expression body (`fun f() = expr`), supply the expression.
+Supported languages: rust, python, javascript, typescript, tsx, go, cpp, java, kotlin.
 
 ### `apply_patch`
 
@@ -491,7 +497,7 @@ Search the project RAG index for relevant code chunks.
 Tree-sitter-backed navigation (feature `treesitter`, on by default). Answers
 "where is this defined / who uses it" in one tool call instead of several
 grep→read round-trips. Supported languages: rust, python, javascript,
-typescript, tsx, go.
+typescript, tsx, go, cpp, java, kotlin.
 
 ### `find_symbol`
 
@@ -507,13 +513,26 @@ definition line itself. Args: `name` (required), `glob`, `limit`.
 
 **Returns:**
 ```
+(via whole-word name match (heuristic: may include same-named symbols))
 crates/wingman-ts/src/parse.rs:257  [in fn semantic_chunks]  let symbols = extract_symbols(lang, src);
 crates/wingman-ts/src/parse.rs:370  [in fn outline]          let symbols = extract_symbols(lang, src);
 ```
 
 **Notes:**
-- Whole-word, case-sensitive name match — a name-based heuristic, not resolved
-  references, so it can over-report same-named symbols and miss dynamic calls.
+- The first line names the method that produced the answer. Tree-sitter finds
+  the definitions of `name` (up to five), and when a language server is on
+  `PATH` for a defining file the tool asks it, in order:
+  `callHierarchy/incomingCalls` (resolved callers, `[in <caller>]` named by the
+  server), then `textDocument/references` (resolved, mentions as well as
+  calls). The first method with a non-empty answer wins. The server must
+  cover every definition: more than five, or one with no server, skips
+  straight to the name match, and a method declined for one definition (or a
+  call hierarchy with nothing callable at one) is not used for any.
+- With no server, a server that declines both methods or stops answering, or
+  an empty resolved answer (a cold server still indexing looks the same as no
+  callers), it falls back to a whole-word, case-sensitive name match, which
+  can over-report same-named symbols and miss dynamic calls.
+- `glob` filters the reported sites, not where the definition may live.
 - Pair with `find_symbol` (definition) for the full picture of a symbol.
 
 ### `outline`
@@ -812,10 +831,37 @@ Terminal call for a pilot-mode worker: reports the final summary and the
 files changed, after which the worker ends its turn and the orchestrator
 takes over. Args: `summary` (required), `files_changed`, `outcome` (e.g.
 `approve` / `rework` for reviewer tasks), `acceptance_results` (required when
-the task carries acceptance checks).
+the task carries acceptance checks; each result's `passed_tests` count, when
+`run_acceptance` reported one, feeds the net-negative-tests escalation).
 
 Only registered for pilot workers — it is not part of an ordinary session's
 tool set. See [PILOT-MODE.md](PILOT-MODE.md).
+
+### `checkpoint`
+
+Commits every change in a pilot worker's worktree onto its task branch, except
+`.wingman/`, with commit hooks skipped, so a bad edit can be undone with git.
+Args: `label` (optional, goes in the commit message). A clean tree commits
+nothing. Needs write and shell permission. With the `checkpoint_hygiene`
+capability on, a worker that edits a second file without calling it first is
+failed before review, and the worker refuses to start when `[tools]` removals
+exclude it. Pilot workers only.
+
+### `propose_tool`
+
+Tool synthesis (J7): a pilot worker proposes a shell command as a named tool
+for this project. Args: `name` (`[a-z][a-z0-9_]*`, not an existing tool),
+`description`, `command`, `timeout_secs`. The proposal is written to the
+owning project's `.wingman/tools/<name>.toml` in the `[[tools.custom]]`
+format and becomes callable in registries built after it is approved — never
+in the proposing worker's own. Approved by the worker itself only on
+`autopilot` in a trusted project; otherwise it waits for
+`wingman pilot tools approve <name>`.
+
+Declares write and shell, needs the shell permission, and refuses a command
+the shell denylist blocks. Only registered for pilot workers when the
+`tool_synthesis` capability is on. See
+[PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
 
 ## User-Defined Tools
 
@@ -830,6 +876,12 @@ Runs under the shell permission (auto-edit / yolo) and carries its own
 `timeout_secs` (default 30), so it opts out of the registry's backstop
 deadline. See [CONFIGURATION.md](CONFIGURATION.md) and
 [EXTENDING.md](EXTENDING.md).
+
+Approved synthesized tools from `.wingman/tools/` (see `propose_tool`) join
+the same family, with two differences: they run exactly as `run_shell` would
+run their command — `[tools].shell_sandbox`, credential scrub, Job Object —
+and receive their input in `$WINGMAN_TOOL_INPUT` only. They never replace a
+tool that is already registered, and none load when `run_shell` is disabled.
 
 ## Subagent Control
 
@@ -901,6 +953,8 @@ faster model while the parent session keeps the strongest one. An explicit
 | `update_tasks`      | —    | —     | —     | always     | Visible checklist; replaces whole list |
 | `ask_user`          | —    | —     | —     | always     | Pause and ask at a real fork   |
 | `task_complete`     | —    | —     | —     | always     | Pilot workers only; ends the task |
+| `checkpoint`        | —    | Y     | Y     | mode       | Pilot workers only; commits the worktree |
+| `propose_tool`      | —    | Y     | Y     | mode/list  | Pilot workers only; proposes a project tool |
 | `save_memory`       | —    | Y     | —     | always     | Persist across sessions        |
 | `recall_memory`     | Y    | —     | —     | always     | Fetch memory body              |
 | `forget_memory`     | —    | Y     | —     | always     | Delete memory                  |

@@ -13,6 +13,7 @@ pub mod loopguard;
 pub mod message;
 pub mod pricing;
 pub mod provider;
+pub mod redact;
 pub mod spill;
 pub mod steer;
 pub mod stream;

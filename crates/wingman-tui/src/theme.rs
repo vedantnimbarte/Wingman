@@ -4,8 +4,13 @@
 //! (`default` / `light` / `mono`) plus optional per-role overrides under
 //! `tui.colors`. Initialized once at startup via [`init`] and read via
 //! [`current`].
+//!
+//! A non-empty `NO_COLOR` (<https://no-color.org>) wins over both: code falls
+//! back to the `mono` syntax styles, and [`strip_colour`] clears every colour
+//! from each drawn frame, including the ones widgets pick for themselves.
 
-use ratatui::style::Color;
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier};
 use std::sync::OnceLock;
 use wingman_config::{ThemeColors, TuiConfig};
 
@@ -20,6 +25,21 @@ pub struct Theme {
     pub system: Color,
     pub error: Color,
     pub code_block: Color,
+    /// How code is told apart by syntax scope.
+    pub syntax: Syntax,
+    /// `NO_COLOR` is set: frames are drawn without colour.
+    pub no_color: bool,
+}
+
+/// Palette for syntax-highlighted code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Syntax {
+    /// Hues chosen to read on a dark ground.
+    Dark,
+    /// Darker hues for a light ground.
+    Light,
+    /// No hue: scopes differ only by weight and slant.
+    Mono,
 }
 
 static CURRENT: OnceLock<Theme> = OnceLock::new();
@@ -29,16 +49,35 @@ pub fn current() -> Theme {
 }
 
 pub fn init(cfg: &TuiConfig) {
-    let _ = CURRENT.set(resolve(cfg));
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
+    let _ = CURRENT.set(resolve(cfg, no_color));
 }
 
-fn resolve(cfg: &TuiConfig) -> Theme {
+pub(crate) fn resolve(cfg: &TuiConfig, no_color: bool) -> Theme {
+    if no_color {
+        return Theme {
+            no_color: true,
+            ..mono_theme()
+        };
+    }
     let base = match cfg.theme.as_str() {
         "light" => light_theme(),
         "mono" => mono_theme(),
         _ => default_theme(),
     };
     apply_overrides(base, &cfg.colors)
+}
+
+/// Clear every foreground and background colour in `buf`. A cell that had a
+/// background (a selected row, a button) is reversed instead, so what the
+/// colour singled out stays visible without it.
+pub fn strip_colour(buf: &mut Buffer) {
+    for cell in &mut buf.content {
+        if cell.bg != Color::Reset {
+            cell.modifier.insert(Modifier::REVERSED);
+        }
+        cell.set_fg(Color::Reset).set_bg(Color::Reset);
+    }
 }
 
 fn apply_overrides(mut t: Theme, o: &ThemeColors) -> Theme {
@@ -83,6 +122,8 @@ fn default_theme() -> Theme {
         system: Color::DarkGray,
         error: Color::Red,
         code_block: Color::Yellow,
+        syntax: Syntax::Dark,
+        no_color: false,
     }
 }
 
@@ -97,6 +138,8 @@ fn light_theme() -> Theme {
         system: Color::Gray,
         error: Color::Red,
         code_block: Color::Magenta,
+        syntax: Syntax::Light,
+        no_color: false,
     }
 }
 
@@ -111,6 +154,8 @@ fn mono_theme() -> Theme {
         system: Color::DarkGray,
         error: Color::White,
         code_block: Color::DarkGray,
+        syntax: Syntax::Mono,
+        no_color: false,
     }
 }
 
@@ -145,4 +190,37 @@ fn parse_color(s: &str) -> Option<Color> {
         "reset" | "default" => Color::Reset,
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{layout::Rect, style::Style};
+
+    #[test]
+    fn no_color_ignores_overrides_and_strips_frames() {
+        let cfg = TuiConfig {
+            colors: ThemeColors {
+                code_block: Some("red".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(resolve(&cfg, false).code_block, Color::Red);
+        let th = resolve(&cfg, true);
+        assert!(th.no_color);
+        assert_eq!(th.syntax, Syntax::Mono);
+
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 1));
+        buf.set_string(0, 0, "a", Style::default().fg(Color::Green));
+        buf.set_string(1, 0, "b", Style::default().fg(Color::Black).bg(Color::Red));
+        strip_colour(&mut buf);
+        let (a, b) = (&buf.content[0], &buf.content[1]);
+        assert_eq!(
+            (a.fg, a.bg, b.fg, b.bg),
+            (Color::Reset, Color::Reset, Color::Reset, Color::Reset)
+        );
+        assert!(!a.modifier.contains(Modifier::REVERSED));
+        assert!(b.modifier.contains(Modifier::REVERSED));
+    }
 }

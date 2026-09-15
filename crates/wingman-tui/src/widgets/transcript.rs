@@ -1,4 +1,4 @@
-use crate::theme;
+use crate::theme::{self, Theme};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -171,7 +171,7 @@ impl<'a> Widget for TranscriptView<'a> {
                     lines.push(Line::from(""));
                 }
                 TranscriptItem::AssistantText(s) => {
-                    lines.extend(render_assistant_text(s, th.code_block));
+                    lines.extend(render_assistant_text(s, &th));
                     lines.push(Line::from(""));
                 }
                 TranscriptItem::Thinking(s) => {
@@ -266,7 +266,7 @@ fn truncate_chars(s: &str, max: usize) -> String {
     out
 }
 
-fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {
+fn render_assistant_text(s: &str, th: &Theme) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut in_code_block = false;
     let mut current_lang: Option<String> = None;
@@ -278,19 +278,19 @@ fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {
                 current_lang = Some(rest.trim().to_string());
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(th.system),
                 )));
             } else {
                 // Closing fence — flush the buffered block, then the fence line.
                 lines.extend(render_code_block(
                     std::mem::take(&mut code_buf),
                     current_lang.take().unwrap_or_default(),
-                    code_color,
+                    th,
                 ));
                 in_code_block = false;
                 lines.push(Line::from(Span::styled(
                     line.to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(th.system),
                 )));
             }
             continue;
@@ -306,7 +306,7 @@ fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {
         lines.extend(render_code_block(
             code_buf,
             current_lang.unwrap_or_default(),
-            code_color,
+            th,
         ));
     }
     lines
@@ -315,100 +315,7 @@ fn render_assistant_text(s: &str, code_color: Color) -> Vec<Line<'static>> {
 fn render_code_block(
     body_lines: Vec<String>,
     lang_label: String,
-    fallback_color: Color,
+    th: &Theme,
 ) -> Vec<Line<'static>> {
-    let body = body_lines.join("\n");
-    #[cfg(feature = "treesitter")]
-    {
-        let lang = match lang_label.to_ascii_lowercase().as_str() {
-            "rust" | "rs" => Some(wingman_ts::Language::Rust),
-            "python" | "py" => Some(wingman_ts::Language::Python),
-            "javascript" | "js" => Some(wingman_ts::Language::JavaScript),
-            "typescript" | "ts" => Some(wingman_ts::Language::TypeScript),
-            "tsx" => Some(wingman_ts::Language::Tsx),
-            "go" => Some(wingman_ts::Language::Go),
-            _ => None,
-        };
-        if let Some(lang) = lang {
-            return highlight_body_to_lines(lang, &body, fallback_color);
-        }
-    }
-    let _ = lang_label;
-    plain_code_lines(&body, fallback_color)
-}
-
-fn plain_code_lines(body: &str, color: Color) -> Vec<Line<'static>> {
-    body.lines()
-        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(color))))
-        .collect()
-}
-
-#[cfg(feature = "treesitter")]
-fn highlight_body_to_lines(
-    lang: wingman_ts::Language,
-    body: &str,
-    fallback_color: Color,
-) -> Vec<Line<'static>> {
-    use wingman_ts::highlight::{highlight, HIGHLIGHT_NAMES};
-    let spans = highlight(lang, body);
-    // Build one Vec<Span> per source line, splitting spans on '\n'.
-    let bytes = body.as_bytes();
-    let mut lines: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    for sp in spans {
-        let start = sp.start_byte.min(bytes.len());
-        let end = sp.end_byte.min(bytes.len());
-        if start >= end {
-            continue;
-        }
-        let style = match sp.scope.and_then(|i| HIGHLIGHT_NAMES.get(i).copied()) {
-            Some(name) => scope_style(name, fallback_color),
-            None => Style::default().fg(fallback_color),
-        };
-        let mut slice_start = start;
-        while slice_start < end {
-            let nl = bytes[slice_start..end].iter().position(|&b| b == b'\n');
-            match nl {
-                Some(rel) => {
-                    let chunk_end = slice_start + rel;
-                    if chunk_end > slice_start {
-                        let text =
-                            String::from_utf8_lossy(&bytes[slice_start..chunk_end]).into_owned();
-                        lines.last_mut().unwrap().push(Span::styled(text, style));
-                    }
-                    lines.push(Vec::new());
-                    slice_start = chunk_end + 1;
-                }
-                None => {
-                    let text = String::from_utf8_lossy(&bytes[slice_start..end]).into_owned();
-                    lines.last_mut().unwrap().push(Span::styled(text, style));
-                    break;
-                }
-            }
-        }
-    }
-    lines.into_iter().map(Line::from).collect()
-}
-
-#[cfg(feature = "treesitter")]
-fn scope_style(name: &str, fallback: Color) -> Style {
-    // Coarse mapping that works on dark and light themes. The fallback
-    // ensures unmapped scopes still read as "code".
-    let color = match name {
-        "comment" => Color::DarkGray,
-        "string" | "string.special" => Color::Green,
-        "number" | "constant" | "constant.builtin" => Color::LightMagenta,
-        "keyword" => Color::Magenta,
-        "function" | "function.builtin" | "function.macro" => Color::Yellow,
-        "type" | "type.builtin" => Color::Cyan,
-        "variable.builtin" | "variable.parameter" => Color::LightBlue,
-        "property" | "attribute" => Color::LightCyan,
-        "label" | "tag" => Color::LightYellow,
-        "operator" | "punctuation" | "punctuation.bracket" | "punctuation.delimiter" => Color::Gray,
-        _ => fallback,
-    };
-    let mut s = Style::default().fg(color);
-    if name == "keyword" {
-        s = s.add_modifier(Modifier::BOLD);
-    }
-    s
+    super::code::fence_lines(&body_lines.join("\n"), &lang_label, th)
 }

@@ -92,11 +92,14 @@ pub enum Acceptance {
     Shell { cmd: String },
     /// Grep `pattern` in `path`; success = at least one match.
     Grep { pattern: String, path: String },
-    /// HTTP GET; success = response JSON shape matches `must_match`.
+    /// HTTP GET; success = the status/body satisfy `must_match` and, when
+    /// `schema` is given, the body parses as JSON that validates against it.
     Http {
         url: String,
         #[serde(default)]
         must_match: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        schema: Option<serde_json::Value>,
     },
     /// J6 — run the app/target to actually exercise the change (not just
     /// test it). `script` (when given) is the command to run; otherwise
@@ -332,6 +335,10 @@ pub struct RunState {
     /// URL of the PR opened by the orchestrator, once known.
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// J15 hard escalation triggers recorded while the run was live, oldest
+    /// first, one per incident (see [`crate::escalation::EscalationTrigger::duplicates`]).
+    #[serde(default)]
+    pub escalations: Vec<crate::escalation::EscalationTrigger>,
 }
 
 impl RunState {
@@ -351,6 +358,7 @@ impl RunState {
             agents: Vec::new(),
             totals: Totals::default(),
             pr_url: None,
+            escalations: Vec::new(),
         }
     }
 
@@ -446,6 +454,30 @@ pub enum Event {
         ok: bool,
     },
 
+    /// One worker attempt on a task ended (E5 ladder telemetry). The worker
+    /// supervisor writes it just before the attempt's final `task.status`, so
+    /// the retry ladder reacting to that status cannot race it. The R3
+    /// escalation packet reads these as its "what was tried" history, and the
+    /// J15 net-negative-tests check compares `tests` with the base commit.
+    #[serde(rename = "task.attempt")]
+    TaskAttempt {
+        t: String,
+        id: String,
+        agent: String,
+        /// Retry-ladder rung: 0 = first attempt, 1 = retry, 2 = escalated model.
+        rung: u32,
+        #[serde(default)]
+        model: Option<String>,
+        status: TaskStatus,
+        /// The attempt's outcome summary, or why it failed.
+        #[serde(default)]
+        summary: String,
+        /// Passing tests per test-running acceptance check, keyed by the
+        /// check's result label. Empty when no check reported a count.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        tests: BTreeMap<String, u32>,
+    },
+
     /// Worker committed on its task branch.
     #[serde(rename = "task.commit")]
     TaskCommit { t: String, id: String, sha: String },
@@ -483,6 +515,18 @@ pub enum Event {
         usd: f64,
     },
 
+    /// E9 — a worker's provider pushed back for capacity (HTTP 429 / 529).
+    /// The orchestrator narrows its live concurrency cap while these are
+    /// recent, and holds it at the floor while a `Retry-After` is in effect.
+    #[serde(rename = "agent.rate_limit")]
+    AgentRateLimited {
+        t: String,
+        agent: String,
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_secs: Option<u32>,
+    },
+
     /// Run-level status transition.
     #[serde(rename = "run.status")]
     RunStatusEv { t: String, status: RunStatus },
@@ -501,6 +545,17 @@ pub enum Event {
         commit: String,
     },
 
+    /// E4 — squash-merging a task into the integration branch conflicted on
+    /// these files. Recorded before any resolver runs, so it is written
+    /// whether or not the conflict was then resolved; J8 counts these as
+    /// merge hotspots.
+    #[serde(rename = "run.conflict")]
+    RunConflict {
+        t: String,
+        id: String,
+        files: Vec<String>,
+    },
+
     /// PR was opened (or push URL printed if `gh` is missing).
     #[serde(rename = "run.pr")]
     RunPr { t: String, url: String },
@@ -508,6 +563,13 @@ pub enum Event {
     /// Run terminated cleanly.
     #[serde(rename = "run.done")]
     RunDone { t: String },
+
+    /// J15 — a hard escalation trigger fired while the run was live.
+    #[serde(rename = "run.escalation")]
+    Escalation {
+        t: String,
+        trigger: crate::escalation::EscalationTrigger,
+    },
 
     /// R2 — post-merge feedback. Appended (often long after `run.done`)
     /// when the poller/webhook observes what happened to this run's PR.
@@ -530,6 +592,29 @@ pub enum Event {
         #[serde(default)]
         hours_to_hotfix: Option<f64>,
     },
+
+    /// One round of the daemon's `pr_reviews` source addressing reviewer
+    /// threads on this run's PR. Appended to the run that *opened* the PR,
+    /// so the round count and the spend that bound the loop live next to it.
+    #[serde(rename = "pr.review_round")]
+    PrReviewRound {
+        t: String,
+        /// 1-based round number for this PR.
+        round: u32,
+        /// Id of the nested pilot run that did the rework.
+        rework_run: String,
+        /// GraphQL ids of the review threads the round took on.
+        #[serde(default)]
+        threads: Vec<String>,
+        /// The subset of `threads` that were replied to and resolved.
+        #[serde(default)]
+        addressed: Vec<String>,
+        /// `pushed` | `no_changes` | `push_failed` | `rework_failed`.
+        outcome: String,
+        /// What the rework run spent.
+        #[serde(default)]
+        usd: f64,
+    },
 }
 
 fn default_strategy() -> String {
@@ -544,15 +629,20 @@ impl Event {
             | Event::TaskAssign { t, .. }
             | Event::TaskStatus { t, .. }
             | Event::TaskTool { t, .. }
+            | Event::TaskAttempt { t, .. }
             | Event::TaskCommit { t, .. }
             | Event::AgentSpawn { t, .. }
             | Event::AgentStatus { t, .. }
             | Event::AgentUsd { t, .. }
+            | Event::AgentRateLimited { t, .. }
             | Event::RunStatusEv { t, .. }
             | Event::RunMergeStart { t, .. }
             | Event::RunMergeTask { t, .. }
+            | Event::RunConflict { t, .. }
             | Event::RunPr { t, .. }
             | Event::PrOutcome { t, .. }
+            | Event::Escalation { t, .. }
+            | Event::PrReviewRound { t, .. }
             | Event::RunDone { t } => t,
         }
     }
@@ -709,6 +799,10 @@ pub fn apply(state: &mut RunState, event: &Event) {
                 }
             }
         }
+        // Telemetry: read off the log by the R3 packet, not projected.
+        Event::TaskAttempt { .. } => {}
+        // Read live by the orchestrator's concurrency cap, not projected.
+        Event::AgentRateLimited { .. } => {}
         Event::TaskCommit { id, sha, .. } => {
             if let Some(t) = state.task_mut(id) {
                 t.commits.push(sha.clone());
@@ -813,17 +907,30 @@ pub fn apply(state: &mut RunState, event: &Event) {
                 }
             }
         }
+        Event::RunConflict { .. } => {
+            // A record of what happened, read off the log by J8's hotspots;
+            // the merge-fixer task it may lead to carries the state.
+        }
         Event::RunPr { url, .. } => {
             state.pr_url = Some(url.clone());
         }
         Event::RunDone { .. } => {
             state.status = RunStatus::Done;
         }
+        Event::Escalation { trigger, .. } => {
+            if !state.escalations.iter().any(|e| e.duplicates(trigger)) {
+                state.escalations.push(trigger.clone());
+            }
+        }
         Event::PrOutcome { .. } => {
             // Cross-run signal recorded after the run has already ended.
             // It carries no in-run state mutation; the feedback module
             // (R2) reads these directly off the event log when computing
             // weighted stats, so replay is a no-op here.
+        }
+        Event::PrReviewRound { .. } => {
+            // Also recorded after the run ended; `pr_reviews` reads the
+            // rounds straight off the log, so replay is a no-op too.
         }
     }
 }
@@ -905,5 +1012,22 @@ mod tests {
         let agent: Agent = serde_json::from_str(json).unwrap();
         assert_eq!(agent.model, None);
         assert_eq!(agent.usd, 0.5);
+    }
+
+    /// A replayed log projects one escalation per incident, however many
+    /// `run.escalation` events repeat it.
+    #[test]
+    fn escalation_events_project_once_per_incident() {
+        let mut s = state();
+        for spent in [8.2, 9.1] {
+            let ev: Event = serde_json::from_value(serde_json::json!({
+                "ev": "run.escalation",
+                "t": "2026-09-14T10:00:00Z",
+                "trigger": {"type": "cost_warn", "spent": spent, "cap": 10.0}
+            }))
+            .unwrap();
+            apply(&mut s, &ev);
+        }
+        assert_eq!(s.escalations.len(), 1);
     }
 }

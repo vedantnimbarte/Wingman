@@ -31,11 +31,42 @@ Wingman different; this is everything else it does.
   model; `wingman logout <provider>` clears it. ChatGPT uses a browser
   OAuth flow.
 - **Multi-agent pilot mode.** `wingman pilot run "<goal>"` plans, spawns
-  worker agents in isolated worktrees, and opens a PR. See
-  [PILOT-MODE.md](PILOT-MODE.md).
+  worker agents in isolated worktrees, and opens a PR. Tasks are gated on
+  executable acceptance checks (including HTTP responses validated against a
+  JSON schema), and every PR gets a security pass (secrets, gitleaks, lockfile
+  license policy, cargo audit) whose summary is posted as a PR comment. Hard
+  escalation triggers (fewer passing tests than the base commit, 80%/100% of
+  the budget, three failures in a row, a force-push outside `wingman/auto/*`)
+  fire while the run is live and block auto-merge. The concurrency cap narrows
+  under provider rate limits and host CPU load, a task about to become ready
+  gets its worktree created and built ahead of assignment, and on autopilot a
+  worker whose turn gate keeps failing is rolled back to its last green state.
+  A merge conflict the one-shot resolver cannot clear goes to merge-fixer
+  workers before the run stops. After each merged run the project knowledge
+  layer (architecture summary, decisions, merge hotspots) is updated, by a
+  knowledge-keeper agent on autopilot, and the planner reads it back. On
+  autopilot, multi-file work that never called the `checkpoint` tool is failed
+  before review. A critic model, which can be required to come from a different
+  model family than the workers, adds guardrail tasks to the plan and can veto
+  auto-merge. Cross-run stats count a task as a first-try success only when no
+  retry rung ran. The daemon polls opened PRs for their post-merge outcome on
+  its own cadence, and `wingman pilot eval` scores canned goals, with an LLM
+  judge grading each run's diff against a golden commit, and fails on a
+  regression against a committed baseline (run weekly by
+  `.github/workflows/eval.yml`). See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
-  memories, skills, model routing, the verification gate, and index
-  freshness.
+  memories, skills, model routing, the verification gate, the metrics
+  summary below, and index freshness. It flags stale memories: ones naming a
+  project file that is gone, or a code symbol no source file defines or
+  mentions and no language server's `workspace/symbol` knows.
+- **`wingman metrics`.** The numbers that say whether any of this is
+  working, for the current repo: time to first token (median and p90 of
+  each session's first turn), tokens per completed task, verified-done rate
+  (of gated turns, and of sessions), and routing pass-rates by task class and
+  model. Read from the session transcripts, where the agent loop records each
+  turn's `first_output_ms` and last verification receipt on its `stop`
+  record — so every surface (TUI, `--print`, pilot workers, `serve`) counts.
+  `--json`; also `GET /v1/projects/{p}/metrics` and the panel's Insights view.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
   listing, shell execution, semantic search, and the new learning tools
   (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
@@ -151,12 +182,35 @@ Wingman different; this is everything else it does.
   multi-file edit block atomically — no partial writes on failure.
 - **Working-tree checkpoints.** `wingman checkpoint` snapshots the tree
   into a tagged `git stash`; `wingman undo` restores the most recent one.
+- **Rewind timeline.** Every file edit the agent makes is already an undo
+  checkpoint (`/undo [n]`); the TUI and `--print` now tag each with the session
+  and turn that made it. `/rewind` in the TUI lists them one point per turn,
+  with the files touched, and Enter previews what restoring to before a point
+  would change, diff and all; `y` confirms. The restore is itself a checkpoint
+  — none is ever deleted — so it shows at the top of the timeline and is
+  undone the same way. `t` additionally truncates the conversation to before
+  that turn, by forking the transcript and continuing in the fork. The panel's
+  conversation view has the same timeline, preview and confirmation, over
+  `GET/POST /v1/projects/{p}/sessions/{id}/rewind[/{seq}]`.
 - **`wingman init`.** Scans the project (Cargo.toml, package.json,
   pyproject.toml, go.mod, …) and writes a starter `WINGMAN.md`.
 - **`wingman cost`.** Per-model token + USD spend table derived from
   `~/.wingman/usage.json` and `pricing.rs`.
 - **`wingman session list / fork`.** Browse recent session JSONLs;
   fork an old session (optionally truncating to N records) and resume it.
+- **Session export.** `wingman session export <id> --format md|html|json`
+  reduces a transcript to what a reviewer asks about: the task and the last
+  answer, files changed with lines added and removed (counted from the
+  successful `edit_file`/`edit_symbol` diffs, `apply_patch` patches and
+  `write_file` contents in the log; `lsp_rename` and `lsp_code_action` list
+  their files without line counts), every verification receipt, cost and
+  tokens, and the tool-call timeline. Everything taken from the model, a
+  tool or the user goes through the same secret redactor as tool output
+  first, and the report says how many it caught. The TUI's `/export [md|html|json]`
+  writes the current session's report to `.wingman/exports/`,
+  `GET /v1/projects/{p}/sessions/{id}/export` serves it, and the panel's
+  conversation view copies it or downloads it. `wingman pilot export` does the
+  same for a pilot run, as a PR description with a row per worker session.
 - **User-defined slash commands.** Drop a markdown file at
   `~/.wingman/commands/<name>.md` (or `<project>/.wingman/commands/`) and
   it becomes `/<name>` in the TUI. `$ARGS` is substituted.
@@ -164,7 +218,11 @@ Wingman different; this is everything else it does.
   `/findclear` walk hits inside the current transcript. Mouse wheel
   scrolling is enabled.
 - **File-tree sidebar.** `Ctrl+B` toggles a left-side file browser; `j`/`k`
-  move, `Tab` descends, `Enter` inserts the path into the composer.
+  move, `Tab` descends, `Enter` inserts the path into the composer, `v` opens
+  the file in a read-only, line-numbered, syntax-highlighted view.
+- **Syntax highlighting.** Fenced code blocks in the transcript and the file
+  view are highlighted with tree-sitter for every parsed language. `diff`
+  fences stay plain (decisions/0016).
 - **`@file` attachments.** Write `@src/main.rs` in the composer and the file's
   contents are inlined into the prompt, saving the agent a `read_file` round
   trip. Image files (`png`/`jpg`/`gif`/`webp`) are base64-encoded for
@@ -177,6 +235,9 @@ Wingman different; this is everything else it does.
   rest with `read_file`'s `offset`/`limit`.
 - **Themes.** `tui.theme = "default" | "light" | "mono"`, plus optional
   per-role color overrides under `tui.colors` (`"#rrggbb"` hex or named).
+  Highlighted code follows the theme; `mono` marks scopes by weight and slant
+  instead of hue. A non-empty `NO_COLOR` environment variable wins over both
+  and draws the whole TUI without colour.
 - **Model fallback.** `router.fallback_models = ["openai/gpt-4.1",
   "openrouter/anthropic/claude-opus-4-7"]` — on primary failure the
   runtime walks the chain in order.
@@ -191,7 +252,10 @@ Wingman different; this is everything else it does.
 - **Worktree sandbox.** `wingman worktree create <branch>` spins up an
   isolated working copy under `.wingman/worktrees/`.
 - **PR review.** `wingman review <pr#>` (or `--local <base>`) runs a
-  one-shot review prompt against the diff.
+  one-shot review prompt against the diff. `--comment` posts the findings
+  back as one GitHub review with inline comments anchored to their diff
+  lines (via `gh api`), skipping any a previous run already posted;
+  `--dry-run` prints the payload instead of posting.
 - **Local model auto-discovery.** `wingman discover` probes localhost
   Ollama / LM Studio / vLLM and prints available models.
 - **Skill auto-extraction.** `wingman skill extract` scans recent session
@@ -199,8 +263,9 @@ Wingman different; this is everything else it does.
   edit_file`) and writes draft skill markdown files under
   `~/.wingman/skills/proposed/` for you to review.
 - **Tree-sitter powered code understanding.** Deep language-aware parsing
-  (Rust, Python, JavaScript, TypeScript, Go) for semantic chunking in the RAG
-  index, symbol extraction, AST-aware diffs, and outline generation. Feature-gated
+  (Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin) for semantic chunking in the RAG
+  index (re-chunked incrementally from a cached tree when a file changes),
+  symbol extraction, AST-aware diffs, and outline generation. Feature-gated
   so the workspace builds without the C toolchain if you don't need parsing.
 - **LSP-backed code intelligence.** Real, *resolved* go-to-definition,
   find-references, hover, diagnostics, and project-wide rename via whatever
@@ -208,12 +273,17 @@ Wingman different; this is everything else it does.
   typescript-language-server, gopls) — the semantic upgrade over the
   tree-sitter heuristics. Tools `lsp_definition`, `lsp_references`, `lsp_hover`,
   `lsp_diagnostics`, `lsp_rename` degrade gracefully to the heuristic tools when
-  no server is installed. See [LSP.md](LSP.md).
+  no server is installed. `who_calls` answers from the server's call hierarchy
+  (then its references) when one is installed, and says which method it used.
+  See [LSP.md](LSP.md).
 - **LSP-backed verification receipts.** The post-edit turn gate can fold the
   language server's diagnostics for the *changed* files into the verdict
   (`[verify].lsp_diagnostics`), so a change that introduces a type error the
   compile step missed fails verification: `✓ builds  ✓ affected tests  ✓ 0 new
-  LSP diagnostics`.
+  LSP diagnostics`. The affected-tests stage runs only the tests that reference
+  the symbols edited this turn, found through the server's references (else a
+  tree-sitter name match in test code), and falls back to the changed crates
+  when a change can't be tied to a symbol; the receipt says which.
 - **Git-backed team memory.** `wingman memory sync [<git-ref>]` reconciles the
   team-shared `<project>/.wingman/memory/` — rebuilds the `MEMORY.md` index from
   the files on disk (resolving the "two teammates both added a memory" merge
@@ -245,19 +315,35 @@ Wingman different; this is everything else it does.
   composing with the rewind timeline and verification gate.
 - **Local-first privacy preset.** `wingman router preset local` prints a
   `[router.classes]` block that points the cheap task classes at a local
-  model. Caveat worth knowing: compaction and commit messages are currently
-  computed without a model call at all, and `[router.classes]` is consulted
-  only for subagents — so today the preset is a starting point for your own
-  config rather than a switch that redirects live traffic. For a real
-  guarantee use `[privacy].local_only` and `wingman attest`.
+  model. Caveat worth knowing: compaction, titles and commit messages are
+  computed without a model call at all, so only the calls that do use a model
+  follow it — subagents by their `task_class`, and `wingman distill` and
+  `wingman explain` as `summarize`. Everything else stays on the session
+  model. For a real guarantee use `[privacy].local_only` and `wingman attest`.
+- **Learned routing.** Every verification-gate result — from `--print`, the
+  TUI and pilot workers — is recorded in `~/.wingman/learn.db` against the
+  task class (`default` for a session, the role for a pilot worker) and the
+  `provider/model` that ran it. `wingman router backfill` adds a later,
+  durable verdict for merged pilot PRs (`held` / `reverted` / `unknown`,
+  where an untouched PR is `unknown`, never a pass), and `wingman router
+  stats` shows both per class. Setting `[router].learned_min_samples` turns
+  on learned routing: once a model has that many gate results for a class in
+  this repo, the best of them (skipping any whose PRs were reverted more often
+  than they held) serves that class — the session model when no `--model` is
+  given, and each pilot worker role's first attempt. Off by default; it only
+  chooses among models that have already run the class and whose provider is
+  still configured (and local, under `[privacy].local_only`).
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
-  why it matters" walkthrough of the working diff (fast-model), for reviewers
-  and juniors.
+  why it matters" walkthrough of the working diff (routed as the `summarize`
+  class, which is the fast model unless `[router.classes]` says otherwise),
+  for reviewers and juniors.
 - **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
 - **Benchmark harness.** `wingman bench` runs a suite of prompts and records
-  time-to-first-token, tokens/task, and verified-done rate.
+  time to first token, tokens per completed task, verified-done rate, and
+  routing outcomes per served model — the same definitions as
+  `wingman metrics`. `--json` or `--markdown` prints a publishable report.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [SDK.md](SDK.md).
 - **Visual verification.** *(Opt-in build.)* Build with `--features browser`
@@ -269,6 +355,47 @@ Wingman different; this is everything else it does.
   (`[team]`), merging non-destructively.
 - **Multi-channel pilot intake.** `wingman pilot intake slack | email`
   turns Slack events or delivered `.eml` files into pilot requests.
+- **Sandboxed pilot workers.** A task whose plan touches dependencies, build
+  scripts or risky commands runs its worker in `docker run` against a copy of
+  its worktree; migrations, infra and irreversible work run in a Firecracker
+  microVM (Linux + KVM, optionally jailed). The resulting diff is applied back
+  and committed; CPU, memory, pid and network limits come from
+  `[pilot.sandbox]`. Without Firecracker the vm tier stays fail-closed, and
+  `wingman doctor` reports which tiers are available. Unvalidated against a
+  real Docker daemon or Firecracker host. See
+  [PILOT-MODE.md](PILOT-MODE.md#sandbox-tiers).
+- **Tool synthesis.** A pilot worker that keeps needing a command the toolset
+  lacks calls `propose_tool`; the proposal lands in `.wingman/tools/` as a
+  custom command tool and every registry built after approval carries it, so
+  the next worker can call it by name. Approval is automatic only on
+  `autopilot` in a trusted project, otherwise `wingman pilot tools approve`.
+  Synthesized tools run under `run_shell`'s own guards. Unvalidated against a
+  live provider. See [PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
+- **Watch mode.** `wingman pilot daemon --watch` wakes the discovery daemon
+  between polls. A saved file runs the local sources, including `// ASK:`
+  comments. A commit, merge, checkout or rebase runs every source, through
+  hooks `wingman pilot hooks install` writes. The hooks run the wingman binary
+  directly on every platform, no shell script. Candidates go through the same
+  queue, trust and per-cycle dispatch cap. See
+  [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
+- **Provider validation matrix.** `wingman pilot validate-providers` runs one
+  canned pilot plan (add a `--version-only` flag to a throwaway CLI) against
+  every configured provider that has credentials, each in a scratch repo under
+  a strict USD and token cap, and writes a pass/fail/skipped matrix to
+  `.wingman/provider-validation/matrix.md` and `matrix.json`. A pass means the
+  flag reached the merged integration branch, not that the worker said so.
+  See [PILOT-MODE.md](PILOT-MODE.md#validating-your-providers).
+- **Skill packs.** `wingman pilot skills install | search | list | verify`
+  shares pilot roles as versioned packs from a git-hosted index, resolving
+  dependencies with caret rules and refusing unsigned packs unless told
+  otherwise; signatures are checked with `ssh-keygen`. See
+  [PILOT-MODE.md](PILOT-MODE.md#skill-packs).
+- **Pilot answers review on its own PRs.** With `pr_reviews` in
+  `[pilot.daemon].sources`, the daemon picks up trusted reviewers' unresolved
+  threads on the PRs pilot opened. It fixes them on the same branch, pushes,
+  replies on each thread, and resolves only the threads the push actually
+  changed. Rounds per PR are capped and share `[pilot].max_usd`. See
+  [PILOT-MODE.md](PILOT-MODE.md#review-rounds-on-pilots-prs).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,
@@ -279,6 +406,19 @@ Wingman different; this is everything else it does.
   mode rather than replacing it, so a client can narrow what the agent may do
   but never widen it. Writes still go to disk through Wingman
   ([#127](https://github.com/vedantnimbarte/Wingman/issues/127)).
+- **Warm index daemon.** `wingman indexd start` keeps `.wingman/index.db` fresh
+  in the background; `stop` and `status` manage it. Liveness is a real process
+  check (`kill(pid, 0)` / `OpenProcess`), so a crashed daemon's pidfile is
+  cleared rather than reported as running. The TUI opens on the daemon's warm
+  index instead of indexing again.
+- **Import-aware prefetch.** Reading a file pre-warms the files it imports,
+  then its siblings, so the agent's next read hits a warm cache.
+- **Search escalation.** Before each user turn the request is run against the
+  project index and the best-matching files, line ranges and symbols go into
+  the turn, so the agent starts by reading the right code instead of
+  grepping for it; the system prompt and `grep`'s description steer
+  concept-level lookups to `semantic_search` first. The block is capped at
+  `[learn].search_hint_tokens` (default 300; `0` turns it off).
 - **Hybrid semantic search.** The index fuses dense vector similarity with BM25
   keyword scoring (reciprocal-rank fusion), so exact identifier/error-string
   matches surface alongside semantic ones.

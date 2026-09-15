@@ -33,6 +33,9 @@ wingman-ts = { workspace = true, optional = true }
 
 tokio = { workspace = true, features = ["io-std", "net"] }
 futures = { workspace = true }
+# `.gitignore`-aware project walk for the symbol analysis (affected tests,
+# memory staleness). Already built for wingman-tools and wingman-rag.
+ignore = "0.4"
 async-trait = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -56,12 +59,20 @@ subtle = "2"
 urlencoding = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Private file for the `gh api --input` body `wingman review --comment` posts.
+# Already the dev-dependency every crate tests with.
+tempfile = "3"
 ratatui = "0.29"
 crossterm = "0.28"
 
-# `setsid` for detaching a `-d` background run from the controlling terminal.
+# `setsid` for detaching a `-d` background run from the controlling terminal;
+# `kill(pid, 0)` for `indexd`'s liveness check.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", default-features = false, features = ["process"] }
+nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
+
+# `OpenProcess` + `GetExitCodeProcess` for `indexd`'s liveness check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = ["embeddings", "treesitter"]
@@ -83,6 +94,3 @@ treesitter = [
 # Chromium binary at runtime). Off by default so the standard build needs no
 # browser; the screenshot-diff logic is always compiled, only capture is gated.
 browser = ["wingman-browser/chrome"]
-
-[dev-dependencies]
-tempfile = "3"

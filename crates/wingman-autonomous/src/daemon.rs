@@ -1,7 +1,8 @@
 //! J2 — autonomous goal discovery (daemon scoring core).
 //!
 //! The daemon polls GitHub issues, failing CI, dependabot PRs, recent
-//! TODO/FIXME comments, coverage gaps, and stale deps. For each candidate
+//! TODO/FIXME comments, coverage gaps, review threads on pilot's own PRs
+//! ([`crate::pr_reviews`]), and stale deps. For each candidate
 //! it computes a `value × confidence ÷ risk` score and decides whether to
 //! auto-run, propose, or ignore. The polling/adapters are I/O (and need
 //! tokens the plan defers to the user); this module is the scoring +
@@ -170,6 +171,71 @@ pub fn fetch_todo_candidates(
             value: 0.4,
             confidence: 0.5,
             risk: 0.3,
+            trust: TrustLevel::Known,
+        });
+        if candidates.len() >= MAX_TODO_CANDIDATES {
+            break;
+        }
+    }
+    Ok(candidates)
+}
+
+/// J13 local source: `// ASK: <question>` (or `# ASK:`) comments left in the
+/// working tree, untracked files included, via `git grep` (so `.gitignore`
+/// still applies). Each becomes a goal to answer the question inline and
+/// remove the marker. Under `pilot daemon --watch` a save surfaces it within
+/// the debounce window.
+///
+/// Trust is [`TrustLevel::Known`], as for TODOs: the watcher cannot tell a
+/// comment you just typed from one that arrived in a `git pull`, so an ASK is
+/// only ever proposed, never auto-run.
+pub fn fetch_ask_candidates(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+) -> Result<Vec<Candidate>, String> {
+    let out = runner
+        .run(
+            "git",
+            &[
+                "grep",
+                "-n",
+                "-I",
+                "--untracked",
+                "-E",
+                "(//|#)[[:space:]]*ASK:",
+            ],
+            repo_root,
+        )
+        .map_err(|e| format!("git grep failed: {e}"))?;
+    // git grep exits 1 with no matches.
+    if !out.success() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for line in out.stdout.lines() {
+        let mut parts = line.splitn(3, ':');
+        let (Some(path), Some(_lineno), Some(content)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let Some((_, question)) = content.split_once("ASK:") else {
+            continue;
+        };
+        let question = question.trim();
+        if question.is_empty() {
+            continue;
+        }
+        candidates.push(Candidate {
+            source: format!("ask:{path}"),
+            title: format!(
+                "Answer the `ASK:` comment in {path} with a reply comment beside it, \
+                 then remove the marker: {question}"
+            ),
+            // A direct question: valuable, usually answerable, and the change
+            // is a comment.
+            value: 0.6,
+            confidence: 0.7,
+            risk: 0.2,
             trust: TrustLevel::Known,
         });
         if candidates.len() >= MAX_TODO_CANDIDATES {
@@ -427,6 +493,16 @@ pub fn run_cycle(
         let dir = repo_root.join(&cfg.intake_dir);
         candidates.extend(fetch_intake_candidates(&dir, &cfg.trusted_authors));
     }
+    if cfg.sources.iter().any(|s| s == "ask") {
+        if let Ok(found) = fetch_ask_candidates(runner, repo_root) {
+            candidates.extend(found);
+        }
+    }
+    if cfg.sources.iter().any(|s| s == "pr_reviews") {
+        candidates.extend(crate::pr_reviews::fetch_pr_review_candidates(
+            runner, repo_root, cfg,
+        ));
+    }
     rank(candidates)
         .into_iter()
         .map(|c| {
@@ -577,6 +653,38 @@ mod tests {
         assert!(cands
             .iter()
             .all(|c| decide(c, 0.75, 0.3) != DaemonAction::AutoRun));
+    }
+
+    struct FakeAskGrep;
+    impl CommandRunner for FakeAskGrep {
+        fn run(&self, program: &str, args: &[&str], _cwd: &StdPath) -> std::io::Result<CommandOut> {
+            assert_eq!(program, "git");
+            assert!(args.contains(&"--untracked"), "new files must be searched");
+            Ok(CommandOut {
+                status: Some(0),
+                stdout: "src/a.rs:4:    // ASK: why is this O(n^2)?\ntools/x.py:1:# ASK:\n"
+                    .to_string(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn j13_fetch_ask_candidates_proposes_each_question() {
+        let cfg = wingman_config::PilotDaemonConfig {
+            sources: vec!["ask".into()],
+            ..Default::default()
+        };
+        let results = run_cycle(&FakeAskGrep, StdPath::new("."), &cfg, 0.3);
+        // The empty `# ASK:` is skipped.
+        assert_eq!(results.len(), 1);
+        let (ask, action) = &results[0];
+        assert_eq!(ask.source, "ask:src/a.rs");
+        assert!(ask.title.ends_with(": why is this O(n^2)?"));
+        // Scores far above the threshold, but a file's contents never carry
+        // enough trust to auto-run.
+        assert!(ask.score() >= cfg.auto_threshold);
+        assert_eq!(*action, DaemonAction::Propose);
     }
 
     struct NoMatchGrep;

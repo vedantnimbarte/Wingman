@@ -5,6 +5,7 @@ import {
   type ContextReport,
   type CostReport,
   type CostTimeline,
+  type Metrics,
   type RouteInfo,
   type RunSummary,
 } from './api'
@@ -33,11 +34,15 @@ import { Empty, Failed, Loading, PageHead } from './ui'
  * 4. **The per-turn tax** — 28 tool schemas as a Pareto, so "how many tools
  *    are most of the tax" is answerable by looking.
  *
+ * Between them, **whether it is working** — the metrics DIFFERENTIATION.md
+ * says to track, from `GET /metrics`: time to first token, tokens per
+ * completed task, verified-done rate, and routing outcomes.
+ *
  * The palette rule holds throughout: colour encodes epistemic status and
  * nothing else. Every chart here is drawn in ink and the neutrals, and the
- * three status hues appear in exactly one place — run outcomes, where a
- * verdict is what is being reported. Nothing on this page is coloured because
- * it is a chart.
+ * status hues appear only where a verdict is what is being reported — run
+ * outcomes, and verification receipts. Nothing on this page is coloured
+ * because it is a chart.
  */
 export function Insights({ project }: { project: string | null }) {
   if (!project) {
@@ -60,6 +65,7 @@ export function Insights({ project }: { project: string | null }) {
       />
       <Spend project={project} />
       <Timeline project={project} />
+      <Working project={project} />
       <Outcomes project={project} />
       <Context project={project} />
       <Reports project={project} />
@@ -496,6 +502,134 @@ function Area({ values, label }: { values: number[]; label: string }) {
   )
 }
 
+/* ── Working ───────────────────────────────────────────────────────────── */
+
+/** A nullable rate as a whole percentage; an absent rate is a dash, never 0%. */
+export function rate(x: number | null): string {
+  return x == null ? '—' : `${Math.round(x * 100)}%`
+}
+
+/**
+ * Whether the agent is getting faster, cheaper, and more often right.
+ *
+ * Headline numbers are tiles, because each is one figure and a chart of one
+ * figure is a decoration. The verification split is the second place on the
+ * page the status hues are earned: a green receipt and a red one are verdicts.
+ * Routing pass-rates are a measure, not a verdict, so they stay in ink.
+ */
+function Working({ project }: { project: string }) {
+  const [m, setM] = useState<Metrics | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let live = true
+    api
+      .metrics(project)
+      .then((d) => live && setM(d))
+      .catch((e: unknown) => live && setError(message(e)))
+    return () => {
+      live = false
+    }
+  }, [project])
+
+  if (error) return <p className="is-failed dot figure">{error}</p>
+  if (!m) return null
+
+  const ttft = m.time_to_first_token_ms
+  const red = m.gated_turns - m.verified_turns
+
+  return (
+    <section className="panel">
+      <h2 className="section-head">Is it working</h2>
+      <p className="section-intro">
+        From this repo's session transcripts, so it covers every surface that ran a turn here —
+        the terminal, <code>--print</code>, pilot workers and this panel.
+      </p>
+
+      {m.turns === 0 ? (
+        <Empty title="No turns recorded yet">
+          These fill in as sessions in this repo finish turns. Nothing is estimated.
+        </Empty>
+      ) : (
+        <>
+          <div className="tiles">
+            <div className="tile">
+              <span className="eyebrow">Time to first token</span>
+              <span className="tile-value">{ttft.median == null ? '—' : `${ttft.median} ms`}</span>
+              <span className="tile-note figure">
+                median · p90 {ttft.p90 == null ? '—' : `${ttft.p90} ms`} · {ttft.samples}{' '}
+                {ttft.samples === 1 ? 'session' : 'sessions'}
+              </span>
+            </div>
+            <div className="tile">
+              <span className="eyebrow">Tokens per completed task</span>
+              <span className="tile-value">
+                {m.tokens_per_completed_task == null
+                  ? '—'
+                  : Math.round(m.tokens_per_completed_task).toLocaleString()}
+              </span>
+              <span className="tile-note figure">
+                {m.total_tokens.toLocaleString()} tokens · {m.completed_turns} of {m.turns} turns
+                completed
+              </span>
+            </div>
+            <div className="tile">
+              <span className="eyebrow">Verified-done rate</span>
+              <span className="tile-value">{rate(m.verified_done_rate)}</span>
+              <span className="tile-note figure">
+                {m.verified_turns} of {m.gated_turns} gated turns · {rate(m.session_verified_done_rate)}{' '}
+                of sessions
+              </span>
+            </div>
+          </div>
+
+          {m.gated_turns > 0 && (
+            <>
+              <h3 className="chart-head">How gated turns ended</h3>
+              <div className="stack" role="img" aria-label={`${m.verified_turns} green receipts, ${red} red`}>
+                {m.verified_turns > 0 && (
+                  <span className="stack-seg is-proven" style={{ width: `${(m.verified_turns / m.gated_turns) * 100}%` }} title={`${m.verified_turns} green`} />
+                )}
+                {red > 0 && (
+                  <span className="stack-seg is-failed" style={{ width: `${(red / m.gated_turns) * 100}%` }} title={`${red} red`} />
+                )}
+              </div>
+              <p className="section-intro">
+                <span className="is-proven dot">{m.verified_turns} ended green</span>,{' '}
+                <span className="is-failed dot">{red} ended red</span>. Turns that changed nothing
+                never run the gate and are not in this bar.
+              </p>
+            </>
+          )}
+        </>
+      )}
+
+      <h3 className="chart-head">Routing outcomes</h3>
+      {m.routing.length === 0 ? (
+        <p className="section-intro">
+          None recorded for this repo yet. A row lands per verified turn, by task class and model.
+        </p>
+      ) : (
+        <div className="bars">
+          {m.routing.map((r) => (
+            <div key={`${r.task_class}/${r.model}`} className="bar-row">
+              <span className="figure bar-label truncate" title={`${r.task_class} · ${r.model}`}>
+                <span className="muted">{r.task_class}</span> {r.model}
+              </span>
+              <span className="bar-track">
+                <span className="bar-fill" style={{ width: `${r.pass_rate * 100}%` }} />
+              </span>
+              <span className="figure bar-value">
+                {r.passed}/{r.total} · {rate(r.pass_rate)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
 /* ── Outcomes ──────────────────────────────────────────────────────────── */
 
 /** How many runs are priced individually. Named because the cap is stated. */
@@ -768,6 +902,7 @@ function Reports({ project }: { project: string }) {
   const own = [
     '/cost',
     '/context',
+    '/metrics',
     '/pilot',
     '/sessions',
     '/diff',

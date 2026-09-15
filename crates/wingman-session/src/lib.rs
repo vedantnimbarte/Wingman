@@ -14,6 +14,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
+pub mod export;
 pub mod store;
 
 pub use store::{FileSessionStore, MemorySessionStore, SessionStore};
@@ -112,6 +113,14 @@ pub enum SessionRecord {
     Stop {
         ts: String,
         reason: String,
+        /// Milliseconds from the prompt to the model's first output. Absent in
+        /// logs written before it was recorded, and on turns with no output.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_output_ms: Option<u64>,
+        /// The turn's last verification receipt; absent when the gate did
+        /// not run. `wingman metrics` computes the verified-done rate from it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verified: Option<bool>,
     },
 }
 
@@ -337,10 +346,16 @@ impl SessionLog {
                 self.write(SessionRecord::UsageDelta { ts, usage: *usage })
                     .await
             }
-            ContextFact::Stop { reason } => {
+            ContextFact::Stop {
+                reason,
+                first_output_ms,
+                verified,
+            } => {
                 self.write(SessionRecord::Stop {
                     ts,
                     reason: reason.clone(),
+                    first_output_ms: *first_output_ms,
+                    verified: *verified,
                 })
                 .await
             }
@@ -363,6 +378,8 @@ impl SessionLog {
                         .ok()
                         .and_then(|v| v.as_str().map(str::to_string))
                         .unwrap_or_else(|| "unknown".into()),
+                    first_output_ms: None,
+                    verified: None,
                 })
                 .await
             }
@@ -527,10 +544,161 @@ pub fn session_meta(records: &[SessionRecord]) -> Option<(String, String)> {
     None
 }
 
+/// Where one turn of a transcript starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TurnStart {
+    /// Index of the turn's first record: its user record for the first turn,
+    /// the record after the previous `Stop` for later ones (so a `SessionStart`
+    /// a `--print` process wrote for this turn belongs to it). A copy keeping
+    /// records `..record` is the conversation from before this turn.
+    pub record: usize,
+    /// What the turn was asked.
+    pub prompt: String,
+}
+
+/// The turns of a transcript, in order.
+///
+/// A turn runs to its `Stop`. A user record inside a turn — verification-gate
+/// feedback, a steer — is written by the loop and does not start one. A
+/// `SessionStart` also ends any turn still open: `--print` writes one per
+/// process, so a process killed mid-turn does not swallow the next. This is
+/// how the rewind timeline numbers turns, so `wingman_core::checkpoint::set_turn`
+/// callers count the same way.
+pub fn turn_starts(records: &[SessionRecord]) -> Vec<TurnStart> {
+    let mut out = Vec::new();
+    let mut from = None;
+    let mut in_turn = false;
+    for (i, record) in records.iter().enumerate() {
+        match record {
+            SessionRecord::User { text, .. } if !in_turn => {
+                out.push(TurnStart {
+                    record: from.unwrap_or(i),
+                    prompt: text.clone(),
+                });
+                in_turn = true;
+            }
+            SessionRecord::Stop { .. } => {
+                in_turn = false;
+                from = Some(i + 1);
+            }
+            SessionRecord::SessionStart { .. } if in_turn => {
+                in_turn = false;
+                from = Some(i);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Fork the session at `src` into a new session beside it, keeping only the
+/// conversation from before turn `turn`. The original is untouched. `None`
+/// when the transcript has no such turn.
+pub async fn fork_before_turn(src: &Path, turn: usize) -> Result<Option<PathBuf>, SessionError> {
+    let records = load_session(src)?;
+    let Some(start) = turn_starts(&records).get(turn).map(|t| t.record) else {
+        return Ok(None);
+    };
+    // `fork_session` cuts by line, and `load_session` skips blank lines, so
+    // turn the record index into the line it was read from.
+    let body = std::fs::read_to_string(src)?;
+    let line = body
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .nth(start)
+        .map_or(body.lines().count(), |(i, _)| i);
+    let dir = src.parent().unwrap_or_else(|| Path::new("."));
+    fork_session(src, dir, Some(line)).await.map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wingman_core::AgentStop;
+
+    fn user(text: &str) -> SessionRecord {
+        SessionRecord::User {
+            ts: "t".into(),
+            text: text.into(),
+        }
+    }
+
+    fn stop() -> SessionRecord {
+        SessionRecord::Stop {
+            ts: "t".into(),
+            reason: "end_turn".into(),
+            first_output_ms: None,
+            verified: None,
+        }
+    }
+
+    fn start() -> SessionRecord {
+        SessionRecord::SessionStart {
+            ts: "t".into(),
+            model: "m".into(),
+            provider: "p".into(),
+            system_hash: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn turns_start_after_each_stop_and_fork_keeps_what_came_before() {
+        let records = vec![
+            start(),
+            user("first"),
+            user("gate feedback, same turn"),
+            stop(),
+            start(),
+            user("second"),
+            stop(),
+            // A `--print` process killed before its stop: the next process's
+            // start still opens a turn of its own.
+            start(),
+            user("killed"),
+            start(),
+            user("fourth"),
+            stop(),
+        ];
+        let turns = turn_starts(&records);
+        assert_eq!(
+            turns,
+            vec![
+                TurnStart {
+                    record: 1,
+                    prompt: "first".into()
+                },
+                TurnStart {
+                    record: 4,
+                    prompt: "second".into()
+                },
+                TurnStart {
+                    record: 7,
+                    prompt: "killed".into()
+                },
+                TurnStart {
+                    record: 9,
+                    prompt: "fourth".into()
+                },
+            ]
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("20260101T000000000Z.jsonl");
+        let body: String = records
+            .iter()
+            .map(|r| serde_json::to_string(r).unwrap() + "\n")
+            .collect();
+        // A blank line before the cut (a hand-edited log) must not move it.
+        std::fs::write(&src, format!("\n{body}")).unwrap();
+
+        let fork = fork_before_turn(&src, 1).await.unwrap().unwrap();
+        let kept = load_session(&fork).unwrap();
+        assert_eq!(kept.len(), 4);
+        assert_eq!(turn_starts(&kept).len(), 1);
+        assert_eq!(load_session(&src).unwrap().len(), 12, "original untouched");
+        assert!(fork_before_turn(&src, 4).await.unwrap().is_none());
+    }
 
     /// Write a message and a couple of records, then read the file back and
     /// confirm the log round-trips through JSONL without loss.

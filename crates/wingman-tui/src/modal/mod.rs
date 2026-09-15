@@ -14,12 +14,14 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 pub mod diff_preview;
 pub mod file_picker;
+pub mod file_view;
 pub mod help;
 pub mod login;
 pub mod mcp;
 pub mod mode_picker;
 pub mod model_picker;
 pub mod params;
+pub mod rewind;
 pub mod session_picker;
 pub mod skill_vars;
 pub mod skills;
@@ -27,12 +29,14 @@ pub mod usage;
 
 pub use diff_preview::{DiffDecision, DiffPreviewModal};
 pub use file_picker::FilePicker;
+pub use file_view::FileViewModal;
 pub use help::HelpModal;
 pub use login::{LoginPayload, LoginTask, LoginWizard};
 pub use mcp::{McpAddPayload, McpServerSummary, McpTask, McpView};
 pub use mode_picker::ModePicker;
 pub use model_picker::{ModelChoice, ModelPicker};
 pub use params::ParamsModal;
+pub use rewind::{RewindChoice, RewindView};
 pub use session_picker::{SessionEntry, SessionPicker};
 pub use skill_vars::SkillVarsModal;
 pub use skills::SkillsView;
@@ -77,6 +81,8 @@ pub enum ActiveModal {
     SessionPicker(SessionPicker),
     SkillVars(SkillVarsModal),
     DiffPreview(DiffPreviewModal),
+    FileView(FileViewModal),
+    Rewind(RewindView),
 }
 
 impl ActiveModal {
@@ -99,6 +105,8 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.handle_key(key),
             Self::SkillVars(v) => v.handle_key(key),
             Self::DiffPreview(v) => v.handle_key(key),
+            Self::FileView(v) => v.handle_key(key),
+            Self::Rewind(v) => v.handle_key(key),
         }
     }
 
@@ -118,6 +126,8 @@ impl ActiveModal {
             Self::SessionPicker(_) => None,
             Self::SkillVars(_) => None,
             Self::DiffPreview(_) => None,
+            Self::FileView(_) => None,
+            Self::Rewind(_) => None,
         }
     }
 
@@ -149,6 +159,8 @@ impl ActiveModal {
             Self::SessionPicker(_) => {}
             Self::SkillVars(_) => {}
             Self::DiffPreview(_) => {}
+            Self::FileView(_) => {}
+            Self::Rewind(_) => {}
         }
     }
 
@@ -167,6 +179,8 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.render(area, buf),
             Self::SkillVars(v) => v.render(area, buf),
             Self::DiffPreview(v) => v.render(area, buf),
+            Self::FileView(v) => v.render(area, buf),
+            Self::Rewind(v) => v.render(area, buf),
         }
     }
 }

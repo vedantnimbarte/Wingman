@@ -101,6 +101,24 @@ pub struct Cli {
     #[arg(long, hide = true, value_name = "PATH")]
     pub worktree: Option<String>,
 
+    /// E5.5 — with `--worker-mode`, restore the worktree to the last state
+    /// that passed the turn gate after this many consecutive gate failures.
+    /// Passed by the orchestrator when the `turn_rollback` capability is on.
+    #[arg(long, hide = true, value_name = "N")]
+    pub turn_rollback_after: Option<u32>,
+
+    /// E11 — with `--worker-mode`, tell the worker checkpoints are enforced:
+    /// multi-file work that never called `checkpoint` is failed at review.
+    /// Passed by the orchestrator when the `checkpoint_hygiene` capability is on.
+    #[arg(long, hide = true)]
+    pub checkpoint_hygiene: bool,
+
+    /// J7 — give the worker `propose_tool`, approving proposals at this tier
+    /// (`auto` or `hard-gate`). The orchestrator decides it from the run's
+    /// tier and the project's trust; absent, tool synthesis is off.
+    #[arg(long, hide = true, value_name = "TIER")]
+    pub tool_synthesis: Option<String>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -157,6 +175,14 @@ pub enum Command {
         #[arg(long)]
         compare: bool,
     },
+    /// This repo's time to first token, tokens per completed task,
+    /// verified-done rate, and routing outcomes, from its session transcripts.
+    #[command(display_order = 17)]
+    Metrics {
+        /// Output as JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Session utilities.
     #[command(display_order = 16)]
     Session {
@@ -186,6 +212,14 @@ pub enum Command {
         /// Path to a custom review prompt template.
         #[arg(long, value_name = "FILE")]
         template: Option<String>,
+        /// Post the findings to the PR as one GitHub review with inline
+        /// comments on their diff lines, skipping findings a previous run
+        /// already posted.
+        #[arg(long, requires = "pr", conflicts_with = "local")]
+        comment: bool,
+        /// With --comment: print the review payload instead of posting it.
+        #[arg(long, requires = "comment")]
+        dry_run: bool,
     },
     /// Probe localhost for running Ollama / LM Studio / vLLM and print
     /// discovered models.
@@ -259,8 +293,11 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         suite: Option<String>,
         /// Output JSON instead of a table.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "markdown")]
         json: bool,
+        /// Output a publishable Markdown report instead of a table.
+        #[arg(long)]
+        markdown: bool,
     },
     /// Model routing utilities.
     #[command(display_order = 41)]
@@ -314,12 +351,12 @@ pub enum Command {
         session: Option<std::path::PathBuf>,
     },
     /// Keep this project's semantic index warm: initial reindex, then watch
-    /// the tree and refresh on change until interrupted.
+    /// the tree and refresh on change. Runs in the foreground until
+    /// interrupted; `start` runs it in the background instead.
     #[command(display_order = 26)]
     Indexd {
-        /// Report whether a daemon is running and index freshness, then exit.
-        #[arg(long)]
-        status: bool,
+        #[command(subcommand)]
+        action: Option<IndexdAction>,
     },
     /// Run any [[schedule]] entries whose cadence is due.
     #[command(display_order = 43)]
@@ -604,6 +641,15 @@ pub enum PilotAction {
         /// Specific run id; defaults to the most recently updated.
         run_id: Option<String>,
     },
+    /// Print a run as a pull-request description: the goal, tasks and cost,
+    /// plus each worker session's files, receipts and tokens. Secrets are
+    /// redacted.
+    Export {
+        /// Specific run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        #[arg(long, default_value = "md", value_parser = ["md", "json"])]
+        format: String,
+    },
     /// Live-watch a run: redraw whenever its state.json changes.
     Watch {
         /// Specific run id; defaults to the most recently updated.
@@ -639,23 +685,70 @@ pub enum PilotAction {
         /// letting the daemon act on its own.
         #[arg(long)]
         dry_run: bool,
+        /// J13 — also wake between polls: a file change runs the local
+        /// sources (todos, coverage_gaps, intake, ask), a git hook installed
+        /// by `pilot hooks install` runs every source.
+        #[arg(long)]
+        watch: bool,
     },
-    /// J12 — install the skill packs listed in `[pilot.skills].packs` into
-    /// `~/.wingman/packs/` and link their roles into `~/.wingman/agents/`.
-    Skills,
+    /// J13 — git hooks that wake `pilot daemon --watch` on commit, merge,
+    /// checkout and rewrite. They run the wingman binary directly, no shell.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+    /// J12 — skill packs: install (with dependencies and signature checks),
+    /// search the index, list and re-verify installs. Bare `pilot skills`
+    /// installs `[pilot.skills].packs`.
+    Skills {
+        #[command(subcommand)]
+        action: Option<SkillsAction>,
+    },
+    /// J7 — tools pilot workers proposed for this project
+    /// (`.wingman/tools/`). Bare `pilot tools` lists them.
+    Tools {
+        #[command(subcommand)]
+        action: Option<ToolsAction>,
+    },
     /// R4 — eval / regression gate. Summarize eval results, compare to the
     /// committed baseline, and exit non-zero on regression (the CI gate).
     Eval {
-        /// Run each goal line in this file live, then gate on the results.
-        /// Omit to gate on an existing `.wingman/eval/results.jsonl`.
+        /// Run each goal in this file live (no PR), then gate on the results.
+        /// A plain line is a goal; a JSON line can add `golden_commit` or
+        /// `golden_diff` for the LLM judge, and `base`. Omit to gate on an
+        /// existing `.wingman/eval/results.jsonl`.
         #[arg(long, value_name = "FILE")]
         goals: Option<std::path::PathBuf>,
+        /// Baseline to compare against (or rewrite with --update-baseline).
+        /// Defaults to `.wingman/eval/baseline.json`.
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<std::path::PathBuf>,
         /// Allowed fractional drift before an axis counts as regressed.
         #[arg(long, default_value_t = 0.10)]
         threshold: f64,
         /// Rewrite the baseline from the current results instead of gating.
         #[arg(long)]
         update_baseline: bool,
+    },
+    /// Run the canned `--version-only` plan against every configured provider
+    /// that has credentials, each in a scratch repo under a strict cap, and
+    /// write the pass/fail matrix as markdown and JSON. Spends real money.
+    ValidateProviders {
+        /// Only these provider ids (repeatable). Default: every
+        /// `[providers.*]` section.
+        #[arg(long = "provider", value_name = "ID")]
+        providers: Vec<String>,
+        /// Spend cap per provider, in USD. Must be above 0.
+        #[arg(long, default_value_t = 0.50)]
+        max_usd: f64,
+        /// Token cap per provider (in + out); holds for unpriced models,
+        /// where the USD cap cannot trip. Must be above 0.
+        #[arg(long, default_value_t = 400_000)]
+        max_tokens: u64,
+        /// Directory for `matrix.md` and `matrix.json`.
+        /// Default: `.wingman/provider-validation/`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
     },
     /// R2 — post-merge feedback poller: for every run that opened a PR,
     /// query its terminal state (`gh`) and record a `pr.outcome` event the
@@ -742,6 +835,79 @@ pub enum IntakeChannel {
     Email {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksAction {
+    /// Write post-commit, post-merge, post-checkout and post-rewrite hooks
+    /// into this repo's hooks directory. An existing hook that wingman did
+    /// not write is left alone and reported.
+    Install,
+    /// Remove the hooks `install` wrote, and nothing else.
+    Uninstall,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ToolsAction {
+    /// List proposed tools and whether each is approved.
+    List,
+    /// Approve a proposed tool: record its exact content in the trust store,
+    /// so the next worker spawned (and any session in this project) can call
+    /// it. Editing the file afterwards revokes the approval.
+    Approve {
+        /// The tool's name.
+        name: String,
+    },
+    /// Reject a proposed or approved tool: delete it and its trust record.
+    Reject {
+        /// The tool's name.
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsAction {
+    /// Resolve packs and their dependencies against `[pilot.skills].index`,
+    /// verify each signature, and install into `~/.wingman/packs/`, linking
+    /// roles into `~/.wingman/agents/`.
+    Install {
+        /// `owner/name@X.Y[.Z]` specs; defaults to `[pilot.skills].packs`.
+        specs: Vec<String>,
+        /// Install packs that carry no signature (signed packs must still
+        /// verify).
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// Search the index by name or description.
+    Search {
+        /// Case-insensitive substring; omit to list every pack.
+        query: Option<String>,
+    },
+    /// List installed packs.
+    List,
+    /// Re-check installed packs against their signatures (or, for unsigned
+    /// packs, their install-time digest). Exits non-zero on any failure.
+    Verify {
+        /// `owner/name` or `owner/name@X.Y.Z`; omit to verify all.
+        specs: Vec<String>,
+        /// Accept unsigned packs whose files are unchanged.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// For pack authors: print the payload to sign with
+    /// `ssh-keygen -Y sign -n wingman-skillpack` for a pack directory.
+    Digest {
+        /// The `owner/name@X.Y.Z` being published.
+        spec: String,
+        /// A clean checkout of the pack's `v<version>` tag.
+        dir: std::path::PathBuf,
+        /// A dependency as listed in the index entry (repeatable).
+        #[arg(long = "dep", value_name = "SPEC")]
+        deps: Vec<String>,
+        /// Write the payload to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -850,6 +1016,18 @@ pub enum SessionAction {
         /// Path to the session JSONL to replay.
         src: String,
     },
+    /// Export a session as a shareable report: summary, files changed with
+    /// diff stats, verification receipts, cost and tokens, and the tool-call
+    /// timeline. Secrets are redacted.
+    Export {
+        /// Session id (as `session list` names it) or path to a session JSONL.
+        id: String,
+        #[arg(long, default_value = "md", value_parser = ["md", "html", "json"])]
+        format: String,
+        /// Write here instead of stdout.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -895,11 +1073,21 @@ pub enum GoldenAction {
 
 #[derive(Subcommand, Debug)]
 pub enum RouterAction {
-    /// Show recorded per-class model win rates (gate pass-rate) for this repo.
+    /// Show recorded per-class model win rates for this repo: the gate
+    /// pass-rate, and how many merged PRs held.
     Stats {
         /// Aggregate across all repos instead of just the current one.
         #[arg(long)]
         all: bool,
+    },
+    /// Judge this repo's merged pilot PRs once they are old enough: reverted,
+    /// mostly rewritten, broke the base branch, reopened their issue, or
+    /// held. Records the verdict against the roles and models that wrote them.
+    /// Needs `gh` and `git`.
+    Backfill {
+        /// How long after merging a PR is judged.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
     },
     /// Print a recommended [router] preset to paste into config. `local` keeps
     /// cheap steps (summarize/compaction/commit-message/title) on a local model.
@@ -911,6 +1099,17 @@ pub enum RouterAction {
         #[arg(long)]
         model: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexdAction {
+    /// Start the daemon in the background (log: `.wingman/indexd.log`).
+    /// Sessions opened while it runs use its warm index.
+    Start,
+    /// Ask a running daemon to exit and wait for it.
+    Stop,
+    /// Report whether a daemon is running and index freshness, then exit.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1001,6 +1200,15 @@ static REASONING_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::ne
 static PRESET_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub async fn run() -> Result<ExitCode> {
+    // Git running a `pilot hooks install` hook: the hook file's `#!` line is
+    // this binary, so argv is `wingman <hook-file> <git args>`, which clap
+    // would reject. Handled before parsing, and before config or logging, so
+    // a hook costs one small file write.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(hook) = wingman_autonomous::watcher::hook_invocation(&args) {
+        return Ok(commands::pilot::record_hook(hook));
+    }
+
     let cli = Cli::parse();
     if let Some(r) = cli.reasoning.clone() {
         let _ = REASONING_OVERRIDE.set(r);
@@ -1033,6 +1241,9 @@ pub async fn run() -> Result<ExitCode> {
             session_id: cli.session_id,
             worktree: cli.worktree,
             model_override: cli.model,
+            turn_rollback_after: cli.turn_rollback_after.unwrap_or(0),
+            checkpoint_hygiene: cli.checkpoint_hygiene,
+            tool_synthesis: cli.tool_synthesis,
         };
         return commands::worker::run(cfg, opts).await;
     }
@@ -1083,6 +1294,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Undo) => commands::checkpoint::undo().await,
         Some(Command::Rewind { steps }) => commands::rewind::run(steps).await,
         Some(Command::Cost { json, compare }) => commands::cost::run_with(json, compare).await,
+        Some(Command::Metrics { json }) => commands::metrics::run(json).await,
         Some(Command::Session { action }) => commands::session::run(action).await,
         Some(Command::Worktree { action }) => match action {
             WorktreeAction::Create { branch } => commands::worktree::create(branch).await,
@@ -1106,7 +1318,9 @@ pub async fn run() -> Result<ExitCode> {
             pr,
             local,
             template,
-        }) => commands::review::run(pr, local, template).await,
+            comment,
+            dry_run,
+        }) => commands::review::run(pr, local, template, comment, dry_run).await,
         Some(Command::Login {
             provider,
             api_key,
@@ -1178,7 +1392,11 @@ pub async fn run() -> Result<ExitCode> {
             GoldenAction::List => commands::golden::list().await,
         },
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
-        Some(Command::Bench { suite, json }) => commands::bench::run(suite, json).await,
+        Some(Command::Bench {
+            suite,
+            json,
+            markdown,
+        }) => commands::bench::run(suite, json, markdown).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
         Some(Command::McpServe) => {
             // Read-only by default: exposing write/shell tools to an external
@@ -1187,7 +1405,7 @@ pub async fn run() -> Result<ExitCode> {
             commands::mcp_serve::run(load_config()?, mode).await
         }
         Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
-        Some(Command::Indexd { status }) => commands::indexd::run(status).await,
+        Some(Command::Indexd { action }) => commands::indexd::run(action).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
@@ -1280,11 +1498,16 @@ pub async fn run() -> Result<ExitCode> {
                         await_approval,
                         approval_timeout_secs: approval_timeout,
                         model_override: cli.model,
+                        run_id: None,
+                        rework_branch: None,
                     },
                 )
                 .await
             }
             PilotAction::Status { run_id } => commands::pilot::status(run_id).await,
+            PilotAction::Export { run_id, format } => {
+                commands::pilot::export(run_id, format == "json").await
+            }
             PilotAction::Watch {
                 run_id,
                 interval_ms,
@@ -1303,20 +1526,60 @@ pub async fn run() -> Result<ExitCode> {
             }
             PilotAction::Eval {
                 goals,
+                baseline,
                 threshold,
                 update_baseline,
             } => {
                 let cfg = load_config()?;
-                commands::pilot::eval(cfg, goals, threshold, update_baseline).await
+                commands::pilot::eval(cfg, goals, baseline, threshold, update_baseline).await
             }
-            PilotAction::Skills => {
+            PilotAction::ValidateProviders {
+                providers,
+                max_usd,
+                max_tokens,
+                out,
+            } => {
                 let cfg = load_config()?;
-                commands::pilot::skills_install(cfg).await
+                commands::pilot::validate_providers(cfg, providers, max_usd, max_tokens, out).await
             }
-            PilotAction::Daemon { cycles, dry_run } => {
+            PilotAction::Tools { action } => match action {
+                None | Some(ToolsAction::List) => commands::pilot::tools_list().await,
+                Some(ToolsAction::Approve { name }) => commands::pilot::tools_approve(name).await,
+                Some(ToolsAction::Reject { name }) => commands::pilot::tools_reject(name).await,
+            },
+            PilotAction::Skills { action } => match action {
+                None => commands::pilot::skills_install(load_config()?, Vec::new(), false).await,
+                Some(SkillsAction::Install {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_install(load_config()?, specs, allow_unsigned).await,
+                Some(SkillsAction::Search { query }) => {
+                    commands::pilot::skills_search(load_config()?, query.unwrap_or_default()).await
+                }
+                Some(SkillsAction::List) => commands::pilot::skills_list().await,
+                Some(SkillsAction::Verify {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_verify(specs, allow_unsigned).await,
+                Some(SkillsAction::Digest {
+                    spec,
+                    dir,
+                    deps,
+                    out,
+                }) => commands::pilot::skills_digest(spec, dir, deps, out).await,
+            },
+            PilotAction::Daemon {
+                cycles,
+                dry_run,
+                watch,
+            } => {
                 let cfg = load_config()?;
-                commands::pilot::daemon(cfg, cycles, dry_run).await
+                commands::pilot::daemon(cfg, cycles, dry_run, watch).await
             }
+            PilotAction::Hooks { action } => match action {
+                HooksAction::Install => commands::pilot::hooks_install().await,
+                HooksAction::Uninstall => commands::pilot::hooks_uninstall().await,
+            },
             PilotAction::Abort { run_id, task } => {
                 commands::pilot::control_abort(run_id, task).await
             }
@@ -1374,6 +1637,8 @@ pub async fn run() -> Result<ExitCode> {
                     await_approval: false,
                     approval_timeout_secs: 600,
                     model_override: cli.model,
+                    run_id: None,
+                    rework_branch: None,
                 },
             )
             .await
@@ -1389,11 +1654,22 @@ pub async fn run() -> Result<ExitCode> {
                 std::sync::Mutex<Option<std::sync::Arc<crate::mcp_registry::McpRegistry>>>,
             > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
+            let project = ProjectPaths::discover(&std::env::current_dir()?);
+            // Learned routing replaces only the configured default model; an
+            // explicit --model always wins.
+            let model_flag = cli.model.clone().or_else(|| {
+                crate::runtime::learned_model(
+                    &cfg,
+                    wingman_learn::stats::SESSION_CLASS,
+                    &project.root.to_string_lossy(),
+                )
+            });
+
             // Try to resolve a provider/model and build the agent. If no
             // provider is configured (or the configured one fails to build),
             // we still open the TUI — the user can run /login to set one up.
             let (selection, agent) =
-                match crate::runtime::resolve_selection(&cfg, cli.model.as_deref()) {
+                match crate::runtime::resolve_selection(&cfg, model_flag.as_deref()) {
                     Ok(sel) => {
                         match crate::runtime::build_agent_and_registry(&cfg, &sel, mode).await {
                             Ok((a, registry)) => {
@@ -1416,10 +1692,20 @@ pub async fn run() -> Result<ExitCode> {
                     }
                 };
 
-            // Kick off background indexing for the project. The handle is
+            // Kick off background indexing for the project, unless a live
+            // `indexd` already keeps this index warm: a second indexer would
+            // only redo its work against the same database. The handle is
             // held until the TUI exits.
-            let project = ProjectPaths::discover(&std::env::current_dir()?);
-            let _watch_handle = match crate::runtime::build_indexer(&project)? {
+            let indexd = crate::commands::indexd::live_pid(&project.dir);
+            if let Some(pid) = indexd {
+                tracing::info!("using the warm index kept by indexd (pid {pid})");
+            }
+            let _watch_handle = match indexd
+                .is_none()
+                .then(|| crate::runtime::build_indexer(&project))
+                .transpose()?
+                .flatten()
+            {
                 Some(indexer) => {
                     wingman_rag::spawn_background_indexer(indexer, project.root.clone())
                         .map_err(anyhow::Error::msg)

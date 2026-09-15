@@ -34,6 +34,12 @@ pub struct AcceptanceResult {
     /// Best-effort tail of stdout/stderr or the matched text. Capped to
     /// keep token usage bounded.
     pub output: String,
+    /// J15 — passing tests the command reported, when its output carried a
+    /// test-runner summary [`passed_tests`] recognises. Parsed from the whole
+    /// output rather than the tail: a workspace `cargo test` prints one
+    /// summary per test binary, and the tail holds only the last few.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed_tests: Option<u32>,
 }
 
 impl AcceptanceResult {
@@ -42,6 +48,7 @@ impl AcceptanceResult {
             label: label.into(),
             ok: true,
             output: output.into(),
+            passed_tests: None,
         }
     }
     pub fn fail(label: impl Into<String>, output: impl Into<String>) -> Self {
@@ -49,6 +56,7 @@ impl AcceptanceResult {
             label: label.into(),
             ok: false,
             output: output.into(),
+            passed_tests: None,
         }
     }
 }
@@ -96,8 +104,13 @@ fn run_one(check: &Acceptance, cwd: &Path, timeout: Duration) -> AcceptanceResul
         Acceptance::Shell { cmd } => run_shell(cmd, cwd, timeout),
         Acceptance::Grep { pattern, path } => run_grep(pattern, path, cwd),
         // J6 — real HTTP GET via `curl` (no async runtime, no new dep). The
-        // status line proves reachability; `must_match` asserts on body/code.
-        Acceptance::Http { url, must_match } => run_http(url, must_match, cwd),
+        // status line proves reachability; `must_match` asserts on body/code,
+        // `schema` on the shape of the JSON body.
+        Acceptance::Http {
+            url,
+            must_match,
+            schema,
+        } => run_http(url, must_match, schema.as_ref(), cwd),
         // J6 — run the app: execute the script (or the target as a
         // command) like a shell check, but label it as a run.
         Acceptance::Run { target, script } => {
@@ -125,9 +138,14 @@ fn run_one(check: &Acceptance, cwd: &Path, timeout: Duration) -> AcceptanceResul
 /// - anything else (object/array) → its compact JSON form must appear in the
 ///   body (and status < 400) — a coarse "shape present" check.
 ///
-/// ponytail: substring/status checks, not a JSON-schema match. Add a real
-/// JSON-path assertion when a canned string-contains proves too blunt.
-fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> AcceptanceResult {
+/// `schema`, when given, is checked on top of that: the body must parse as
+/// JSON and validate against it (see [`schema_errors`]).
+fn run_http(
+    url: &str,
+    must_match: &serde_json::Value,
+    schema: Option<&serde_json::Value>,
+    cwd: &Path,
+) -> AcceptanceResult {
     let label = format!("http: {url}");
     // -sS quiet-but-show-errors, -L follow redirects, -m 30 hard timeout,
     // -w appends the numeric status on its own trailing line.
@@ -154,7 +172,252 @@ fn run_http(url: &str, must_match: &serde_json::Value, cwd: &Path) -> Acceptance
         None => ("", raw.trim()),
     };
     let status: u32 = status_str.parse().unwrap_or(0);
-    assert_http(label, status, body, must_match)
+    let res = assert_http(label, status, body, must_match);
+    match schema {
+        Some(schema) if res.ok => assert_schema(res, body, schema),
+        _ => res,
+    }
+}
+
+/// Validate a JSON `body` against `schema`, turning a passing [`assert_http`]
+/// result into a failure when it does not.
+fn assert_schema(
+    res: AcceptanceResult,
+    body: &str,
+    schema: &serde_json::Value,
+) -> AcceptanceResult {
+    let value: serde_json::Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return AcceptanceResult::fail(
+                res.label,
+                format!("{}, body is not JSON: {e}", res.output),
+            )
+        }
+    };
+    let mut errs = Vec::new();
+    schema_errors(&value, schema, "$", &mut errs);
+    if errs.is_empty() {
+        AcceptanceResult::ok(res.label, format!("{}, schema matched", res.output))
+    } else {
+        let shown = errs.iter().take(5).cloned().collect::<Vec<_>>().join("; ");
+        AcceptanceResult::fail(
+            res.label,
+            format!(
+                "{}, schema mismatch ({} error(s)): {shown}",
+                res.output,
+                errs.len()
+            ),
+        )
+    }
+}
+
+/// JSON Schema keywords [`schema_errors`] treats as annotations and ignores.
+/// `format` is annotation-only by default in draft 2020-12, too.
+const SCHEMA_ANNOTATIONS: &[&str] = &[
+    "$schema",
+    "$id",
+    "$comment",
+    "title",
+    "description",
+    "default",
+    "examples",
+    "format",
+];
+
+/// Validate `value` against a JSON Schema, appending one message per
+/// violation (prefixed with its JSON path) to `errs`.
+///
+/// Covers the keywords an acceptance check realistically asserts on: `type`,
+/// `enum`, `const`, `properties`, `required`, `additionalProperties`, `items`,
+/// `min/maxItems`, `min/maxLength`, `pattern`, `minimum`/`maximum` (and the
+/// exclusive forms), `allOf`/`anyOf`/`oneOf`/`not`.
+///
+/// ponytail: a subset, not a full validator (no `$ref`, `patternProperties`,
+/// `if/then/else`, …). Any keyword outside the subset is reported as an error
+/// rather than skipped, so a schema this cannot fully check fails the
+/// acceptance check instead of passing it unexamined. Swap in the
+/// `jsonschema` crate if planners start writing schemas that need more.
+fn schema_errors(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    path: &str,
+    errs: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let obj = match schema {
+        Value::Bool(true) => return,
+        Value::Bool(false) => {
+            return errs.push(format!("{path}: schema `false` rejects every value"))
+        }
+        Value::Object(o) => o,
+        other => {
+            return errs.push(format!(
+                "{path}: schema must be an object or boolean, got {other}"
+            ))
+        }
+    };
+    let num = |k: &str| obj.get(k).and_then(Value::as_f64);
+    let len = |k: &str| obj.get(k).and_then(Value::as_u64);
+    for (key, kw) in obj {
+        match key.as_str() {
+            "type" => {
+                let names: Vec<&str> = match kw {
+                    Value::String(s) => vec![s.as_str()],
+                    Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+                    _ => vec![],
+                };
+                if !names.iter().any(|n| json_type_matches(value, n)) {
+                    errs.push(format!(
+                        "{path}: expected type {}, got {}",
+                        names.join("|"),
+                        json_type_name(value)
+                    ));
+                }
+            }
+            "enum" => {
+                if !kw.as_array().is_some_and(|a| a.contains(value)) {
+                    errs.push(format!("{path}: {value} is not one of {kw}"));
+                }
+            }
+            "const" => {
+                if kw != value {
+                    errs.push(format!("{path}: expected {kw}, got {value}"));
+                }
+            }
+            "properties" => {
+                if let (Some(props), Value::Object(v)) = (kw.as_object(), value) {
+                    for (name, sub) in props {
+                        if let Some(child) = v.get(name) {
+                            schema_errors(child, sub, &format!("{path}.{name}"), errs);
+                        }
+                    }
+                }
+            }
+            "required" => {
+                if let Value::Object(v) = value {
+                    for name in kw
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                    {
+                        if !v.contains_key(name) {
+                            errs.push(format!("{path}: missing required property `{name}`"));
+                        }
+                    }
+                }
+            }
+            "additionalProperties" => {
+                if let Value::Object(v) = value {
+                    let declared = obj.get("properties").and_then(Value::as_object);
+                    for (name, child) in v {
+                        if !declared.is_some_and(|d| d.contains_key(name)) {
+                            schema_errors(child, kw, &format!("{path}.{name}"), errs);
+                        }
+                    }
+                }
+            }
+            "items" => {
+                if let Value::Array(items) = value {
+                    for (i, child) in items.iter().enumerate() {
+                        schema_errors(child, kw, &format!("{path}[{i}]"), errs);
+                    }
+                }
+            }
+            "minItems" | "maxItems" => {
+                if let (Value::Array(a), Some(n)) = (value, len(key)) {
+                    if (key == "minItems" && (a.len() as u64) < n)
+                        || (key == "maxItems" && a.len() as u64 > n)
+                    {
+                        errs.push(format!("{path}: {} item(s) violates {key} {n}", a.len()));
+                    }
+                }
+            }
+            "minLength" | "maxLength" => {
+                if let (Value::String(s), Some(n)) = (value, len(key)) {
+                    let chars = s.chars().count() as u64;
+                    if (key == "minLength" && chars < n) || (key == "maxLength" && chars > n) {
+                        errs.push(format!("{path}: length {chars} violates {key} {n}"));
+                    }
+                }
+            }
+            "pattern" => {
+                if let (Value::String(s), Some(p)) = (value, kw.as_str()) {
+                    match regex::Regex::new(p) {
+                        Ok(re) if re.is_match(s) => {}
+                        Ok(_) => errs.push(format!("{path}: {s:?} does not match pattern {p:?}")),
+                        Err(e) => errs.push(format!("{path}: invalid pattern {p:?}: {e}")),
+                    }
+                }
+            }
+            "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => {
+                if let (Some(v), Some(n)) = (value.as_f64(), num(key)) {
+                    let ok = match key.as_str() {
+                        "minimum" => v >= n,
+                        "maximum" => v <= n,
+                        "exclusiveMinimum" => v > n,
+                        _ => v < n,
+                    };
+                    if !ok {
+                        errs.push(format!("{path}: {v} violates {key} {n}"));
+                    }
+                }
+            }
+            "allOf" | "anyOf" | "oneOf" => {
+                let subs = kw.as_array().map(Vec::as_slice).unwrap_or_default();
+                let results: Vec<Vec<String>> = subs
+                    .iter()
+                    .map(|s| {
+                        let mut e = Vec::new();
+                        schema_errors(value, s, path, &mut e);
+                        e
+                    })
+                    .collect();
+                let passing = results.iter().filter(|e| e.is_empty()).count();
+                match key.as_str() {
+                    "allOf" => errs.extend(results.into_iter().flatten()),
+                    "anyOf" if passing == 0 => errs.push(format!("{path}: matches none of anyOf")),
+                    "oneOf" if passing != 1 => errs.push(format!(
+                        "{path}: matches {passing} of oneOf, wanted exactly 1"
+                    )),
+                    _ => {}
+                }
+            }
+            "not" => {
+                let mut e = Vec::new();
+                schema_errors(value, kw, path, &mut e);
+                if e.is_empty() {
+                    errs.push(format!("{path}: matches a `not` schema"));
+                }
+            }
+            k if SCHEMA_ANNOTATIONS.contains(&k) => {}
+            k => errs.push(format!("{path}: unsupported schema keyword `{k}`")),
+        }
+    }
+}
+
+fn json_type_matches(value: &serde_json::Value, name: &str) -> bool {
+    use serde_json::Value;
+    match (name, value) {
+        ("integer", Value::Number(n)) => {
+            n.is_i64() || n.is_u64() || n.as_f64().is_some_and(|f| f.fract() == 0.0)
+        }
+        ("number", Value::Number(_)) => true,
+        (other, v) => other == json_type_name(v),
+    }
+}
+
+fn json_type_name(value: &serde_json::Value) -> &'static str {
+    use serde_json::Value;
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Pure assertion half of [`run_http`] — separated so the match/status
@@ -286,15 +549,20 @@ fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> AcceptanceResult {
                     })
                     .unwrap_or_default();
                 let tail = tail_string(&combined, OUTPUT_TAIL_BYTES);
-                if status.success() {
-                    return AcceptanceResult::ok(label, tail);
+                let mut res = if status.success() {
+                    AcceptanceResult::ok(label, tail)
                 } else {
                     let code = status
                         .code()
                         .map(|c| c.to_string())
                         .unwrap_or_else(|| "signal".to_string());
-                    return AcceptanceResult::fail(label, format!("exit {code}\n{tail}"));
-                }
+                    AcceptanceResult::fail(label, format!("exit {code}\n{tail}"))
+                };
+                // Counted whether or not the command passed: a red test run
+                // still says how many tests passed, and that is the number the
+                // net-negative check compares.
+                res.passed_tests = passed_tests(&combined);
+                return res;
             }
             Ok(None) => {
                 if started.elapsed() > timeout {
@@ -418,6 +686,90 @@ pub fn summarize(results: &[AcceptanceResult]) -> String {
                 .join(", ")
         )
     }
+}
+
+/// J15 — passing tests reported by a test runner's summary, or `None` when
+/// `output` carries no summary this recognises. Tried in order, first match
+/// wins:
+///
+/// - `cargo test`: every `test result: … N passed;` line, summed (one per test
+///   binary); `cargo nextest`: the `Summary … N passed` line.
+/// - jest / vitest: the `Tests: … N passed` line.
+/// - pytest: the closing `N passed … in 1.23s` line.
+/// - `go test -v`: one `--- PASS:` line per test, subtests included. Plain
+///   `go test` prints no per-test lines and so reports nothing.
+pub fn passed_tests(output: &str) -> Option<u32> {
+    use std::sync::OnceLock;
+    static RES: OnceLock<[regex::Regex; 6]> = OnceLock::new();
+    let [ansi, cargo, nextest, jest, pytest, go] = RES.get_or_init(|| {
+        [
+            r"\x1b\[[0-9;]*m",
+            r"test result: \w+\. (\d+) passed;",
+            r"^\s*Summary \[.*?(\d+) passed",
+            r"^\s*Tests:?\s+(?:.*?, )?(\d+) passed",
+            r"^=*\s*(?:.*?, )?(\d+) passed.* in [\d.]+s",
+            r"^\s*--- PASS: ",
+        ]
+        .map(|p| regex::Regex::new(&format!("(?m){p}")).expect("static pattern"))
+    });
+    // Runners colour their summaries when they think they own a terminal.
+    let plain = ansi.replace_all(output, "");
+    let sum = |re: &regex::Regex| -> Option<u32> {
+        let mut found = None;
+        for c in re.captures_iter(&plain) {
+            let n: u32 = c[1].parse().ok()?;
+            found = Some(found.unwrap_or(0) + n);
+        }
+        found
+    };
+    let go_passes = go.find_iter(&plain).count() as u32;
+    sum(cargo)
+        .or_else(|| sum(nextest))
+        .or_else(|| sum(jest))
+        .or_else(|| sum(pytest))
+        .or((go_passes > 0).then_some(go_passes))
+}
+
+/// J15 — the label a test-running check's result will carry, or `None` for a
+/// check that does not look like it runs tests. Only `shell` and `run` checks
+/// execute a command; of those, one whose command mentions `test` (or `jest`)
+/// is treated as a test run.
+///
+/// ponytail: a keyword heuristic — a test runner invoked through a script
+/// named without "test" is missed, and its count stays unchecked. A plan field
+/// marking a check as the test suite would make it exact.
+pub fn test_check_label(check: &Acceptance) -> Option<String> {
+    let (label, cmd) = match check {
+        Acceptance::Shell { cmd } => (format!("shell: {cmd}"), cmd.as_str()),
+        Acceptance::Run { target, script } => (
+            format!("run: {target}"),
+            script.as_deref().unwrap_or(target),
+        ),
+        _ => return None,
+    };
+    let cmd = cmd.to_ascii_lowercase();
+    (cmd.contains("test") || cmd.contains("jest")).then_some(label)
+}
+
+/// J15 — compare an attempt's test counts with the base-commit counts for the
+/// same checks. Returns `(before, after)` summed over the labels both sides
+/// counted, or `None` when they share none — a check whose output carried no
+/// summary on one side says nothing about the other.
+///
+/// `before` maps a label to `None` when the base-commit run printed no
+/// summary, so a check is measured once per run whether or not it counted.
+pub fn net_test_counts(
+    before: &std::collections::HashMap<String, Option<u32>>,
+    after: &std::collections::BTreeMap<String, u32>,
+) -> Option<(u32, u32)> {
+    let shared: Vec<(u32, u32)> = after
+        .iter()
+        .filter_map(|(label, a)| before.get(label).copied().flatten().map(|b| (b, *a)))
+        .collect();
+    if shared.is_empty() {
+        return None;
+    }
+    Some(shared.iter().fold((0, 0), |(b, a), (x, y)| (b + x, a + y)))
 }
 
 #[cfg(test)]
@@ -588,6 +940,7 @@ mod tests {
         let checks = vec![Acceptance::Http {
             url: "http://127.0.0.1:1/nope".into(),
             must_match: serde_json::Value::Null,
+            schema: None,
         }];
         let results = run_acceptance_checks(&checks, dir.path());
         assert!(!results[0].ok);
@@ -732,5 +1085,161 @@ error[E0425]: cannot find value",
         assert!(assert_http(lbl(), 200, "welcome home", &json!("welcome")).ok);
         assert!(!assert_http(lbl(), 200, "welcome home", &json!("missing")).ok);
         assert!(!assert_http(lbl(), 503, "welcome home", &json!("welcome")).ok);
+    }
+
+    /// J6 — the JSON-schema option: the body must be JSON and validate.
+    #[test]
+    fn j6_http_schema_validates_body_shape() {
+        use serde_json::json;
+        let passed = || AcceptanceResult::ok("http: x", "status 200");
+        let schema = json!({
+            "type": "object",
+            "required": ["version", "tags"],
+            "properties": {
+                "version": {"type": "string", "pattern": r"^\d+\.\d+"},
+                "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "port": {"type": "integer", "minimum": 1, "maximum": 65535}
+            },
+            "additionalProperties": false
+        });
+        let good = r#"{"version":"0.4.0","tags":["stable"],"port":8080}"#;
+        let r = assert_schema(passed(), good, &schema);
+        assert!(r.ok, "{}", r.output);
+
+        // Every kind of violation is reported, each with its path.
+        let bad = r#"{"tags":[],"port":0.5,"extra":1}"#;
+        let r = assert_schema(passed(), bad, &schema);
+        assert!(!r.ok);
+        for needle in ["`version`", "$.tags", "$.port", "$.extra"] {
+            assert!(
+                r.output.contains(needle),
+                "{needle} missing from {}",
+                r.output
+            );
+        }
+
+        // A body that is not JSON fails rather than vacuously passing.
+        assert!(!assert_schema(passed(), "<html>", &schema).ok);
+
+        // Combinators.
+        let one_of = json!({"oneOf": [{"type": "string"}, {"type": "integer"}]});
+        assert!(assert_schema(passed(), "3", &one_of).ok);
+        assert!(!assert_schema(passed(), "true", &one_of).ok);
+        let not_enum = json!({"not": {"const": 2}, "enum": [1, 2]});
+        assert!(assert_schema(passed(), "1", &not_enum).ok);
+        assert!(!assert_schema(passed(), "2", &not_enum).ok);
+    }
+
+    /// A schema keyword the validator does not implement must fail the check,
+    /// never be skipped: skipping would pass a body nobody actually checked.
+    #[test]
+    fn j6_http_schema_fails_closed_on_unsupported_keywords() {
+        use serde_json::json;
+        let passed = AcceptanceResult::ok("http: x", "status 200");
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "title": "annotations are fine",
+            "$ref": "#/$defs/thing"
+        });
+        let r = assert_schema(passed, "{}", &schema);
+        assert!(!r.ok);
+        assert!(
+            r.output.contains("unsupported schema keyword `$ref`"),
+            "{}",
+            r.output
+        );
+    }
+
+    /// `schema` is optional in the plan JSON, so existing plans still parse.
+    #[test]
+    fn j6_http_schema_is_optional_in_plans() {
+        let a: Acceptance =
+            serde_json::from_str(r#"{"kind":"http","url":"http://x","must_match":200}"#).unwrap();
+        assert!(matches!(a, Acceptance::Http { schema: None, .. }));
+        let a: Acceptance =
+            serde_json::from_str(r#"{"kind":"http","url":"http://x","schema":{"type":"object"}}"#)
+                .unwrap();
+        assert!(matches!(
+            a,
+            Acceptance::Http {
+                schema: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn j15_passed_tests_reads_each_runner_summary() {
+        // cargo test: one summary per test binary, summed.
+        let cargo = "running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n\nrunning 9 tests\ntest result: FAILED. 7 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out\n";
+        assert_eq!(passed_tests(cargo), Some(10));
+        let nextest = "     Summary [   0.123s] 12 tests run: 12 passed, 0 skipped\n";
+        assert_eq!(passed_tests(nextest), Some(12));
+        let jest = "Test Suites: 1 failed, 2 passed, 3 total\nTests:       1 failed, 12 passed, 13 total\n";
+        assert_eq!(passed_tests(jest), Some(12));
+        let vitest = " Test Files  3 passed (3)\n      Tests  21 passed (21)\n";
+        assert_eq!(passed_tests(vitest), Some(21));
+        // Coloured, as pytest prints when it thinks it owns a terminal.
+        let pytest = "\x1b[32m===== 1 failed, 4 passed, 1 warning in 0.12s =====\x1b[0m\n";
+        assert_eq!(passed_tests(pytest), Some(4));
+        let go = "=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\n    --- PASS: TestB/sub (0.00s)\n--- FAIL: TestB (0.00s)\n";
+        assert_eq!(passed_tests(go), Some(2));
+        // No summary at all: no count, never a zero.
+        assert_eq!(
+            passed_tests("Finished dev profile\nok  \tpkg\t0.01s\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn j15_shell_checks_carry_the_whole_outputs_count() {
+        let dir = tempfile::tempdir().unwrap();
+        // More summary lines than the 1 KiB tail keeps, and a failing exit.
+        let line = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out";
+        std::fs::write(dir.path().join("out.txt"), format!("{line}\n").repeat(40)).unwrap();
+        let cmd = if cfg!(windows) {
+            "type out.txt && exit 1"
+        } else {
+            "cat out.txt; exit 1"
+        };
+        let r = run_acceptance_checks(&[Acceptance::Shell { cmd: cmd.into() }], dir.path());
+        assert!(!r[0].ok);
+        assert!(r[0].output.len() < line.len() * 40);
+        assert_eq!(r[0].passed_tests, Some(40));
+    }
+
+    #[test]
+    fn j15_test_checks_are_the_ones_that_run_tests() {
+        let shell = |c: &str| Acceptance::Shell { cmd: c.into() };
+        assert_eq!(
+            test_check_label(&shell("cargo test -p x")).as_deref(),
+            Some("shell: cargo test -p x")
+        );
+        assert_eq!(test_check_label(&shell("cargo check")), None);
+        let run = Acceptance::Run {
+            target: "suite".into(),
+            script: Some("npx jest".into()),
+        };
+        assert_eq!(test_check_label(&run).as_deref(), Some("run: suite"));
+        let grep = Acceptance::Grep {
+            pattern: "test".into(),
+            path: "x".into(),
+        };
+        assert_eq!(test_check_label(&grep), None);
+    }
+
+    #[test]
+    fn j15_net_counts_compare_only_shared_checks() {
+        let before: std::collections::HashMap<String, Option<u32>> = [
+            ("a".to_string(), Some(10)),
+            ("b".to_string(), Some(5)),
+            ("c".to_string(), None),
+        ]
+        .into();
+        let after: std::collections::BTreeMap<String, u32> =
+            [("a".to_string(), 8), ("c".to_string(), 99)].into();
+        assert_eq!(net_test_counts(&before, &after), Some((10, 8)));
+        let unrelated: std::collections::BTreeMap<String, u32> = [("c".to_string(), 1)].into();
+        assert_eq!(net_test_counts(&before, &unrelated), None);
     }
 }

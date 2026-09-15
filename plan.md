@@ -16,6 +16,56 @@ This builds on existing pieces:
 
 ---
 
+## Implementation status (Session 7 — as of 2026-09-15)
+
+> **Session 7 update (2026-09-15): nothing below is merged.** The work sits in
+> seven open PRs against `main` (0.4.0). Every "in #N (open)" in the tables
+> means "on that branch, reviewed, unit/mock-tested", not shipped.
+>
+> | PR | Branch | Plan items |
+> |---|---|---|
+> | [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open) | `feat/pilot-hardening` | J6 schema, R6 externals, J15 runtime + R3 attempts, E9, E5.5 rollback, E4 merge-fixer, J8 keeper, E11 hard gate, J10 plan-time, E6 first-try, R4 judge + workflow, R2 cadence |
+> | [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open) | `feat/pilot-capabilities` | J12 index/signatures/deps, J11 container + vm, J7, J13, Phase 8 provider matrix |
+> | [#247](https://github.com/vedantnimbarte/Wingman/pull/247) (open) | `feat/pr-review-loop` | E8 `wingman review --comment`; daemon `pr_reviews` source |
+> | [#250](https://github.com/vedantnimbarte/Wingman/pull/250) (open) | `feat/single-agent-roadmap` | learned routing + durable verdicts (#183), detached indexd, search escalation |
+> | [#249](https://github.com/vedantnimbarte/Wingman/pull/249) (open) | `feat/lsp-symbol-analysis` | LSP `who_calls`, symbol-level affected tests, symbol staleness |
+> | [#248](https://github.com/vedantnimbarte/Wingman/pull/248) (open) | `feat/tree-sitter-expansion` | C++/Java/Kotlin, incremental reparse, themed TUI highlighting |
+> | [#251](https://github.com/vedantnimbarte/Wingman/pull/251) (open) | `feat/insights-export-rewind` | `wingman metrics`, session/pilot export, rewind timeline |
+>
+> The last four are single-agent work tracked in `docs/DIFFERENTIATION.md` and
+> `docs/ROADMAP-STATUS.md`; they touch this plan only where pilot workers
+> record routing rows and learned routing picks a worker model (#250).
+>
+> **The tables had drifted behind `main` before this session.** Between
+> session 6 and 0.4.0, `main` gained E7 inline review at the finalize choke
+> point (not post-run), conflicts queued as a visible merge-fixer task (E4),
+> a deterministic `regenerate_knowledge` pass (J8), the J12 git/local
+> fetcher, the R4 `pilot eval --goals` runner (success-proxied), and an
+> `Acceptance::Http` status/body check (J6). The rows below now say so.
+>
+> **Each PR had a review pass that found and fixed real bugs** before this
+> refresh — among them: the weekly eval could never fail (the checkout was
+> left on an old integration branch), a diverged pilot branch could be
+> force-pushed over someone else's commit, sandbox patch-back could commit the
+> copied config with provider keys, vm tasks added mid-run were silently
+> downgraded, and a rework push could merge through armed auto-merge without
+> pilot's gate.
+>
+> **Still unvalidated live, and the reason is always missing infrastructure:**
+> no provider keys (every model-backed path, `validate-providers`, the eval
+> judge, the knowledge-keeper, tool synthesis); no Docker daemon or KVM host
+> (J11 has never run a worker in either tier); no real GitHub activity (gh
+> comments, review threads, force-push, post-merge verdicts, feedback polling);
+> gitleaks/cargo-audit not installed; the Unix-only sandbox, liveness and hook
+> code never compiled on this machine (Linux/macOS CI is its first compile);
+> no `eval/baseline.jsonl`, so `eval.yml` does not gate yet.
+>
+> **Tests (per branch, local, Windows):** `wingman-autonomous` 567 on
+> #252 and 552 on #253 (478 at session 6); `wingman-cli` 275–279 unit + 17–19
+> smoke across branches. On GitHub the per-OS test jobs pass on #247–#252,
+> but the required-jobs gate is red on all of them because the `audit` job
+> fails (RUSTSEC-2026-0285 on the two checked); #253 was still running.
+
 ## Implementation status (Session 6 — as of 2026-08-19)
 
 > **Session 6 update (2026-08-19):** shipped in
@@ -233,117 +283,125 @@ Items are tagged with the git commit that landed them.
 | Phase 5 — Worktree integration & merge            | ✅ | `d7143f9` | `git worktree add`, per-task branches under `wingman/auto-tasks/`, squash-merge into `wingman/auto/<run-id>`, conflict halt |
 | Phase 6 — PR creation                             | ✅ | `86a659d` | `gh pr create` with `git push` + compare-URL fallback |
 | Phase 7 — TUI dashboard                           | ✅ | `3a15c71` | Renderer + `pilot status`/`pilot watch` CLIs via mtime polling. **Deferred:** deep wingman-tui integration (Ctrl+A, slash commands, in-app top-bar) — see M4 polish |
-| Phase 8 — Cross-provider validation + polish      | ✅ | `ade3984`, `5584db6` | Cost-cap (assign-time + budget watchdog), provider gate, retry watchdog, README provider-support table, end-to-end pipeline wired, e2e stub-provider test. **Deferred:** live 9-provider validation (needs user API keys) |
+| Phase 8 — Cross-provider validation + polish      | ✅ | `ade3984`, `5584db6` | Cost-cap (assign-time + budget watchdog), provider gate, retry watchdog, README provider-support table, end-to-end pipeline wired, e2e stub-provider test. **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** `wingman pilot validate-providers` runs one canned plan per configured provider through the real pipeline and worker spawner under USD/token caps, and writes `matrix.md`/`matrix.json`; a row passes only if the change is on the merged integration branch. **Unvalidated live:** no real provider has been run through it (no keys here); only skip rows and an unreachable-Ollama failure row were smoke-tested |
 
-### M2 (copilot tier) — E1–E8 and E10–E13 wired; E9 partial (speculative pre-spawn remains)
+### M2 (copilot tier) — every item wired on `main` in some form; the remaining halves are in #252/#247 (open)
 
 | Item | Status | Commit | Notes |
 | ---- | :----: | ------ | ----- |
 | E1 — Trust-tiered auto-approval         | ✅ | `1a686fd` | Auto / notify-only / hard tiers; cost + globset + dangerous_paths classifier |
 | E2 — Two-pass repo-aware planner        | ✅ | `aa7b335` | Grounding pass + draft + static critique + optional LLM rewrite |
 | E3 — Executable acceptance + self-verify| ✅ | `0bfd84d` | `run_acceptance` builtin tool + orchestrator gates Review→Done on green results |
-| E4 — Conflict avoidance + rebase-as-you-go + auto merge-fixer | ✅ **wired** | `scheduler.rs` | Logic + **live**: `orchestrator::handle_assign` rejects assigning a task whose `writes` overlap an in-progress task (`OrchestratorError::WriteConflict`), serialising them. **Deferred:** rebase-as-you-go + merge-fixer auto-spawn |
-| E5 — 4-rung retry ladder + per-turn check-gate | ✅ partial | `2fc9e63` | Rungs 1 (context), 2 (escalate model), 3 (splitter), 4 (Blocked) all implemented. **Deferred:** E5.5 per-turn `cargo check` gate (needs E11 checkpoint rollback to be useful) |
-| E6 — Cross-run learning + adaptive routing | ✅ **wired** | `learning.rs` | Logic + **live**: `pipeline.rs` appends a `StatRecord` per task to `~/.wingman/stats.jsonl` on every run (`record_run_stats`); **session 3** reads them back — the live worker spawner routes the base model per role via `learning::route_model`, and `pilot run` primes the planner with similar past runs via `learning::render_priming` + `planner::plan_from_goal_with_priming`. **Session 5** wired **per-role lessons file load**: `learning::load_lessons` + `render_lessons_appendix` + `role::load_role_prompt_with_lessons`, with the worker subprocess composing its prompt via the lessons-aware loader. **Deferred:** true first-try detection (still proxied by Done-status) |
-| E7 — Per-task reviewer                  | ✅ **wired** | `review.rs` | Logic + **live**: `pipeline::run_reviewer_pass` runs a reviewer agent per Done task (gated by the `per_task_reviewer` capability, on for copilot+); a Rework verdict feeds the E8 gate. **Deferred:** spawn it *during* the run on each Review transition (currently post-run) |
-| E8 — PR-side automation                 | ✅ **wired** | `automerge.rs` | Logic + **live**: `pipeline.rs` calls `decide_auto_merge` after PR open and issues `gh pr merge --squash --auto` when it passes (`decide_and_maybe_merge`); **session 3** plumbs real **CI status** via `gh pr checks --json state` (`query_ci_status`) into the gate. Per-task-review + critic signals already feed it. **Deferred:** `wingman review` inline PR comments |
-| E9 — Speculative dispatch + adaptive concurrency | ✅ partial | `concurrency.rs`: `recommended_concurrency` scales the cap from rate-limit/CPU/burn signals. **Deferred:** speculative pre-spawn of the next task |
+| E4 — Conflict avoidance + rebase-as-you-go + auto merge-fixer | ✅ **wired** / 🔶 fixer in PR | `scheduler.rs` | **On `main`:** `orchestrator::handle_assign` rejects a task whose `writes` overlap an in-progress task (`OrchestratorError::WriteConflict`); a squash-merge conflict is recorded as a visible merge-fixer task plus an R3 packet, and the run blocks. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** after the one-shot model rewrite fails, up to two merge-fixer *workers* run in a worktree at the integration tip with the conflicting task merged in (the second on the escalated model); a clean result is adopted and the run continues, and every conflict is a `run.conflict` event. Gated by the `merge_fixer` capability (copilot+). **Unvalidated live** (mock spawner only). **Not built:** rebase-as-you-go |
+| E5 — 4-rung retry ladder + per-turn check-gate | ✅ / 🔶 rollback in PR | `2fc9e63` | Rungs 1 (context), 2 (escalate model), 3 (splitter), 4 (Blocked) on `main`. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** E5.5 `RollbackGate` snapshots the worktree when the per-turn gate passes and restores it after `[pilot].turn_rollback_after` consecutive failures (`turn_rollback` capability, autopilot only); each attempt now writes a `task.attempt` event (rung, model, status, test counts). **Unvalidated live** |
+| E6 — Cross-run learning + adaptive routing | ✅ **wired** / 🔶 first-try in PR | `learning.rs` | **On `main`:** `record_run_stats` appends a `StatRecord` per task to `~/.wingman/stats.jsonl`; the worker spawner routes the base model per role via `learning::route_model`; `pilot run` primes the planner with similar past runs; per-role lessons files load into worker prompts (session 5). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** true first-try detection from `task.attempt` events (every attempt on rung 0, none failed) instead of the Done-status proxy. **In [#250](https://github.com/vedantnimbarte/Wingman/pull/250) (open):** pilot workers also record gate outcomes to `learn.db` and, with `[router].learned_min_samples` set, take the learned winner per role before E6 routing (never when escalating) |
+| E7 — Per-task reviewer                  | ✅ **wired** | `review.rs` | **On `main`:** the inline reviewer runs at the finalize choke point *during* the run (`orchestrator.rs`, gated by `per_task_reviewer`, copilot+); a Rework verdict sends the task back through the retry ladder. This row used to say post-run — that was stale. **Remaining:** a task batch-finalized by the pipeline rather than the manager skips the inline gate (`ponytail:` in `pipeline.rs`) |
+| E8 — PR-side automation                 | ✅ **wired** / 🔶 inline comments in PR | `automerge.rs` | **On `main`:** `decide_auto_merge` after PR open, `gh pr merge --squash --auto` when it passes, real CI status via `gh pr checks` (session 3). **In [#247](https://github.com/vedantnimbarte/Wingman/pull/247) (open):** `wingman review <pr> --comment [--dry-run]` posts findings as one inline review (anchored to new-side diff lines, the rest in the body), deduped only against reviews the gh user authored; and the daemon `pr_reviews` source reworks trusted reviewers' threads on pilot's own PRs, turning armed auto-merge off before pushing. **Unvalidated live:** no real PR, no gh call; first 100 threads/comments only |
+| E9 — Speculative dispatch + adaptive concurrency | ✅ partial / 🔶 rest in PR | `concurrency.rs` | **On `main`:** `recommended_concurrency` scales the cap from rate-limit/CPU/burn signals, but nothing fed it worker 429s or host load. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** provider 429/529s surface as `agent.rate_limit` events feeding a 60 s window, host CPU is sampled (`adaptive_concurrency`), and speculative pre-spawn warms the worktree and gate of a task whose deps are all in Review/Done (`speculative_prespawn`, copilot+), torn down on plan change. **Unvalidated live;** the Linux/macOS CPU samplers were not run on this machine |
 | E10 — Manager↔worker IPC                | ✅ **wired** | `ipc.rs`: `ManagerCommand` (pivot/cancel/clarify/**note**) + `WorkerMessage` (question/ack/blocked/**answer**). Transport wired in #30 (piped stdin, per-worker channel, `message_agent` delivery). **Session 6** added the operator surface: `ControlCommand::Tell` → watchdog resolves task → agent → `MessageAgent`, exposed as `pilot tell` / `pilot ask`, with the reply coming back as a `worker_msg:` event. **Deferred:** none |
-| E11 — Mandatory checkpoint hygiene      | ✅ **wired** | `checkpoint.rs` | Logic + **live**: `pipeline.rs` reads the event log and reports per-task hygiene violations in `PipelineOutcome.checkpoint_violations` (advisory). **Deferred:** make it a hard Review gate + worker-prompt mandate |
+| E11 — Mandatory checkpoint hygiene      | ✅ advisory / 🔶 hard gate in PR | `checkpoint.rs` | **On `main`:** `PipelineOutcome.checkpoint_violations` reports per-task violations (advisory). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** with `checkpoint_hygiene` (autopilot only) workers get a `checkpoint` tool and a prompt mandate, and `run_worker` fails an attempt that edits a second file before any checkpoint, before it can enter Review. **Unvalidated live** |
 | E12 — `--watch` mode                    | ✅ **wired** | `3a15c71` | `wingman pilot watch <id>` ships; **session 3** wired `--watch` into `pilot run` (`run_with_watch`) for an in-terminal compact tail of the in-process run via a `select!` loop |
 | E13 — Role lineup                       | ✅ | `33e4ab9` | All 6 roles shipped with default prompts (developer/designer/tester/reviewer/refactorer/merge-fixer) |
 
-### M3 (autopilot tier) — wired except J7/J13 (dropped) and the parts needing a Docker daemon or a live account
+### M3 (autopilot tier) — J7/J11/J12/J13 remaining halves in #253 (open), J6/J8/J10/J15 in #252 (open); none validated against live infrastructure
 
 | Item | Status | Notes |
 | ---- | :----: | ----- |
 | J1 — Goal refinement + challenge        | ✅ **wired** | `refine.rs`: parse clarify/challenge/restatement/alternatives; `decide` → Proceed / NotifyWindow / AskUser by confidence + `challenge_threshold`. **Live (session 3):** `pilot run` runs the refinement agent before E2 (gated by the `goal_refinement` capability, autopilot default); `refine_goal`/`ask_user_refinement` render the negotiation and feed the (possibly restated) goal into the run |
-| J2 — Daemon mode                        | ✅ **wired** | `daemon.rs` logic + `run_cycle`/`run_n_cycles` + **live `wingman pilot daemon` CLI command** (real poll loop: `run_cycle` on the configured interval, logs decisions, queues accepted candidates to `.wingman/daemon-queue.jsonl`; `--cycles N` for one-shot). Functions fully given a GitHub token. **Deferred:** auto-dispatching accepted goals into nested runs |
+| J2 — Daemon mode                        | ✅ **wired** / 🔶 additions in PR | **On `main`:** `wingman pilot daemon` poll loop over the configured sources, queue at `.wingman/daemon-queue.jsonl`, `--cycles N`, `--dry-run`, and `[pilot.daemon].auto_dispatch` — which has **never opened a real PR** ([#34](https://github.com/vedantnimbarte/Wingman/issues/34)). **In [#247](https://github.com/vedantnimbarte/Wingman/pull/247) (open):** a `pr_reviews` source (off by default). **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** `--watch` wake-ups (see J13). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** feedback polling on a cadence (see R2) |
 | J3 — Multi-channel intake               | ✅ **wired** | `intake.rs` normalization + `scan_inbox` (file-drop, fs-tested) + outbound `notify::send_webhook`. Inbound is `wingman serve` (authenticated HTTP API) or the file drop — a gateway writes into `[pilot.daemon].intake_dir` and the daemon consumes it. **Session 6:** the never-called `webhook.rs` receiver was **deleted** (#129); this row used to claim it as wired. **Deferred:** Slack/email *transports* ([#32](https://github.com/vedantnimbarte/Wingman/issues/32) — need live accounts) |
 | J4 — Mid-run interjection               | ✅ **wired** | **Session 6:** `pilot tell` / `pilot ask` ship as subcommands (see E10). The `interject.rs` design is superseded — it routed its own parser at the IPC layer; these route through the control file like every other cross-process command. The injection point was the per-turn `LearningHook`, not the new `AgentLoop` API #35 assumed. |
 | J5 — Proactive status reporting         | ✅ **wired** | `reporting.rs`: per-run start/mid(>50% est.)/complete/failure + daily standup + weekly summary renderers. **Live (session 3):** `pilot run` pushes a completion/failure report at run end, routed by severity through `[pilot.notifications]` (`report_run_outcome` → `notify::route`) to the terminal or the `.wingman/pilot-digest.jsonl` digest. **Deferred:** daemon-scheduled standup/weekly cron + Slack/email transports |
-| J6 — Real verification (run/screenshot/http) | ✅ partial | Added `Acceptance::Run` + `Acceptance::Assert` (screenshot text-contains) variants; sync runner executes both. **Deferred:** real browser/screenshot capture + async `http` runner |
-| J7 — Tool synthesis                     | ❌ not started | A logic-only `toolsynth.rs` was written and then removed (never had a caller; it wrote scaffolds and a registry line, not a live tool). Design retained in `docs/AUTONOMOUS-MODE.md`. |
-| J8 — Project knowledge graph            | ✅ logic | `knowledge.rs`: `Hotspots` (edit/conflict heat → scheduler bias), `decisions.jsonl` append/load, `render_architecture`. **Deferred:** knowledge-keeper agent that regenerates these post-merge |
+| J6 — Real verification (run/screenshot/http) | ✅ partial / 🔶 schema in PR | **On `main`:** `Acceptance::Run`, `Acceptance::Assert` (screenshot text-contains) and `Acceptance::Http` (status + body substring over curl). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** an optional `schema` on `http` checks — a built-in JSON-Schema subset (no new dependency); unsupported keywords such as `$ref` fail the check instead of being skipped. **Unvalidated** against a running server. **Not built:** real browser/screenshot capture in pilot acceptance |
+| J7 — Tool synthesis                     | 🔶 in PR | **On `main`:** not present (the logic-only `toolsynth.rs` was removed). **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** workers get `propose_tool` under `tool_synthesis` (autopilot only); a proposal is a `[[tools.custom]]` file in `.wingman/tools/`, approved against its exact content (auto only on autopilot in a trusted project, a hard gate elsewhere; `pilot tools list/approve/reject`), loaded on the next spawn, and run through `run_shell`'s guards. Sandboxed workers don't get it. **Unvalidated live:** no model has proposed a tool that a later worker called |
+| J8 — Project knowledge graph            | ✅ partial / 🔶 keeper in PR | **On `main`:** `knowledge.rs` + a deterministic `regenerate_knowledge` pass after the PR (architecture map + one decision record); hotspots computed but never persisted. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** `hotspots.json` accumulated from real edits and `run.conflict` events, a knowledge-keeper agent on the `summarize` class (`knowledge_keeper`, autopilot) rewriting the architecture summary and adding up to three decisions, and the planner prompt reading all of it back. **Unvalidated live;** hotspots double-count if a resumed run reaches the PR step twice |
 | J9 — Cost / time / risk estimation with confidence | ✅ **wired** | `estimate.rs` logic + **live**: `pilot.rs` prints the estimate banner before the approval decision. **Session 5** feeds real `CostSamples` from past runs' per-task USD (`estimate::cost_samples_from_runs` + `dashboard::load_all_run_states`), so the bands tighten and confidence rises once a project has history (graceful static-prior fallback with none). **Deferred:** none |
-| J10 — Critic agent                      | ✅ **wired** | `critic.rs` logic + **live**: `pipeline::run_critic_pass` runs a critic agent before the auto-merge gate (gated by the `critic` capability, autopilot default); a high+ risk vetoes auto-merge. **Deferred:** run it at plan-time too + force a different model family |
-| J11 — Sandboxed execution tiers         | ✅ **wired** | `sandbox.rs` (`select_tier`/`container_run_argv`/`run_in_container`/`docker_available`/`resolve_effective_tier`) + **live**: `pipeline::compute_sandbox_tiers` chooses each task's tier and **degrades container/vm→host when no Docker daemon is reachable** (graceful, tested); `run_in_container` invokes `docker run`. **Deferred (leaf):** a real Docker/Firecracker daemon + patch-back — needs Docker on the host |
-| J12 — Skill packs                       | ✅ logic | `skillpack.rs`: parse `owner/name@semver`, `SemVer::satisfies` caret rules, `PackManifest`, install-path resolution. **Deferred:** the git/local fetcher + installer |
-| J13 — Real-time watcher hooks           | ❌ not started | A logic-only `watcher.rs` was written and then removed (never had a caller; also shipped a `#!/bin/sh` git hook that could not run on Windows). Design retained in `docs/AUTONOMOUS-MODE.md`. |
-| J15 — Hard escalation triggers          | ✅ **wired** | `escalation.rs`: `check_runtime` already covered the numeric triggers (net-negative tests, cost ×0.8/×1.0, 3 consecutive failures, R1 irreversible). **Session 4** added the static detectors — `dangerous_path_triggers` (dangerous_paths hit the goal never mentions, via `goal_mentions_path`), `secret_triggers` (reuses `security::scan_secrets`), `license_header_triggers`, `force_push_trigger` (`is_pilot_namespace` guard) — plus `EscalationTrigger::blocks_auto_merge`. **Live:** `pipeline::detect_escalation_triggers` runs the plan+diff checks on the PR path and feeds `dangerous_paths_touched` + a blocking-trigger veto into the E8 auto-merge gate; surfaced in `PipelineOutcome.escalation_triggers`. **Deferred:** wiring `check_runtime` (needs test-count + prior-run-outcome telemetry) and force-push detection into the live git path; folding static triggers into the blocked-run escalation packet (R3) |
+| J10 — Critic agent                      | ✅ **wired** / 🔶 plan-time in PR | **On `main`:** `run_critic_pass` before the auto-merge gate (`critic`, autopilot); high+ risk vetoes auto-merge. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** `critic::review_plan` before the approval gate appends up to three `guardrail-N` tasks; `[pilot].critic_model`; `[pilot].critic_other_family` refuses to start when critic and worker share a model family (compares `worker_model` only, not adaptively routed models). **Unvalidated live** |
+| J11 — Sandboxed execution tiers         | ✅ host-degrade / 🔶 real tiers in PR | **On `main`:** tier selection, container/vm→host degrade, vm tasks refused; nothing actually ran in a container. **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** container workers via `docker run` (cpu/memory/pids/network limits, env forwarded by name only) and Firecracker vm workers (optional jailer), both on a copy of the worktree with a binary diff patched back only when the worker passes the completion gate (`.wingman/` and `.wingman-sandbox/` excluded from the apply); vm tasks added mid-run are refused rather than downgraded; `wingman doctor` shows tier availability. **Unvalidated:** never run against a real Docker daemon or KVM/Firecracker host; the Unix-only code has never been compiled locally (Linux/macOS CI is its first compile); a sandboxed worker's acceptance results are self-reported by design |
+| J12 — Skill packs                       | ✅ fetcher / 🔶 registry in PR | **On `main`:** spec parsing, caret semver, and `fetch_pack` (git clone of `v<version>` or local copy, no verification). **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** `[pilot.skills].index` (local or git), transitive dependency resolution (no backtracking), `ssh-keygen -Y verify` signatures against `~/.wingman/packs/allowed_signers` over version + file digest + deps, unsigned packs refused unless `--allow-unsigned`, install receipts, and `pilot skills install/search/list/verify/digest`. **Unvalidated live:** no git-hosted index or real pack repo; the real `ssh-keygen` round trip ran on Windows only |
+| J13 — Real-time watcher hooks           | 🔶 in PR | **On `main`:** not present (the logic-only `watcher.rs` with a `#!/bin/sh` hook was removed). **In [#253](https://github.com/vedantnimbarte/Wingman/pull/253) (open):** `pilot daemon --watch` wakes early on file changes (local sources only) and git events; `pilot hooks install/uninstall` writes hooks whose `#!` line is the wingman binary (no shell script), recording only in repos that already have `.wingman/watch/`; new `// ASK:` source (propose-only). Checked by hand on Windows with real Git; **Linux/macOS hook execution unvalidated** until CI, and a woken cycle has never auto-dispatched a run |
+| J15 — Hard escalation triggers          | ✅ static / 🔶 runtime in PR | **On `main`:** static detectors (dangerous paths, secrets, license headers) run on the PR path and veto auto-merge; `check_runtime` and force-push detection had no live caller. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** an `escalation_watchdog` fires triggers *during* the run (three prior failed runs, spend at 0.8×/1.0×, fewer passing tests than a base-commit baseline measured once per check, irreversible task, three failed attempts), each recorded once as `run.escalation` and shown as a desktop card; a rejected non-fast-forward push is force-pushed with a lease only inside `wingman/auto/*` and only when this clone has the remote tip, otherwise the run blocks. **Unvalidated live;** post-task test counts are worker-reported, and only runners the command-keyword guess recognises are counted |
 
-### R-series (production hardening) — R1/R3/R5/R6 wired; R2 has its poller; R4 logic-only
+### R-series (production hardening) — R1/R3/R5/R6 wired on `main`; R2 cadence, R3 attempts, R4 judge and R6 externals in #252 (open)
 
 | Item | Folds into | Status | Notes |
 | ---- | :--------: | :----: | ----- |
 | R1 — Reversibility classification     | M3 | ✅ **wired** | `escalation.rs` logic + **live**: `pilot.rs` approval path now calls `final_approval_tier` to layer R1 over E1 (irreversible→hard, hard→hard on copilot / notify-only on autopilot) |
-| R2 — Post-merge feedback loop         | M2 | ✅ logic + poller | `feedback.rs` + `Event::PrOutcome`: gh-state parse, `Revert "…"` detection, `WeightedStats`. `poll_pr_outcome` + `poll_and_record` (appends the `pr.outcome` event, mock-runner tested). **Deferred:** only the scheduling cadence that calls it + an optional webhook receiver |
-| R3 — Handoff packet                   | M2 | ✅ **wired** | `handoff.rs` logic + **live**: `pipeline.rs` writes `escalation.md` on a blocked run and surfaces its path; `PipelineOutcome.escalation_packet` + CLI prints it. **Session 5** populates the real J15 **triggers** in the packet — the blocked-run path runs `detect_escalation_triggers` and threads them into the `HandoffPacket` so the page names the reason. **Deferred:** retry-ladder `attempts` (needs E5 ladder telemetry) |
-| R4 — Eval / regression harness        | M2 | ✅ logic | `eval.rs`: `summarize` + `compare` (per-axis ±threshold regression detection, direction-aware) + markdown dashboard. **Deferred:** the canned-goal runner, LLM-judge, and CI gate wiring |
+| R2 — Post-merge feedback loop         | M2 | ✅ poller / 🔶 cadence in PR | **On `main`:** `feedback.rs`, `Event::PrOutcome`, `poll_and_record`, and the manual `pilot feedback` command. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** `pilot daemon` polls on `[pilot.daemon].feedback_poll_secs` (default 3600, 0 = off). **In [#250](https://github.com/vedantnimbarte/Wingman/pull/250) (open):** durable per-model verdicts (`wingman router backfill`: revert, CI red on the merge and still red on the next commit, reopened issue, blame survival) feed learned routing. **Unvalidated:** neither has polled a real PR |
+| R3 — Handoff packet                   | M2 | ✅ **wired** / 🔶 attempts in PR | **On `main`:** `escalation.md` on a blocked run with the J15 triggers (session 5). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** "What was tried" is filled from `task.attempt` events, and every blocked path (failed tasks, merge conflict, refused force-push) includes the triggers recorded during the run |
+| R4 — Eval / regression harness        | M2 | ✅ runner / 🔶 judge + CI in PR | **On `main`:** `summarize`/`compare` plus `pilot eval --goals`, with quality success-proxied (1.0/0.0). **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** goals can pin `golden_commit`/`golden_diff`; an LLM judge on the `judge` class scores the run's diff against it; `--baseline`; and `.github/workflows/eval.yml` (weekly + manual) fails on regression. **Not gating yet:** `eval/baseline.jsonl` is not committed (it has to come from a real paid run), the workflow has never run (needs `OPENROUTER_API_KEY` + `WINGMAN_EVAL_MODEL`), and the judge has never been called live |
 | R5 — Notification routing & digesting | M3 | ✅ **wired** | `notify.rs`: `route` per severity tier → Immediate/Digest/Suppress; `Digest` accumulator + flush. Added `[pilot.notifications]`. **Live (session 3):** `pilot run`'s end-of-run report is routed through `notify::route` (terminal delivery + `.wingman/pilot-digest.jsonl` queue). **Deferred:** real Slack/email channel senders + digest cron |
-| R6 — Security pass in PR pipeline     | M2 | ✅ **wired** | `security.rs` logic + **live**: `pipeline.rs` runs the built-in secrets scan over `git diff <base>..<integration>` (`run_security_pass`) and feeds `security_blocks` into the E8 auto-merge gate. Added `[pilot.security]`. **Deferred:** external `gitleaks`/`cargo audit` subprocess + license scan from lockfile + PR comment |
+| R6 — Security pass in PR pipeline     | M2 | ✅ **wired** / 🔶 externals in PR | **On `main`:** built-in secrets scan over the run's diff feeding `security_blocks` into the E8 gate. **In [#252](https://github.com/vedantnimbarte/Wingman/pull/252) (open):** gitleaks over the run's commits (`--redact`), `cargo audit` per changed `Cargo.lock`, a license scan of only the packages the run added (`denied_licenses` is Critical; `cargo metadata --locked`), scanner-missing notes instead of failures, and the summary posted as a PR comment (capped at 30 KB). **Unvalidated live:** no gitleaks or cargo-audit binary here, no real `gh pr comment` |
 
 ### Cumulative metrics
 
-As of session 6 (2026-08-19). The session-1 numbers this section used to carry
-were four sessions stale.
+As of session 7 (2026-09-15). `main` is 0.4.0; the session 7 work is in seven
+open PRs (#247–#253) and **none of it is merged**.
 
-- All of this is merged to `main`; the branch-ahead count it tracked is gone.
-- Tests: **478** in `wingman-autonomous`, **943** across the workspace.
-  478 is *down* from 514 on purpose — deleting the never-called webhook
-  receiver took ~14 tests over unreachable code with it, which is the point of
-  [#129](https://github.com/vedantnimbarte/Wingman/issues/129): the count now
-  tracks the live surface.
-- `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
-  and `cargo test --workspace` clean; CI green on Linux, macOS, and Windows.
-- `crates/wingman-autonomous/`: ~11,000 lines.
+- `main`: the session 6 figures (**478** in `wingman-autonomous`, **943**
+  across the workspace) are the last full-workspace count recorded here; they
+  were not recounted for 0.4.0.
+- Branches (local, Windows, per-crate runs, not a full-workspace count):
+  `wingman-autonomous` **567** on `feat/pilot-hardening`, **552** on
+  `feat/pilot-capabilities`, 518 on `feat/single-agent-roadmap` and
+  `feat/pr-review-loop`; `wingman-cli` 275–279 unit + 17–19 smoke. fmt and
+  `clippy -D warnings` clean on each branch's touched crates.
+- CI: per-OS test jobs pass on #247–#252; the required-jobs gate is red on all
+  six because the `audit` job fails (RUSTSEC-2026-0285 on the two checked).
+  #253 was still running when this was written.
 
-**What the numbers still don't cover.** Pilot is unit- and CI-tested, not
-end-to-end CI-tested: no canned goal runs against a live provider in CI (R4),
-so every "wired" above means "reachable and unit-tested", not "observed working
-against a real model". That gap is item 2 in the priorities below.
+**What the numbers still don't cover.** Pilot is unit-, mock- and CI-tested,
+not end-to-end tested: no goal has run against a live provider, no worker has
+run in a container or vm, and no gh call added this session has hit GitHub.
+Every "wired" and every "in #N" above means "reachable and tested with fakes",
+not "observed working against real infrastructure".
 
 ### Next-session priorities (suggested order)
 
-> Rewritten in session 6. The original list is satisfied — every item on it is
-> wired — so this is what is actually left, hardest-first.
+> Rewritten in session 7. Most of the session 6 list is now written, but it
+> lives in open PRs and none of it has met real infrastructure.
 
-1. **J11 container/vm tiers against a real Docker daemon.** `select_tier`,
-   `container_run_argv`, and the host-degrade path are tested, but nothing has
-   run in a container. The `vm` tier is fail-closed (pilot refuses vm-tier
-   tasks) and stays that way until it isn't a stub.
-2. **R4's canned-goal runner + CI gate.** `summarize`/`compare` exist; nothing
-   runs the goals or fails a build on regression. Without it, "pilot is
-   user-validated, not CI-validated" stays true.
-3. **E7 reviewer during the run** (it is post-run today) and **E11 as a hard
-   Review gate** (advisory today).
-4. **E4 rebase-as-you-go + merge-fixer auto-spawn.** Write-set serialisation
-   lands; the recovery half doesn't.
-5. **J8 knowledge-keeper.** `Hotspots` and `decisions.jsonl` are written and
-   read, but nothing regenerates them post-merge.
-6. **J12 pack fetcher/installer.** Parsing and semver resolution are done; the
-   git/local fetch is not.
-7. **E9 speculative pre-spawn** and **E5.5 per-turn check gate** — both want
-   telemetry that only real runs produce.
+1. **Unblock and land #247–#253.** Triage the `audit` failure
+   (RUSTSEC-2026-0285: fix, or a reasoned `deny.toml` ignore), let #253's CI
+   finish — it is the first Linux/macOS compile of the Unix-only sandbox,
+   liveness and hook code — and resolve overlaps: #250 and #253 both carry a
+   fix for the worker's `--model` precedence, and #250/#252/#253 all touch
+   `commands/pilot.rs` and `worker.rs`.
+2. **Commit an eval baseline and run `eval.yml` once** (needs
+   `OPENROUTER_API_KEY` + `WINGMAN_EVAL_MODEL`). Until then R4 does not gate
+   and "pilot is CI-validated" stays false.
+3. **`pilot validate-providers` against real keys**, then publish the matrix.
+4. **J11 against a real Docker daemon, then a KVM/Firecracker host**: an image
+   with `wingman`/`git`/`sh`, NDJSON over `docker run -i`, patch-back, `--user`
+   ownership, timeout cleanup; the guest init contract for vm.
+5. **One live pilot run end to end** on a throwaway repo, to exercise the
+   #252 paths only real runs produce — 429 adaptation, pre-spawn, turn
+   rollback, merge-fixer workers, runtime escalations, test-count baselines,
+   the security pass with gitleaks/cargo-audit installed — and #34's
+   `auto_dispatch`.
+6. **Real GitHub round trips:** `review --comment` on a PR, a `pr_reviews`
+   rework round, `router backfill` on merged pilot PRs, daemon feedback
+   polling.
+7. **Known leftovers:** E4 rebase-as-you-go; E7's batch-finalize bypass;
+   pages past 100 in the review-thread queries; the J10 family check against
+   adaptively routed models; hotspot and security-comment repeats on resume.
 
 ### Deferred items requiring user input
 
-- **Live 9-provider validation matrix** (Phase 8 item 4): code +
-  README table are in place. Pointing real API keys at Anthropic /
-  OpenAI / ChatGPT / Gemini / OpenRouter / LiteLLM / LM Studio /
-  vLLM / Ollama and running the canned `--version-only` plan needs
-  user credentials.
-- **GitHub token for R2**: the post-merge feedback poller (`pilot feedback`)
-  shells to `gh` and needs auth. The webhook alternative is no longer on the
-  table — that receiver was deleted in session 6; use `wingman serve` if an
-  endpoint is ever wanted.
+- **Provider API keys** for `pilot validate-providers` (#253), the eval judge
+  and workflow secrets (#252), and any live pilot run.
+- **GitHub activity** for R2 polling, `router backfill` verdicts (#250),
+  `review --comment` and `pr_reviews` (#247). Uses `gh` auth.
 - **Slack / email accounts** for the J3 transports and R5 senders
   ([#32](https://github.com/vedantnimbarte/Wingman/issues/32)).
 - **A provider key + throwaway repo** to validate `[pilot.daemon].auto_dispatch`
   before it is recommended ([#34](https://github.com/vedantnimbarte/Wingman/issues/34)).
   `pilot daemon --dry-run` covers the trust config safely; the nested run that
   opens a real PR has never executed.
-- **A Docker daemon** for the J11 container tier.
+- **A Docker daemon and a Linux KVM host** (kernel + rootfs, `firecracker`,
+  `mke2fs`) for the J11 tiers in #253.
+- **gitleaks and cargo-audit** installed where pilot runs, for the R6
+  externals in #252.
 
 ---
 

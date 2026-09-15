@@ -78,6 +78,24 @@ fn config_for(lang: Language) -> Option<HighlightConfiguration> {
             "",
             "",
         ),
+        Language::Cpp => (
+            tree_sitter_cpp::language(),
+            tree_sitter_cpp::HIGHLIGHT_QUERY,
+            "",
+            "",
+        ),
+        Language::Java => (
+            tree_sitter_java::language(),
+            tree_sitter_java::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
+        Language::Kotlin => (
+            tree_sitter_kotlin::language(),
+            tree_sitter_kotlin::HIGHLIGHTS_QUERY,
+            "",
+            "",
+        ),
     };
     let mut cfg =
         HighlightConfiguration::new(ts_lang, lang.label(), highlights, injections, locals).ok()?;
@@ -135,9 +153,12 @@ pub fn highlight(lang: Language, src: &str) -> Vec<Span> {
             Err(_) => break,
         }
     }
-    if out.is_empty() {
+    // An error mid-stream still owes the caller the rest of the text; a
+    // view built from these spans would otherwise end early.
+    let covered = out.last().map_or(0, |s| s.end_byte);
+    if covered < src.len() {
         out.push(Span {
-            start_byte: 0,
+            start_byte: covered,
             end_byte: src.len(),
             scope: None,
         });
@@ -164,4 +185,28 @@ pub fn highlight_html(lang: Language, src: &str) -> Option<String> {
         })
         .ok()?;
     Some(String::from_utf8_lossy(&renderer.html).into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_queries_compile_for_every_language() {
+        for lang in [
+            Language::Rust,
+            Language::Python,
+            Language::JavaScript,
+            Language::TypeScript,
+            Language::Tsx,
+            Language::Go,
+            Language::Cpp,
+            Language::Java,
+            Language::Kotlin,
+        ] {
+            assert!(config_for(lang).is_some(), "{lang:?} highlight query");
+        }
+        let spans = highlight(Language::Kotlin, "fun main() { val x = 1 }");
+        assert!(spans.iter().any(|s| s.scope.is_some()));
+    }
 }

@@ -534,6 +534,10 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
             Info,
             format!("{short_ts}  agent.usd    {} +${usd:.4}", nm(agent)),
         ),
+        Event::AgentRateLimited { agent, status, .. } => (
+            Warn,
+            format!("{short_ts}  agent.rate_limit {} HTTP {status}", nm(agent)),
+        ),
         Event::RunStatusEv { status, .. } => {
             let sev = match status {
                 RunStatus::Failed | RunStatus::Aborted => Error,
@@ -552,11 +556,43 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
                 &commit[..commit.len().min(8)]
             ),
         ),
+        Event::RunConflict { id, files, .. } => (
+            Warn,
+            format!("{short_ts}  run.conflict {id}: {}", files.join(", ")),
+        ),
         Event::RunPr { url, .. } => (Ok, format!("{short_ts}  run.pr       {url}")),
         Event::RunDone { .. } => (Ok, format!("{short_ts}  run.done")),
         Event::PrOutcome { kind, .. } => {
             (Info, format!("{short_ts}  pr.outcome   {}", kind.as_str()))
         }
+        Event::TaskAttempt {
+            id, rung, status, ..
+        } => (
+            if *status == TaskStatus::Failed {
+                Warn
+            } else {
+                Info
+            },
+            format!("{short_ts}  task.attempt {id} rung {rung} → {status:?}"),
+        ),
+        Event::Escalation { trigger, .. } => (
+            Warn,
+            format!("{short_ts}  escalation   {}", trigger.short_label()),
+        ),
+        Event::PrReviewRound {
+            round,
+            outcome,
+            addressed,
+            threads,
+            ..
+        } => (
+            Info,
+            format!(
+                "{short_ts}  pr.review   round {round} {outcome} ({}/{} threads)",
+                addressed.len(),
+                threads.len()
+            ),
+        ),
     };
     LogRow { text, severity }
 }

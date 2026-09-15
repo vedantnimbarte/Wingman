@@ -39,6 +39,8 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod planner;
 pub mod pr;
+pub mod pr_reviews;
+pub mod provider_matrix;
 pub mod provider_support;
 pub mod refine;
 pub mod reporting;
@@ -51,6 +53,7 @@ pub mod severity;
 pub mod skillpack;
 pub mod store;
 pub mod tools;
+pub mod watcher;
 pub mod worker;
 pub mod worktree;
 

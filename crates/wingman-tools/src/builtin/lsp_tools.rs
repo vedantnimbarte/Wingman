@@ -73,7 +73,7 @@ fn resolve_position(
 
 /// Common preamble: resolve+read-gate the path and fetch the language client.
 /// Returns `Err(ToolOutcome)` already-formed for the unavailable / denied cases.
-async fn client_for(
+pub(super) async fn client_for(
     ctx: &ToolCtx,
     raw_path: &str,
 ) -> Result<(PathBuf, std::sync::Arc<wingman_lsp::LspClient>), ToolOutcome> {
@@ -151,7 +151,7 @@ fn is_allowed_lsp_command(name: &str) -> bool {
     ALLOWED_SUFFIXES.contains(&tail)
 }
 
-fn rel(root: &Path, p: &Path) -> String {
+pub(super) fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root)
         .unwrap_or(p)
         .to_string_lossy()

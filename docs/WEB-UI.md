@@ -305,6 +305,27 @@ display is clamped. It reports a refusal rather than going quiet:
 `navigator.clipboard` is unavailable on a plain-HTTP non-loopback origin, which
 is exactly the phone-on-the-LAN case the panel exists for.
 
+**A conversation exports as a report** — the one `wingman session export`
+prints, with secrets redacted by the server. *Copy report* puts the Markdown on
+the clipboard for a PR or an issue (and says when the browser refuses); the
+`md`, `html` and `json` links are server downloads, sent with
+`Content-Disposition: attachment`, never `data:` or blob links, which a
+sandboxed page cannot open.
+
+**The timeline rewinds the files a conversation changed.** *Timeline* lists
+the files each turn of the session edited, and every restore, newest first —
+the same checkpoints the TUI's `/rewind` shows. Nothing is restored from a row:
+*Preview* shows what restoring to before that point would change, file by file
+with the diff (redacted by the server, since a repo holds `.env` files), and
+only *Restore* then asks, in a confirmation that says what it will do. A
+restore puts back every file touched since the point, whichever session
+touched it, which is why the preview comes first. It never deletes a
+checkpoint: it writes one of its own, which appears at the top of the timeline
+and is undone the same way. *Also truncate the conversation* is a separate,
+unticked box; it forks the transcript to before that turn and opens the fork,
+leaving the original as it was. A server whose ceiling cannot write refuses the
+restore.
+
 Long transcripts render the newest 150 records with the rest one click away, and
 the view stops auto-scrolling the moment you scroll up.
 
@@ -334,6 +355,13 @@ Cache reads and writes are reported per model. For anyone using prompt caching
 that is the interesting number — a repo that is 80% cache reads is paying a
 fraction of what its input count implies, which is why the totals and the bill
 can disagree in your favour.
+
+**Is it working** shows the metrics `docs/DIFFERENTIATION.md` says to track,
+from `GET /v1/projects/{p}/metrics`: median and p90 time to first token, tokens
+per completed task, the verified-done rate (with green and red receipts as the
+one other status-coloured bar on the page), and routing pass-rates by task class
+and model. Every figure carries its sample size; a rate with nothing to divide
+by is a dash, not 0%.
 
 **Recent runs, by spend**, gives cost the time dimension the lifetime total
 cannot: `cost` answers "what has this cost", not "what cost it". There is no

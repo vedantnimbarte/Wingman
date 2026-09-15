@@ -42,6 +42,8 @@ pub enum WorkerError {
     EarlyExit(Option<i32>),
     #[error("worker task timed out after {0:?}")]
     Timeout(Duration),
+    #[error("sandbox: {0}")]
+    Sandbox(String),
 }
 
 /// Spec for one worker launch. All paths absolute; relative paths confuse
@@ -67,6 +69,26 @@ pub struct WorkerSpec {
     /// line per command). `None` leaves the channel unused (stdin is closed
     /// so the child sees EOF).
     pub cmd_rx: Option<tokio::sync::mpsc::Receiver<crate::ipc::ManagerCommand>>,
+    /// E5 retry-ladder rung this attempt runs on (`SpawnContext::rung`),
+    /// recorded in the attempt's `task.attempt` event.
+    pub rung: u32,
+    /// E5.5 — consecutive failures of the worker's turn gate after which it
+    /// restores the worktree to the last state that passed the gate. 0 turns
+    /// rollback off. Forwarded as `--turn-rollback-after`.
+    pub turn_rollback_after: u32,
+    /// E11 — hold the attempt out of Review unless its recorded tool calls
+    /// satisfy checkpoint hygiene ([`crate::checkpoint::verify`]), and tell the
+    /// worker so in its prompt. Forwarded as `--checkpoint-hygiene`.
+    pub checkpoint_hygiene: bool,
+    /// J11 — run the worker in a container or Firecracker VM against a copy
+    /// of `worktree`, and apply its diff back when it completes. `None` runs
+    /// it on the host.
+    pub sandbox: Option<crate::sandbox::WorkerSandbox>,
+    /// J7 — register `propose_tool` on the worker, approving its proposals
+    /// at this tier ([`crate::approval::tool_synthesis_tier`]). `None` leaves
+    /// tool synthesis off. Ignored for a sandboxed worker, which runs against
+    /// a copy with no `.wingman/` and no trust store to write to.
+    pub tool_synthesis: Option<crate::approval::ApprovalTier>,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -105,33 +127,65 @@ pub async fn run_worker(
     // command channel (E10).
     let task_path = write_task_file(&spec.task, &spec.worktree)?;
 
-    let mut sc = SupervisedCommand::new(&spec.wingman_bin);
-    sc.command_mut()
-        .arg("--worker-mode")
-        .arg("--task-file")
-        .arg(&task_path)
-        .arg("--role")
-        .arg(spec.role.as_str())
-        .arg("--session-id")
-        .arg(&spec.session_id)
-        .arg("--worktree")
-        .arg(&spec.worktree)
-        .arg("--print") // signal headless to suppress TUI init
-        .arg("noop") // headless --print needs a prompt; the worker-mode
-        // entry runs before headless is invoked, so the
-        // value is never read
-        .arg("--json")
-        .current_dir(&spec.worktree);
+    // J11 — a sandboxed worker is the same `wingman --worker-mode`, run by
+    // docker/firecracker against a copy, with its paths as the guest sees
+    // them. Preparing copies the worktree (and packs a drive for a VM), so
+    // it runs off the async threads.
+    let sandbox_run = match spec.sandbox.clone() {
+        None => None,
+        Some(sb) => {
+            let guest = crate::sandbox::GUEST_WORK;
+            let args: Vec<String> = worker_args(
+                &spec,
+                format!("{guest}/.wingman/pilot/task-{}.json", spec.task.id).as_ref(),
+                guest.as_ref(),
+                None,
+            )
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+            let (worktree, session) = (spec.worktree.clone(), spec.session_id.clone());
+            let prepared = tokio::task::spawn_blocking(move || {
+                crate::sandbox::prepare(
+                    &sb,
+                    &worktree,
+                    &session,
+                    &args,
+                    &crate::pr::SystemCommandRunner,
+                    &std::env::temp_dir(),
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("sandbox setup panicked: {e}")));
+            match prepared {
+                Ok(run) => Some(run),
+                Err(e) => {
+                    let summary = format!("could not prepare the sandbox: {e}");
+                    record_failure(store, &spec, agent_id, summary.clone()).await;
+                    return Err(WorkerError::Sandbox(summary));
+                }
+            }
+        }
+    };
 
-    // Forward the resolved model. The worker `cd`s into the worktree, which
-    // does not contain the project's untracked `.wingman/config.toml`, so it
-    // cannot rediscover `pilot.worker_model` on its own — without this the
-    // child falls back to global config and dies with "no default_provider
-    // configured", deadlocking every run. `--model` (env WINGMAN_MODEL) is
-    // read as `opts.model_override` by worker-mode.
-    if let Some(model) = &spec.model {
-        sc.command_mut().arg("--model").arg(model);
-    }
+    let mut sc = match &sandbox_run {
+        Some(run) => {
+            let mut sc = SupervisedCommand::new(&run.program);
+            sc.command_mut().args(&run.args);
+            sc
+        }
+        None => {
+            let mut sc = SupervisedCommand::new(&spec.wingman_bin);
+            sc.command_mut().args(worker_args(
+                &spec,
+                task_path.as_os_str(),
+                spec.worktree.as_os_str(),
+                spec.tool_synthesis,
+            ));
+            sc
+        }
+    };
+    sc.command_mut().current_dir(&spec.worktree);
 
     let mut supervisor = sc.spawn()?;
     let pid = supervisor.pid();
@@ -275,6 +329,21 @@ pub async fn run_worker(
                     outcome = Some(o);
                     acceptance = a;
                 }
+                WorkerLine::RateLimited {
+                    status,
+                    retry_after_secs,
+                } => {
+                    let _ = store
+                        .lock()
+                        .await
+                        .append(Event::AgentRateLimited {
+                            t: RunStore::now(),
+                            agent: agent_id.to_string(),
+                            status,
+                            retry_after_secs,
+                        })
+                        .await;
+                }
                 WorkerLine::Unknown => {
                     tracing::debug!(target: "pilot::worker", "unrecognised worker line: {line}");
                 }
@@ -300,7 +369,7 @@ pub async fn run_worker(
             // summary", which is not something anyone can act on.
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!("worker stream ended abnormally: {e}"),
             )
@@ -314,7 +383,7 @@ pub async fn run_worker(
                 .ok();
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!(
                     "worker exceeded pilot.task_timeout_secs ({}s) and was terminated",
@@ -331,7 +400,7 @@ pub async fn run_worker(
         Err(e) => {
             record_failure(
                 store,
-                &spec.task.id,
+                &spec,
                 agent_id,
                 format!("could not reap the worker process: {e}"),
             )
@@ -340,6 +409,43 @@ pub async fn run_worker(
         }
     };
     let exit_code = status.code();
+
+    // J11 patch-back. Only a worker that would pass the E3 gate (clean exit,
+    // `task_complete`, green acceptance) gets its diff applied: a failed
+    // attempt leaves the host worktree exactly as it was. Committed here
+    // because the squash-merge reads the task branch, and the worker's own
+    // commits stayed in the copy. The task file goes first so that commit
+    // cannot pick it up.
+    if let Some(run) = sandbox_run {
+        let passes = compute_final_status(
+            &outcome,
+            status.success(),
+            &spec.task.acceptance,
+            &acceptance,
+        ) == TaskStatus::Review;
+        if passes {
+            let _ = std::fs::remove_file(&task_path);
+            let worktree = spec.worktree.clone();
+            let message = format!("pilot({}): sandboxed worker changes", spec.task.id);
+            let applied = tokio::task::spawn_blocking(move || {
+                crate::sandbox::patch_back(&run, &worktree, &crate::pr::SystemCommandRunner)
+                    .and_then(|changed| {
+                        if changed {
+                            crate::worktree::commit_checkpoint(&worktree, &message)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    })
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("patch-back panicked: {e}")));
+            if let Err(e) = applied {
+                let summary = format!("sandbox patch-back failed: {e}");
+                record_failure(store, &spec, agent_id, summary.clone()).await;
+                return Err(WorkerError::Sandbox(summary));
+            }
+        }
+    }
 
     // Salvage a silent-success worker. A worker can do everything right —
     // edit files, commit, pass every acceptance check — yet stop on
@@ -351,11 +457,11 @@ pub async fn run_worker(
     // they're all green, synthesize the outcome the worker never sent. This
     // doubles as a trust check — the parent now verifies acceptance itself
     // rather than taking the worker's self-report on faith.
-    let (outcome, acceptance) = if should_reverify(
-        outcome.is_some(),
-        status.success(),
-        &spec.task.acceptance,
-    ) {
+    // Never for a sandboxed worker: re-running its acceptance commands here
+    // would run them on the host, which is what the sandbox exists to avoid.
+    let (outcome, acceptance) = if spec.sandbox.is_none()
+        && should_reverify(outcome.is_some(), status.success(), &spec.task.acceptance)
+    {
         // Bounded by the task's own timeout rather than a constant: this is
         // usually the first compile in a brand-new worktree, and judging it
         // against 60s produced a red check for a tree that builds fine.
@@ -393,7 +499,7 @@ pub async fn run_worker(
     // E3 gate: if the task declared acceptance checks, the worker MUST
     // have returned green results in order to move to Review. Otherwise
     // the task lands in Failed for the retry watchdog to pick up.
-    let final_status = compute_final_status(
+    let mut final_status = compute_final_status(
         &outcome,
         status.success(),
         &spec.task.acceptance,
@@ -407,6 +513,19 @@ pub async fn run_worker(
             summary = %crate::acceptance::summarize(&acceptance),
             "acceptance checks failed; gating to Failed (E3)"
         );
+    }
+
+    // E11 gate: green multi-file work that never checkpointed does not enter
+    // Review either. It fails like a red check, so the retry ladder hands the
+    // next attempt the reason.
+    let hygiene_violation = if spec.checkpoint_hygiene && acceptance_green {
+        checkpoint_violation(store, &spec.task.id).await
+    } else {
+        None
+    };
+    if let Some(reason) = &hygiene_violation {
+        tracing::warn!(target: "pilot::worker", task = %spec.task.id, "{reason}; gating to Failed (E11)");
+        final_status = TaskStatus::Failed;
     }
 
     // A worker that fails the E3 gate without calling `task_complete` has no
@@ -425,7 +544,33 @@ pub async fn run_worker(
         }),
         (None, _) => None,
     };
+    let recorded_outcome = match hygiene_violation {
+        Some(reason) => Some(TaskOutcome {
+            summary: format!(
+                "{reason}; the work itself reported: {}",
+                recorded_outcome
+                    .as_ref()
+                    .map_or("nothing", |o| o.summary.as_str())
+            ),
+            files_changed: recorded_outcome
+                .map(|o| o.files_changed)
+                .unwrap_or_default(),
+        }),
+        None => recorded_outcome,
+    };
 
+    record_attempt(
+        store,
+        &spec,
+        agent_id,
+        final_status,
+        recorded_outcome
+            .as_ref()
+            .map(|o| o.summary.clone())
+            .unwrap_or_default(),
+        &acceptance,
+    )
+    .await;
     let _ = store
         .lock()
         .await
@@ -462,19 +607,55 @@ pub async fn run_worker(
     })
 }
 
+/// E11 — why the latest attempt on `task_id` may not enter Review under
+/// checkpoint hygiene, or `None` when it may. Reads the attempt's `task.tool`
+/// events, which the stdout parser has finished writing by the time the
+/// attempt ends. An unreadable log lets the attempt through: the gate is about
+/// recoverability, and failing finished work over a log read would cost more
+/// than it protects.
+async fn checkpoint_violation(
+    store: &tokio::sync::Mutex<RunStore>,
+    task_id: &str,
+) -> Option<String> {
+    let events = match store.lock().await.read_events().await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::warn!(target: "pilot::worker", task = %task_id, "checkpoint hygiene not checked: {e}");
+            return None;
+        }
+    };
+    match crate::checkpoint::verify(&crate::checkpoint::tool_calls_for_task(&events, task_id)) {
+        crate::checkpoint::CheckpointVerdict::Ok => None,
+        crate::checkpoint::CheckpointVerdict::Violation { reason } => Some(format!(
+            "checkpoint hygiene: {reason}. Call the `checkpoint` tool before editing a second \
+             file"
+        )),
+    }
+}
+
 /// Record a task failure that carries an explanation.
 ///
 /// Every early return in `run_worker` used to leave the run log silent, so a
 /// dead worker looked identical to a worker that had simply not finished yet.
 /// The retry ladder then reported "failed without outcome summary" to the next
 /// rung, which re-ran the same work blind.
-async fn record_failure(
+pub async fn record_failure(
     store: &tokio::sync::Mutex<RunStore>,
-    task_id: &str,
+    spec: &WorkerSpec,
     agent_id: &str,
     summary: String,
 ) {
+    let task_id = &spec.task.id;
     tracing::warn!(target: "pilot::worker", task = %task_id, "{summary}");
+    record_attempt(
+        store,
+        spec,
+        agent_id,
+        TaskStatus::Failed,
+        summary.clone(),
+        &[],
+    )
+    .await;
     let mut guard = store.lock().await;
     let _ = guard
         .append(Event::TaskStatus {
@@ -496,6 +677,38 @@ async fn record_failure(
         .await;
 }
 
+/// E5/R3 — record how this attempt ended, with the passing-test counts its
+/// test-running checks reported (J15). Written before the attempt's final
+/// `task.status`: the retry ladder reassigns on that status and kills this
+/// attempt's task as it does, so anything written after it can be lost.
+async fn record_attempt(
+    store: &tokio::sync::Mutex<RunStore>,
+    spec: &WorkerSpec,
+    agent_id: &str,
+    status: TaskStatus,
+    summary: String,
+    results: &[crate::acceptance::AcceptanceResult],
+) {
+    let tests = results
+        .iter()
+        .filter_map(|r| r.passed_tests.map(|n| (r.label.clone(), n)))
+        .collect();
+    let _ = store
+        .lock()
+        .await
+        .append(Event::TaskAttempt {
+            t: RunStore::now(),
+            id: spec.task.id.clone(),
+            agent: agent_id.to_string(),
+            rung: spec.rung,
+            model: spec.model.clone(),
+            status,
+            summary,
+            tests,
+        })
+        .await;
+}
+
 /// One parsed line from the worker's stdout.
 enum WorkerLine {
     AgentEvent(wingman_core::AgentEvent),
@@ -507,6 +720,12 @@ enum WorkerLine {
     TaskComplete {
         outcome: TaskOutcome,
         acceptance: Vec<crate::acceptance::AcceptanceResult>,
+    },
+    /// E9 — the worker's provider answered 429 / 529. Emitted by the worker
+    /// shim for every such response, including ones the provider retried.
+    RateLimited {
+        status: u16,
+        retry_after_secs: Option<u32>,
     },
     Unknown,
 }
@@ -641,6 +860,13 @@ fn parse_line(line: &str) -> WorkerLine {
                         acceptance,
                     }
                 }
+                "rate_limited" => WorkerLine::RateLimited {
+                    status: v.get("status").and_then(|x| x.as_u64()).unwrap_or(429) as u16,
+                    retry_after_secs: v
+                        .get("retry_after_secs")
+                        .and_then(|x| x.as_u64())
+                        .map(|n| n.min(u64::from(u32::MAX)) as u32),
+                },
                 _ => WorkerLine::Unknown,
             };
         }
@@ -792,7 +1018,7 @@ pub async fn drive_stdout_for_test(
             WorkerLine::TaskComplete { outcome: o, .. } => {
                 outcome = Some(o);
             }
-            WorkerLine::Unknown => {}
+            WorkerLine::RateLimited { .. } | WorkerLine::Unknown => {}
         }
     }
     let final_status = if outcome.is_some() {
@@ -822,6 +1048,59 @@ pub async fn drive_stdout_for_test(
     Ok(outcome)
 }
 
+/// `wingman` arguments for one worker, shared by the host spawn and the
+/// sandbox script (which passes guest paths).
+fn worker_args(
+    spec: &WorkerSpec,
+    task_file: &std::ffi::OsStr,
+    worktree: &std::ffi::OsStr,
+    tool_synthesis: Option<crate::approval::ApprovalTier>,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--worker-mode".into(),
+        "--task-file".into(),
+        task_file.into(),
+        "--role".into(),
+        spec.role.as_str().into(),
+        "--session-id".into(),
+        spec.session_id.as_str().into(),
+        "--worktree".into(),
+        worktree.into(),
+        // Signals headless to suppress TUI init. Headless `--print` needs a
+        // prompt, but the worker-mode entry runs first, so it is never read.
+        "--print".into(),
+        "noop".into(),
+        "--json".into(),
+    ];
+    // Forward the resolved model. The worker `cd`s into the worktree, which
+    // does not contain the project's untracked `.wingman/config.toml`, so it
+    // cannot rediscover `pilot.worker_model` on its own — without this the
+    // child falls back to global config and dies with "no default_provider
+    // configured", deadlocking every run. `--model` (env WINGMAN_MODEL) is
+    // read as `opts.model_override` by worker-mode.
+    if let Some(model) = &spec.model {
+        args.extend(["--model".into(), model.into()]);
+    }
+    // Like the model, the tier that decides these lives in project config the
+    // worker cannot see from inside its worktree.
+    if spec.turn_rollback_after > 0 {
+        args.extend([
+            "--turn-rollback-after".into(),
+            spec.turn_rollback_after.to_string().into(),
+        ]);
+    }
+    if spec.checkpoint_hygiene {
+        args.push("--checkpoint-hygiene".into());
+    }
+    // Decided here, not in the worker: the worker's config comes from inside
+    // the worktree, so it sees neither `pilot run --tier` nor the project
+    // config the trust decision is about.
+    if let Some(tier) = tool_synthesis {
+        args.extend(["--tool-synthesis".into(), tier.to_string().into()]);
+    }
+    args
+}
+
 fn write_task_file(task: &Task, worktree: &Path) -> Result<PathBuf, WorkerError> {
     // Put the task JSON inside the worktree's .wingman/ subdir so it's
     // visible to the worker without needing extra env vars.
@@ -837,6 +1116,74 @@ fn write_task_file(task: &Task, worktree: &Path) -> Result<PathBuf, WorkerError>
 mod tests {
     use super::*;
     use crate::model::Role;
+
+    /// The host spawn and the sandbox script share one argument list; the
+    /// sandbox only swaps in guest paths.
+    #[test]
+    fn worker_args_carry_paths_and_model() {
+        let spec = |model: Option<&str>| WorkerSpec {
+            wingman_bin: PathBuf::from("wingman"),
+            task: Task::new("t1", Role::Developer, "x"),
+            role: Role::Developer,
+            worktree: PathBuf::from("w"),
+            session_id: "s1".into(),
+            model: model.map(Into::into),
+            timeout: Duration::from_secs(1),
+            cmd_rx: None,
+            rung: 0,
+            turn_rollback_after: 0,
+            checkpoint_hygiene: false,
+            sandbox: None,
+            tool_synthesis: None,
+        };
+        let strings = |args: Vec<std::ffi::OsString>| {
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let args = |model| {
+            strings(worker_args(
+                &spec(model),
+                "/work/.wingman/pilot/task-t1.json".as_ref(),
+                "/work".as_ref(),
+                None,
+            ))
+        };
+        let with = args(Some("m1"));
+        assert_eq!(
+            &with[..3],
+            [
+                "--worker-mode",
+                "--task-file",
+                "/work/.wingman/pilot/task-t1.json"
+            ]
+        );
+        let at = |flag: &str| &with[with.iter().position(|a| a == flag).unwrap() + 1];
+        assert_eq!(at("--role"), "developer");
+        assert_eq!(at("--session-id"), "s1");
+        assert_eq!(at("--worktree"), "/work");
+        assert_eq!(&with[with.len() - 2..], ["--model", "m1"]);
+        assert!(!args(None).iter().any(|a| a == "--model"));
+        assert!(!with.iter().any(|a| a == "--tool-synthesis"));
+        assert!(!with.iter().any(|a| a == "--checkpoint-hygiene"));
+
+        let synth = strings(worker_args(
+            &spec(None),
+            "t".as_ref(),
+            "w".as_ref(),
+            Some(crate::approval::ApprovalTier::Hard),
+        ));
+        assert_eq!(&synth[synth.len() - 2..], ["--tool-synthesis", "hard-gate"]);
+
+        let mut gated = spec(None);
+        gated.turn_rollback_after = 3;
+        gated.checkpoint_hygiene = true;
+        let gated = strings(worker_args(&gated, "t".as_ref(), "w".as_ref(), None));
+        assert_eq!(
+            &gated[gated.len() - 3..],
+            ["--turn-rollback-after", "3", "--checkpoint-hygiene"]
+        );
+    }
 
     /// Phase 3 acceptance (plan.md line 638): a single task executes
     /// end-to-end, events stream into tasks.jsonl, run exits cleanly.
@@ -1059,6 +1406,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_recognises_rate_limited() {
+        match parse_line(r#"{"event":"rate_limited","status":529,"retry_after_secs":12}"#) {
+            WorkerLine::RateLimited {
+                status,
+                retry_after_secs,
+            } => {
+                assert_eq!(status, 529);
+                assert_eq!(retry_after_secs, Some(12));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+        assert!(matches!(
+            parse_line(r#"{"event":"rate_limited","status":429}"#),
+            WorkerLine::RateLimited {
+                retry_after_secs: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn parse_line_handles_agent_event() {
         let line = r#"{"type":"text_delta","text":"hello"}"#;
         match parse_line(line) {
@@ -1075,6 +1443,7 @@ mod tests {
                 WorkerLine::AgentEvent(_) => write!(f, "AgentEvent"),
                 WorkerLine::WorkerStart { .. } => write!(f, "WorkerStart"),
                 WorkerLine::TaskComplete { .. } => write!(f, "TaskComplete"),
+                WorkerLine::RateLimited { .. } => write!(f, "RateLimited"),
                 WorkerLine::Unknown => write!(f, "Unknown"),
             }
         }
@@ -1092,7 +1461,22 @@ mod tests {
             .unwrap();
         let store = tokio::sync::Mutex::new(store);
 
-        record_failure(&store, "t1", "agent-0001", "worker exceeded 1800s".into()).await;
+        let spec = WorkerSpec {
+            wingman_bin: PathBuf::from("wingman"),
+            task: Task::new("t1", Role::Developer, "x"),
+            role: Role::Developer,
+            worktree: dir.path().to_path_buf(),
+            session_id: "s".into(),
+            model: Some("haiku".into()),
+            timeout: Duration::from_secs(1800),
+            cmd_rx: None,
+            rung: 2,
+            turn_rollback_after: 0,
+            checkpoint_hygiene: false,
+            sandbox: None,
+            tool_synthesis: None,
+        };
+        record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 
         let guard = store.lock().await;
         let task = guard.state().task("t1");
@@ -1106,6 +1490,62 @@ mod tests {
 {log}"
         );
         assert!(log.contains("\"status\":\"failed\""));
+        // The ladder telemetry lands first, so the reassign the failed status
+        // triggers cannot cut it off.
+        let attempt = log
+            .find("\"ev\":\"task.attempt\"")
+            .expect("attempt recorded");
+        let status = log.find("\"ev\":\"task.status\"").expect("status recorded");
+        assert!(attempt < status, "{log}");
+        assert!(log.contains("\"rung\":2") && log.contains("\"model\":\"haiku\""));
+    }
+
+    /// E11: multi-file work reaches Review only when this attempt checkpointed.
+    #[tokio::test]
+    async fn checkpoint_violation_reads_the_attempts_tool_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RunStore::create(dir.path(), "r1", "goal", "base", "branch")
+            .await
+            .unwrap();
+        let store = tokio::sync::Mutex::new(store);
+        let tool = |name: &str, file: &str| Event::TaskTool {
+            t: RunStore::now(),
+            id: "t1".into(),
+            agent: "agent-0001".into(),
+            tool: name.into(),
+            input_hash: None,
+            file: Some(file.into()),
+            ok: true,
+        };
+        for ev in [tool("edit_file", "a.rs"), tool("write_file", "b.rs")] {
+            store.lock().await.append(ev).await.unwrap();
+        }
+        let reason = checkpoint_violation(&store, "t1").await.expect("violation");
+        assert!(
+            reason.contains("rule 1") && reason.contains("`checkpoint` tool"),
+            "{reason}"
+        );
+
+        // The retry checkpoints first and passes.
+        store
+            .lock()
+            .await
+            .append(Event::TaskAssign {
+                t: RunStore::now(),
+                id: "t1".into(),
+                agent: "agent-0002".into(),
+                worktree: "wt".into(),
+            })
+            .await
+            .unwrap();
+        for ev in [
+            tool("checkpoint", ""),
+            tool("edit_file", "a.rs"),
+            tool("write_file", "b.rs"),
+        ] {
+            store.lock().await.append(ev).await.unwrap();
+        }
+        assert_eq!(checkpoint_violation(&store, "t1").await, None);
     }
 
     /// Observed on run 2026-08-21-1920-xoyw4q: t1 declared three acceptance
@@ -1140,6 +1580,7 @@ mod tests {
             label: "grep version_only".into(),
             ok: false,
             output: "no match".into(),
+            passed_tests: None,
         }];
         let s = failure_summary(&results, &declared, Some(1), None);
         assert!(s.starts_with("acceptance checks failed:"), "{s}");
@@ -1185,6 +1626,7 @@ mod tests {
             label: "grep version_only in src/args.rs".into(),
             ok: false,
             output: "no match".into(),
+            passed_tests: None,
         }];
         let summary = format!(
             "acceptance checks failed: {}",

@@ -29,6 +29,51 @@ pub struct Selection {
     pub model: String,
 }
 
+impl Selection {
+    /// `provider/model`, the form config and `--model` take. Routing rows are
+    /// keyed by it so a learned pick resolves back onto the provider that
+    /// earned it, not onto whichever provider is the default.
+    pub fn spec(&self) -> String {
+        format!("{}/{}", self.provider_id, self.model)
+    }
+}
+
+/// Learned routing (`[router].learned_min_samples`): the model that has won
+/// `class` in `repo`. `None` when learned routing is off, when no model has
+/// enough samples yet, or when `learn.db` cannot be read — never an error,
+/// because the static choice it would have replaced still stands.
+pub fn learned_model(cfg: &Config, class: &str, repo: &str) -> Option<String> {
+    let min_samples = cfg.router.learned_min_samples?;
+    let winner = wingman_learn::StatsStore::open_default().and_then(|store| {
+        store.learned_winner(class, repo, min_samples, |spec| {
+            learned_model_usable(cfg, spec)
+        })
+    });
+    match winner {
+        Ok(Some(model)) => {
+            tracing::info!("learned routing: class '{class}' -> {model}");
+            Some(model)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("learned routing unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// Whether a recorded `provider/model` can still run under `cfg`. Without
+/// this, a winner whose provider was since removed would be handed whole to
+/// the default provider as a model id, and one on a cloud provider would fail
+/// every session once `[privacy].local_only` is on.
+fn learned_model_usable(cfg: &Config, spec: &str) -> bool {
+    spec.split_once('/').is_some_and(|(provider, model)| {
+        !model.is_empty()
+            && cfg.providers.contains_key(provider)
+            && (!cfg.privacy.local_only || provider_is_local(cfg, provider))
+    })
+}
+
 /// Parse a model string. Either `provider/model` (preferred) or bare
 /// `model` (uses `default_provider` from config).
 pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selection> {
@@ -436,6 +481,38 @@ pub fn api_key_env_var(provider_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Why `provider_id` has no credential to call with, or `None` when it has one
+/// (or, like a local server, needs none). Looks where [`build_provider`] looks
+/// (config value, keyring marker, environment) without building anything,
+/// because the OpenAI-compatible adapter builds fine with no key and only
+/// fails on its first request. `env` stands in for `std::env::var`.
+pub fn missing_credential(
+    cfg: &Config,
+    provider_id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let from_config = cfg
+        .providers
+        .get(provider_id)
+        .and_then(|pc| pc.api_key.as_deref());
+    if check_config_value(from_config).is_some() {
+        return None;
+    }
+    let set = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+    let found = match provider_id {
+        "chatgpt" => {
+            set("CHATGPT_ACCESS_TOKEN") || secrets::load("chatgpt").ok().flatten().is_some()
+        }
+        "gemini" => set("GOOGLE_API_KEY") || set("GEMINI_API_KEY"),
+        "watsonx" => set("WATSONX_API_KEY") || set("WATSONX_ACCESS_TOKEN"),
+        id => api_key_env_var(id).is_none_or(set),
+    };
+    (!found).then(|| match api_key_env_var(provider_id) {
+        Some(name) => format!("no credential: set {name} or run `wingman login {provider_id}`"),
+        None => format!("no credential: run `wingman login {provider_id}`"),
+    })
+}
+
 fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> {
     if let Some(key) = check_config_value(from_config) {
         return Ok(key);
@@ -608,6 +685,8 @@ pub(crate) fn base_registry(
     // through, and a setting applied per-caller is how `disabled_tools`
     // shipped broken twice.
     let ctx = ctx.with_ask_timeout(cfg.tools.ask_user_desktop_timeout_secs);
+    let synthesized =
+        approved_synthesized_tools(&ctx.project_root, cfg, wingman_config::trust::is_trusted);
     let reg = ToolRegistry::new(ctx)
         .with_builtins()
         .with_hooks(cfg.hooks.clone())
@@ -619,6 +698,7 @@ pub(crate) fn base_registry(
             cfg.tools.repeat_exempt.clone(),
         )
         .with_custom_tools(&cfg.tools.custom)
+        .with_synthesized_tools(&synthesized)
         .with_deferred(cfg.tools.defer.clone());
 
     // Air-gapped guard: hard-remove the network tools so no code leaves the
@@ -629,6 +709,37 @@ pub(crate) fn base_registry(
         reg.unregister("web_search");
     }
     reg
+}
+
+/// The J7 synthesized tools this registry may carry: those under the owning
+/// project's `.wingman/tools/` whose content `approved` accepts (the trust
+/// store, in production).
+///
+/// The owning project, because a pilot worker's root is its worktree, which
+/// holds no `.wingman/tools/` and is deleted after the task — the tool one
+/// worker proposed has to be visible to the next one.
+///
+/// None at all when `run_shell` is excluded: a synthesized tool is a shell
+/// command under a name, so carrying it would hand back the shell that
+/// `[tools].disabled_tools` or a preset took away.
+fn approved_synthesized_tools(
+    project_root: &std::path::Path,
+    cfg: &Config,
+    approved: impl Fn(&std::path::Path) -> bool,
+) -> Vec<wingman_config::CustomToolConfig> {
+    let removals = ToolRemovals::new(
+        cfg.tools.preset_keep_list(),
+        cfg.tools.disabled_tools.clone(),
+    );
+    if removals.excludes("run_shell") {
+        return Vec::new();
+    }
+    let root = wingman_config::find_owning_project_root(project_root);
+    wingman_config::synthesized_tools(&root)
+        .into_iter()
+        .filter(|t| approved(&t.path))
+        .map(|t| t.tool)
+        .collect()
 }
 
 /// Register `tool_search` / `tool_call` when `[tools].defer` actually hides
@@ -773,11 +884,21 @@ const PENDING_DRAIN_LIMIT: usize = 25;
 ///
 /// Returns `None` (with a warning) if the store can't be opened, so a broken
 /// `.wingman/` degrades to a session without memory rather than a hard failure.
-pub fn build_learn(paths: &ProjectPaths, session_id: String) -> Option<Arc<LearnHandles>> {
-    let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+pub fn build_learn(
+    cfg: &Config,
+    paths: &ProjectPaths,
+    session_id: String,
+) -> Option<Arc<LearnHandles>> {
+    let mut learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+    learn_cfg.search_hint_tokens = cfg.learn.search_hint_tokens;
     // Give the learn hook the project index so it can inject relevant code
-    // locations per turn (search escalation). Cheap: opens the store, no reindex.
-    let learn_indexer = build_indexer(paths).ok().flatten();
+    // locations per turn (search escalation). Cheap: opens the store, no
+    // reindex. Not opened at all when `[learn].search_hint_tokens = 0`.
+    let learn_indexer = if learn_cfg.search_hint_tokens == 0 {
+        None
+    } else {
+        build_indexer(paths).ok().flatten()
+    };
     match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
         Ok(h) => Some(Arc::new(h)),
         Err(e) => {
@@ -804,6 +925,23 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
             e @ (wingman_rag::RagError::DimMismatch { .. }
             | wingman_rag::RagError::EmbedderChanged { .. }),
         ) => {
+            // A live `indexd` owns this database and keeps writing to it.
+            // Deleting it here would pull the file out from under the daemon
+            // (or fail outright on Windows), so leave its index alone and let
+            // the user restart the daemon with the embedder they want. The
+            // daemon itself claims the pidfile before it opens the index, so
+            // its own pid is not a reason to refuse: it is the one restarted
+            // to do this rebuild.
+            if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir)
+                .filter(|&pid| pid != std::process::id())
+            {
+                eprintln!(
+                    "wingman: the semantic index kept by indexd (pid {pid}) was built by a \
+                     different embedder ({e}); `semantic_search` is disabled this session. \
+                     Restart it with `wingman indexd stop` then `wingman indexd start`."
+                );
+                return Ok(None);
+            }
             // Both mean the same thing operationally — the vectors on disk were
             // produced by something this session cannot reproduce — so both
             // rebuild. They are reported apart because "4-dim vs 4-dim" is what
@@ -978,11 +1116,11 @@ impl TurnGate for ShellTurnGate {
 }
 
 /// Runs the tests of the crates changed this turn (via `git`), not the whole
-/// suite. Discovers changed crates at check-time so it tracks whatever the
-/// agent edited. A no-op (passes) when nothing relevant changed.
-///
-/// ponytail: crate-level granularity, not symbol→test mapping. Upgrade path is
-/// mapping edited symbols to the specific tests that reference them.
+/// suite, narrowed to the tests that reference the symbols edited this turn
+/// when that mapping can be made (see [`crate::symbols::narrow_to_tests`]).
+/// Discovers changes at check-time so it tracks whatever the agent edited. A
+/// no-op (passes) when nothing relevant changed. The receipt names the method
+/// that mapped the tests, or why the whole changed crates ran.
 pub struct AffectedTestsGate {
     root: std::path::PathBuf,
 }
@@ -1001,63 +1139,88 @@ impl TurnGate for AffectedTestsGate {
                 summary: "affected tests: none (no changed Rust crates)".into(),
             };
         }
-        let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
 
-        // Safe symbol-level narrowing: map the diff to the symbols it edited,
-        // then run ONLY the tests whose names match an edited symbol — but
-        // first confirm (via `cargo test -- --list`) that at least one test
-        // actually matches. If none do, fall back to the whole changed crate.
-        // This never runs zero tests under the guise of "passing" (the
-        // false-green trap): narrowing is a pure speed win when it applies and a
-        // no-op otherwise.
-        let symbols = edited_symbol_names(&self.root);
-        let mut narrowed_to: Vec<String> = Vec::new();
-        if !symbols.is_empty() {
-            if let Some(all_tests) = list_tests(&self.root, &pkg_flags).await {
-                narrowed_to = symbols
-                    .iter()
-                    .filter(|s| all_tests.iter().any(|t| t.contains(s.as_str())))
-                    .cloned()
-                    .collect();
+        // Narrowing is a pure speed win when it applies and the whole changed
+        // crate otherwise: every narrowed name comes from `cargo test --
+        // --list`, so it never runs zero tests under the guise of "passing"
+        // (the false-green trap).
+        let (symbols, narrowed) = narrow_to_tests(&self.root, &crates).await;
+        let (cmd, note) = match narrowed {
+            Ok(n) => {
+                let pkg_flags: String = n.crates.iter().map(|c| format!(" -p {c}")).collect();
+                let names: String = n.tests.iter().map(|t| format!(" {t}")).collect();
+                (
+                    format!("cargo test --quiet{pkg_flags} -- --exact{names}"),
+                    format!(
+                        "narrowed via {} to {} test(s) referencing them: {}",
+                        n.via,
+                        n.tests.len(),
+                        shortlist(&n.tests)
+                    ),
+                )
             }
-        }
-
-        let cmd = if narrowed_to.is_empty() {
-            format!("cargo test --quiet{pkg_flags}")
-        } else {
-            let filters: String = narrowed_to.iter().map(|s| format!(" {s}")).collect();
-            format!("cargo test --quiet{pkg_flags}{filters}")
+            Err(why) => {
+                let pkg_flags: String = crates.iter().map(|c| format!(" -p {c}")).collect();
+                (
+                    format!("cargo test --quiet{pkg_flags}"),
+                    format!("crate-level: {why} — ran the whole changed crate(s)"),
+                )
+            }
         };
         let mut report = run_check_cmd(&cmd, &self.root).await;
-
-        if !symbols.is_empty() {
-            let shown: Vec<&str> = symbols.iter().take(12).map(String::as_str).collect();
-            let more = symbols.len().saturating_sub(shown.len());
-            let narrow_note = if narrowed_to.is_empty() {
-                " (no test names matched — ran the whole changed crate)".to_string()
-            } else {
-                format!(" → narrowed to tests matching: {}", narrowed_to.join(", "))
-            };
-            report.summary = format!(
-                "edited symbols: {}{}{}\n{}",
-                shown.join(", "),
-                if more > 0 {
-                    format!(" (+{more})")
-                } else {
-                    String::new()
-                },
-                narrow_note,
-                report.summary
-            );
-        }
+        let edited = if symbols.is_empty() {
+            String::new()
+        } else {
+            format!("edited symbols: {}\n", shortlist(&symbols))
+        };
+        report.summary = format!("{edited}{note}\n{}", report.summary);
         report
     }
+}
+
+/// Up to 12 names, then a `(+n)` count.
+fn shortlist(names: &[String]) -> String {
+    let shown = names
+        .iter()
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match names.len().saturating_sub(12) {
+        0 => shown,
+        more => format!("{shown} (+{more})"),
+    }
+}
+
+/// Tests narrowed from this turn's edited symbols.
+#[cfg_attr(not(feature = "treesitter"), allow(dead_code))]
+pub(crate) struct Narrowed {
+    /// Which method found the referencing tests.
+    pub via: &'static str,
+    /// Packages to test: the changed crates plus any crate a referencing test
+    /// lives in.
+    pub crates: Vec<String>,
+    /// Full test names, as `cargo test -- --list` prints them.
+    pub tests: Vec<String>,
+}
+
+#[cfg(feature = "treesitter")]
+use crate::symbols::narrow_to_tests;
+
+/// Without tree-sitter there are no edited symbols to map.
+#[cfg(not(feature = "treesitter"))]
+async fn narrow_to_tests(
+    _root: &std::path::Path,
+    _crates: &[String],
+) -> (Vec<String>, Result<Narrowed, String>) {
+    (Vec::new(), Err("built without tree-sitter".into()))
 }
 
 /// List every test name in `pkg_flags`'s packages via `cargo test -- --list`.
 /// `None` when the command can't run, so the caller runs the full suite rather
 /// than narrowing on incomplete data.
-async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<String>> {
+#[cfg(feature = "treesitter")]
+pub(crate) async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<String>> {
     let cmd = format!("cargo test{pkg_flags} -- --list");
     let output = if cfg!(windows) {
         tokio::process::Command::new("cmd")
@@ -1085,15 +1248,28 @@ async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<Strin
     Some(names)
 }
 
-/// Repo-relative changed file -> 1-based line numbers touched, from
-/// `git diff --unified=0` hunk headers. Empty on non-git repos.
-fn changed_lines_by_file(
+/// Repo-relative changed file -> 1-based line numbers touched since `HEAD`
+/// (staged or not), from `git diff HEAD --unified=0` hunk headers. Untracked
+/// and deleted files have no entry. Empty on non-git repos and before the
+/// first commit.
+#[cfg(feature = "treesitter")]
+pub(crate) fn changed_lines_by_file(
     root: &std::path::Path,
 ) -> std::collections::HashMap<String, std::collections::BTreeSet<u32>> {
     let mut map: std::collections::HashMap<String, std::collections::BTreeSet<u32>> =
         std::collections::HashMap::new();
     let out = std::process::Command::new("git")
-        .args(["diff", "--unified=0"])
+        // Pinned prefixes, and no color or external diff tool, whatever the
+        // user's git config says, so the headers below parse.
+        .args([
+            "diff",
+            "HEAD",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ])
         .current_dir(root)
         .output();
     let Ok(out) = out else {
@@ -1104,57 +1280,38 @@ fn changed_lines_by_file(
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<String> = None;
+    // Between `diff --git` and a file's first hunk. Inside a hunk, an added
+    // source line reading `++ x` shows as `+++ x` and must not end the file.
+    let mut in_header = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
-            current = Some(rest.trim().to_string());
+        if line.starts_with("diff --git ") {
+            in_header = true;
+            current = None;
+        } else if let Some(rest) = line.strip_prefix("+++ ").filter(|_| in_header) {
+            // `+++ /dev/null` (a deleted file) names no file here; its hunks
+            // must not land on the previous one.
+            current = rest.strip_prefix("b/").map(|p| p.trim().to_string());
         } else if line.starts_with("@@") {
+            in_header = false;
             // `@@ -a,b +c,d @@` — take the `+c,d` (new-side) span.
             if let Some(plus) = line.split('+').nth(1) {
                 let spec = plus.split([' ', '@']).next().unwrap_or("");
                 let mut it = spec.split(',');
+                // A pure deletion's span starts at the line before it: `0`
+                // for lines deleted from the top, which counts as line 1 so
+                // the deletion still marks the file changed there.
                 let start: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
                 let count: u32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(1);
-                if start > 0 {
-                    if let Some(f) = &current {
-                        let set = map.entry(f.clone()).or_default();
-                        for l in start..start + count.max(1) {
-                            set.insert(l);
-                        }
+                if let Some(f) = &current {
+                    let set = map.entry(f.clone()).or_default();
+                    for l in start.max(1)..start.max(1) + count.max(1) {
+                        set.insert(l);
                     }
                 }
             }
         }
     }
     map
-}
-
-/// Names of symbols whose definition span overlaps a changed line this turn,
-/// via tree-sitter over the changed files. Used to make the affected-tests
-/// receipt informative (which symbols changed). Empty without tree-sitter.
-#[cfg(feature = "treesitter")]
-fn edited_symbol_names(root: &std::path::Path) -> Vec<String> {
-    let changed = changed_lines_by_file(root);
-    let mut names = std::collections::BTreeSet::new();
-    for (path, lines) in changed {
-        let abs = root.join(&path);
-        let Some(lang) = wingman_ts::Language::from_path(&abs) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(&abs) else {
-            continue;
-        };
-        for sym in wingman_ts::extract_symbols(lang, &text) {
-            if lines.range(sym.start_line..=sym.end_line).next().is_some() {
-                names.insert(sym.name);
-            }
-        }
-    }
-    names.into_iter().collect()
-}
-
-#[cfg(not(feature = "treesitter"))]
-fn edited_symbol_names(_root: &std::path::Path) -> Vec<String> {
-    Vec::new()
 }
 
 /// Characterization gate: re-run captured `wingman golden` snapshots and fail
@@ -1331,11 +1488,9 @@ impl TurnGate for CompositeGate {
     }
 }
 
-/// Changed Rust crates (by package name) in the working tree, via
-/// `git status --porcelain`. Maps each changed `.rs` file up to its nearest
-/// `Cargo.toml` and reads the package name. Empty on non-git repos or when
-/// nothing Rust changed.
-fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+/// Repo-relative paths changed in the working tree (staged, unstaged, or
+/// untracked), via `git status --porcelain -z`. Empty on non-git repos.
+pub(crate) fn changed_paths(root: &std::path::Path) -> Vec<String> {
     let out = std::process::Command::new("git")
         .args(["status", "--porcelain", "-z"])
         .current_dir(root)
@@ -1346,21 +1501,40 @@ fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
     if !out.status.success() {
         return Vec::new();
     }
-    let mut crates: Vec<String> = Vec::new();
     // `-z` gives NUL-separated `XY <path>` entries where `XY` is exactly two
     // status columns followed by a space — so the path starts at byte 3. Do
     // NOT trim: a leading space in `XY` (e.g. " M") is significant alignment.
-    // Renames emit a second NUL field (the old path) with no status prefix;
-    // it won't map to a real file so it's harmlessly ignored.
-    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
-        if entry.len() < 4 {
+    // A rename or copy (`R`/`C` in `XY`) is followed by a second NUL field,
+    // the old path, with no status prefix: that path changed too (it's gone).
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut fields = text.split('\0');
+    let mut paths = Vec::new();
+    while let Some(entry) = fields.next() {
+        let (Some(xy), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if path.is_empty() {
             continue;
         }
-        let path = &entry[3..]; // strip "XY " status prefix
+        paths.push(path.to_string());
+        if xy.contains(['R', 'C']) {
+            paths.extend(fields.next().map(str::to_string));
+        }
+    }
+    paths
+}
+
+/// Changed Rust crates (by package name) in the working tree. Maps each
+/// changed `.rs` file (see [`changed_paths`]) up to its nearest `Cargo.toml`
+/// and reads the package name. Empty on non-git repos or when nothing Rust
+/// changed.
+fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+    let mut crates: Vec<String> = Vec::new();
+    for path in changed_paths(root) {
         if !path.ends_with(".rs") {
             continue;
         }
-        if let Some(name) = crate_name_for(root, std::path::Path::new(path)) {
+        if let Some(name) = crate_name_for(root, std::path::Path::new(&path)) {
             if !crates.contains(&name) {
                 crates.push(name);
             }
@@ -1371,33 +1545,16 @@ fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
 }
 
 /// Changed files in the working tree (absolute paths) whose extension maps to
-/// a language server we can drive. Shares the `git status --porcelain -z`
-/// parsing of [`changed_rust_crates`]. Empty on non-git repos.
+/// a language server we can drive, from [`changed_paths`]. Empty on non-git
+/// repos.
 fn changed_lsp_files(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    let out = std::process::Command::new("git")
-        .args(["status", "--porcelain", "-z"])
-        .current_dir(root)
-        .output();
-    let Ok(out) = out else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let mut files = Vec::new();
-    for entry in String::from_utf8_lossy(&out.stdout).split('\0') {
-        if entry.len() < 4 {
-            continue;
-        }
-        let path = &entry[3..]; // strip "XY " status prefix
-        let abs = root.join(path);
-        // Deletions won't exist on disk; skip so we don't ask the server about
-        // a vanished file.
-        if wingman_lsp::Lang::from_path(&abs).is_some() && abs.exists() {
-            files.push(abs);
-        }
-    }
-    files
+    changed_paths(root)
+        .into_iter()
+        .map(|path| root.join(path))
+        // Deletions won't exist on disk; skip so we don't ask the server
+        // about a vanished file.
+        .filter(|abs| wingman_lsp::Lang::from_path(abs).is_some() && abs.exists())
+        .collect()
 }
 
 /// Post-edit gate that folds the language server's diagnostics for the files
@@ -1483,7 +1640,7 @@ impl TurnGate for LspDiagnosticsGate {
 
 /// Walk up from a repo-relative file path to the nearest `Cargo.toml` and read
 /// its `[package] name`. Returns None if no manifest or no name found.
-fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
+pub(crate) fn crate_name_for(root: &std::path::Path, rel_file: &std::path::Path) -> Option<String> {
     let mut dir = root.join(rel_file);
     dir.pop(); // drop filename
     loop {
@@ -1677,7 +1834,7 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let spill = build_spill(cfg, &paths, &session_id);
-    let learn = build_learn(&paths, session_id);
+    let learn = build_learn(cfg, &paths, session_id);
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
 
@@ -1998,6 +2155,8 @@ fn base_prompt(mode: PermissionMode, cwd: &str) -> String {
          - For \"where is X\" or \"how does Y work\" questions, call `semantic_search` first \
          to find the relevant chunks, then `read_file` the specific line range you need. \
          Avoid reading whole files when a targeted range will do.\n\
+         - When the turn already lists \"Relevant code from the project index\", read \
+         those locations before searching again.\n\
          - Use `grep` for exact-string lookups and `glob` for filename patterns; \
          use `semantic_search` for conceptual / fuzzy queries.\n\
          - Edit with `edit_file` and include enough surrounding context that `old_string` is unique.\n\
@@ -2204,5 +2363,97 @@ mod affected_tests_tests {
         // A changed non-rs file contributes no crate.
         std::fs::write(root.join("README.md"), "x").unwrap();
         assert_eq!(changed_rust_crates(root), vec!["foo".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod synthesized_tool_tests {
+    use super::*;
+
+    /// A worker proposes from inside its worktree; the next worker (another
+    /// worktree) must find the approved tool, and nothing unapproved.
+    #[test]
+    fn approved_tools_come_from_the_owning_project_and_need_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("repo");
+        let worktree = project.join(".wingman").join("worktrees").join("auto-y");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../../../.git").unwrap();
+        let dir = wingman_config::synthesized_tools_dir(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["approved_one", "pending_one"] {
+            std::fs::write(
+                dir.join(format!("{name}.toml")),
+                format!("name = \"{name}\"\ndescription = \"d\"\ncommand = \"echo\"\n"),
+            )
+            .unwrap();
+        }
+        let approve = |p: &std::path::Path| p.ends_with("approved_one.toml");
+
+        let cfg = Config::default();
+        let names: Vec<String> = approved_synthesized_tools(&worktree, &cfg, approve)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["approved_one"]);
+
+        // Disabling run_shell takes synthesized shell tools with it.
+        let mut no_shell = Config::default();
+        no_shell.tools.disabled_tools = vec!["run_shell".into()];
+        assert!(approved_synthesized_tools(&worktree, &no_shell, approve).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn missing_credential_checks_config_then_env_and_lets_local_servers_through() {
+        let mut cfg = Config::default();
+        for id in ["anthropic", "openai", "ollama", "gemini"] {
+            cfg.providers.insert(id.into(), Default::default());
+        }
+        cfg.providers.get_mut("anthropic").unwrap().api_key = Some("sk-in-config".into());
+        // A `${VAR}` placeholder the loader could not fill is not a key.
+        cfg.providers.get_mut("openai").unwrap().api_key = Some("${OPENAI_API_KEY}".into());
+        let no_env = |_: &str| None;
+
+        assert_eq!(missing_credential(&cfg, "anthropic", &no_env), None);
+        assert_eq!(missing_credential(&cfg, "ollama", &no_env), None);
+        let why = missing_credential(&cfg, "openai", &no_env).unwrap();
+        assert!(why.contains("OPENAI_API_KEY"), "{why}");
+
+        let env = |k: &str| (k == "OPENAI_API_KEY" || k == "GEMINI_API_KEY").then(|| "k".into());
+        assert_eq!(missing_credential(&cfg, "openai", &env), None);
+        assert_eq!(missing_credential(&cfg, "gemini", &env), None);
+        let blank = |_: &str| Some("  ".into());
+        assert!(missing_credential(&cfg, "openai", &blank).is_some());
+    }
+}
+
+#[cfg(test)]
+mod learned_routing_tests {
+    use super::*;
+
+    #[test]
+    fn a_learned_pick_must_still_run_under_this_config() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "anthropic".into(),
+            wingman_config::ProviderConfig::default(),
+        );
+        cfg.providers
+            .insert("ollama".into(), wingman_config::ProviderConfig::default());
+        assert!(learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
+        // A provider since removed, or a bare id from before rows carried one.
+        assert!(!learned_model_usable(&cfg, "openai/gpt-4.1"));
+        assert!(!learned_model_usable(&cfg, "claude-opus"));
+        assert!(!learned_model_usable(&cfg, "anthropic/"));
+        // local_only rules out the cloud winner, not the local one.
+        cfg.privacy.local_only = true;
+        assert!(!learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
     }
 }

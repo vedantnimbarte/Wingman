@@ -1,6 +1,9 @@
 # Supported Providers
 
-Every backend Wingman speaks to, and which ones are validated for pilot mode.
+Every backend Wingman speaks to. For which ones carry a pilot run on your
+machine, run `wingman pilot validate-providers`: it runs a canned pilot plan
+against each provider you have configured and writes a pass/fail matrix (see
+[PILOT-MODE.md](PILOT-MODE.md#validating-your-providers)).
 
 | Provider           | id          | Env var                  | Default base URL                                  |
 | ------------------ | ----------- | ------------------------ | ------------------------------------------------- |

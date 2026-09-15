@@ -27,6 +27,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 globset = "0.4"
 sha2 = { workspace = true }
 subtle = "2"
+# J13 watch mode. Already compiled for wingman-rag's background indexer, so the
+# same version adds nothing to the tree.
+notify-debouncer-mini = "0.7"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

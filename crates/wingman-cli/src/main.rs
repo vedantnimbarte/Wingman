@@ -16,6 +16,8 @@ mod remote;
 mod runtime;
 mod serve;
 mod shutdown;
+#[cfg(feature = "treesitter")]
+mod symbols;
 
 use std::process::ExitCode;
 

@@ -32,6 +32,10 @@ pub enum PrError {
     GhFailed(String),
     #[error("could not parse a remote `origin` URL from the repo")]
     NoOriginRemote,
+    /// J15 — the push needed a force-push, and the branch is outside the
+    /// pilot's `wingman/auto/*` namespace.
+    #[error("{}", .0.render())]
+    ForcePushRefused(crate::escalation::EscalationTrigger),
 }
 
 /// Outcome of [`open_pull_request`].
@@ -116,6 +120,20 @@ pub fn render_pr_title(state: &RunState) -> String {
 /// a real remote.
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> std::io::Result<CommandOut>;
+
+    /// [`run`](Self::run) with `stdin` piped to the child (`ssh-keygen -Y
+    /// verify` only reads the signed message from stdin). The default drops
+    /// `stdin` so test doubles that only care about argv implement `run` alone.
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> std::io::Result<CommandOut> {
+        let _ = stdin;
+        self.run(program, args, cwd)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -136,6 +154,45 @@ pub struct SystemCommandRunner;
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, program: &str, args: &[&str], cwd: &Path) -> std::io::Result<CommandOut> {
         let out = Command::new(program).args(args).current_dir(cwd).output()?;
+        Ok(CommandOut {
+            status: out.status.code(),
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        })
+    }
+
+    fn run_with_stdin(
+        &self,
+        program: &str,
+        args: &[&str],
+        cwd: &Path,
+        stdin: &[u8],
+    ) -> std::io::Result<CommandOut> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+        let mut child = Command::new(program)
+            .args(args)
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        // Written from a thread while `wait_with_output` drains stdout and
+        // stderr. A program that answers line by line as it reads (`git
+        // check-ignore --stdin`, fed a build's worth of paths by the J13
+        // watcher) stops reading once nobody drains its full stdout pipe, so
+        // writing everything first can deadlock. A write error (the child
+        // exited early) shows up in its status instead.
+        let pipe = child.stdin.take();
+        let input = stdin.to_vec();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.write_all(&input);
+            }
+        });
+        let out = child.wait_with_output();
+        let _ = writer.join();
+        let out = out?;
         Ok(CommandOut {
             status: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -216,14 +273,7 @@ fn create_via_gh(
 ) -> Result<PrOutcome, PrError> {
     // Push the integration branch first — gh pr create assumes the head
     // ref is reachable on the remote.
-    let push = runner.run(
-        "git",
-        &["push", "-u", "origin", integration_branch],
-        repo_root,
-    )?;
-    if !push.success() {
-        return Err(PrError::GitPush(push.stderr.trim().to_string()));
-    }
+    push_branch(runner, repo_root, integration_branch)?;
 
     let out = runner.run(
         gh,
@@ -262,20 +312,74 @@ fn create_via_gh(
     })
 }
 
+/// Push `branch` to `origin`, force-pushing only where J15 allows it.
+///
+/// Every merge rebuilds the integration branch from the base commit, so a run
+/// resumed after its branch was already pushed has new commits the remote copy
+/// lacks and the plain push is rejected. Inside `wingman/auto/*` that branch
+/// belongs to the pilot: it is replaced with `--force-with-lease` pinned to
+/// the remote commit just read, so a push that raced in since is still not
+/// overwritten, and only when that commit is one this clone has. Outside the
+/// namespace the force-push is refused with the
+/// [`crate::escalation::EscalationTrigger::ForcePushOutsideNamespace`] trigger.
+fn push_branch(runner: &dyn CommandRunner, repo_root: &Path, branch: &str) -> Result<(), PrError> {
+    let push = runner.run("git", &["push", "-u", "origin", branch], repo_root)?;
+    if push.success() {
+        return Ok(());
+    }
+    let stderr = push.stderr.trim().to_string();
+    let needs_force = stderr.contains("[rejected]")
+        && (stderr.contains("non-fast-forward") || stderr.contains("fetch first"));
+    if !needs_force {
+        return Err(PrError::GitPush(stderr));
+    }
+    if let Some(trigger) = crate::escalation::force_push_trigger(branch, true) {
+        return Err(PrError::ForcePushRefused(trigger));
+    }
+    let remote_ref = format!("refs/heads/{branch}");
+    let remote = runner.run("git", &["ls-remote", "origin", &remote_ref], repo_root)?;
+    let Some(sha) = remote
+        .stdout
+        .split_whitespace()
+        .next()
+        .filter(|_| remote.success())
+    else {
+        return Err(PrError::GitPush(stderr));
+    };
+    // The lease only guards the moment between reading the remote and
+    // pushing. A commit someone else pushed to the PR branch earlier (a review
+    // fixup, GitHub's "update branch") is not in this clone, and a remote tip
+    // this clone never had is left alone rather than overwritten.
+    let tip = format!("{sha}^{{commit}}");
+    if !runner
+        .run("git", &["cat-file", "-e", &tip], repo_root)?
+        .success()
+    {
+        return Err(PrError::GitPush(format!(
+            "{stderr}\nremote `{branch}` is at {sha}, a commit this clone does not have, so it \
+             was not force-pushed over; fetch it and reconcile by hand"
+        )));
+    }
+    let lease = format!("--force-with-lease={remote_ref}:{sha}");
+    tracing::warn!(
+        target: "pilot::pr",
+        branch,
+        "remote branch has diverged (rebuilt integration branch); force-pushing with lease"
+    );
+    let forced = runner.run("git", &["push", "-u", &lease, "origin", branch], repo_root)?;
+    if !forced.success() {
+        return Err(PrError::GitPush(forced.stderr.trim().to_string()));
+    }
+    Ok(())
+}
+
 fn fallback_push(
     runner: &dyn CommandRunner,
     repo_root: &Path,
     integration_branch: &str,
     base_branch: &str,
 ) -> Result<PrOutcome, PrError> {
-    let push = runner.run(
-        "git",
-        &["push", "-u", "origin", integration_branch],
-        repo_root,
-    )?;
-    if !push.success() {
-        return Err(PrError::GitPush(push.stderr.trim().to_string()));
-    }
+    push_branch(runner, repo_root, integration_branch)?;
     let url = compose_compare_url(runner, repo_root, base_branch, integration_branch)?;
     eprintln!("[pilot] gh missing or unauthenticated. Open the PR by hand at:\n  {url}");
     Ok(PrOutcome {
@@ -666,5 +770,106 @@ mod tests {
                 .any(|(p, a)| p == "git" && a == &["push", "-u", "origin", "wingman/auto/r1"]),
             "git push not invoked in fallback path: {calls:?}"
         );
+    }
+
+    fn rejected() -> CommandOut {
+        CommandOut {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: " ! [rejected]        b -> b (non-fast-forward)
+error: failed to push some refs"
+                .into(),
+        }
+    }
+
+    /// A resumed run rebuilds its integration branch, so the pushed copy has
+    /// diverged. Inside `wingman/auto/*` that is replaced, leased to the remote
+    /// commit just read so nothing pushed in between is overwritten.
+    #[test]
+    fn j15_diverged_pilot_branch_is_force_pushed_with_a_lease() {
+        let runner = MockCommandRunner::new();
+        runner.respond(
+            "git",
+            &["push", "-u", "origin", "wingman/auto/r1"],
+            rejected(),
+        );
+        runner.respond(
+            "git",
+            &["ls-remote", "origin", "refs/heads/wingman/auto/r1"],
+            ok("0123abcd	refs/heads/wingman/auto/r1
+"),
+        );
+        runner.respond("git", &["cat-file", "-e", "0123abcd^{commit}"], ok(""));
+        let lease = "--force-with-lease=refs/heads/wingman/auto/r1:0123abcd";
+        runner.respond(
+            "git",
+            &["push", "-u", lease, "origin", "wingman/auto/r1"],
+            ok(""),
+        );
+        push_branch(&runner, Path::new("."), "wingman/auto/r1").unwrap();
+        assert!(runner
+            .calls()
+            .iter()
+            .any(|(_, a)| a.iter().any(|x| x == lease)));
+    }
+
+    /// A remote tip this clone does not have was pushed by someone else (a
+    /// review fixup on the PR); forcing would silently drop it.
+    #[test]
+    fn j15_a_remote_tip_this_clone_never_had_is_not_forced() {
+        let runner = MockCommandRunner::new();
+        runner.respond(
+            "git",
+            &["push", "-u", "origin", "wingman/auto/r1"],
+            rejected(),
+        );
+        runner.respond(
+            "git",
+            &["ls-remote", "origin", "refs/heads/wingman/auto/r1"],
+            ok("feedface\trefs/heads/wingman/auto/r1\n"),
+        );
+        // No cat-file response: the mock answers it with a failure.
+        let err = push_branch(&runner, Path::new("."), "wingman/auto/r1").unwrap_err();
+        assert!(
+            matches!(&err, PrError::GitPush(m) if m.contains("does not have")),
+            "{err}"
+        );
+        assert!(!runner
+            .calls()
+            .iter()
+            .any(|(_, a)| a.iter().any(|x| x.starts_with("--force"))));
+    }
+
+    #[test]
+    fn j15_force_push_outside_the_pilot_namespace_is_refused() {
+        let runner = MockCommandRunner::new();
+        runner.respond("git", &["push", "-u", "origin", "main"], rejected());
+        let err = push_branch(&runner, Path::new("."), "main").unwrap_err();
+        assert!(matches!(
+            &err,
+            PrError::ForcePushRefused(crate::escalation::EscalationTrigger::ForcePushOutsideNamespace { branch })
+                if branch == "main"
+        ));
+        assert!(err.to_string().contains("refused to force-push `main`"));
+        // Nothing past the rejected plain push ran.
+        assert_eq!(runner.calls().len(), 1);
+    }
+
+    /// Any other push failure (auth, network) is reported, never forced.
+    #[test]
+    fn j15_other_push_failures_are_not_forced() {
+        let runner = MockCommandRunner::new();
+        runner.respond(
+            "git",
+            &["push", "-u", "origin", "wingman/auto/r1"],
+            CommandOut {
+                status: Some(128),
+                stdout: String::new(),
+                stderr: "fatal: could not read from remote repository".into(),
+            },
+        );
+        let err = push_branch(&runner, Path::new("."), "wingman/auto/r1").unwrap_err();
+        assert!(matches!(err, PrError::GitPush(_)));
+        assert_eq!(runner.calls().len(), 1);
     }
 }

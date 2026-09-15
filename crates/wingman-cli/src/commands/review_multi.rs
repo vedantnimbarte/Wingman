@@ -16,7 +16,7 @@ use wingman_core::AgentEvent;
 
 use crate::runtime::{self, Selection};
 
-const REVIEWER_PROMPT: &str = "\
+pub(super) const REVIEWER_PROMPT: &str = "\
 Review the following diff. Emit ONE LINE per finding, exactly in this format:\n\
 <severity>|<file>:<line>|<message>\n\
 where severity is one of: blocker, major, minor, nit. Skip nits unless\n\
@@ -105,7 +105,7 @@ pub async fn run(
     Ok(ExitCode::SUCCESS)
 }
 
-async fn run_one(cfg: Config, sel: Selection, prompt: String) -> Result<String> {
+pub(super) async fn run_one(cfg: Config, sel: Selection, prompt: String) -> Result<String> {
     let mode = PermissionMode::ReadOnly;
     let mut agent = runtime::build_agent_with_fallback(&cfg, &sel, mode).await?;
     let mut stream = agent.run(prompt);
@@ -122,14 +122,14 @@ async fn run_one(cfg: Config, sel: Selection, prompt: String) -> Result<String> 
 }
 
 #[derive(Debug, Clone)]
-struct Finding {
-    severity: String,
-    file: String,
-    line: String,
-    message: String,
+pub(super) struct Finding {
+    pub(super) severity: String,
+    pub(super) file: String,
+    pub(super) line: String,
+    pub(super) message: String,
 }
 
-fn parse_finding(line: &str) -> Option<Finding> {
+pub(super) fn parse_finding(line: &str) -> Option<Finding> {
     let parts: Vec<&str> = line.splitn(3, '|').collect();
     if parts.len() != 3 {
         return None;
@@ -222,7 +222,7 @@ fn sev_sort_key(s: &str) -> String {
     .to_string()
 }
 
-fn normalize_message(m: &str) -> String {
+pub(super) fn normalize_message(m: &str) -> String {
     // Strip leading "the/a/that", lowercase, collapse whitespace — so two
     // reviewers wording it differently still merge.
     let lower = m.to_ascii_lowercase();

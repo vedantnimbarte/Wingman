@@ -24,6 +24,10 @@ struct Args {
     /// Start it and return a job id instead of waiting.
     #[serde(default)]
     background: bool,
+    /// Set only by [`run_contained`], never from model input: the calling
+    /// tool's input JSON, exported as `$WINGMAN_TOOL_INPUT`.
+    #[serde(skip)]
+    tool_input: Option<String>,
 }
 
 /// Say once per process that shell commands are running unconfined, so the
@@ -111,38 +115,70 @@ impl Tool for RunShell {
             };
         }
         let timeout = Duration::from_secs(args.timeout_secs.unwrap_or(60).min(600));
-        let output = match run_captured(cmd, timeout, &policy).await {
-            Ok(o) => o,
-            Err(e) => return ToolOutcome::err(e),
-        };
+        capture(cmd, timeout, &policy).await
+    }
+}
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let mut body = String::new();
-        body.push_str(&format!(
-            "[exit: {}]\n",
-            output
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "?".into())
-        ));
-        if !stdout.is_empty() {
-            body.push_str("[stdout]\n");
-            body.push_str(&stdout);
-            if !stdout.ends_with('\n') {
-                body.push('\n');
-            }
+/// Run `command` exactly as `run_shell` would — permission mode, denylist,
+/// `[tools].shell_sandbox`, env scrub, Job Object, timeout — with `input`
+/// exported as `$WINGMAN_TOOL_INPUT`.
+///
+/// For tools that are a shell command under another name (synthesized tools,
+/// J7). Going through here is what keeps such a tool from being a way around
+/// the guards `run_shell` applies: running it unconfined would widen the very
+/// ceiling that made the command acceptable.
+pub(crate) async fn run_contained(
+    command: &str,
+    input: String,
+    timeout: Duration,
+    ctx: &ToolCtx,
+) -> ToolOutcome {
+    let args = Args {
+        command: command.to_string(),
+        cwd: None,
+        timeout_secs: None,
+        background: false,
+        tool_input: Some(input),
+    };
+    match prepare(&args, ctx) {
+        Ok((cmd, policy)) => capture(cmd, timeout.min(Duration::from_secs(600)), &policy).await,
+        Err(e) => ToolOutcome::err(e),
+    }
+}
+
+/// Run a prepared command in the foreground and format its result.
+async fn capture(cmd: Command, timeout: Duration, policy: &str) -> ToolOutcome {
+    let output = match run_captured(cmd, timeout, policy).await {
+        Ok(o) => o,
+        Err(e) => return ToolOutcome::err(e),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let mut body = String::new();
+    body.push_str(&format!(
+        "[exit: {}]\n",
+        output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into())
+    ));
+    if !stdout.is_empty() {
+        body.push_str("[stdout]\n");
+        body.push_str(&stdout);
+        if !stdout.ends_with('\n') {
+            body.push('\n');
         }
-        if !stderr.is_empty() {
-            body.push_str("[stderr]\n");
-            body.push_str(&stderr);
-        }
-        if output.status.success() {
-            ToolOutcome::ok(body)
-        } else {
-            ToolOutcome::err(body)
-        }
+    }
+    if !stderr.is_empty() {
+        body.push_str("[stderr]\n");
+        body.push_str(&stderr);
+    }
+    if output.status.success() {
+        ToolOutcome::ok(body)
+    } else {
+        ToolOutcome::err(body)
     }
 }
 
@@ -227,6 +263,9 @@ fn prepare(args: &Args, ctx: &ToolCtx) -> Result<(Command, String), String> {
         {
             cmd.env_remove(k);
         }
+    }
+    if let Some(input) = &args.tool_input {
+        cmd.env("WINGMAN_TOOL_INPUT", input);
     }
 
     Ok((cmd, policy.to_string()))

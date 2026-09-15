@@ -30,16 +30,18 @@ wingman [OPTIONS] [COMMAND]
 | `config paths`       | Print the resolved global and project config paths.    |
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
-| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
-| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, and git/gh tooling. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
+| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, the `metrics` summary, and index freshness. |
+| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, git/gh tooling, and which pilot sandbox tiers (Docker, Firecracker) this machine can run. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
 | `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
 | `serve`              | Serve the HTTP/SSE API so another machine, a phone, or CI can drive Wingman. `--addr`, `--init-token`, `--list`, `--allow-yolo`, `--pair`. See [HTTP-API.md](HTTP-API.md). |
-| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
-| `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
-| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
-| `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
+| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
+| `metrics`            | This repo's time to first token (median/p90), tokens per completed task, verified-done rate, and routing outcomes, from its session transcripts and `learn.db`. `--json`. |
+| `bench`              | Benchmark harness: time to first token, tokens per completed task, verified-done rate, routing outcomes per served model. `--suite <file.jsonl>`; `--json` or `--markdown` for a publishable report. |
+| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
+| `indexd`             | Keep this project's semantic index warm (reindex, then watch) in the foreground. `start` runs it in the background (log: `.wingman/indexd.log`), `stop` asks it to exit, `status` reports whether it is running and the index age. A pidfile naming a dead process is cleared, so a crashed daemon never reads as running. While a daemon is live, the TUI uses its warm index instead of starting a second indexer, and `doctor` reports it. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
-| `router stats`       | Per-class model win-rates (gate pass-rate) for this repo. `--all` across repos. |
+| `router stats`       | Per-class model win-rates for this repo: the gate pass-rate beside the durable PR verdicts (held / reverted / unknown). `--all` across repos. |
+| `router backfill`    | Judge merged pilot PRs at least `--days` (default 30) old — reverted, mostly rewritten, broke the base branch, reopened their issue, or held — and record it against the roles and models that wrote them. A PR judged `unknown` is judged again on later runs; `held` and `reverted` are final. Needs `gh` and `git`. |
 | `router preset local`| Print a recommended local-first `[router]` preset. `--model <provider/model>`. |
 | `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |
@@ -47,6 +49,7 @@ wingman [OPTIONS] [COMMAND]
 | `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. `--compare` reprices your volume against other models (provider-cost arbitrage). |
 | `session list`       | List recent session JSONL files for this project.       |
 | `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
+| `session export <id>` | A session as a shareable report: summary, files changed with line counts, verification receipts, cost and tokens, and the tool-call timeline. `<id>` is a session id or a path to any session JSONL. `--format md\|html\|json` (default `md`), `-o <file>`. Secrets are redacted. |
 | `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
 | `worktree list`      | `git worktree list` passthrough.                        |
 | `worktree remove <path>` | Remove a worktree by path.                          |
@@ -56,7 +59,7 @@ wingman [OPTIONS] [COMMAND]
 | `memory sync [<ref>]` | Reconcile team-shared project memory: rebuild `MEMORY.md` from files (resolving index merge conflicts), optionally fold in a git ref's memories. |
 | `memory push` / `memory pull` | Sync memories through a team HTTP endpoint (`[team]`), non-clobbering. |
 | `memory review`      | Review distilled pending memories: list, or `--promote N` / `--discard N` / `--promote-all`. |
-| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. |
+| `review <pr#>`       | Fetch a PR diff via `gh` and run a one-shot review prompt. `--local <base>` for git-local diff. `--template <file>` for a custom prompt. `--comment` posts the findings to the PR as one GitHub review with inline comments on their diff lines (findings not on a diff line go in the review body; findings a previous run already posted are skipped); add `--dry-run` to print the review payload instead. |
 | `discover`           | Probe localhost for Ollama / LM Studio / vLLM and list their models. |
 | `schedule [--all]`   | Run any `[[schedule]]` entries whose cadence is due (cron-callable). |
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
@@ -67,13 +70,26 @@ wingman [OPTIONS] [COMMAND]
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
+| `pilot export [run-id]` | A run as a pull-request description: goal, tasks and run cost, plus each worker session's files, receipts, tokens and cost. `--format md\|json`. Secrets are redacted. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
+| `pilot feedback`     | Poll every run's opened PR for its terminal state (`gh`) and record a `pr.outcome` event. `--cycles N` (0 = forever). |
+| `pilot eval`         | Score eval results against a baseline and exit 1 on regression. `--goals <file>` runs the goals live first (no PR); `--baseline <file>`, `--threshold <f>` (default 0.10), `--update-baseline`. |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). `--cycles N`, `--dry-run`, and `--watch` to also wake on file changes and `pilot hooks` git hooks (see [Watch mode](PILOT-MODE.md#watch-mode)). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. The `pr_reviews` source reworks trusted review threads on pilot's own PRs; `--dry-run` logs what it would dispatch without running, pushing or replying. |
+| `pilot validate-providers` | Run the canned `--version-only` pilot plan against every configured provider with credentials, one scratch repo each, and write a pass/fail/skipped matrix (`matrix.md`, `matrix.json`). `--provider <id>` (repeatable), `--max-usd <f>` (default 0.50), `--max-tokens <n>` (default 400000), `--out <dir>` (default `.wingman/provider-validation/`). Exit 1 if any provider failed, 2 if none could run. Spends real money. |
+| `pilot hooks install\|uninstall` | Write (or remove) post-commit/merge/checkout/rewrite hooks that run the wingman binary directly, no shell, and wake `pilot daemon --watch`. Leaves hooks it didn't write alone. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |
 | `pilot ask "<msg>" [run-id]` | Same, but wait for the worker's reply and print it (`--wait <secs>`, default 120). |
 | `pilot intake slack\|email` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion). |
+| `pilot skills install [spec…]` | Resolve skill packs (default `[pilot.skills].packs`) and their dependencies against `[pilot.skills].index`, verify signatures, install. `--allow-unsigned` to accept packs without one. Bare `pilot skills` does the same. |
+| `pilot skills search [query]` | Search the pack index by name or description. |
+| `pilot skills list` | List installed packs, signed or not. |
+| `pilot skills verify [spec…]` | Re-check installed packs against their signatures / install digest; non-zero exit on failure. `--allow-unsigned`. |
+| `pilot skills digest <spec> <dir>` | For pack authors: the payload to sign with `ssh-keygen -Y sign -n wingman-skillpack`. `--dep <spec>` (repeatable), `--out <file>`. |
+| `pilot tools [list]` | List the tools pilot workers proposed for this project (`.wingman/tools/`), approved or pending. |
+| `pilot tools approve <name>` | Approve a proposed tool: records its exact content in the trust store, so workers spawned afterwards (and sessions in this project) can call it. Editing the file revokes it. |
+| `pilot tools reject <name>` | Delete a proposed or approved tool and its trust record. |
 | `board`              | Kanban board over pilot runs: a persistent, multi-project backlog. Cards are goals that outlive their runs; columns are derived from run state. |
 | `board add "<title>"` | Create a Backlog card. `--goal <text>` (the prompt sent to pilot; defaults to the title), `--project <id>`, `--label <l>`, `--notes <text>`. |
 | `board list`         | List cards with derived columns. `--project`, `--column backlog\|planned\|in-progress\|review\|done`, `--label`, `--all`, `--json`. |
