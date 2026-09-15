@@ -139,9 +139,10 @@ async fn backfill(days: u32) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-/// Judge every pilot run's PR in `project_root` that has no verdict yet, and
-/// report what happened to each. A PR too young, still open, or unreadable is
-/// left for a later backfill.
+/// Judge every pilot run's PR in `project_root` that has no decided verdict
+/// yet, and report what happened to each. A PR too young, still open, or
+/// unreadable is left for a later backfill, and one judged `unknown` is judged
+/// again each time, so a revert that lands after the first look still counts.
 fn backfill_project(
     store: &wingman_learn::StatsStore,
     runner: &dyn wingman_autonomous::pr::CommandRunner,
@@ -288,9 +289,19 @@ mod tests {
             (0, 0, 1)
         );
 
-        // A second pass does not judge the recorded PR again.
+        // An unknown PR is judged again on the next pass, replacing its
+        // verdict rather than adding a second one.
         let again = backfill_project(&store, &Gh, root, 30, chrono::Utc::now()).join("\n");
-        assert!(!again.contains("pull/old"), "{again}");
+        assert!(again.contains("pull/old: unknown"), "{again}");
+        let stats = store.routing_summary(Some("r")).unwrap();
+        assert_eq!(stats[0].unknown, 1);
+
+        // A decided one is final and not judged again.
+        store
+            .record_verdict("https://x/pull/old", &["w1".to_string()], "held")
+            .unwrap();
+        let settled = backfill_project(&store, &Gh, root, 30, chrono::Utc::now()).join("\n");
+        assert!(!settled.contains("pull/old"), "{settled}");
     }
 
     #[test]

@@ -430,11 +430,13 @@ impl StatsStore {
         Ok(())
     }
 
-    /// Whether a durable verdict has already been recorded for `pr`.
+    /// Whether `pr` already has a decided verdict (`held` or `reverted`).
+    /// An `unknown` one does not count: a PR nobody had touched when it was
+    /// first judged can still be reverted later, so it stays open to judging.
     pub fn has_verdict(&self, pr: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM routing_verdict WHERE pr = ?1",
+            "SELECT COUNT(*) FROM routing_verdict WHERE pr = ?1 AND verdict != 'unknown'",
             params![pr],
             |r| r.get(0),
         )?;
@@ -448,22 +450,25 @@ impl StatsStore {
     /// case nothing is written and a later backfill will look again.
     ///
     /// One row per pair per PR, not per turn: a worker that ran the gate five
-    /// times wrote one change, and should be judged once for it.
+    /// times wrote one change, and should be judged once for it. A decided
+    /// verdict is final; an `unknown` one is replaced by the next judgement.
     pub fn record_verdict(&self, pr: &str, session_ids: &[String], verdict: &str) -> Result<usize> {
         let ts = Utc::now().to_rfc3339();
+        let sessions = serde_json::to_string(session_ids)?;
         let conn = self.conn.lock().unwrap();
-        let mut n = 0;
-        for session_id in session_ids {
-            n += conn.execute(
-                // `ON CONFLICT DO NOTHING`, not `OR IGNORE`: the latter also
-                // swallows the CHECK on `verdict`, and a typo would vanish.
-                "INSERT INTO routing_verdict(pr, task_class, model, repo, ts, verdict) \
-                 SELECT DISTINCT ?1, task_class, model, repo, ?2, ?3 \
-                 FROM routing_outcome WHERE session_id = ?4 \
-                 ON CONFLICT DO NOTHING",
-                params![pr, ts, verdict, session_id],
-            )?;
-        }
+        // An upsert, not `OR IGNORE`/`OR REPLACE`: those also swallow the
+        // CHECK on `verdict`, and a typo would vanish. One statement over all
+        // the sessions, so two workers on the same pair count as one pair.
+        let n = conn.execute(
+            "INSERT INTO routing_verdict(pr, task_class, model, repo, ts, verdict) \
+             SELECT DISTINCT ?1, task_class, model, repo, ?2, ?3 \
+             FROM routing_outcome \
+             WHERE session_id IN (SELECT value FROM json_each(?4)) \
+             ON CONFLICT(pr, task_class, model) DO UPDATE \
+             SET verdict = excluded.verdict, ts = excluded.ts \
+             WHERE routing_verdict.verdict = 'unknown'",
+            params![pr, ts, verdict, sessions],
+        )?;
         Ok(n)
     }
 
@@ -939,7 +944,8 @@ mod tests {
             .unwrap();
 
         assert!(!store.has_verdict("pr/1").unwrap());
-        let sessions = vec!["w1".to_string(), "w2".to_string()];
+        // "elsewhere" is a second session on w1's pair: still one pair.
+        let sessions = vec!["w1".to_string(), "w2".to_string(), "elsewhere".to_string()];
         assert_eq!(store.record_verdict("pr/1", &sessions, "held").unwrap(), 2);
         assert!(store.has_verdict("pr/1").unwrap());
         // Recording again is a no-op, not a second vote.
@@ -955,6 +961,13 @@ mod tests {
             0
         );
         assert!(!store.has_verdict("pr/3").unwrap());
+        // An unknown verdict stays open, and a later judgement replaces it.
+        let w2 = ["w2".to_string()];
+        store.record_verdict("pr/5", &w2, "unknown").unwrap();
+        assert!(!store.has_verdict("pr/5").unwrap());
+        assert_eq!(store.record_verdict("pr/5", &w2, "reverted").unwrap(), 1);
+        assert!(store.has_verdict("pr/5").unwrap());
+        assert_eq!(store.record_verdict("pr/5", &w2, "held").unwrap(), 0);
         // The CHECK constraint keeps the value set closed.
         assert!(store.record_verdict("pr/4", &sessions, "fine").is_err());
 
@@ -965,7 +978,7 @@ mod tests {
         // The unknown PR is not in the rate: 1 held of 1 decided.
         assert_eq!(dev.durable_rate(), Some(1.0));
         let tester = stats.iter().find(|s| s.task_class == "tester").unwrap();
-        assert_eq!(tester.held, 1);
+        assert_eq!((tester.held, tester.reverted, tester.unknown), (1, 1, 0));
         let _ = std::fs::remove_file(&p);
     }
 

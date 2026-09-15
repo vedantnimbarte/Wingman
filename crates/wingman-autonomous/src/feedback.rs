@@ -235,7 +235,7 @@ impl DurabilityFacts {
 }
 
 /// Ask `gh` and `git` what became of a PR. `Ok(None)` while the PR is not
-/// merged, or merged less than `min_age` ago — it is judged once, when old
+/// merged, or merged less than `min_age` ago — it is not judged until old
 /// enough. `Err` only when the PR itself cannot be read; a later check that
 /// fails just leaves its fact unanswered.
 pub fn durability_facts(
@@ -382,15 +382,19 @@ pub fn durability_facts(
                 .or_else(|| issue["number"].as_u64().map(|n| n.to_string()));
             let state = target
                 .and_then(|t| {
-                    gh_stdout(runner, repo_root, &["issue", "view", &t, "--json", "state"]).ok()
+                    let args = ["issue", "view", &t, "--json", "state,stateReason"];
+                    gh_stdout(runner, repo_root, &args).ok()
                 })
                 .and_then(|b| serde_json::from_str::<serde_json::Value>(&b).ok());
+            // Open is not enough: an issue the merge never closed (a PR into a
+            // non-default branch, say) is open without having come back.
+            let is = |v: &serde_json::Value, key: &str, want: &str| {
+                v[key]
+                    .as_str()
+                    .is_some_and(|s| s.eq_ignore_ascii_case(want))
+            };
             match state {
-                Some(v)
-                    if v["state"]
-                        .as_str()
-                        .is_some_and(|s| s.eq_ignore_ascii_case("open")) =>
-                {
+                Some(v) if is(&v, "state", "open") && is(&v, "stateReason", "reopened") => {
                     return Some(true);
                 }
                 Some(_) => {}
@@ -734,6 +738,8 @@ mod tests {
         /// `gh run list --commit` per sha.
         ci: Vec<(&'static str, &'static str)>,
         issue_state: Option<&'static str>,
+        /// `stateReason` of that issue; `None` for one never closed.
+        issue_reason: Option<&'static str>,
     }
 
     impl Default for History {
@@ -749,6 +755,7 @@ mod tests {
                 file_on_base: true,
                 ci: vec![("m1", r#"[{"conclusion":"success"}]"#)],
                 issue_state: Some("CLOSED"),
+                issue_reason: Some("COMPLETED"),
             }
         }
     }
@@ -787,10 +794,11 @@ mod tests {
                         None => ok("[]".into()),
                     }
                 }
-                ("gh", ["issue", "view", "7", ..]) => ok(format!(
-                    r#"{{"state":"{}"}}"#,
-                    self.issue_state.unwrap_or("")
-                )),
+                ("gh", ["issue", "view", "7", ..]) => ok(serde_json::json!({
+                    "state": self.issue_state.unwrap_or(""),
+                    "stateReason": self.issue_reason,
+                })
+                .to_string()),
                 ("git", ["fetch", ..]) => ok(String::new()),
                 ("git", ["merge-base", ..]) if self.on_base => ok(String::new()),
                 ("git", ["log", "--format=%H", ..]) => ok(self.touched.into()),
@@ -916,9 +924,17 @@ mod tests {
     fn a_reopened_issue_counts_against_it() {
         let h = History {
             issue_state: Some("OPEN"),
+            issue_reason: Some("REOPENED"),
             ..Default::default()
         };
         assert_eq!(judge(&h), Some(Durability::Reverted));
+        // Open but never closed (the merge did not close it) is not a reopen.
+        let never_closed = History {
+            issue_state: Some("OPEN"),
+            issue_reason: None,
+            ..Default::default()
+        };
+        assert_eq!(judge(&never_closed), Some(Durability::Held));
     }
 
     #[test]
