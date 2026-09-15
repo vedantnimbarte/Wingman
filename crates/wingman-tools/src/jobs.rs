@@ -80,7 +80,7 @@ pub struct Tail {
 }
 
 impl Tail {
-    fn push(&mut self, bytes: &[u8]) {
+    pub(crate) fn push(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
         if self.buf.len() > MAX_BUFFERED_BYTES {
             let excess = self.buf.len() - MAX_BUFFERED_BYTES;
@@ -89,7 +89,7 @@ impl Tail {
         }
     }
 
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let text = String::from_utf8_lossy(&self.buf).into_owned();
         if self.dropped == 0 {
             text

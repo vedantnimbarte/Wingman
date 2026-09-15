@@ -27,7 +27,7 @@ wingman-ts = { workspace = true, optional = true }
 # >= 0.42, where the recursion is bounded.
 pdf-extract = { version = "0.12", optional = true }
 
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }

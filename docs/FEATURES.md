@@ -135,6 +135,18 @@ Wingman different; this is everything else it does.
   denylist, sandbox, and credential scrub as a foreground one, and every job is
   killed with its whole process tree when the session ends — a forgotten dev
   server doesn't outlive the agent.
+- **Debugger tools (DAP).** Where the LSP tools ask the compiler, `debug_start`,
+  `debug_breakpoints`, `debug_continue`, `debug_state`, `debug_eval`, and
+  `debug_stop` ask the runtime: launch a program or test under whatever Debug
+  Adapter Protocol adapter is on `PATH` (`lldb-dap`/`codelldb` for Rust/C/C++,
+  debugpy for Python, `dlv dap` for Go), stop at a line, read the stack and the
+  top frame's locals, evaluate an expression, step. They need the same grant as
+  `run_shell`, start the adapter through its preparation (denylist, sandbox,
+  credential scrub), and kill the adapter and debuggee as one process tree on
+  stop or session end. No adapter installed is a note naming what to install;
+  `wingman doctor` lists what it found. Not validated live: tested against an
+  in-process fake adapter only — no real lldb-dap, debugpy, Delve, or CodeLLDB
+  was run. See [TOOLS.md](TOOLS.md#debugger--ask-the-runtime).
 - **Two-layer loop protection.** The tools layer nudges the model when it
   repeats a call with identical arguments (`[tools].repeat_thresholds`,
   advisory, never blocks). Above it, a rolling window

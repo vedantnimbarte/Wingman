@@ -246,13 +246,8 @@ impl LspClient {
     }
 
     async fn write_message(&self, msg: &Value) -> Result<()> {
-        let body = serde_json::to_vec(msg).expect("serialize json-rpc");
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
         let mut w = self.writer.lock().await;
-        w.write_all(header.as_bytes()).await?;
-        w.write_all(&body).await?;
-        w.flush().await?;
-        Ok(())
+        Ok(write_message(&mut *w, msg).await?)
     }
 
     /// Send a request and await its result, bounded by `timeout`.
@@ -656,12 +651,7 @@ async fn reader_loop(
                 _ => Value::Null,
             };
             let reply = json!({ "jsonrpc": "2.0", "id": id, "result": result });
-            let body = serde_json::to_vec(&reply).unwrap_or_default();
-            let header = format!("Content-Length: {}\r\n\r\n", body.len());
-            let mut w = writer.lock().await;
-            let _ = w.write_all(header.as_bytes()).await;
-            let _ = w.write_all(&body).await;
-            let _ = w.flush().await;
+            let _ = write_message(&mut *writer.lock().await, &reply).await;
             continue;
         }
 
@@ -686,8 +676,23 @@ async fn reader_loop(
     }
 }
 
-/// Read one `Content-Length`-framed JSON message. `Ok(None)` on clean EOF.
-async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<Value>> {
+/// Write one `Content-Length`-framed JSON message. The Debug Adapter Protocol
+/// uses the same framing, so `wingman-tools`' DAP client shares this.
+pub async fn write_message<W: AsyncWrite + Unpin + ?Sized>(
+    w: &mut W,
+    msg: &Value,
+) -> std::io::Result<()> {
+    let body = serde_json::to_vec(msg).expect("serialize json");
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    w.write_all(header.as_bytes()).await?;
+    w.write_all(&body).await?;
+    w.flush().await
+}
+
+/// Read one `Content-Length`-framed JSON message. `Ok(None)` on clean EOF or
+/// a frame with no length; an unparseable body yields `Value::Null` so the
+/// caller can skip it and keep reading. Shared with the DAP client.
+pub async fn read_message<R: AsyncBufReadExt + Unpin>(reader: &mut R) -> Result<Option<Value>> {
     let mut content_length: Option<usize> = None;
     loop {
         let mut line = String::new();
@@ -919,6 +924,52 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Framing edge cases the DAP client leans on as much as LSP does: other
+    /// headers, a frame split across writes, two frames in one write, a
+    /// multi-byte body (the length is bytes, not chars), a garbage body that
+    /// must be skipped rather than end the stream, and a frame with no length.
+    #[tokio::test]
+    async fn framing_survives_the_edge_cases() {
+        let frame = |b: &str| format!("Content-Length: {}\r\n\r\n{b}", b.len());
+        let (mut tx, rx) = tokio::io::duplex(64);
+        let writer = tokio::spawn(async move {
+            let first = format!(
+                "Content-Type: application/vscode-jsonrpc; charset=utf-8\r\n{}",
+                frame(r#"{"n":"héllo"}"#)
+            );
+            // Split mid-header and again mid-body.
+            let (a, b) = first.as_bytes().split_at(20);
+            tx.write_all(a).await.unwrap();
+            tx.flush().await.unwrap();
+            let (b1, b2) = b.split_at(b.len() - 4);
+            tx.write_all(b1).await.unwrap();
+            tx.flush().await.unwrap();
+            tx.write_all(b2).await.unwrap();
+            let two = format!("{}{}", frame("not json"), frame(r#"{"n":2}"#));
+            tx.write_all(two.as_bytes()).await.unwrap();
+            tx.write_all(b"X-Nothing: 1\r\n\r\n{}").await.unwrap();
+        });
+        let mut r = BufReader::new(rx);
+        assert_eq!(
+            read_message(&mut r).await.unwrap(),
+            Some(json!({"n": "héllo"}))
+        );
+        assert_eq!(read_message(&mut r).await.unwrap(), Some(Value::Null));
+        assert_eq!(read_message(&mut r).await.unwrap(), Some(json!({"n": 2})));
+        assert_eq!(read_message(&mut r).await.unwrap(), None, "no length");
+        writer.await.unwrap();
+
+        let mut out = Vec::new();
+        write_message(&mut out, &json!({"a": 1})).await.unwrap();
+        assert_eq!(out, b"Content-Length: 7\r\n\r\n{\"a\":1}");
+        let (_, closed) = tokio::io::duplex(8);
+        assert_eq!(
+            read_message(&mut BufReader::new(closed)).await.unwrap(),
+            None,
+            "EOF"
+        );
+    }
 
     #[test]
     fn uri_roundtrip_unix() {

@@ -474,6 +474,14 @@ impl ToolRegistry {
         self.register(crate::builtin::JobSend);
         self.register(crate::builtin::JobStop);
         self.register(crate::builtin::JobList);
+        // Registered unconditionally, like the LSP tools: with no adapter on
+        // PATH `debug_start` says what to install instead of failing.
+        self.register(crate::builtin::DebugStart);
+        self.register(crate::builtin::DebugBreakpoints);
+        self.register(crate::builtin::DebugContinue);
+        self.register(crate::builtin::DebugState);
+        self.register(crate::builtin::DebugEval);
+        self.register(crate::builtin::DebugStop);
         self.register(crate::builtin::ListDir);
         self.register(crate::builtin::Glob);
         self.register(crate::builtin::Grep);
