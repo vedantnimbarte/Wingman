@@ -2489,6 +2489,11 @@ fn eval_judge(cfg: &Config) -> Option<wingman_autonomous::pipeline::AuxAgent> {
 ///
 /// A goal runs from its `base` (a golden commit's parent by default) and
 /// never opens a PR: an eval's attempts are measurements, not contributions.
+///
+/// A run leaves the checkout on its integration branch, built from that
+/// goal's base, where the goals file's golden diffs, the next goal and the
+/// baseline read after the suite may not exist. So after each run the
+/// checkout is put back where the suite found it, before the run is scored.
 async fn run_eval_goals(
     cfg: &Config,
     project_root: &std::path::Path,
@@ -2502,6 +2507,7 @@ async fn run_eval_goals(
         .any(|g| g.golden_commit.is_some() || g.golden_diff.is_some());
     let judge = if has_golden { eval_judge(cfg) } else { None };
     let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let home = current_checkout(&runner, project_root);
     let mut out = Vec::with_capacity(goals.len());
     for goal in goals {
         let before: std::collections::HashSet<String> =
@@ -2522,6 +2528,11 @@ async fn run_eval_goals(
             eprintln!("[pilot] eval: {:?} run failed: {e:#}", goal.goal);
         }
         let wall_min = started.elapsed().as_secs_f64() / 60.0;
+        if let Some(home) = &home {
+            if let Err(e) = restore_checkout(&runner, project_root, home) {
+                eprintln!("[pilot] eval: could not return the checkout to {home}: {e}");
+            }
+        }
 
         // Find the run this goal produced (newest id not seen before) and
         // read its terminal status + spend.
@@ -2573,6 +2584,39 @@ async fn run_eval_goals(
         }
     }
     out
+}
+
+/// Where HEAD is in `root`: its branch, or the commit when detached. `None`
+/// outside a git repository.
+fn current_checkout(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    root: &std::path::Path,
+) -> Option<String> {
+    let read = |args: &[&str]| {
+        runner
+            .run("git", args, root)
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    read(&["symbolic-ref", "--short", "-q", "HEAD"]).or_else(|| read(&["rev-parse", "HEAD"]))
+}
+
+/// Check out `checkout` (from [`current_checkout`]) in `root` again.
+fn restore_checkout(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    root: &std::path::Path,
+    checkout: &str,
+) -> std::result::Result<(), String> {
+    let out = runner
+        .run("git", &["checkout", "-q", checkout], root)
+        .map_err(|e| e.to_string())?;
+    if out.success() {
+        Ok(())
+    } else {
+        Err(out.stderr.trim().to_string())
+    }
 }
 
 fn read_eval_results(path: &std::path::Path) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
@@ -2908,6 +2952,51 @@ mod tests {
             wingman_config::PilotDaemonConfig::default().feedback_poll_secs,
             3600
         );
+    }
+
+    /// R4: a goal's run leaves the checkout on its integration branch; the
+    /// suite returns it to the branch (or detached commit) it started on.
+    #[test]
+    fn r4_eval_returns_the_checkout_where_it_found_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+        };
+        if git(&["init", "-q", "-b", "trunk"]).is_err() {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        for kv in [["user.email", "t@t.t"], ["user.name", "t"]] {
+            git(&["config", kv[0], kv[1]]).unwrap();
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        let runner = wingman_autonomous::pr::SystemCommandRunner;
+        let home = current_checkout(&runner, root).expect("on a branch");
+        assert_eq!(home, "trunk");
+
+        // What a run does: switch to a rebuilt integration branch.
+        git(&["switch", "-q", "-c", "wingman/auto/r1"]).unwrap();
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        git(&["commit", "-qam", "run"]).unwrap();
+        restore_checkout(&runner, root, &home).unwrap();
+        assert_eq!(current_checkout(&runner, root).as_deref(), Some("trunk"));
+        assert!(root.join("a.txt").exists());
+
+        // Detached: comes back as the commit.
+        git(&["checkout", "-q", "--detach", "trunk"]).unwrap();
+        let detached = current_checkout(&runner, root).unwrap();
+        assert_eq!(detached.len(), 40, "{detached}");
+        git(&["switch", "-q", "wingman/auto/r1"]).unwrap();
+        restore_checkout(&runner, root, &detached).unwrap();
+        assert_eq!(current_checkout(&runner, root), Some(detached));
+        assert!(restore_checkout(&runner, root, "no-such-branch").is_err());
     }
 
     /// R4: the judge runs on the `judge` class when routed, else on the

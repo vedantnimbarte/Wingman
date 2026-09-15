@@ -1060,12 +1060,14 @@ fn scan_lockfile_licenses(
 /// Collect `(name, version, spdx_license)` for every package `cargo metadata`
 /// resolves in `dir`. `None` when cargo is missing or the command fails, so
 /// the caller can say the licenses went unchecked rather than report a clean
-/// scan.
+/// scan. `--locked`: `dir` is the user's checkout, and a lockfile that does not
+/// match its manifests is reported as unchecked rather than rewritten there.
 fn collect_dependency_licenses(
     runner: &dyn CommandRunner,
     dir: &std::path::Path,
 ) -> Option<Vec<(String, String, String)>> {
-    let out = match runner.run("cargo", &["metadata", "--format-version", "1"], dir) {
+    let args = ["metadata", "--format-version", "1", "--locked"];
+    let out = match runner.run("cargo", &args, dir) {
         Ok(o) if o.success() => o.stdout,
         _ => return None,
     };
@@ -1233,8 +1235,9 @@ fn run_cargo_audit(
     }
 }
 
-/// GitHub rejects comment bodies over 65536 characters.
-const MAX_PR_COMMENT_BYTES: usize = 60_000;
+/// The body travels as a `gh` argument, and a Windows command line is capped
+/// at 32767 characters (GitHub's own limit, 65536, is the looser of the two).
+const MAX_PR_COMMENT_BYTES: usize = 30_000;
 
 /// R6 — post the security summary on the PR `gh` opened, so it sits where
 /// the change is reviewed. Best-effort: a failed comment is logged and the
@@ -2210,10 +2213,12 @@ mod tests {
             fn run(
                 &self,
                 program: &str,
-                _args: &[&str],
+                args: &[&str],
                 _cwd: &std::path::Path,
             ) -> std::io::Result<CommandOut> {
                 assert_eq!(program, "cargo");
+                // Never rewrites the user's lockfile.
+                assert!(args.contains(&"--locked"), "{args:?}");
                 Ok(CommandOut {
                     status: Some(0),
                     stdout: r#"{"packages":[

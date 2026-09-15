@@ -266,7 +266,8 @@ fn create_via_gh(
 /// lacks and the plain push is rejected. Inside `wingman/auto/*` that branch
 /// belongs to the pilot: it is replaced with `--force-with-lease` pinned to
 /// the remote commit just read, so a push that raced in since is still not
-/// overwritten. Outside the namespace the force-push is refused with the
+/// overwritten, and only when that commit is one this clone has. Outside the
+/// namespace the force-push is refused with the
 /// [`crate::escalation::EscalationTrigger::ForcePushOutsideNamespace`] trigger.
 fn push_branch(runner: &dyn CommandRunner, repo_root: &Path, branch: &str) -> Result<(), PrError> {
     let push = runner.run("git", &["push", "-u", "origin", branch], repo_root)?;
@@ -292,6 +293,20 @@ fn push_branch(runner: &dyn CommandRunner, repo_root: &Path, branch: &str) -> Re
     else {
         return Err(PrError::GitPush(stderr));
     };
+    // The lease only guards the moment between reading the remote and
+    // pushing. A commit someone else pushed to the PR branch earlier (a review
+    // fixup, GitHub's "update branch") is not in this clone, and a remote tip
+    // this clone never had is left alone rather than overwritten.
+    let tip = format!("{sha}^{{commit}}");
+    if !runner
+        .run("git", &["cat-file", "-e", &tip], repo_root)?
+        .success()
+    {
+        return Err(PrError::GitPush(format!(
+            "{stderr}\nremote `{branch}` is at {sha}, a commit this clone does not have, so it \
+             was not force-pushed over; fetch it and reconcile by hand"
+        )));
+    }
     let lease = format!("--force-with-lease={remote_ref}:{sha}");
     tracing::warn!(
         target: "pilot::pr",
@@ -731,6 +746,7 @@ error: failed to push some refs"
             ok("0123abcd	refs/heads/wingman/auto/r1
 "),
         );
+        runner.respond("git", &["cat-file", "-e", "0123abcd^{commit}"], ok(""));
         let lease = "--force-with-lease=refs/heads/wingman/auto/r1:0123abcd";
         runner.respond(
             "git",
@@ -742,6 +758,33 @@ error: failed to push some refs"
             .calls()
             .iter()
             .any(|(_, a)| a.iter().any(|x| x == lease)));
+    }
+
+    /// A remote tip this clone does not have was pushed by someone else (a
+    /// review fixup on the PR); forcing would silently drop it.
+    #[test]
+    fn j15_a_remote_tip_this_clone_never_had_is_not_forced() {
+        let runner = MockCommandRunner::new();
+        runner.respond(
+            "git",
+            &["push", "-u", "origin", "wingman/auto/r1"],
+            rejected(),
+        );
+        runner.respond(
+            "git",
+            &["ls-remote", "origin", "refs/heads/wingman/auto/r1"],
+            ok("feedface\trefs/heads/wingman/auto/r1\n"),
+        );
+        // No cat-file response: the mock answers it with a failure.
+        let err = push_branch(&runner, Path::new("."), "wingman/auto/r1").unwrap_err();
+        assert!(
+            matches!(&err, PrError::GitPush(m) if m.contains("does not have")),
+            "{err}"
+        );
+        assert!(!runner
+            .calls()
+            .iter()
+            .any(|(_, a)| a.iter().any(|x| x.starts_with("--force"))));
     }
 
     #[test]

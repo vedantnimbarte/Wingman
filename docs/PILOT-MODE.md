@@ -239,7 +239,9 @@ when it re-verifies a worker that stopped without reporting.
 **Force-pushes.** Every merge rebuilds the integration branch from the base
 commit, so a resumed run whose branch was already pushed is rejected as
 non-fast-forward. Inside `wingman/auto/*` the branch is replaced with
-`--force-with-lease` pinned to the remote commit just read. Any other branch
+`--force-with-lease` pinned to the remote commit just read, but only when that
+commit is one this clone has: a commit someone else pushed to the PR branch is
+never overwritten, and the push fails for you to reconcile. Any other branch
 is refused, and the run stops with an escalation packet instead of a PR.
 
 **Retry history.** Each worker attempt records a `task.attempt` event (rung,
@@ -427,8 +429,9 @@ feedback_poll_secs = 3600   # 0 = off
 ```
 
 **Evals.** `wingman pilot eval --goals <file>` runs each goal through
-`pilot run` with no PR, and scores it on success (the run reached Done), cost,
-wall time and quality. It writes `.wingman/eval/results.jsonl`, compares the
+`pilot run` with no PR, puts the checkout back on the branch it started from,
+and scores the run on success (the run reached Done), cost, wall time and
+quality. It writes `.wingman/eval/results.jsonl`, compares the
 averages with the baseline (`--baseline <file>`, default
 `.wingman/eval/baseline.json`), prints the report, and exits 1 when an axis is
 more than `--threshold` (default 10%) worse. `--update-baseline` writes the
