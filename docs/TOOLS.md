@@ -66,6 +66,11 @@ Read a file and return its content with line numbers.
   instead of returning an empty string a model would read as an empty
   document. Behind the default-on `pdf` build feature.
 - Output truncated per `tool_output_max_lines` (head + tail).
+- After a read, the files it is likely to be followed by are pre-read in the
+  background to warm the OS page cache: first the project files it imports
+  (resolved with tree-sitter for Rust, Python, JS/TS and Go, never outside the
+  project root), then its same-directory siblings. Nothing is returned to the
+  model; it only makes the next read faster.
 
 **Example:**
 ```

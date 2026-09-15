@@ -30,6 +30,18 @@ prompt_cache = true
 [router]
 fast_model = "anthropic/claude-haiku-4-5-20251001"
 # local_model = "ollama/llama3.1"   # target of the `local` class keyword
+# Learned routing (off by default). Once a model has this many gate results
+# for a class in this repo, the best one serves that class: the session model
+# when no --model is given, and each pilot worker role. `wingman router stats`
+# shows the table; an explicit --model always wins.
+# learned_min_samples = 20
+
+[learn]
+allow_global_memory_writes = false   # may the agent write ~/.wingman/memory/
+# Search escalation: before each user turn, the top index hits for the
+# request (file, line range, symbol) are added to the turn, best first, until
+# the next would pass this many tokens. 0 turns it off.
+search_hint_tokens = 300
 
 [tui]
 theme = "default"

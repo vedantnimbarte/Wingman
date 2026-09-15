@@ -674,6 +674,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             pilot.worker_model.as_deref().unwrap_or(&selection.model),
             &selection.model,
             routing,
+            learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(pilot.task_timeout_secs),
             turn_rollback_after(&pilot),
             capability_on(&pilot, "checkpoint_hygiene"),
@@ -1668,6 +1669,7 @@ pub async fn resume(
                 .unwrap_or(&selection.model),
             &selection.model,
             routing,
+            learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
             turn_rollback_after(&cfg.pilot),
             capability_on(&cfg.pilot, "checkpoint_hygiene"),
@@ -1848,6 +1850,18 @@ fn worker_sandbox_for(
     )
 }
 
+/// The config learned routing reads (`[router].learned_min_samples`, and the
+/// providers a pick must still resolve to) paired with the repo key routing
+/// rows are recorded under, or `None` when learned routing is off.
+fn learned_routing(
+    cfg: &Config,
+    project_root: &std::path::Path,
+) -> Option<std::sync::Arc<(Config, String)>> {
+    cfg.router
+        .learned_min_samples
+        .map(|_| std::sync::Arc::new((cfg.clone(), project_root.to_string_lossy().to_string())))
+}
+
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
 /// child processes via [`wingman_autonomous::worker::run_worker`].
 ///
@@ -1860,6 +1874,10 @@ fn worker_sandbox_for(
 /// threshold is dispatched straight to the capable model instead of
 /// burning a first attempt that history says will fail.
 ///
+/// `learned` is the config with `[router].learned_min_samples` set and the
+/// repo it reads `learn.db` for. When set, and a model has won the task's role
+/// there, that model takes the base attempt ahead of the E6 choice.
+///
 /// `sandbox` + `avail` pick each task's J11 tier: a container/vm task runs
 /// its worker in that sandbox, degraded to what this machine can honour.
 ///
@@ -1870,6 +1888,7 @@ fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
+    learned: Option<std::sync::Arc<(Config, String)>>,
     task_timeout: std::time::Duration,
     turn_rollback_after: u32,
     checkpoint_hygiene: bool,
@@ -1887,12 +1906,20 @@ fn build_real_worker_spawner(
             let manager_model = manager_model.clone();
             let routing = routing.clone();
             let worker_sandbox = worker_sandbox_for(&ctx.task, &sandbox, &avail);
+            let learned = learned.clone();
             Box::pin(async move {
                 // E5 rung 2: escalate to the manager model when the
                 // orchestrator flagged this attempt as needing it. Otherwise
-                // E6 adaptive routing picks the base model per role.
+                // learned routing, then E6 adaptive routing, picks the base
+                // model per role.
+                let learned_pick = match (&learned, ctx.escalate_model) {
+                    (Some(l), false) => runtime::learned_model(&l.0, ctx.task.role.as_str(), &l.1),
+                    _ => None,
+                };
                 let model = if ctx.escalate_model {
                     Some(manager_model)
+                } else if learned_pick.is_some() {
+                    learned_pick
                 } else if let Some(agg) = &routing {
                     Some(wingman_autonomous::learning::route_model(
                         agg,
@@ -3216,6 +3243,8 @@ pub async fn validate_providers(
         let spawner = build_real_worker_spawner(
             &spec,
             &spec,
+            None,
+            // The matrix measures this provider, not a learned pick.
             None,
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
             // First-attempt behaviour, as below: no rollback, no hygiene gate.

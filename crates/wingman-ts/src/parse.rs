@@ -404,6 +404,146 @@ pub fn outline(lang: Language, src: &str) -> Option<String> {
     Some(out)
 }
 
+// ─── Imports ────────────────────────────────────────────────────────────
+
+/// Module paths `src` imports, in source order, spelled the way the language
+/// names them: Rust `crate::a::b` (one path per `use` list item, `mod x;` as
+/// `self::x`), Python `pkg.mod` / `..rel.mod` (a from-import names each item as
+/// `module.item`), JS/TS the `import`/`export`/`require` specifier, Go the
+/// import path. Resolving them to files is the caller's job.
+pub fn imports(lang: Language, src: &str) -> Vec<String> {
+    let Some((_parser, tree)) = parse(lang, src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    walk_imports(lang, src, tree.root_node(), &mut out, 0);
+    out
+}
+
+fn walk_imports(lang: Language, src: &str, node: Node, out: &mut Vec<String>, depth: u32) {
+    let text = |n: &Node| src.get(n.start_byte()..n.end_byte()).unwrap_or_default();
+    let unquote = |n: &Node| {
+        text(n)
+            .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+            .to_string()
+    };
+    let found = match (lang, node.kind()) {
+        (Language::Rust, "use_declaration") => {
+            if let Some(arg) = node.child_by_field_name("argument") {
+                rust_use_paths(src, arg, "", out);
+            }
+            true
+        }
+        (Language::Rust, "mod_item") if node.child_by_field_name("body").is_none() => {
+            if let Some(name) = child_text(src, &node, "name") {
+                out.push(format!("self::{name}"));
+            }
+            true
+        }
+        (Language::Python, "import_statement") => {
+            let mut cursor = node.walk();
+            for name in node.children_by_field_name("name", &mut cursor) {
+                let name = name.child_by_field_name("name").unwrap_or(name);
+                out.push(text(&name).to_string());
+            }
+            true
+        }
+        (Language::Python, "import_from_statement") => {
+            let module = child_text(src, &node, "module_name").unwrap_or_default();
+            let sep = if module.ends_with('.') { "" } else { "." };
+            let mut cursor = node.walk();
+            let mut any = false;
+            for name in node.children_by_field_name("name", &mut cursor) {
+                let name = name.child_by_field_name("name").unwrap_or(name);
+                out.push(format!("{module}{sep}{}", text(&name)));
+                any = true;
+            }
+            if !any {
+                out.push(module.to_string()); // `from x import *`
+            }
+            true
+        }
+        (
+            Language::JavaScript | Language::TypeScript | Language::Tsx,
+            "import_statement" | "export_statement",
+        ) => {
+            if let Some(source) = node.child_by_field_name("source") {
+                out.push(unquote(&source));
+            }
+            // An export statement can wrap declarations holding `require`s.
+            node.kind() == "import_statement"
+        }
+        (Language::JavaScript | Language::TypeScript | Language::Tsx, "call_expression") => {
+            let callee = node.child_by_field_name("function");
+            if callee.is_some_and(|c| matches!(text(&c), "require" | "import")) {
+                let arg = node
+                    .child_by_field_name("arguments")
+                    .and_then(|a| a.named_child(0));
+                if let Some(arg) = arg.filter(|a| a.kind() == "string") {
+                    out.push(unquote(&arg));
+                }
+            }
+            false
+        }
+        (Language::Go, "import_spec") => {
+            if let Some(path) = node.child_by_field_name("path") {
+                out.push(unquote(&path));
+            }
+            true
+        }
+        _ => false,
+    };
+    // Imports sit near the top of the tree; the cap only guards against
+    // pathological nesting blowing the stack.
+    if found || depth > 64 {
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_imports(lang, src, child, out, depth + 1);
+    }
+}
+
+/// Flatten one Rust use-tree (`a::{b, c::d as e, f::*}`) into full paths.
+fn rust_use_paths(src: &str, node: Node, prefix: &str, out: &mut Vec<String>) {
+    let join = |tail: &str| {
+        if prefix.is_empty() {
+            tail.to_string()
+        } else {
+            format!("{prefix}::{tail}")
+        }
+    };
+    let text = |n: &Node| src.get(n.start_byte()..n.end_byte()).unwrap_or_default();
+    match node.kind() {
+        "use_as_clause" => {
+            if let Some(path) = node.child_by_field_name("path") {
+                rust_use_paths(src, path, prefix, out);
+            }
+        }
+        "use_wildcard" => {
+            if let Some(path) = node.named_child(0) {
+                out.push(join(text(&path)));
+            }
+        }
+        "scoped_use_list" => {
+            let inner = node
+                .child_by_field_name("path")
+                .map(|p| join(text(&p)))
+                .unwrap_or_else(|| prefix.to_string());
+            if let Some(list) = node.child_by_field_name("list") {
+                rust_use_paths(src, list, &inner, out);
+            }
+        }
+        "use_list" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                rust_use_paths(src, child, prefix, out);
+            }
+        }
+        _ => out.push(join(text(&node))),
+    }
+}
+
 // ─── Enclosing symbol ───────────────────────────────────────────────────
 
 /// Return the innermost named symbol that contains `line` (1-based).
@@ -615,6 +755,51 @@ mod tests {
             replace_function_body(Language::Python, src, "add", "    return a - b\n").unwrap();
         assert!(out.contains("return a - b"));
         assert!(!out.contains("return a + b"));
+    }
+
+    #[test]
+    fn imports_flatten_rust_use_trees_and_mod_decls() {
+        let src = r"
+            use crate::a::{b, c::d as e, f::*};
+            use super::g;
+            mod h;
+            mod inline { }
+            fn x() { use std::fmt; }
+        ";
+        assert_eq!(
+            imports(Language::Rust, src),
+            [
+                "crate::a::b",
+                "crate::a::c::d",
+                "crate::a::f",
+                "super::g",
+                "self::h",
+                "std::fmt"
+            ]
+        );
+    }
+
+    #[test]
+    fn imports_cover_python_js_and_go() {
+        let py = "import os.path as p, json\nfrom . import sib\nfrom ..pkg.mod import thing\nfrom x import *\n";
+        assert_eq!(
+            imports(Language::Python, py),
+            ["os.path", "json", ".sib", "..pkg.mod.thing", "x"]
+        );
+        let js = r#"
+            import a from './a';
+            export { b } from "../b";
+            const c = require('./c');
+        "#;
+        assert_eq!(imports(Language::TypeScript, js), ["./a", "../b", "./c"]);
+        let go = r#"
+            package main
+            import (
+                "fmt"
+                m "example.com/app/pkg"
+            )
+        "#;
+        assert_eq!(imports(Language::Go, go), ["fmt", "example.com/app/pkg"]);
     }
 
     #[test]

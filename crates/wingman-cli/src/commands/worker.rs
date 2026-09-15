@@ -70,10 +70,11 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     // Resolve the worker model — prefer --model, then pilot.worker_model,
     // then the global default. `--model` comes first because the parent has
     // already resolved it from the project config this worker cannot see (see
-    // `worker_args`), and it carries the E5 escalation to the manager model and
-    // `pilot validate-providers`' choice of provider; a `pilot.worker_model` in
-    // global config used to override both. We deliberately don't fall back to
-    // pilot.default_model: workers should be the cheap tier.
+    // `worker_args`), and it carries the E5 escalation to the manager model, a
+    // learned-routing pick, and `pilot validate-providers`' choice of provider;
+    // a `pilot.worker_model` in global config used to override all of them. We
+    // deliberately don't fall back to pilot.default_model: workers should be
+    // the cheap tier.
     let model_string = opts
         .model_override
         .clone()
@@ -331,6 +332,16 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         });
     }
 
+    // Gate results are recorded per role against the model that ran them —
+    // the per-class signal `wingman router stats` and learned routing read,
+    // and the rows `wingman router backfill` later attaches this task's PR
+    // verdict to. Keyed by the owning project, as the transcript is: the
+    // worktree path is gone once the run cleans up.
+    let routing_stats = wingman_learn::StatsStore::open_default().ok();
+    let routing_repo = wingman_config::find_owning_project_root(&paths.root)
+        .to_string_lossy()
+        .to_string();
+
     // Not held locked for the run: the rate-limit observer below writes its
     // own lines from whichever thread the provider's retry runs on. Each
     // `writeln!` still takes the lock for its whole line.
@@ -405,6 +416,17 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
             break;
         }
         match event {
+            AgentEvent::Verification { passed, .. } => {
+                if let Some(st) = &routing_stats {
+                    let _ = st.record_routing(
+                        role.as_str(),
+                        &selection.spec(),
+                        &routing_repo,
+                        opts.session_id.as_deref(),
+                        passed,
+                    );
+                }
+            }
             AgentEvent::Error { .. } => {
                 exit = ExitCode::from(1);
             }

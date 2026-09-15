@@ -27,7 +27,17 @@ pub struct HeadlessOptions {
 
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
-    let selection = runtime::resolve_selection(&cfg, opts.model_override.as_deref())?;
+    let cwd = std::env::current_dir()?;
+    let paths = ProjectPaths::discover(&cwd);
+    let repo = paths.root.to_string_lossy().to_string();
+    // An explicit --model always wins; learned routing only replaces the
+    // configured default.
+    let learned = match opts.model_override {
+        Some(_) => None,
+        None => runtime::learned_model(&cfg, wingman_learn::stats::SESSION_CLASS, &repo),
+    };
+    let selection =
+        runtime::resolve_selection(&cfg, opts.model_override.as_deref().or(learned.as_deref()))?;
     let (mut agent, registry) =
         runtime::build_agent_registry_with_fallback(&cfg, &selection, mode).await?;
     // Seed MCP servers so `mcp__*` tools are available in headless mode too.
@@ -36,8 +46,6 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
     let _mcp = runtime::seed_mcp(&cfg, registry).await;
 
     // Open session log under the project's .wingman/sessions/ dir.
-    let cwd = std::env::current_dir()?;
-    let paths = ProjectPaths::discover(&cwd);
     // `--resume` replays a previous transcript into the agent, and writes
     // this turn into that same log — so a conversation can continue across
     // processes (which is what the HTTP API's server-held sessions ride on).
@@ -96,15 +104,25 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
 
     if !opts.json {
         eprintln!(
-            "wingman [{}/{}] mode={mode}",
-            selection.provider_id, selection.model
+            "wingman [{}/{}] mode={mode}{}",
+            selection.provider_id,
+            selection.model,
+            if learned.is_some() {
+                " (learned routing)"
+            } else {
+                ""
+            }
         );
     }
 
     // Record per-turn routing outcomes (which model, did the gate pass) so
     // `wingman router stats` can show which model wins per class in this repo.
     let routing_stats = wingman_learn::StatsStore::open_default().ok();
-    let repo = paths.root.to_string_lossy().to_string();
+    let routing_model = selection.spec();
+    let routing_session = session
+        .as_ref()
+        .and_then(|s| s.path().file_stem())
+        .map(|n| n.to_string_lossy().to_string());
 
     // `[[hooks.user_prompt_submit]]` — the policy/content-filter hook. A
     // blocking hook that exits non-zero refuses the prompt outright.
@@ -135,7 +153,13 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
             AgentEvent::TextDelta { text } => assistant_text.push_str(text),
             AgentEvent::Verification { passed, .. } => {
                 if let Some(st) = &routing_stats {
-                    let _ = st.record_routing("default", &selection.model, &repo, *passed);
+                    let _ = st.record_routing(
+                        wingman_learn::stats::SESSION_CLASS,
+                        &routing_model,
+                        &repo,
+                        routing_session.as_deref(),
+                        *passed,
+                    );
                 }
             }
             AgentEvent::Error { .. } => exit = ExitCode::from(1),

@@ -266,14 +266,28 @@ Wingman different; this is everything else it does.
   composing with the rewind timeline and verification gate.
 - **Local-first privacy preset.** `wingman router preset local` prints a
   `[router.classes]` block that points the cheap task classes at a local
-  model. Caveat worth knowing: compaction and commit messages are currently
-  computed without a model call at all, and `[router.classes]` is consulted
-  only for subagents — so today the preset is a starting point for your own
-  config rather than a switch that redirects live traffic. For a real
-  guarantee use `[privacy].local_only` and `wingman attest`.
+  model. Caveat worth knowing: compaction, titles and commit messages are
+  computed without a model call at all, so only the calls that do use a model
+  follow it — subagents by their `task_class`, and `wingman distill` and
+  `wingman explain` as `summarize`. Everything else stays on the session
+  model. For a real guarantee use `[privacy].local_only` and `wingman attest`.
+- **Learned routing.** Every verification-gate result — from `--print`, the
+  TUI and pilot workers — is recorded in `~/.wingman/learn.db` against the
+  task class (`default` for a session, the role for a pilot worker) and the
+  `provider/model` that ran it. `wingman router backfill` adds a later,
+  durable verdict for merged pilot PRs (`held` / `reverted` / `unknown`,
+  where an untouched PR is `unknown`, never a pass), and `wingman router
+  stats` shows both per class. Setting `[router].learned_min_samples` turns
+  on learned routing: once a model has that many gate results for a class in
+  this repo, the best of them (skipping any whose PRs were reverted more often
+  than they held) serves that class — the session model when no `--model` is
+  given, and each pilot worker role's first attempt. Off by default; it only
+  chooses among models that have already run the class and whose provider is
+  still configured (and local, under `[privacy].local_only`).
 - **Explain-and-teach.** `wingman explain` gives a per-file "what changed and
-  why it matters" walkthrough of the working diff (fast-model), for reviewers
-  and juniors.
+  why it matters" walkthrough of the working diff (routed as the `summarize`
+  class, which is the fast model unless `[router.classes]` says otherwise),
+  for reviewers and juniors.
 - **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
@@ -335,6 +349,19 @@ Wingman different; this is everything else it does.
   mode rather than replacing it, so a client can narrow what the agent may do
   but never widen it. Writes still go to disk through Wingman
   ([#127](https://github.com/vedantnimbarte/Wingman/issues/127)).
+- **Warm index daemon.** `wingman indexd start` keeps `.wingman/index.db` fresh
+  in the background; `stop` and `status` manage it. Liveness is a real process
+  check (`kill(pid, 0)` / `OpenProcess`), so a crashed daemon's pidfile is
+  cleared rather than reported as running. The TUI opens on the daemon's warm
+  index instead of indexing again.
+- **Import-aware prefetch.** Reading a file pre-warms the files it imports,
+  then its siblings, so the agent's next read hits a warm cache.
+- **Search escalation.** Before each user turn the request is run against the
+  project index and the best-matching files, line ranges and symbols go into
+  the turn, so the agent starts by reading the right code instead of
+  grepping for it; the system prompt and `grep`'s description steer
+  concept-level lookups to `semantic_search` first. The block is capped at
+  `[learn].search_hint_tokens` (default 300; `0` turns it off).
 - **Hybrid semantic search.** The index fuses dense vector similarity with BM25
   keyword scoring (reciprocal-rank fusion), so exact identifier/error-string
   matches surface alongside semantic ones.

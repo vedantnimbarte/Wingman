@@ -29,6 +29,51 @@ pub struct Selection {
     pub model: String,
 }
 
+impl Selection {
+    /// `provider/model`, the form config and `--model` take. Routing rows are
+    /// keyed by it so a learned pick resolves back onto the provider that
+    /// earned it, not onto whichever provider is the default.
+    pub fn spec(&self) -> String {
+        format!("{}/{}", self.provider_id, self.model)
+    }
+}
+
+/// Learned routing (`[router].learned_min_samples`): the model that has won
+/// `class` in `repo`. `None` when learned routing is off, when no model has
+/// enough samples yet, or when `learn.db` cannot be read — never an error,
+/// because the static choice it would have replaced still stands.
+pub fn learned_model(cfg: &Config, class: &str, repo: &str) -> Option<String> {
+    let min_samples = cfg.router.learned_min_samples?;
+    let winner = wingman_learn::StatsStore::open_default().and_then(|store| {
+        store.learned_winner(class, repo, min_samples, |spec| {
+            learned_model_usable(cfg, spec)
+        })
+    });
+    match winner {
+        Ok(Some(model)) => {
+            tracing::info!("learned routing: class '{class}' -> {model}");
+            Some(model)
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!("learned routing unavailable: {e}");
+            None
+        }
+    }
+}
+
+/// Whether a recorded `provider/model` can still run under `cfg`. Without
+/// this, a winner whose provider was since removed would be handed whole to
+/// the default provider as a model id, and one on a cloud provider would fail
+/// every session once `[privacy].local_only` is on.
+fn learned_model_usable(cfg: &Config, spec: &str) -> bool {
+    spec.split_once('/').is_some_and(|(provider, model)| {
+        !model.is_empty()
+            && cfg.providers.contains_key(provider)
+            && (!cfg.privacy.local_only || provider_is_local(cfg, provider))
+    })
+}
+
 /// Parse a model string. Either `provider/model` (preferred) or bare
 /// `model` (uses `default_provider` from config).
 pub fn resolve_selection(cfg: &Config, model_flag: Option<&str>) -> Result<Selection> {
@@ -839,11 +884,21 @@ const PENDING_DRAIN_LIMIT: usize = 25;
 ///
 /// Returns `None` (with a warning) if the store can't be opened, so a broken
 /// `.wingman/` degrades to a session without memory rather than a hard failure.
-pub fn build_learn(paths: &ProjectPaths, session_id: String) -> Option<Arc<LearnHandles>> {
-    let learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+pub fn build_learn(
+    cfg: &Config,
+    paths: &ProjectPaths,
+    session_id: String,
+) -> Option<Arc<LearnHandles>> {
+    let mut learn_cfg = LearnConfig::new(paths.root.clone(), session_id);
+    learn_cfg.search_hint_tokens = cfg.learn.search_hint_tokens;
     // Give the learn hook the project index so it can inject relevant code
-    // locations per turn (search escalation). Cheap: opens the store, no reindex.
-    let learn_indexer = build_indexer(paths).ok().flatten();
+    // locations per turn (search escalation). Cheap: opens the store, no
+    // reindex. Not opened at all when `[learn].search_hint_tokens = 0`.
+    let learn_indexer = if learn_cfg.search_hint_tokens == 0 {
+        None
+    } else {
+        build_indexer(paths).ok().flatten()
+    };
     match LearnHandles::build_with_indexer(learn_cfg, learn_indexer) {
         Ok(h) => Some(Arc::new(h)),
         Err(e) => {
@@ -870,6 +925,23 @@ pub fn build_indexer(paths: &ProjectPaths) -> Result<Option<Arc<Indexer>>> {
             e @ (wingman_rag::RagError::DimMismatch { .. }
             | wingman_rag::RagError::EmbedderChanged { .. }),
         ) => {
+            // A live `indexd` owns this database and keeps writing to it.
+            // Deleting it here would pull the file out from under the daemon
+            // (or fail outright on Windows), so leave its index alone and let
+            // the user restart the daemon with the embedder they want. The
+            // daemon itself claims the pidfile before it opens the index, so
+            // its own pid is not a reason to refuse: it is the one restarted
+            // to do this rebuild.
+            if let Some(pid) = crate::commands::indexd::live_pid(&paths.dir)
+                .filter(|&pid| pid != std::process::id())
+            {
+                eprintln!(
+                    "wingman: the semantic index kept by indexd (pid {pid}) was built by a \
+                     different embedder ({e}); `semantic_search` is disabled this session. \
+                     Restart it with `wingman indexd stop` then `wingman indexd start`."
+                );
+                return Ok(None);
+            }
             // Both mean the same thing operationally — the vectors on disk were
             // produced by something this session cannot reproduce — so both
             // rebuild. They are reported apart because "4-dim vs 4-dim" is what
@@ -1743,7 +1815,7 @@ pub async fn build_agent_registry_learn(
     // the tool registry (some tools need to read/write them).
     let session_id = format!("session-{}", chrono_like_now());
     let spill = build_spill(cfg, &paths, &session_id);
-    let learn = build_learn(&paths, session_id);
+    let learn = build_learn(cfg, &paths, session_id);
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
 
@@ -2064,6 +2136,8 @@ fn base_prompt(mode: PermissionMode, cwd: &str) -> String {
          - For \"where is X\" or \"how does Y work\" questions, call `semantic_search` first \
          to find the relevant chunks, then `read_file` the specific line range you need. \
          Avoid reading whole files when a targeted range will do.\n\
+         - When the turn already lists \"Relevant code from the project index\", read \
+         those locations before searching again.\n\
          - Use `grep` for exact-string lookups and `glob` for filename patterns; \
          use `semantic_search` for conceptual / fuzzy queries.\n\
          - Edit with `edit_file` and include enough surrounding context that `old_string` is unique.\n\
@@ -2336,5 +2410,31 @@ mod credential_tests {
         assert_eq!(missing_credential(&cfg, "gemini", &env), None);
         let blank = |_: &str| Some("  ".into());
         assert!(missing_credential(&cfg, "openai", &blank).is_some());
+    }
+}
+
+#[cfg(test)]
+mod learned_routing_tests {
+    use super::*;
+
+    #[test]
+    fn a_learned_pick_must_still_run_under_this_config() {
+        let mut cfg = Config::default();
+        cfg.providers.insert(
+            "anthropic".into(),
+            wingman_config::ProviderConfig::default(),
+        );
+        cfg.providers
+            .insert("ollama".into(), wingman_config::ProviderConfig::default());
+        assert!(learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
+        // A provider since removed, or a bare id from before rows carried one.
+        assert!(!learned_model_usable(&cfg, "openai/gpt-4.1"));
+        assert!(!learned_model_usable(&cfg, "claude-opus"));
+        assert!(!learned_model_usable(&cfg, "anthropic/"));
+        // local_only rules out the cloud winner, not the local one.
+        cfg.privacy.local_only = true;
+        assert!(!learned_model_usable(&cfg, "anthropic/claude-opus"));
+        assert!(learned_model_usable(&cfg, "ollama/llama3.1"));
     }
 }

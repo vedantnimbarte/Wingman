@@ -34,12 +34,13 @@ wingman [OPTIONS] [COMMAND]
 | `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, git/gh tooling, and which pilot sandbox tiers (Docker, Firecracker) this machine can run. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
 | `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
 | `serve`              | Serve the HTTP/SSE API so another machine, a phone, or CI can drive Wingman. `--addr`, `--init-token`, `--list`, `--allow-yolo`, `--pair`. See [HTTP-API.md](HTTP-API.md). |
-| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
+| `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
 | `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
-| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. |
-| `indexd`             | Keep this project's semantic index warm (reindex, then watch). `--status`. |
+| `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
+| `indexd`             | Keep this project's semantic index warm (reindex, then watch) in the foreground. `start` runs it in the background (log: `.wingman/indexd.log`), `stop` asks it to exit, `status` reports whether it is running and the index age. A pidfile naming a dead process is cleared, so a crashed daemon never reads as running. While a daemon is live, the TUI uses its warm index instead of starting a second indexer, and `doctor` reports it. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
-| `router stats`       | Per-class model win-rates (gate pass-rate) for this repo. `--all` across repos. |
+| `router stats`       | Per-class model win-rates for this repo: the gate pass-rate beside the durable PR verdicts (held / reverted / unknown). `--all` across repos. |
+| `router backfill`    | Judge merged pilot PRs at least `--days` (default 30) old — reverted, mostly rewritten, broke the base branch, reopened their issue, or held — and record it against the roles and models that wrote them. A PR judged `unknown` is judged again on later runs; `held` and `reverted` are final. Needs `gh` and `git`. |
 | `router preset local`| Print a recommended local-first `[router]` preset. `--model <provider/model>`. |
 | `init`               | Scan the current project and write a starter `WINGMAN.md`. `--force` to overwrite. |
 | `checkpoint`         | Snapshot the working tree into a tagged `git stash`. `--label <text>` for a note. |

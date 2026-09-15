@@ -332,12 +332,12 @@ pub enum Command {
         session: Option<std::path::PathBuf>,
     },
     /// Keep this project's semantic index warm: initial reindex, then watch
-    /// the tree and refresh on change until interrupted.
+    /// the tree and refresh on change. Runs in the foreground until
+    /// interrupted; `start` runs it in the background instead.
     #[command(display_order = 26)]
     Indexd {
-        /// Report whether a daemon is running and index freshness, then exit.
-        #[arg(long)]
-        status: bool,
+        #[command(subcommand)]
+        action: Option<IndexdAction>,
     },
     /// Run any [[schedule]] entries whose cadence is due.
     #[command(display_order = 43)]
@@ -1033,11 +1033,21 @@ pub enum GoldenAction {
 
 #[derive(Subcommand, Debug)]
 pub enum RouterAction {
-    /// Show recorded per-class model win rates (gate pass-rate) for this repo.
+    /// Show recorded per-class model win rates for this repo: the gate
+    /// pass-rate, and how many merged PRs held.
     Stats {
         /// Aggregate across all repos instead of just the current one.
         #[arg(long)]
         all: bool,
+    },
+    /// Judge this repo's merged pilot PRs once they are old enough: reverted,
+    /// mostly rewritten, broke the base branch, reopened their issue, or
+    /// held. Records the verdict against the roles and models that wrote them.
+    /// Needs `gh` and `git`.
+    Backfill {
+        /// How long after merging a PR is judged.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
     },
     /// Print a recommended [router] preset to paste into config. `local` keeps
     /// cheap steps (summarize/compaction/commit-message/title) on a local model.
@@ -1049,6 +1059,17 @@ pub enum RouterAction {
         #[arg(long)]
         model: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum IndexdAction {
+    /// Start the daemon in the background (log: `.wingman/indexd.log`).
+    /// Sessions opened while it runs use its warm index.
+    Start,
+    /// Ask a running daemon to exit and wait for it.
+    Stop,
+    /// Report whether a daemon is running and index freshness, then exit.
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1337,7 +1358,7 @@ pub async fn run() -> Result<ExitCode> {
             commands::mcp_serve::run(load_config()?, mode).await
         }
         Some(Command::Distill { session }) => commands::distill::run(load_config()?, session).await,
-        Some(Command::Indexd { status }) => commands::indexd::run(status).await,
+        Some(Command::Indexd { action }) => commands::indexd::run(action).await,
         Some(Command::Schedule { all }) => commands::schedule::run(all).await,
         Some(Command::Skill { action }) => match action {
             SkillAction::Extract { min, force } => commands::skill::extract(min, force).await,
@@ -1579,11 +1600,22 @@ pub async fn run() -> Result<ExitCode> {
                 std::sync::Mutex<Option<std::sync::Arc<crate::mcp_registry::McpRegistry>>>,
             > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
+            let project = ProjectPaths::discover(&std::env::current_dir()?);
+            // Learned routing replaces only the configured default model; an
+            // explicit --model always wins.
+            let model_flag = cli.model.clone().or_else(|| {
+                crate::runtime::learned_model(
+                    &cfg,
+                    wingman_learn::stats::SESSION_CLASS,
+                    &project.root.to_string_lossy(),
+                )
+            });
+
             // Try to resolve a provider/model and build the agent. If no
             // provider is configured (or the configured one fails to build),
             // we still open the TUI — the user can run /login to set one up.
             let (selection, agent) =
-                match crate::runtime::resolve_selection(&cfg, cli.model.as_deref()) {
+                match crate::runtime::resolve_selection(&cfg, model_flag.as_deref()) {
                     Ok(sel) => {
                         match crate::runtime::build_agent_and_registry(&cfg, &sel, mode).await {
                             Ok((a, registry)) => {
@@ -1606,10 +1638,20 @@ pub async fn run() -> Result<ExitCode> {
                     }
                 };
 
-            // Kick off background indexing for the project. The handle is
+            // Kick off background indexing for the project, unless a live
+            // `indexd` already keeps this index warm: a second indexer would
+            // only redo its work against the same database. The handle is
             // held until the TUI exits.
-            let project = ProjectPaths::discover(&std::env::current_dir()?);
-            let _watch_handle = match crate::runtime::build_indexer(&project)? {
+            let indexd = crate::commands::indexd::live_pid(&project.dir);
+            if let Some(pid) = indexd {
+                tracing::info!("using the warm index kept by indexd (pid {pid})");
+            }
+            let _watch_handle = match indexd
+                .is_none()
+                .then(|| crate::runtime::build_indexer(&project))
+                .transpose()?
+                .flatten()
+            {
                 Some(indexer) => {
                     wingman_rag::spawn_background_indexer(indexer, project.root.clone())
                         .map_err(anyhow::Error::msg)

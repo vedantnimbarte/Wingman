@@ -34,8 +34,9 @@ pub async fn run(cfg: Config, session: Option<PathBuf>) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // Prefer the configured fast model for this cheap side call.
-    let model_flag = cfg.router.fast_model.clone();
+    // A cheap side call: routed as the `summarize` class, so the local
+    // preset keeps session transcripts on the machine.
+    let model_flag = cfg.router.resolve_side_call("summarize");
     let selection = resolve_selection(&cfg, model_flag.as_deref())?;
     let provider = build_provider(&cfg, &selection.provider_id)?;
 

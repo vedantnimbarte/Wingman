@@ -31,9 +31,9 @@ pub async fn run(base: Option<String>, staged: bool) -> Result<ExitCode> {
     let prompt = format!("{TEMPLATE}\n```\n{annotated}\n```");
 
     let cfg = load_config()?;
-    // Route to the fast model when configured — explanations don't need the
-    // heavyweight model, keeping this cheap.
-    let model_override = cfg.router.fast_model.clone();
+    // Explaining a diff is summarizing it, so it routes as the `summarize`
+    // class (fast model unless `[router.classes]` says otherwise).
+    let model_override = cfg.router.resolve_side_call("summarize");
     let opts = crate::commands::headless::HeadlessOptions {
         prompt,
         json: false,

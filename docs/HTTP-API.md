@@ -330,7 +330,7 @@ is returned as JSON; anything else comes back as
 | `GET /v1/projects/{p}/explain?base=&staged` | `explain [--local base] [--staged]` |
 | `GET /v1/projects/{p}/review?pr=&base=` | `review [pr] [--local base]` |
 | `GET /v1/projects/{p}/router/stats?all` | `router stats [--all]` |
-| `GET /v1/projects/{p}/index/status` | `indexd --status` |
+| `GET /v1/projects/{p}/index/status` | `indexd status` |
 | `POST /v1/projects/{p}/index/reindex` | `indexd` |
 | `GET /v1/projects/{p}/memory` | `memory review` |
 | `POST /v1/projects/{p}/memory/sync?ref=` | `memory sync [ref]` |
