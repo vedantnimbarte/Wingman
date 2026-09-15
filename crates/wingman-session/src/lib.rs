@@ -599,10 +599,17 @@ pub async fn fork_before_turn(src: &Path, turn: usize) -> Result<Option<PathBuf>
     let Some(start) = turn_starts(&records).get(turn).map(|t| t.record) else {
         return Ok(None);
     };
-    // One record per line: the writer never leaves a blank one, so a record
-    // index is a line count.
+    // `fork_session` cuts by line, and `load_session` skips blank lines, so
+    // turn the record index into the line it was read from.
+    let body = std::fs::read_to_string(src)?;
+    let line = body
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .nth(start)
+        .map_or(body.lines().count(), |(i, _)| i);
     let dir = src.parent().unwrap_or_else(|| Path::new("."));
-    fork_session(src, dir, Some(start)).await.map(Some)
+    fork_session(src, dir, Some(line)).await.map(Some)
 }
 
 #[cfg(test)]
@@ -682,7 +689,8 @@ mod tests {
             .iter()
             .map(|r| serde_json::to_string(r).unwrap() + "\n")
             .collect();
-        std::fs::write(&src, body).unwrap();
+        // A blank line before the cut (a hand-edited log) must not move it.
+        std::fs::write(&src, format!("\n{body}")).unwrap();
 
         let fork = fork_before_turn(&src, 1).await.unwrap().unwrap();
         let kept = load_session(&fork).unwrap();

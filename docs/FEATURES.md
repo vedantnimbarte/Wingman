@@ -179,7 +179,8 @@ Wingman different; this is everything else it does.
   reduces a transcript to what a reviewer asks about: the task and the last
   answer, files changed with lines added and removed (counted from the
   successful `edit_file`/`edit_symbol` diffs, `apply_patch` patches and
-  `write_file` contents in the log), every verification receipt, cost and
+  `write_file` contents in the log; `lsp_rename` and `lsp_code_action` list
+  their files without line counts), every verification receipt, cost and
   tokens, and the tool-call timeline. Everything taken from the model, a
   tool or the user goes through the same secret redactor as tool output
   first, and the report says how many it caught. The TUI's `/export [md|html|json]`

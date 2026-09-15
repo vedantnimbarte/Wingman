@@ -325,7 +325,7 @@ pub fn timeline(root: &Path) -> Vec<Point> {
         } else {
             points.len().checked_sub(1).filter(|&i| same(&points[i]))
         };
-        let file = relative(root, Path::new(&e.path));
+        let file = relative(root, &resolve(root, &e.path));
         match at {
             Some(i) => {
                 let point = &mut points[i];
@@ -390,7 +390,9 @@ fn plan(root: &Path, seq: u64) -> Result<Vec<Planned>, String> {
         if !seen.insert(e.path.clone()) {
             continue;
         }
-        let path = PathBuf::from(&e.path);
+        // `capture` records absolute paths; a relative one (hand-written) is
+        // the project's, not the working directory of whoever restores.
+        let path = resolve(root, &e.path);
         if inside(root, &path).is_none() {
             return Err(format!(
                 "refusing to restore {}: it is outside the project",
@@ -719,6 +721,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep");
         assert_eq!(read(&root, "a.txt").as_deref(), Some("later"));
         assert_eq!(depth(&root), 2, "no checkpoint written for a refused plan");
+    }
+
+    /// A relative manifest path names the project's file, whatever directory
+    /// the restoring process runs in (`wingman serve` does not run in it).
+    #[test]
+    fn a_relative_manifest_path_is_the_projects_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("rel.txt"), "made").unwrap();
+        std::fs::create_dir_all(dir(root)).unwrap();
+        std::fs::write(
+            manifest(root),
+            "{\"seq\":0,\"path\":\"rel.txt\",\"snap\":null,\"existed\":false}\n",
+        )
+        .unwrap();
+
+        assert_eq!(timeline(root)[0].files, vec!["rel.txt"]);
+        assert_eq!(restore_to(root, 0, None).unwrap(), vec!["removed rel.txt"]);
+        assert_eq!(read(root, "rel.txt"), None);
     }
 
     /// The TUI records paths under the directory it started in; `wingman

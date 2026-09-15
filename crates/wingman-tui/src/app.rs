@@ -499,7 +499,7 @@ async fn run_inner(
         // back to waiting on input. Each iteration handles one task; the
         // modal may queue another (e.g. Probe success → Commit).
         if let Some(task) = ui.modal.take_pending_task() {
-            run_modal_task(task, &mut ui, agent, &ctx).await?;
+            run_modal_task(task, &mut ui, agent, &ctx, &session_id).await?;
             continue;
         }
 
@@ -610,6 +610,7 @@ async fn run_modal_task(
     ui: &mut UiState,
     agent: &mut Option<AgentLoop>,
     ctx: &AppCtx,
+    session_id: &str,
 ) -> Result<()> {
     match task {
         ModalTask::Models(provider_ids) => {
@@ -664,7 +665,24 @@ async fn run_modal_task(
                     match (ctx.agent_builder)(payload.provider_id.clone(), payload.model.clone())
                         .await
                     {
-                        Ok(new_agent) => {
+                        Ok(mut new_agent) => {
+                            // The new agent writes into this session's log,
+                            // like the one it replaces: without it the rest of
+                            // the session went unrecorded, so `/export`,
+                            // `/rewind` and `wingman metrics` never saw it.
+                            let sessions_dir = ctx.project_root.join(".wingman").join("sessions");
+                            if wingman_session::session_path(&sessions_dir, session_id).is_some() {
+                                if let Ok(log) = wingman_session::SessionLog::open_named(
+                                    &sessions_dir,
+                                    session_id,
+                                )
+                                .await
+                                {
+                                    new_agent.set_context_sink(Arc::new(
+                                        wingman_session::SessionLogSink::new(log),
+                                    ));
+                                }
+                            }
                             *agent = Some(new_agent);
                             ui.status.connected = true;
                             ui.transcript.push(TranscriptItem::System(format!(

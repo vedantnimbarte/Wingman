@@ -8,7 +8,9 @@
 //! - **Files changed** come from the successful mutating tool calls. The
 //!   `edit_file`/`edit_symbol` results are unified diffs and are counted
 //!   line by line; `apply_patch` is counted from its patch; `write_file`
-//!   counts the lines it wrote (what it replaced is not in the log). Undo
+//!   counts the lines it wrote (what it replaced is not in the log);
+//!   `lsp_rename`/`lsp_code_action` name the files they changed but not the
+//!   lines, so they add an edit and no line counts. Undo
 //!   checkpoints are not consulted: they are per-repo rather than per-session
 //!   and an `/undo` deletes them.
 //! - **Receipts** are each red gate report the loop fed back to the model
@@ -159,6 +161,9 @@ pub fn build(session_id: &str, records: &[SessionRecord]) -> SessionExport {
     let mut files: BTreeMap<String, FileChange> = BTreeMap::new();
     // Tool-use id → (index into `tool_calls`, name, input), until its result.
     let mut open: HashMap<String, (usize, String, serde_json::Value)> = HashMap::new();
+    // Redacted once at the end: only the last answer is reported, so an
+    // earlier one's secrets must not count toward `redacted`.
+    let mut outcome = None;
 
     for record in records {
         let ts = record_ts(record);
@@ -196,7 +201,7 @@ pub fn build(session_id: &str, records: &[SessionRecord]) -> SessionExport {
                     })
                     .collect();
                 if !text.is_empty() {
-                    x.outcome = Some(clean(&text.join("\n\n")));
+                    outcome = Some(text.join("\n\n"));
                 }
                 for b in blocks {
                     if let ContentBlock::ToolUse { id, name, input } = b {
@@ -268,6 +273,7 @@ pub fn build(session_id: &str, records: &[SessionRecord]) -> SessionExport {
         }
     }
 
+    x.outcome = outcome.map(|o| clean(&o));
     let u = &x.usage;
     x.total_tokens = u.input_tokens as u64
         + u.output_tokens as u64
@@ -351,6 +357,14 @@ fn changes(name: &str, input: &serde_json::Value, output: &str) -> Vec<(String, 
                 vec![(p, lines, 0)]
             })
             .unwrap_or_default(),
+        // The result lists the changed files, one per line after the first.
+        "lsp_rename" | "lsp_code_action" => output
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|p| (p.to_string(), 0, 0))
+            .collect(),
         "apply_patch" => input
             .get("patch")
             .and_then(|p| p.as_str())
@@ -858,6 +872,28 @@ mod tests {
         assert_eq!(x.session_id, "20260914T101500000Z");
         assert_eq!(x.files.len(), 2);
         assert!(export_file(&dir.path().join("missing.jsonl")).is_err());
+    }
+
+    /// An LSP rename changes files the log names only in its result, and a
+    /// secret in an answer that is not the last one never reaches the report,
+    /// so it is not counted as redacted from it.
+    #[test]
+    fn lsp_edits_count_as_files_and_only_the_reported_answer_is_redacted() {
+        let x = build(
+            "s",
+            &records(&[
+                r#"{"kind":"user","ts":"t","text":"rename it"}"#,
+                r#"{"kind":"assistant","ts":"t","blocks":[{"type":"text","text":"key sk-abcdefghij0123456789ABCDEF"},{"type":"tool_use","id":"r","name":"lsp_rename","input":{"path":"src/a.rs","line":1,"new_name":"b"}}]}"#,
+                r#"{"kind":"tool_result","ts":"t","id":"r","output":"renamed to `b` across 2 file(s):\nsrc/a.rs\nsrc/c.rs","is_error":false}"#,
+                r#"{"kind":"assistant","ts":"t","blocks":[{"type":"text","text":"Renamed."}]}"#,
+            ]),
+        );
+        assert_eq!(
+            x.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(),
+            vec!["src/a.rs", "src/c.rs"]
+        );
+        assert_eq!(x.outcome.as_deref(), Some("Renamed."));
+        assert_eq!(x.redacted, 0);
     }
 
     #[test]
