@@ -454,6 +454,11 @@ Wingman different; this is everything else it does.
   exits non-zero — bounded retries, not a loop until green.
 - **PR-native.** `wingman pr address <pr#>` addresses a PR's review comments and
   failing CI on the current branch.
+- **GitHub Action.** `uses: vedantnimbarte/Wingman@<tag>` reviews PRs, addresses
+  feedback on an `@wingman` PR comment, and turns an `@wingman` issue mention
+  into a PR (or a comment with the red run's output). Gated on
+  `author_association`; not yet run on a real GitHub runner. See
+  [GITHUB-ACTION.md](GITHUB-ACTION.md).
 - **Repo onboarding.** `wingman tour` orients you on an unfamiliar codebase.
 - **Preview & replay.** `wingman --print --dry-run` shows what it *would* do
   without changing anything; `wingman session replay <file>` re-runs a past

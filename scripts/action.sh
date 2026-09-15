@@ -174,7 +174,7 @@ main() {
   [ -n "${ACTION_PROVIDER_API_KEY:-}" ] || die "provider-key is empty (fork PRs get no secrets under pull_request)"
   local provider=${ACTION_MODEL%%/*} upper
   [[ "$ACTION_MODEL" == */* && "$provider" =~ ^[a-z0-9_]+$ ]] ||
-    die "model must be provider/model, e.g. anthropic/claude-sonnet-4-5 (got '$ACTION_MODEL')"
+    die "model must be provider/model, e.g. anthropic/claude-opus-4-7 (got '$ACTION_MODEL')"
   echo "::add-mask::$ACTION_PROVIDER_API_KEY"
   upper=$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]') # not ${x^^}: macOS bash 3.2
   export "WINGMAN_${upper}_API_KEY=$ACTION_PROVIDER_API_KEY" WINGMAN_MODEL="$ACTION_MODEL"

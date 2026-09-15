@@ -1,0 +1,55 @@
+name: Wingman
+description: Review PRs, address review feedback, and turn @wingman issue mentions into PRs with the Wingman coding agent.
+author: vedantnimbarte
+branding:
+  icon: feather
+  color: blue
+
+# Composite action: installs a Wingman release binary and runs scripts/action.sh.
+# Usage, permissions and the security model: docs/GITHUB-ACTION.md.
+
+inputs:
+  mode:
+    description: "auto | review | fix | address. auto picks from the event: pull_request -> review, a trigger comment on a PR -> address, a trigger on an issue -> fix."
+    default: auto
+  provider-key:
+    description: API key for the model's provider. Pass a secret; it reaches Wingman as WINGMAN_<PROVIDER>_API_KEY.
+    required: true
+  model:
+    description: provider/model, e.g. anthropic/claude-opus-4-7.
+    required: true
+  trigger:
+    description: Text a comment (or new issue) must contain to act. Not needed for pull_request review.
+    default: "@wingman"
+  permission-mode:
+    description: Permission mode for fix runs (read-only | plan | auto-edit | yolo). review is always read-only; address is always auto-edit.
+    default: auto-edit
+  max-usd:
+    description: Sets [tokens].max_usd_per_session. Headless runs only WARN when it is crossed; use the job's timeout-minutes as the hard stop.
+    default: ""
+  wingman-version:
+    description: Release tag to install, e.g. v0.5.0. Empty installs the latest release.
+    default: ""
+  allowed-associations:
+    description: Comma-separated author_association values allowed to trigger the action.
+    default: OWNER,MEMBER,COLLABORATOR
+  github-token:
+    description: Token for gh and git push. Pushes and PRs made with the default GITHUB_TOKEN do not trigger other workflows.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Run Wingman
+      shell: bash
+      env:
+        ACTION_MODE: ${{ inputs.mode }}
+        ACTION_PROVIDER_API_KEY: ${{ inputs.provider-key }}
+        ACTION_MODEL: ${{ inputs.model }}
+        ACTION_TRIGGER: ${{ inputs.trigger }}
+        ACTION_PERMISSION_MODE: ${{ inputs.permission-mode }}
+        ACTION_MAX_USD: ${{ inputs.max-usd }}
+        ACTION_WINGMAN_VERSION: ${{ inputs.wingman-version }}
+        ACTION_ALLOWED: ${{ inputs.allowed-associations }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action.sh"
