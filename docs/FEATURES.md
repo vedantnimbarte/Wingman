@@ -56,7 +56,9 @@ Wingman different; this is everything else it does.
   `.github/workflows/eval.yml`). See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
-  freshness.
+  freshness. It flags stale memories: ones naming a project file that is gone,
+  or a code symbol no source file defines or mentions and no language server's
+  `workspace/symbol` knows.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
   listing, shell execution, semantic search, and the new learning tools
   (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
@@ -237,12 +239,17 @@ Wingman different; this is everything else it does.
   typescript-language-server, gopls) — the semantic upgrade over the
   tree-sitter heuristics. Tools `lsp_definition`, `lsp_references`, `lsp_hover`,
   `lsp_diagnostics`, `lsp_rename` degrade gracefully to the heuristic tools when
-  no server is installed. See [LSP.md](LSP.md).
+  no server is installed. `who_calls` answers from the server's call hierarchy
+  (then its references) when one is installed, and says which method it used.
+  See [LSP.md](LSP.md).
 - **LSP-backed verification receipts.** The post-edit turn gate can fold the
   language server's diagnostics for the *changed* files into the verdict
   (`[verify].lsp_diagnostics`), so a change that introduces a type error the
   compile step missed fails verification: `✓ builds  ✓ affected tests  ✓ 0 new
-  LSP diagnostics`.
+  LSP diagnostics`. The affected-tests stage runs only the tests that reference
+  the symbols edited this turn, found through the server's references (else a
+  tree-sitter name match in test code), and falls back to the changed crates
+  when a change can't be tied to a symbol; the receipt says which.
 - **Git-backed team memory.** `wingman memory sync [<git-ref>]` reconciles the
   team-shared `<project>/.wingman/memory/` — rebuilds the `MEMORY.md` index from
   the files on disk (resolving the "two teammates both added a memory" merge

@@ -5193,6 +5193,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures",
+ "ignore",
  "nix 0.29.0",
  "rand 0.10.2",
  "ratatui",

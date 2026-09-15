@@ -2,9 +2,9 @@
 //!
 //! We speak the LSP wire format directly (raw JSON) rather than depending on a
 //! protocol-types crate: the wire shapes we use — `textDocument/definition`,
-//! `references`, `hover`, `rename`, and `publishDiagnostics` — are stable, and
-//! staying in `serde_json::Value` keeps this crate immune to type-crate churn
-//! and free of heavy dependencies.
+//! `references`, `callHierarchy`, `workspace/symbol`, `hover`, `rename`, and
+//! `publishDiagnostics` — are stable, and staying in `serde_json::Value` keeps
+//! this crate immune to type-crate churn and free of heavy dependencies.
 //!
 //! The client spawns the server, performs the `initialize`/`initialized`
 //! handshake, opens documents on demand, and runs a background reader task that
@@ -17,8 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::{oneshot, Mutex};
 
 use crate::server::Lang;
@@ -92,17 +92,27 @@ type Pending = Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>;
 /// not be able to write just because it asked.
 pub type SharedAuthorizer = Arc<std::sync::RwLock<Option<crate::edit::WriteAuthorizer>>>;
 type Diags = Arc<Mutex<HashMap<String, Vec<Diagnostic>>>>;
+type Writer = Arc<Mutex<Box<dyn AsyncWrite + Send + Unpin>>>;
+
+/// One call site from `callHierarchy/incomingCalls`: where the call is, and
+/// the name of the function/method it sits in.
+#[derive(Debug, Clone)]
+pub struct IncomingCall {
+    pub caller: String,
+    pub at: Location,
+}
 
 /// A live connection to one language server, scoped to one project root.
 pub struct LspClient {
     lang: Lang,
     root: PathBuf,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Writer,
     next_id: AtomicI64,
     pending: Pending,
     diagnostics: Diags,
     opened: Mutex<HashSet<String>>,
-    child: Mutex<Child>,
+    /// `None` for a client speaking over a stream it did not spawn.
+    child: Mutex<Option<Child>>,
 }
 
 impl LspClient {
@@ -133,10 +143,27 @@ impl LspClient {
 
         let stdin = child.stdin.take().ok_or(LspError::Closed)?;
         let stdout = child.stdout.take().ok_or(LspError::Closed)?;
+        // If the handshake fails, `child` drops here and `kill_on_drop` reaps it.
+        let client = Self::connect(root, lang, authorizer, stdout, stdin).await?;
+        *client.child.lock().await = Some(child);
+        Ok(client)
+    }
 
+    /// Perform the LSP handshake over an already-open byte stream. [`start`]
+    /// uses this for a spawned server's pipes; tests drive an in-process fake
+    /// server through it.
+    ///
+    /// [`start`]: LspClient::start
+    pub async fn connect(
+        root: &Path,
+        lang: Lang,
+        authorizer: SharedAuthorizer,
+        reader: impl AsyncRead + Send + Unpin + 'static,
+        writer: impl AsyncWrite + Send + Unpin + 'static,
+    ) -> Result<Arc<LspClient>> {
         let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
         let diagnostics: Diags = Arc::new(Mutex::new(HashMap::new()));
-        let writer = Arc::new(Mutex::new(stdin));
+        let writer: Writer = Arc::new(Mutex::new(Box::new(writer)));
 
         // Reader task: route responses to callers, collect diagnostics, and
         // answer the handful of server→client requests that would otherwise
@@ -149,7 +176,7 @@ impl LspClient {
             let writer = writer.clone();
             let authorizer = authorizer.clone();
             tokio::spawn(async move {
-                reader_loop(stdout, pending, diagnostics, writer, authorizer).await;
+                reader_loop(reader, pending, diagnostics, writer, authorizer).await;
             });
         }
 
@@ -161,7 +188,7 @@ impl LspClient {
             pending,
             diagnostics,
             opened: Mutex::new(HashSet::new()),
-            child: Mutex::new(child),
+            child: Mutex::new(None),
         });
 
         client.handshake().await?;
@@ -180,6 +207,7 @@ impl LspClient {
                     "synchronization": { "didSave": true, "dynamicRegistration": false },
                     "definition": { "dynamicRegistration": false },
                     "references": { "dynamicRegistration": false },
+                    "callHierarchy": { "dynamicRegistration": false },
                     "hover": { "contentFormat": ["plaintext", "markdown"] },
                     "rename": { "dynamicRegistration": false, "prepareSupport": false },
                     "codeAction": {
@@ -200,7 +228,8 @@ impl LspClient {
                     "workspaceFolders": true,
                     "configuration": true,
                     "applyEdit": true,
-                    "executeCommand": { "dynamicRegistration": false }
+                    "executeCommand": { "dynamicRegistration": false },
+                    "symbol": { "dynamicRegistration": false }
                 }
             }
         });
@@ -302,6 +331,19 @@ impl LspClient {
         Ok(parse_locations(&result))
     }
 
+    /// `workspace/symbol` for `query` → the names the server matched. Servers
+    /// match fuzzily, so a caller wanting one exact name compares it itself.
+    pub async fn workspace_symbols(&self, query: &str) -> Result<Vec<String>> {
+        let result = self
+            .request(
+                "workspace/symbol",
+                json!({ "query": query }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        Ok(parse_symbol_names(&result))
+    }
+
     /// `textDocument/references` at a 0-based position.
     pub async fn references(
         &self,
@@ -322,6 +364,45 @@ impl LspClient {
             )
             .await?;
         Ok(parse_locations(&result))
+    }
+
+    /// `textDocument/prepareCallHierarchy` at a 0-based position → the raw
+    /// `CallHierarchyItem`s, to hand back to [`incoming_calls`] unchanged (the
+    /// server may stash opaque `data` in them). Empty when nothing callable is
+    /// there.
+    ///
+    /// [`incoming_calls`]: LspClient::incoming_calls
+    pub async fn prepare_call_hierarchy(&self, path: &Path, pos: Position) -> Result<Vec<Value>> {
+        let uri = self.open(path).await?;
+        let result = self
+            .request(
+                "textDocument/prepareCallHierarchy",
+                json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": pos.line, "character": pos.character }
+                }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        Ok(match result {
+            Value::Array(a) => a,
+            _ => Vec::new(),
+        })
+    }
+
+    /// `callHierarchy/incomingCalls` for one item from
+    /// [`prepare_call_hierarchy`], flattened to one entry per call site.
+    ///
+    /// [`prepare_call_hierarchy`]: LspClient::prepare_call_hierarchy
+    pub async fn incoming_calls(&self, item: &Value) -> Result<Vec<IncomingCall>> {
+        let result = self
+            .request(
+                "callHierarchy/incomingCalls",
+                json!({ "item": item }),
+                Duration::from_secs(20),
+            )
+            .await?;
+        Ok(parse_incoming_calls(&result))
     }
 
     /// `textDocument/hover` → the hover text (markdown flattened to plain).
@@ -464,7 +545,9 @@ impl LspClient {
             .request("shutdown", Value::Null, Duration::from_secs(3))
             .await;
         let _ = self.notify("exit", Value::Null).await;
-        let _ = self.child.lock().await.start_kill();
+        if let Some(child) = self.child.lock().await.as_mut() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -477,13 +560,13 @@ impl Drop for LspClient {
 
 /// Background loop: parse frames off the server's stdout and dispatch them.
 async fn reader_loop(
-    stdout: tokio::process::ChildStdout,
+    reader: impl AsyncRead + Unpin,
     pending: Pending,
     diagnostics: Diags,
-    writer: Arc<Mutex<ChildStdin>>,
+    writer: Writer,
     authorizer: SharedAuthorizer,
 ) {
-    let mut reader = BufReader::new(stdout);
+    let mut reader = BufReader::new(reader);
     loop {
         let msg = match read_message(&mut reader).await {
             Ok(Some(v)) => v,
@@ -669,6 +752,50 @@ fn parse_locations(result: &Value) -> Vec<Location> {
     }
 }
 
+/// `SymbolInformation[]` / `WorkspaceSymbol[]` → their `name`s.
+fn parse_symbol_names(result: &Value) -> Vec<String> {
+    result
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| s.get("name")?.as_str().map(str::to_string))
+        .collect()
+}
+
+/// `CallHierarchyIncomingCall[]` → one [`IncomingCall`] per `fromRanges`
+/// entry. The ranges are in the caller's file (`from.uri`).
+fn parse_incoming_calls(result: &Value) -> Vec<IncomingCall> {
+    let Some(calls) = result.as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for call in calls {
+        let Some(from) = call.get("from") else {
+            continue;
+        };
+        let caller = from
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string();
+        let uri = from.get("uri").cloned().unwrap_or(Value::Null);
+        for range in call
+            .get("fromRanges")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(at) = one_location(&json!({ "uri": uri, "range": range })) {
+                out.push(IncomingCall {
+                    caller: caller.clone(),
+                    at,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn parse_diagnostics(params: &Value) -> Vec<Diagnostic> {
     let Some(arr) = params.get("diagnostics").and_then(Value::as_array) else {
         return Vec::new();
@@ -723,6 +850,12 @@ fn parse_hover(result: &Value) -> Option<String> {
 /// percent-encoding LSP servers expect. Absolute paths only in practice.
 pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
+    // `fs::canonicalize` (how the manager keys its root) gives `\\?\C:\…` on
+    // Windows; servers want, and report, the plain drive path.
+    let s = match s.strip_prefix("//?/") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => s,
+    };
     let mut encoded = String::with_capacity(s.len() + 16);
     for ch in s.chars() {
         match ch {
@@ -806,6 +939,8 @@ mod tests {
         let back = uri_to_path(&uri).unwrap();
         assert!(back.to_string_lossy().contains("proj"));
         assert!(back.to_string_lossy().starts_with("C:"));
+        let verbatim = path_to_uri(Path::new(r"\\?\C:\proj\src\main.rs"));
+        assert_eq!(verbatim, "file:///C:/proj/src/main.rs");
     }
 
     #[test]
@@ -825,6 +960,35 @@ mod tests {
         let locs = parse_locations(&link);
         assert_eq!(locs.len(), 1);
         assert_eq!(locs[0].line, 1);
+    }
+
+    #[test]
+    fn parse_symbol_names_reads_each_name() {
+        let result = json!([
+            { "name": "AgentLoop", "kind": 23, "location": { "uri": "file:///x/a.rs" } },
+            { "name": "run", "kind": 6 },
+            { "kind": 6 }
+        ]);
+        assert_eq!(parse_symbol_names(&result), vec!["AgentLoop", "run"]);
+        assert!(parse_symbol_names(&Value::Null).is_empty());
+    }
+
+    #[test]
+    fn parse_incoming_calls_flattens_from_ranges() {
+        let r = |line: u32| json!({ "start": { "line": line, "character": 4 }, "end": { "line": line, "character": 9 } });
+        let result = json!([
+            { "from": { "name": "main", "uri": "file:///x/a.rs", "range": r(0), "selectionRange": r(0) },
+              "fromRanges": [r(3), r(7)] },
+            { "from": { "name": "helper", "uri": "file:///x/b.rs" }, "fromRanges": [r(1)] },
+            { "fromRanges": [r(2)] }
+        ]);
+        let calls = parse_incoming_calls(&result);
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0].caller, "main");
+        assert_eq!((calls[0].at.line, calls[1].at.line), (3, 7));
+        assert_eq!(calls[2].caller, "helper");
+        assert!(calls[2].at.path.to_string_lossy().ends_with("b.rs"));
+        assert!(parse_incoming_calls(&Value::Null).is_empty());
     }
 
     #[test]

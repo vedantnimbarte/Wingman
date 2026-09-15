@@ -33,6 +33,9 @@ wingman-ts = { workspace = true, optional = true }
 
 tokio = { workspace = true, features = ["io-std", "net"] }
 futures = { workspace = true }
+# `.gitignore`-aware project walk for the symbol analysis (affected tests,
+# memory staleness). Already built for wingman-tools and wingman-rag.
+ignore = "0.4"
 async-trait = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

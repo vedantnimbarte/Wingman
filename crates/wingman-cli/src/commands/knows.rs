@@ -21,13 +21,18 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     print_memory_section("global memories", global_mem.as_deref());
     print_memory_section("project memories", Some(&paths.dir.join("memory")));
 
-    // Staleness: memories naming project files that no longer exist.
+    // Staleness: memories naming project files or symbols that no longer exist.
     let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
     let all = store.load_all();
-    let stale = wingman_learn::staleness::stale_memories(&all, &paths.root);
+    let (defined, checked_via) = defined_symbols(&paths.root, &all).await;
+    let stale = wingman_learn::staleness::stale_memories(
+        &all,
+        &paths.root,
+        defined.as_ref().map(|d| d as &dyn Fn(&str) -> bool),
+    );
     if !stale.is_empty() {
         println!(
-            "stale memories: {} (reference files that no longer exist)",
+            "stale memories: {} (reference files or symbols that no longer exist; symbols checked via {checked_via})",
             stale.len()
         );
         for (m, missing) in stale.iter().take(10) {
@@ -132,6 +137,37 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     }
 
     Ok(ExitCode::SUCCESS)
+}
+
+/// Resolver for the symbols project `memories` name: whether the project
+/// still has each one, per the tree-sitter index and then the language server.
+#[cfg(feature = "treesitter")]
+async fn defined_symbols(
+    root: &Path,
+    memories: &[wingman_learn::memory::Memory],
+) -> (Option<impl Fn(&str) -> bool>, &'static str) {
+    let names: std::collections::BTreeSet<String> = memories
+        .iter()
+        .filter(|m| m.scope == wingman_learn::memory::MemoryScope::Project)
+        .flat_map(|m| wingman_learn::staleness::referenced_symbols(&m.body))
+        .collect();
+    if names.is_empty() {
+        return (None, "nothing (no symbols named)");
+    }
+    let (found, via) = crate::symbols::defined_symbols(root, &names).await;
+    // One-shot command: stop any server the check started.
+    wingman_lsp::shutdown_all_managers().await;
+    (Some(move |name: &str| found.contains(name)), via)
+}
+
+/// Without tree-sitter there is no index to check symbols against, so only
+/// paths are checked.
+#[cfg(not(feature = "treesitter"))]
+async fn defined_symbols(
+    _root: &Path,
+    _memories: &[wingman_learn::memory::Memory],
+) -> (Option<fn(&str) -> bool>, &'static str) {
+    (None, "nothing (built without tree-sitter)")
 }
 
 fn print_memory_section(label: &str, dir: Option<&Path>) {
