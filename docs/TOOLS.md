@@ -549,6 +549,63 @@ Search the web using DuckDuckGo (no API key).
 - Pairs well with `web_fetch` (search, then fetch top result).
 - No API key needed.
 
+## Browser
+
+### `browser`
+
+*(Opt-in build: `--features browser`, plus a Chrome/Chromium binary.)* Drive
+one headless Chrome tab that persists across calls — load the dev server a
+background job started, click through it, read what broke. One tool with an
+`action`, not six, because every schema is paid for on every request.
+
+**Signature:**
+```json
+{ "tool": "browser", "args": { "action": "navigate", "url": "http://localhost:5173/" } }
+{ "tool": "browser", "args": { "action": "click", "selector": "button#save" } }
+{ "tool": "browser", "args": { "action": "type", "selector": "input[name=q]", "text": "hello" } }
+{ "tool": "browser", "args": { "action": "screenshot" } }
+{ "tool": "browser", "args": { "action": "console" } }
+{ "tool": "browser", "args": { "action": "eval", "expression": "document.querySelectorAll('li').length" } }
+```
+
+**Returns:**
+- `navigate`, `click`, `type`: the URL the tab ended up on, the page title,
+  and `document.body.innerText` capped at 16 KiB, fenced as untrusted content.
+  `click` and `type` wait for the selector to appear first.
+- `screenshot`: a **path**, not an image. Tool results are text-only in
+  Wingman (`ToolOutcome` carries a string; images reach a model only as `@file`
+  attachments in a user message), so the PNG is saved to
+  `.wingman/browser/screenshot-<ms>.png` and the path is returned. The model
+  does not see the picture unless someone attaches it.
+- `console`: `console.*` calls, uncaught exceptions, and browser log entries
+  (failed requests, CSP violations) since the last `console` call. Keeps the
+  most recent 200 lines and says how many older ones were dropped.
+- `eval`: the expression's `JSON.stringify` result (promises are awaited),
+  capped at 8 KiB. A throw comes back as an error.
+
+**Notes:**
+- Permission: declared `NETWORK | WRITE` — it reaches the network, writes the
+  screenshot, and clicking in an app changes its state. So auto-edit or yolo;
+  `[tools].allow_network` alone is not enough in read-only mode.
+- http(s) URLs only (`file://` would read past path containment). Unlike
+  `web_fetch`, localhost and private addresses are allowed — a dev server is
+  the point. Link-local IP literals (the cloud metadata endpoint) are refused.
+  After every action the tab's actual URL is re-checked, so a click or redirect
+  onto a refused URL blanks the page instead of returning it.
+- Under `[privacy].local_only` only `localhost`, `127.0.0.1` and `[::1]` open,
+  and Chrome is launched behind a dead proxy so the page's own requests to
+  anything off-box fail too. WebRTC can ignore proxy settings and is not
+  blocked.
+- Chrome starts on the first call and is killed when the session ends, like
+  background jobs. A subagent gets its own browser if it uses one. A wingman
+  process that is hard-killed can leave Chrome behind.
+- If Chrome crashes or disconnects, the next call relaunches it (a fresh tab:
+  the previous page, cookies and console are gone).
+- Not validated live: this has been unit-tested (URL policy, argument checks,
+  output bounds, console buffering) and compile-checked against
+  `headless_chrome`, but not yet exercised end to end against a real Chrome.
+  `wingman doctor` reports whether a Chrome binary was found.
+
 ## Semantic Search
 
 ### `semantic_search`
@@ -1034,6 +1091,7 @@ faster model while the parent session keeps the strongest one. An explicit
 | `debug_stop`        | —    | —     | Y     | mode       | Kill the session's process tree |
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
 | `web_search`        | Y    | —     | —     | always     | DuckDuckGo search (no key)     |
+| `browser`           | Y    | Y     | —     | mode       | Opt-in build; headless Chrome tab |
 | `semantic_search`   | Y    | —     | —     | always     | RAG index search               |
 | `find_symbol`       | Y    | —     | —     | always     | Where a symbol is defined      |
 | `who_calls`         | Y    | —     | —     | always     | References + enclosing symbol  |

@@ -5408,6 +5408,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "windows-sys 0.59.0",
+ "wingman-browser",
  "wingman-config",
  "wingman-core",
  "wingman-learn",

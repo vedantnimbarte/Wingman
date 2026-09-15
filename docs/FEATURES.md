@@ -362,6 +362,15 @@ Wingman different; this is everything else it does.
   and set `[verify.browser].url` to make the turn gate load a URL, screenshot
   it, and fail if it drifts from a baseline. Not in the default build, and it
   fails open — with no browser present the gate passes rather than blocking.
+- **Agent browser.** *(Opt-in build.)* The same `--features browser` build
+  gives the agent a `browser` tool: one headless Chrome tab, started on first
+  use and closed with the session, that it can navigate, click and type into,
+  screenshot (saved under `.wingman/browser/` — tool results can't carry
+  images, so the model gets a path), read console errors from, and run JS in.
+  Localhost dev servers are the target: under `[privacy].local_only` it opens
+  loopback URLs only. `wingman doctor` says whether a Chrome binary was found.
+  Unit-tested and compile-checked, but not yet run end to end against a real
+  Chrome. See [TOOLS.md](TOOLS.md#browser).
 - **Server-backed team memory.** Beyond the git-backed `memory sync`,
   `wingman memory push` / `pull` sync memories through a team HTTP endpoint
   (`[team]`), merging non-destructively.
