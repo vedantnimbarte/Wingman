@@ -1273,6 +1273,62 @@ pub struct VerifyConfig {
     /// feature); fail-open otherwise.
     #[serde(default)]
     pub browser: BrowserVerifyConfig,
+    /// Changed-line coverage stage, run after the other stages pass:
+    /// - "off" (default): never
+    /// - "auto": detect the ecosystem's coverage tool (`cargo llvm-cov`,
+    ///   `pytest --cov`, `c8`/`nyc`, `go test -coverprofile`)
+    /// - anything else: a command that writes an lcov file or Go coverprofile
+    ///   to `{out}` (substituted with a temp path)
+    ///
+    /// A missing tool skips the stage with a note; it never fails the gate.
+    pub coverage: String,
+    /// Fail the coverage stage when fewer than this fraction (0.0..=1.0) of
+    /// the changed, instrumentable lines ran. Unset = report only.
+    #[serde(deserialize_with = "unit_fraction")]
+    pub min_changed_line_coverage: Option<f64>,
+    /// Mutation spot-check of the changed lines (see [`MutationVerifyConfig`]).
+    pub mutation: MutationVerifyConfig,
+}
+
+/// Rejects a fraction outside 0.0..=1.0 at load time rather than letting a
+/// typo like `90` silently fail (or pass) every turn.
+fn unit_fraction<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<f64>, D::Error> {
+    let v = Option::<f64>::deserialize(d)?;
+    match v {
+        Some(f) if !(0.0..=1.0).contains(&f) => Err(serde::de::Error::custom(format!(
+            "must be between 0.0 and 1.0, got {f}"
+        ))),
+        _ => Ok(v),
+    }
+}
+
+/// Mutation spot-check settings (see [`VerifyConfig::mutation`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct MutationVerifyConfig {
+    /// Flip simple operators (`==`/`!=`, `<`/`>=`, `&&`/`||`, `+`/`-`,
+    /// `true`/`false`) on the changed lines one at a time and re-run the
+    /// affected tests, to prove they notice. Off by default.
+    pub enabled: bool,
+    /// Most mutants to try per gate run.
+    pub max_mutants: u32,
+    /// Wall-clock budget for the whole stage, in seconds. Mutants not reached
+    /// in time are reported as not run.
+    pub timeout_secs: u64,
+    /// Fail the gate when a mutant survives. Report-only by default.
+    pub fail_on_survivor: bool,
+}
+
+impl Default for MutationVerifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_mutants: 5,
+            timeout_secs: 600,
+            fail_on_survivor: false,
+        }
+    }
 }
 
 /// Headless-browser visual verification settings (see [`VerifyConfig::browser`]).
@@ -1311,6 +1367,9 @@ impl Default for VerifyConfig {
             lsp_diagnostics: true,
             golden: true,
             browser: BrowserVerifyConfig::default(),
+            coverage: "off".into(),
+            min_changed_line_coverage: None,
+            mutation: MutationVerifyConfig::default(),
         }
     }
 }
@@ -4126,6 +4185,15 @@ max_retries_per_task = 1
         let cfg: Config = toml::from_str(text).unwrap();
         assert_eq!(cfg.verify.turn_gate, "off");
         assert_eq!(cfg.verify.max_retries, 1);
+        assert_eq!(cfg.verify.coverage, "off");
+        assert!(!cfg.verify.mutation.enabled);
+    }
+
+    #[test]
+    fn min_changed_line_coverage_must_be_a_fraction() {
+        let ok: Config = toml::from_str("[verify]\nmin_changed_line_coverage = 0.8\n").unwrap();
+        assert_eq!(ok.verify.min_changed_line_coverage, Some(0.8));
+        assert!(toml::from_str::<Config>("[verify]\nmin_changed_line_coverage = 80\n").is_err());
     }
 }
 

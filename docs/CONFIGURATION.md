@@ -178,6 +178,20 @@ import_claude_code = false
 turn_gate = "auto"        # "auto" | "off" | an explicit command
 affected_tests = true     # tests referencing edited symbols (LSP, else tree-sitter), else changed crates
 lsp_diagnostics = true
+# Opt-in stages that prove the tests exercise the change, run last and only
+# once everything above is green. `coverage` runs the ecosystem's coverage
+# tool ("auto": cargo llvm-cov / pytest --cov / c8 or nyc / go test
+# -coverprofile) or your command, which must write an lcov file or Go
+# coverprofile to `{out}`; the receipt counts the changed lines the tests
+# executed. A tool not on PATH skips the stage, never fails it.
+coverage = "off"          # "off" | "auto" | e.g. "cargo llvm-cov --lcov --output-path {out}"
+# min_changed_line_coverage = 0.8   # 0.0-1.0; unset = report only
+# `mutation` flips ==/!=, </>=, >/<=, &&/||, +/-, true/false on changed Rust
+# and Go lines one at a time and re-runs that file's crate/package tests. The
+# original is backed up to .wingman/mutation-backup first and restored on every
+# exit; a backup left by a killed session is restored at the next start.
+# timeout_secs is the budget for the whole stage.
+mutation = { enabled = false, max_mutants = 5, timeout_secs = 600, fail_on_survivor = false }
 # [verify.browser]
 # url = "http://localhost:5173"
 # baseline = "tests/baseline.png"

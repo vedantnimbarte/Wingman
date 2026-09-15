@@ -6,11 +6,14 @@
 
 mod cli;
 mod commands;
+mod coverage;
 mod git_auto;
 mod logging;
 mod login;
 mod mcp_adapter;
 mod mcp_registry;
+#[cfg(feature = "treesitter")]
+mod mutation;
 mod oauth;
 mod remote;
 mod runtime;
