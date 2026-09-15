@@ -55,10 +55,18 @@ Wingman different; this is everything else it does.
   regression against a committed baseline (run weekly by
   `.github/workflows/eval.yml`). See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
-  memories, skills, model routing, the verification gate, and index
-  freshness. It flags stale memories: ones naming a project file that is gone,
-  or a code symbol no source file defines or mentions and no language server's
-  `workspace/symbol` knows.
+  memories, skills, model routing, the verification gate, the metrics
+  summary below, and index freshness. It flags stale memories: ones naming a
+  project file that is gone, or a code symbol no source file defines or
+  mentions and no language server's `workspace/symbol` knows.
+- **`wingman metrics`.** The numbers that say whether any of this is
+  working, for the current repo: time to first token (median and p90 of
+  each session's first turn), tokens per completed task, verified-done rate
+  (of gated turns, and of sessions), and routing pass-rates by task class and
+  model. Read from the session transcripts, where the agent loop records each
+  turn's `first_output_ms` and last verification receipt on its `stop`
+  record — so every surface (TUI, `--print`, pilot workers, `serve`) counts.
+  `--json`; also `GET /v1/projects/{p}/metrics` and the panel's Insights view.
 - **Built-in tool layer.** File read/write/edit, glob, grep, directory
   listing, shell execution, semantic search, and the new learning tools
   (`save_memory`, `recall_memory`, `invoke_skill`, `recall_session`,
@@ -174,12 +182,35 @@ Wingman different; this is everything else it does.
   multi-file edit block atomically — no partial writes on failure.
 - **Working-tree checkpoints.** `wingman checkpoint` snapshots the tree
   into a tagged `git stash`; `wingman undo` restores the most recent one.
+- **Rewind timeline.** Every file edit the agent makes is already an undo
+  checkpoint (`/undo [n]`); the TUI and `--print` now tag each with the session
+  and turn that made it. `/rewind` in the TUI lists them one point per turn,
+  with the files touched, and Enter previews what restoring to before a point
+  would change, diff and all; `y` confirms. The restore is itself a checkpoint
+  — none is ever deleted — so it shows at the top of the timeline and is
+  undone the same way. `t` additionally truncates the conversation to before
+  that turn, by forking the transcript and continuing in the fork. The panel's
+  conversation view has the same timeline, preview and confirmation, over
+  `GET/POST /v1/projects/{p}/sessions/{id}/rewind[/{seq}]`.
 - **`wingman init`.** Scans the project (Cargo.toml, package.json,
   pyproject.toml, go.mod, …) and writes a starter `WINGMAN.md`.
 - **`wingman cost`.** Per-model token + USD spend table derived from
   `~/.wingman/usage.json` and `pricing.rs`.
 - **`wingman session list / fork`.** Browse recent session JSONLs;
   fork an old session (optionally truncating to N records) and resume it.
+- **Session export.** `wingman session export <id> --format md|html|json`
+  reduces a transcript to what a reviewer asks about: the task and the last
+  answer, files changed with lines added and removed (counted from the
+  successful `edit_file`/`edit_symbol` diffs, `apply_patch` patches and
+  `write_file` contents in the log; `lsp_rename` and `lsp_code_action` list
+  their files without line counts), every verification receipt, cost and
+  tokens, and the tool-call timeline. Everything taken from the model, a
+  tool or the user goes through the same secret redactor as tool output
+  first, and the report says how many it caught. The TUI's `/export [md|html|json]`
+  writes the current session's report to `.wingman/exports/`,
+  `GET /v1/projects/{p}/sessions/{id}/export` serves it, and the panel's
+  conversation view copies it or downloads it. `wingman pilot export` does the
+  same for a pilot run, as a PR description with a row per worker session.
 - **User-defined slash commands.** Drop a markdown file at
   `~/.wingman/commands/<name>.md` (or `<project>/.wingman/commands/`) and
   it becomes `/<name>` in the TUI. `$ARGS` is substituted.
@@ -310,7 +341,9 @@ Wingman different; this is everything else it does.
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
 - **Benchmark harness.** `wingman bench` runs a suite of prompts and records
-  time-to-first-token, tokens/task, and verified-done rate.
+  time to first token, tokens per completed task, verified-done rate, and
+  routing outcomes per served model — the same definitions as
+  `wingman metrics`. `--json` or `--markdown` prints a publishable report.
 - **Embeddable.** Use `wingman-core` as a library or drive Wingman from any
   language over MCP (`wingman mcp-serve`). See [SDK.md](SDK.md).
 - **Visual verification.** *(Opt-in build.)* Build with `--features browser`

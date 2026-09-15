@@ -2065,7 +2065,8 @@ textarea.input::placeholder {
   );
 }
 
-/* Runs by outcome: the one chart where the status hues are the data. */
+/* Runs by outcome and gated turns by receipt: the charts where the status
+   hues are the data. */
 .stack-seg.is-proven {
   background: var(--proven);
 }

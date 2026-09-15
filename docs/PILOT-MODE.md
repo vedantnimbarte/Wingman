@@ -99,6 +99,8 @@ wingman pilot run --yes "<goal>"
 wingman pilot status              # one-shot summary of the latest run
 wingman pilot watch               # live ASCII dashboard, polls state.json
 wingman pilot watch <run-id>      # specific run
+wingman pilot export [<run-id>]   # the run as a PR description, with each worker's
+                                  # files, receipts and tokens (secrets redacted)
 
 # Control a live run (via the control channel)
 wingman pilot approve             # release a run waiting at the plan gate

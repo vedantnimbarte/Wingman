@@ -79,6 +79,13 @@ pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
         }
     };
     if let Some(s) = session.as_mut() {
+        // Name this turn on the checkpoints it writes, so the rewind timeline
+        // can place them. One turn per process; a resumed log already holds
+        // the earlier ones.
+        let turn = wingman_session::load_session(s.path())
+            .map(|r| wingman_session::turn_starts(&r).len())
+            .unwrap_or(0);
+        wingman_core::checkpoint::set_turn(&s.id(), turn);
         let _ = s
             .write(SessionRecord::SessionStart {
                 ts: chrono_rfc3339(),

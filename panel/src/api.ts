@@ -370,6 +370,54 @@ export type SessionSummary = {
   mtime: number
 }
 
+export type ExportFormat = 'md' | 'html' | 'json'
+
+/**
+ * Where a session's report is served. With `download`, the server answers
+ * with `Content-Disposition: attachment`, so a plain link saves a file — the
+ * panel never builds a `data:` or blob URL, which a sandboxed page cannot
+ * open.
+ */
+export function exportUrl(
+  project: string,
+  id: string,
+  format: ExportFormat,
+  download = false,
+): string {
+  const base = `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}/export`
+  return `${base}?format=${format}${download ? '&download=1' : ''}`
+}
+
+/**
+ * One point on a session's rewind timeline: the files one turn edited, or one
+ * restore. Mirrors `serve::sessions::rewind_timeline`.
+ */
+export type RewindPoint = {
+  /** The point's first checkpoint; restoring to it undoes the point and everything after. */
+  seq: number
+  /** 0-based turn of this session; null on a restore. */
+  turn: number | null
+  prompt: string | null
+  /** On a restore: the seq it restored to. */
+  restore: number | null
+  /** Unix seconds of the latest edit. */
+  ts: number | null
+  files: string[]
+}
+
+/** What a restore would do to one file. */
+export type RewindChange = {
+  path: string
+  exists_now: boolean
+  exists_after: boolean
+  /** Unified diff from the file as it is to the file as it will be. */
+  diff: string
+}
+
+function rewindUrl(project: string, id: string): string {
+  return `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}/rewind`
+}
+
 /** A block inside an assistant message. Mirrors `wingman_core::ContentBlock`. */
 export type ContentBlock =
   | { type: 'text'; text: string }
@@ -470,6 +518,33 @@ export type CostTimeline = {
   sessions: number
   /** Turns whose model has no price. A short total says it is short. */
   unpriced_turns: number
+}
+
+/**
+ * The numbers `docs/DIFFERENTIATION.md` says to track, for one repo, from
+ * `GET /v1/projects/{p}/metrics` (`wingman metrics --json`).
+ *
+ * Every rate is `null` rather than `0` when there is nothing to divide by, and
+ * every rate travels with its sample size: "100%" over one turn and over three
+ * hundred are different claims.
+ */
+export type Metrics = {
+  sessions: number
+  turns: number
+  completed_turns: number
+  /** Each session's first turn: prompt reaching the loop to first model output. */
+  time_to_first_token_ms: { median: number | null; p90: number | null; samples: number }
+  total_tokens: number
+  tokens_per_completed_task: number | null
+  /** Turns the verification gate ran on, and how many ended green. */
+  gated_turns: number
+  verified_turns: number
+  verified_done_rate: number | null
+  sessions_with_receipt: number
+  sessions_verified: number
+  session_verified_done_rate: number | null
+  /** Gate pass-rate per task class and model, from `learn.db`. */
+  routing: { task_class: string; model: string; passed: number; total: number; pass_rate: number }[]
 }
 
 /** What a table-driven route returns when its output is not JSON. */
@@ -714,6 +789,9 @@ export const api = {
       `/v1/projects/${encodeURIComponent(project)}/cost/timeline?days=${days}`,
     ),
 
+  metrics: (project: string) =>
+    request<Metrics>(`/v1/projects/${encodeURIComponent(project)}/metrics`),
+
   apiSchema: () => request<ApiSchema>('/v1/schema'),
 
   /**
@@ -741,11 +819,53 @@ export const api = {
       method: 'POST',
     }),
 
+  /**
+   * A session's report as text: summary, files changed, receipts, cost, tool
+   * calls — secrets already redacted by the server. For the clipboard.
+   */
+  exportSession: async (project: string, id: string, format: ExportFormat): Promise<string> => {
+    let res: Response
+    try {
+      res = await fetch(exportUrl(project, id, format), { credentials: 'same-origin' })
+    } catch {
+      throw new ApiError(0, 'No answer from the daemon. Is `wingman serve` running?')
+    }
+    if (!res.ok) throw new ApiError(res.status, await errorText(res))
+    return res.text()
+  },
+
   /** Reports `deindexed` so a partial delete is visible now, not a surprise later. */
   deleteSession: (project: string, id: string) =>
     request<{ deleted: string; deindexed: unknown }>(
       `/v1/projects/${encodeURIComponent(project)}/sessions/${encodeURIComponent(id)}`,
       { method: 'DELETE' },
+    ),
+
+  /** This session's rewind timeline, newest first. */
+  rewindTimeline: (project: string, id: string) =>
+    request<{ session_id: string; points: RewindPoint[] }>(rewindUrl(project, id)).then(
+      (r) => r.points,
+    ),
+
+  /** What restoring to before `seq` would change. Writes nothing; diffs are redacted. */
+  rewindPreview: (project: string, id: string, seq: number) =>
+    request<{ seq: number; changes: RewindChange[]; redacted: number }>(
+      `${rewindUrl(project, id)}/${seq}`,
+    ),
+
+  /**
+   * Restore the files to before `seq`. The restore is itself checkpointed.
+   * `truncate` also forks the conversation to before that turn, and the new
+   * session's id comes back as `forked_session`.
+   */
+  rewind: (project: string, id: string, seq: number, truncate: boolean) =>
+    request<{ restored: string[]; forked_session: string | null }>(
+      `${rewindUrl(project, id)}/${seq}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ truncate }),
+      },
     ),
 
   config: () => request<Record<string, unknown>>('/v1/config'),

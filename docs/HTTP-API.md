@@ -276,6 +276,10 @@ and shows up in `wingman session list` like any other.
 | `POST` | `/v1/projects/{p}/sessions` | `{"model":"…","mode":"…"}` | `{"session_id":"…"}` |
 | `GET` | `/v1/projects/{p}/sessions` | — | Sessions with id, first prompt, model, turn count and `mtime` (Unix seconds), **newest first**. Directory order is neither stable across platforms nor meaningful, and "which conversation was I just in" is the only question a session list is opened to answer. |
 | `GET` | `/v1/projects/{p}/sessions/{id}` | — | Full transcript as `SessionRecord[]`. |
+| `GET` | `/v1/projects/{p}/sessions/{id}/export` | `format` — `md` (default), `html` or `json`; `download` — send as an attachment | The report `wingman session export` prints: summary, files changed, verification receipts, cost and tokens, tool calls. Secrets are redacted before it is rendered. Served with `X-Content-Type-Options: nosniff` and `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`, since it quotes prompts and tool output; `download` adds `Content-Disposition: attachment; filename="<id>.<ext>"`. An unknown format is `400`. |
+| `GET` | `/v1/projects/{p}/sessions/{id}/rewind` | — | The session's rewind timeline, newest first: `{session_id, points: [{seq, turn, prompt, restore, ts, files}]}`. A point is the files one turn edited (its undo checkpoints, grouped by the session and turn that wrote them) or one restore (`restore` is the seq it restored to, `turn` is `null`). `404` for a session with no transcript. |
+| `GET` | `/v1/projects/{p}/sessions/{id}/rewind/{seq}` | — | What restoring to before that point would change, writing nothing: `{seq, changes: [{path, exists_now, exists_after, diff}], redacted}`. Diffs pass through the secret redactor. `404` when `seq` is not one of this session's points; `409` when the restore could not happen (a missing snapshot, a manifest path outside the project). |
+| `POST` | `/v1/projects/{p}/sessions/{id}/rewind/{seq}` | `{"truncate":false}` | Restore every file touched at or after the point to how it was before it: `{restored: ["restored a.rs", "removed b.rs", …], forked_session}`. The restore is itself checkpointed first — no checkpoint is ever deleted — so it lands on the timeline and is undone the same way; if that checkpoint cannot be written nothing is restored. `truncate` also forks the transcript to before the point's turn and returns the new id (the original is untouched); a truncate that cannot happen is a `400` before any file is written. Needs a ceiling of `auto-edit` or above (`403`), and is a `409` while the session has a turn in flight. |
 | `POST` | `/v1/projects/{p}/sessions/{id}/turns` | `{"prompt":"…","mode":"…","model":"…"}` | SSE stream of `wingman_core::AgentEvent`: `text_delta`, `thinking_delta`, `tool_start`, `tool_result`, `usage`, `turn_complete`, `verification`, `stop`, `error`. The event name is the payload's own `type`, so this list is the enum. Resumes the session history. |
 | `POST` | `/v1/projects/{p}/turns` | same | One-shot turn, no session continuity. |
 | `DELETE` | `/v1/projects/{p}/sessions/{id}` | — | Forget the session: deletes the transcript **and** its entries in the global session index, so `recall_session` cannot resurface it. Reports `deindexed` so a partial delete is visible in the response, not a surprise later. |
@@ -323,6 +327,7 @@ is returned as JSON; anything else comes back as
 |---|---|
 | `GET /v1/projects/{p}/cost?compare` | `cost --json [--compare]` |
 | `GET /v1/projects/{p}/context` | `context --json` |
+| `GET /v1/projects/{p}/metrics` | `metrics --json` |
 | `GET /v1/projects/{p}/knows` | `knows` |
 | `GET /v1/projects/{p}/doctor` | `doctor` |
 | `GET /v1/projects/{p}/attest` | `attest` |

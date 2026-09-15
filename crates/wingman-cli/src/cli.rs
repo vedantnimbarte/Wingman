@@ -175,6 +175,14 @@ pub enum Command {
         #[arg(long)]
         compare: bool,
     },
+    /// This repo's time to first token, tokens per completed task,
+    /// verified-done rate, and routing outcomes, from its session transcripts.
+    #[command(display_order = 17)]
+    Metrics {
+        /// Output as JSON instead of a summary.
+        #[arg(long)]
+        json: bool,
+    },
     /// Session utilities.
     #[command(display_order = 16)]
     Session {
@@ -285,8 +293,11 @@ pub enum Command {
         #[arg(long, value_name = "FILE")]
         suite: Option<String>,
         /// Output JSON instead of a table.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "markdown")]
         json: bool,
+        /// Output a publishable Markdown report instead of a table.
+        #[arg(long)]
+        markdown: bool,
     },
     /// Model routing utilities.
     #[command(display_order = 41)]
@@ -629,6 +640,15 @@ pub enum PilotAction {
     Status {
         /// Specific run id; defaults to the most recently updated.
         run_id: Option<String>,
+    },
+    /// Print a run as a pull-request description: the goal, tasks and cost,
+    /// plus each worker session's files, receipts and tokens. Secrets are
+    /// redacted.
+    Export {
+        /// Specific run id; defaults to the most recently updated.
+        run_id: Option<String>,
+        #[arg(long, default_value = "md", value_parser = ["md", "json"])]
+        format: String,
     },
     /// Live-watch a run: redraw whenever its state.json changes.
     Watch {
@@ -996,6 +1016,18 @@ pub enum SessionAction {
         /// Path to the session JSONL to replay.
         src: String,
     },
+    /// Export a session as a shareable report: summary, files changed with
+    /// diff stats, verification receipts, cost and tokens, and the tool-call
+    /// timeline. Secrets are redacted.
+    Export {
+        /// Session id (as `session list` names it) or path to a session JSONL.
+        id: String,
+        #[arg(long, default_value = "md", value_parser = ["md", "html", "json"])]
+        format: String,
+        /// Write here instead of stdout.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1262,6 +1294,7 @@ pub async fn run() -> Result<ExitCode> {
         Some(Command::Undo) => commands::checkpoint::undo().await,
         Some(Command::Rewind { steps }) => commands::rewind::run(steps).await,
         Some(Command::Cost { json, compare }) => commands::cost::run_with(json, compare).await,
+        Some(Command::Metrics { json }) => commands::metrics::run(json).await,
         Some(Command::Session { action }) => commands::session::run(action).await,
         Some(Command::Worktree { action }) => match action {
             WorktreeAction::Create { branch } => commands::worktree::create(branch).await,
@@ -1359,7 +1392,11 @@ pub async fn run() -> Result<ExitCode> {
             GoldenAction::List => commands::golden::list().await,
         },
         Some(Command::Knows) => commands::knows::run(load_config()?).await,
-        Some(Command::Bench { suite, json }) => commands::bench::run(suite, json).await,
+        Some(Command::Bench {
+            suite,
+            json,
+            markdown,
+        }) => commands::bench::run(suite, json, markdown).await,
         Some(Command::Router { action }) => commands::router::run(action).await,
         Some(Command::McpServe) => {
             // Read-only by default: exposing write/shell tools to an external
@@ -1468,6 +1505,9 @@ pub async fn run() -> Result<ExitCode> {
                 .await
             }
             PilotAction::Status { run_id } => commands::pilot::status(run_id).await,
+            PilotAction::Export { run_id, format } => {
+                commands::pilot::export(run_id, format == "json").await
+            }
             PilotAction::Watch {
                 run_id,
                 interval_ms,

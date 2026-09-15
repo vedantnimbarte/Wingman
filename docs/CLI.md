@@ -30,12 +30,13 @@ wingman [OPTIONS] [COMMAND]
 | `config paths`       | Print the resolved global and project config paths.    |
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
-| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
+| `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, the `metrics` summary, and index freshness. |
 | `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, git/gh tooling, and which pilot sandbox tiers (Docker, Firecracker) this machine can run. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
 | `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
 | `serve`              | Serve the HTTP/SSE API so another machine, a phone, or CI can drive Wingman. `--addr`, `--init-token`, `--list`, `--allow-yolo`, `--pair`. See [HTTP-API.md](HTTP-API.md). |
 | `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
-| `bench`              | Benchmark harness: time-to-first-token, tokens/task, verified-done rate. `--suite <file.jsonl>`, `--json`. |
+| `metrics`            | This repo's time to first token (median/p90), tokens per completed task, verified-done rate, and routing outcomes, from its session transcripts and `learn.db`. `--json`. |
+| `bench`              | Benchmark harness: time to first token, tokens per completed task, verified-done rate, routing outcomes per served model. `--suite <file.jsonl>`; `--json` or `--markdown` for a publishable report. |
 | `distill`            | Distill durable facts from a past session into a pending-review file. `--session <path>`. Runs on the `summarize` class model (`[router.classes]`, else `fast_model`). |
 | `indexd`             | Keep this project's semantic index warm (reindex, then watch) in the foreground. `start` runs it in the background (log: `.wingman/indexd.log`), `stop` asks it to exit, `status` reports whether it is running and the index age. A pidfile naming a dead process is cleared, so a crashed daemon never reads as running. While a daemon is live, the TUI uses its warm index instead of starting a second indexer, and `doctor` reports it. |
 | `rewind [n]`         | Scrub back through per-edit checkpoints; `rewind <n>` reverts the last n edits. |
@@ -48,6 +49,7 @@ wingman [OPTIONS] [COMMAND]
 | `cost`               | Show per-model token usage and estimated USD spend. `--json` for JSON. `--compare` reprices your volume against other models (provider-cost arbitrage). |
 | `session list`       | List recent session JSONL files for this project.       |
 | `session fork`       | Copy an existing session into a new file (`--at N` truncates). |
+| `session export <id>` | A session as a shareable report: summary, files changed with line counts, verification receipts, cost and tokens, and the tool-call timeline. `<id>` is a session id or a path to any session JSONL. `--format md\|html\|json` (default `md`), `-o <file>`. Secrets are redacted. |
 | `worktree create <branch>` | Create a `git worktree` under `.wingman/worktrees/<branch>` for sandboxed experiments. |
 | `worktree list`      | `git worktree list` passthrough.                        |
 | `worktree remove <path>` | Remove a worktree by path.                          |
@@ -68,6 +70,7 @@ wingman [OPTIONS] [COMMAND]
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
+| `pilot export [run-id]` | A run as a pull-request description: goal, tasks and run cost, plus each worker session's files, receipts, tokens and cost. `--format md\|json`. Secrets are redacted. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
 | `pilot feedback`     | Poll every run's opened PR for its terminal state (`gh`) and record a `pr.outcome` event. `--cycles N` (0 = forever). |
 | `pilot eval`         | Score eval results against a baseline and exit 1 on regression. `--goals <file>` runs the goals live first (no PR); `--baseline <file>`, `--threshold <f>` (default 0.10), `--update-baseline`. |

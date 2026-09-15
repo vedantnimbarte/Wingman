@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import { apply, resolve, scope } from './Board'
 import { classify, path, strip } from './Changes'
+import { rate } from './Insights'
 import { stripAnsi, verdict } from './output'
 import { clockOf, isIrreversible, summarise } from './Runs'
-import { ago, clock, matching, unquote, usageLine } from './Sessions'
-import type { BoardData, Card, SessionSummary, Task } from './api'
+import { ago, clock, matching, pointLabel, rewindQuestion, unquote, usageLine } from './Sessions'
+import {
+  exportUrl,
+  type BoardData,
+  type Card,
+  type RewindPoint,
+  type SessionSummary,
+  type Task,
+} from './api'
 
 /**
  * The derivations the second pass added.
@@ -360,5 +368,53 @@ describe('stripAnsi', () => {
 
   it('strips cursor and erase sequences, not just colour', () => {
     expect(stripAnsi('a\u001b[2Kb\u001b[1;31mc')).toBe('abc')
+  })
+})
+
+describe('rate', () => {
+  it('shows an absent rate as a dash, not a confident 0%', () => {
+    // `null` is what the server sends when nothing was gated: zero green out
+    // of zero is not a 0% verified-done rate.
+    expect(rate(null)).toBe('—')
+    expect(rate(0)).toBe('0%')
+    expect(rate(0.666)).toBe('67%')
+  })
+})
+
+describe('exportUrl', () => {
+  it('asks for an attachment only when downloading, and encodes the path', () => {
+    // A plain link has to be a server download: the panel never builds a
+    // `data:` URL, so `download=1` is what turns a click into a saved file.
+    expect(exportUrl('my repo', '20260914T101500000Z', 'md')).toBe(
+      '/v1/projects/my%20repo/sessions/20260914T101500000Z/export?format=md',
+    )
+    expect(exportUrl('r', 's', 'html', true)).toBe(
+      '/v1/projects/r/sessions/s/export?format=html&download=1',
+    )
+  })
+})
+
+describe('rewind', () => {
+  const turn: RewindPoint = {
+    seq: 4,
+    turn: 1,
+    prompt: 'fix the parser\nand the tests',
+    restore: null,
+    ts: null,
+    files: ['src/parse.rs'],
+  }
+
+  it('names a turn by what it was asked, and a restore by its target', () => {
+    expect(pointLabel(turn)).toBe('turn 2: fix the parser')
+    expect(pointLabel({ ...turn, turn: null, restore: 4 })).toBe('restore to before #4')
+    expect(pointLabel({ ...turn, turn: null })).toBe('edits #4')
+  })
+
+  it('says a truncate forks the conversation, and only when asked', () => {
+    const plain = rewindQuestion(turn, 1, false)
+    expect(plain).toContain('Restore 1 file to before turn 2')
+    expect(plain).toContain('can be undone')
+    expect(plain).not.toContain('conversation')
+    expect(rewindQuestion(turn, 2, true)).toContain('this one is kept')
   })
 })

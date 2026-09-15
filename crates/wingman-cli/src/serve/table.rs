@@ -83,6 +83,14 @@ pub const ROUTES: &[Route] = &[
     },
     Route {
         method: "GET",
+        path: &["metrics"],
+        argv: &["metrics", "--json"],
+        params: &[],
+        about:
+            "time to first token, tokens per completed task, verified-done rate, routing outcomes",
+    },
+    Route {
+        method: "GET",
         path: &["knows"],
         argv: &["knows"],
         params: &[],

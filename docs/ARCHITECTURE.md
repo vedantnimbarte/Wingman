@@ -186,7 +186,11 @@ loop. One dispatch runs, in order:
    error. A non-blocking hook that fails is still logged, because a policy hook
    whose binary is missing is a security control failing silently.
 2. **Undo snapshot** — the pre-image of any file this call is about to mutate,
-   committed only if the call succeeds, so `/undo` can restore it.
+   committed only if the call succeeds, so `/undo` can restore it. Each entry
+   carries the session and turn the surface set with
+   `checkpoint::set_turn`, which is how `/rewind` and the panel's timeline
+   group them by turn; a restore to a point writes its own entries rather than
+   deleting any.
 3. **Capability gate** — `capability_denial`, the central permission check.
 4. **The tool**, under a backstop deadline (`[tools].tool_timeout_secs`); tools
    that bound themselves opt out via `Tool::owns_timeout`.
@@ -291,10 +295,14 @@ Consequences worth knowing:
                                        {"type":"tool_use","id":"t0","name":"read_file","input":{}}]}
 {"kind":"tool_result","ts":"…","id":"t0","output":"<full>","model_output":"<bounded>","is_error":false}
 {"kind":"recap","ts":"…","replaced":8,"text":"[wingman compact] …"}
-{"kind":"stop","ts":"…","reason":"\"end_turn\""}
+{"kind":"stop","ts":"…","reason":"end_turn","first_output_ms":412,"verified":true}
 ```
 
 Old logs load unchanged: every addition is a new variant or a defaulted field.
+Logs from before the loop's fix carry the stop reason JSON-quoted
+(`"\"end_turn\""`); readers accept both. `first_output_ms` (prompt to the
+model's first output) and `verified` (the turn's last verification receipt,
+absent when the gate did not run) are what `wingman metrics` reads.
 
 **Features:**
 - `wingman session list` — browse recent session files.

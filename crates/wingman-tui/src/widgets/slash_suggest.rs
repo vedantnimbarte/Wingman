@@ -36,6 +36,10 @@ pub const CATALOG: &[Command] = &[
         description: "revert the agent's last file edit(s) · /undo [n]",
     },
     Command {
+        name: "/rewind",
+        description: "checkpoints by turn · preview, then restore to a point",
+    },
+    Command {
         name: "/clear",
         description: "reset the conversation",
     },
@@ -94,6 +98,10 @@ pub const CATALOG: &[Command] = &[
     Command {
         name: "/mcp",
         description: "manage MCP servers",
+    },
+    Command {
+        name: "/export",
+        description: "write this session's report, secrets redacted · md | html | json",
     },
     Command {
         name: "/find",
