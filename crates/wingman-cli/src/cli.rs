@@ -1645,6 +1645,7 @@ pub async fn run() -> Result<ExitCode> {
         }
         None => {
             let cfg = load_config()?;
+            start_telemetry(&cfg);
             let mode_override = parse_mode(cli.mode.as_deref())?;
             let mode = mode_override.unwrap_or(cfg.permission_mode);
 
@@ -1969,6 +1970,17 @@ pub async fn run() -> Result<ExitCode> {
             wingman_tui::run(agent, ctx).await?;
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Start OTLP export for the surfaces that record turns (TUI, headless and
+/// everything built on it, pilot workers). A refused configuration (e.g. a
+/// remote endpoint under `[privacy].local_only`) is said out loud and the
+/// session carries on without export — telemetry never stops a turn.
+pub(crate) fn start_telemetry(cfg: &Config) {
+    if let Err(e) = wingman_session::otlp::init(cfg) {
+        tracing::warn!(target: "wingman::telemetry", "{e}");
+        eprintln!("wingman: OTLP export disabled: {e}");
     }
 }
 

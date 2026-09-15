@@ -229,6 +229,27 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         )),
     }
 
+    // 4b. OTLP export. A TCP probe only: it says a collector is listening,
+    // not that it accepts OTLP/HTTP JSON or these headers.
+    section("telemetry (OTLP)");
+    match wingman_session::otlp::settings(&cfg, |k| std::env::var(k).ok()) {
+        Ok(None) => emit(Status::Ok("not configured — nothing is exported".into())),
+        Err(e) => emit(Status::Bad(format!("refused, export is off: {e}"))),
+        Ok(Some(s)) => {
+            let shown = wingman_session::otlp::display_endpoint(&s.endpoint);
+            let hostport = reqwest::Url::parse(&s.endpoint)
+                .ok()
+                .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)));
+            if hostport.as_deref().is_some_and(tcp_reachable) {
+                emit(Status::Ok(format!("exporting to {shown} (reachable)")));
+            } else {
+                emit(Status::Warn(format!(
+                    "exporting to {shown}, but it is not reachable — spans will be dropped"
+                )));
+            }
+        }
+    }
+
     // 5. Language servers on PATH.
     section("language servers (LSP)");
     let mut any_lsp = false;

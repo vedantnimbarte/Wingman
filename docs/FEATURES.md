@@ -340,6 +340,26 @@ Wingman different; this is everything else it does.
 - **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
+- **OpenTelemetry export.** `[telemetry.otlp].endpoint` (or
+  `OTEL_EXPORTER_OTLP_ENDPOINT`) sends one span per user turn — provider,
+  model, task class, tokens in/out/cache, estimated USD, stop reason, gate
+  verdict — with a child span per tool call (name, duration, error flag), plus
+  delta counters for tokens, cost, tool calls and verified-done turns, over
+  OTLP/HTTP JSON. Prompts, replies, tool input and tool output are never sent.
+  Spans go through a bounded queue flushed in the background: when the
+  collector is slow or down they are dropped and counted
+  (`wingman.telemetry.dropped_spans`), never waited on, and a failed batch is
+  not retried. Exit gives the last batch two seconds. Refused under
+  `[privacy].local_only` unless the endpoint is loopback; a project config
+  cannot set it without `wingman trust`; `wingman attest` lists it as an egress
+  channel and `wingman doctor` checks the endpoint accepts a TCP connection.
+  Covers the TUI, `--print` and the commands built on it (`review`, `pr`,
+  `spec`, `tour`, `explain`, `schedule`) and pilot workers; `--batch`, subagent
+  turns and `wingman serve` do not record a session log and are not exported,
+  and every turn is labelled task class `default`. The payload shape is tested against the OTLP JSON spec but has
+  **not been run against a real collector**, and tool-span durations start
+  when the model asked for the call, so later calls in a sequential batch
+  include the wait for earlier ones.
 - **Benchmark harness.** `wingman bench` runs a suite of prompts and records
   time to first token, tokens per completed task, verified-done rate, and
   routing outcomes per served model — the same definitions as
