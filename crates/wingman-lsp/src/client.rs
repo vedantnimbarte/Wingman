@@ -3,9 +3,8 @@
 //! We speak the LSP wire format directly (raw JSON) rather than depending on a
 //! protocol-types crate: the wire shapes we use — `textDocument/definition`,
 //! `references`, `callHierarchy`, `workspace/symbol`, `hover`, `rename`, and
-//! `publishDiagnostics` —
-//! are stable, and staying in `serde_json::Value` keeps this crate immune to
-//! type-crate churn and free of heavy dependencies.
+//! `publishDiagnostics` — are stable, and staying in `serde_json::Value` keeps
+//! this crate immune to type-crate churn and free of heavy dependencies.
 //!
 //! The client spawns the server, performs the `initialize`/`initialized`
 //! handshake, opens documents on demand, and runs a background reader task that
@@ -851,6 +850,12 @@ fn parse_hover(result: &Value) -> Option<String> {
 /// percent-encoding LSP servers expect. Absolute paths only in practice.
 pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().replace('\\', "/");
+    // `fs::canonicalize` (how the manager keys its root) gives `\\?\C:\…` on
+    // Windows; servers want, and report, the plain drive path.
+    let s = match s.strip_prefix("//?/") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_string(),
+        _ => s,
+    };
     let mut encoded = String::with_capacity(s.len() + 16);
     for ch in s.chars() {
         match ch {
@@ -934,6 +939,8 @@ mod tests {
         let back = uri_to_path(&uri).unwrap();
         assert!(back.to_string_lossy().contains("proj"));
         assert!(back.to_string_lossy().starts_with("C:"));
+        let verbatim = path_to_uri(Path::new(r"\\?\C:\proj\src\main.rs"));
+        assert_eq!(verbatim, "file:///C:/proj/src/main.rs");
     }
 
     #[test]

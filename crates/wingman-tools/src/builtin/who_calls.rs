@@ -207,8 +207,10 @@ async fn lsp_sites(
     let mut calls = Vec::new();
     'hierarchy: for (client, path, pos) in targets {
         let items = match client.prepare_call_hierarchy(path, *pos).await {
-            Ok(items) => items,
-            Err(LspError::Server(_)) => {
+            Ok(items) if !items.is_empty() => items,
+            // Nothing callable there (a struct, say): the hierarchy can't
+            // speak for this definition, so it isn't used for any.
+            Ok(_) | Err(LspError::Server(_)) => {
                 calls.clear();
                 break;
             }
@@ -569,29 +571,53 @@ mod tests {
             50,
         );
         assert_eq!(defs.len(), 2);
-        let (method, rows) = ask(dir.path(), &defs, |method, params, root| match method {
+        // `c.rs`'s definition gets a declined hierarchy, then none at all
+        // (nothing callable there).
+        let declines: Handler = |method, params, root| match method {
+            "textDocument/prepareCallHierarchy"
+                if params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("c.rs") =>
+            {
+                Err("no hierarchy here".into())
+            }
+            _ => both_definitions(method, params, root),
+        };
+        let no_items: Handler = |method, params, root| match method {
+            "textDocument/prepareCallHierarchy"
+                if params["textDocument"]["uri"]
+                    .as_str()
+                    .unwrap()
+                    .ends_with("c.rs") =>
+            {
+                Ok(json!([]))
+            }
+            _ => both_definitions(method, params, root),
+        };
+        for handler in [declines, no_items] {
+            let (method, rows) = ask(dir.path(), &defs, handler)
+                .await
+                .expect("references answer");
+            assert!(method.contains("references"), "{method}");
+            assert_eq!(rows, vec!["b.rs:2  [in fn caller]  foo();"]);
+        }
+    }
+
+    /// A server where hierarchy and references both find `caller` in `b.rs`.
+    fn both_definitions(method: &str, params: &Value, root: &Path) -> Result<Value, String> {
+        let b = wingman_lsp::client::path_to_uri(&root.join("b.rs"));
+        match method {
             "initialize" => Ok(json!({ "capabilities": {} })),
             "textDocument/prepareCallHierarchy" => {
-                let uri = params["textDocument"]["uri"].as_str().unwrap();
-                if uri.ends_with("c.rs") {
-                    return Err("no hierarchy here".into());
-                }
-                Ok(json!([{ "name": "foo", "uri": uri }]))
+                Ok(json!([{ "name": "foo", "uri": params["textDocument"]["uri"] }]))
             }
             "callHierarchy/incomingCalls" => {
-                let uri = wingman_lsp::client::path_to_uri(&root.join("b.rs"));
-                Ok(json!([{ "from": { "name": "caller", "uri": uri }, "fromRanges": [range(1)] }]))
+                Ok(json!([{ "from": { "name": "caller", "uri": b }, "fromRanges": [range(1)] }]))
             }
-            "textDocument/references" => {
-                let uri = wingman_lsp::client::path_to_uri(&root.join("b.rs"));
-                Ok(json!([{ "uri": uri, "range": range(1) }]))
-            }
+            "textDocument/references" => Ok(json!([{ "uri": b, "range": range(1) }])),
             other => Err(format!("method not found: {other}")),
-        })
-        .await
-        .expect("references answer");
-        assert!(method.contains("references"), "{method}");
-        assert_eq!(rows, vec!["b.rs:2  [in fn caller]  foo();"]);
+        }
     }
 
     #[tokio::test]

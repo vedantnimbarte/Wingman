@@ -520,8 +520,8 @@ crates/wingman-ts/src/parse.rs:370  [in fn outline]          let symbols = extra
   server), then `textDocument/references` (resolved, mentions as well as
   calls). The first method with a non-empty answer wins. The server must
   cover every definition: more than five, or one with no server, skips
-  straight to the name match, and a method declined for one definition is
-  not used for any.
+  straight to the name match, and a method declined for one definition (or a
+  call hierarchy with nothing callable at one) is not used for any.
 - With no server, a server that declines both methods or stops answering, or
   an empty resolved answer (a cold server still indexing looks the same as no
   callers), it falls back to a whole-word, case-sensitive name match, which

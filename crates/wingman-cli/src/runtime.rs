@@ -1121,7 +1121,17 @@ pub(crate) fn changed_lines_by_file(
     let mut map: std::collections::HashMap<String, std::collections::BTreeSet<u32>> =
         std::collections::HashMap::new();
     let out = std::process::Command::new("git")
-        .args(["diff", "HEAD", "--unified=0"])
+        // Pinned prefixes, and no color or external diff tool, whatever the
+        // user's git config says, so the headers below parse.
+        .args([
+            "diff",
+            "HEAD",
+            "--unified=0",
+            "--no-color",
+            "--no-ext-diff",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ])
         .current_dir(root)
         .output();
     let Ok(out) = out else {
@@ -1132,12 +1142,19 @@ pub(crate) fn changed_lines_by_file(
     }
     let text = String::from_utf8_lossy(&out.stdout);
     let mut current: Option<String> = None;
+    // Between `diff --git` and a file's first hunk. Inside a hunk, an added
+    // source line reading `++ x` shows as `+++ x` and must not end the file.
+    let mut in_header = false;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("+++ ") {
+        if line.starts_with("diff --git ") {
+            in_header = true;
+            current = None;
+        } else if let Some(rest) = line.strip_prefix("+++ ").filter(|_| in_header) {
             // `+++ /dev/null` (a deleted file) names no file here; its hunks
             // must not land on the previous one.
             current = rest.strip_prefix("b/").map(|p| p.trim().to_string());
         } else if line.starts_with("@@") {
+            in_header = false;
             // `@@ -a,b +c,d @@` — take the `+c,d` (new-side) span.
             if let Some(plus) = line.split('+').nth(1) {
                 let spec = plus.split([' ', '@']).next().unwrap_or("");
@@ -1349,13 +1366,24 @@ pub(crate) fn changed_paths(root: &std::path::Path) -> Vec<String> {
     // `-z` gives NUL-separated `XY <path>` entries where `XY` is exactly two
     // status columns followed by a space — so the path starts at byte 3. Do
     // NOT trim: a leading space in `XY` (e.g. " M") is significant alignment.
-    // Renames emit a second NUL field (the old path) with no status prefix;
-    // it won't map to a real file so it's harmlessly ignored.
-    String::from_utf8_lossy(&out.stdout)
-        .split('\0')
-        .filter(|entry| entry.len() >= 4)
-        .map(|entry| entry[3..].to_string()) // strip "XY " status prefix
-        .collect()
+    // A rename or copy (`R`/`C` in `XY`) is followed by a second NUL field,
+    // the old path, with no status prefix: that path changed too (it's gone).
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut fields = text.split('\0');
+    let mut paths = Vec::new();
+    while let Some(entry) = fields.next() {
+        let (Some(xy), Some(path)) = (entry.get(..2), entry.get(3..)) else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        paths.push(path.to_string());
+        if xy.contains(['R', 'C']) {
+            paths.extend(fields.next().map(str::to_string));
+        }
+    }
+    paths
 }
 
 /// Changed Rust crates (by package name) in the working tree. Maps each

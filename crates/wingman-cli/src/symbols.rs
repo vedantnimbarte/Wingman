@@ -26,7 +26,7 @@ const MAX_LSP_SYMBOLS: usize = 20;
 /// gets long (cmd.exe caps at 8191 characters) for little saving.
 const MAX_NARROWED_TESTS: usize = 64;
 
-const VIA_LSP: &str = "LSP textDocument/references";
+const VIA_LSP: &str = "LSP textDocument/references (test helpers by name)";
 const VIA_TREE_SITTER: &str = "tree-sitter symbol index (name match in test code)";
 
 /// A symbol whose definition overlaps a line changed this turn.
@@ -188,7 +188,8 @@ fn name_sites(root: &Path, names: &BTreeSet<String>) -> Vec<(PathBuf, u32)> {
 /// A doc-test code block in one of `crates` that mentions one of `names`,
 /// described for the receipt. Doc tests can't be named on the narrowed
 /// `cargo test -- --exact` line, so one that uses an edited symbol means the
-/// whole crate runs.
+/// whole crate runs. Covers `///` and `//!` comments and files pulled in with
+/// `#[doc = include_str!("..")]` (a README's examples).
 fn doc_test_mention(root: &Path, crates: &[String], names: &BTreeSet<String>) -> Option<String> {
     for path in source_files(root) {
         if path.extension().is_none_or(|e| e != "rs") {
@@ -197,61 +198,97 @@ fn doc_test_mention(root: &Path, crates: &[String], names: &BTreeSet<String>) ->
         let Ok(text) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !names.iter().any(|n| text.contains(n.as_str())) {
+        if !text.contains("include_str!") && !names.iter().any(|n| text.contains(n.as_str())) {
             continue;
         }
-        let mut in_fence = false;
-        for (idx, line) in text.lines().enumerate() {
-            let line = line.trim_start();
-            let Some(doc) = line
-                .strip_prefix("///")
-                .or_else(|| line.strip_prefix("//!"))
-            else {
-                in_fence = false;
+        let rel = path.strip_prefix(root).unwrap_or(&path);
+        if !crate::runtime::crate_name_for(root, rel).is_some_and(|c| crates.contains(&c)) {
+            continue;
+        }
+        let doc_lines = text.lines().map(|l| {
+            let l = l.trim_start();
+            l.strip_prefix("///").or_else(|| l.strip_prefix("//!"))
+        });
+        if let Some(line) = fence_mention(doc_lines, names) {
+            return Some(format!(
+                "a doc test in `{}` line {line} uses an edited symbol",
+                rel.display()
+            ));
+        }
+        let included = text
+            .lines()
+            .filter(|l| l.contains("doc"))
+            .filter_map(|l| l.split("include_str!(\"").nth(1)?.split('"').next());
+        for file in included {
+            let file = path.parent().unwrap_or(root).join(file);
+            let Ok(md) = std::fs::read_to_string(&file) else {
                 continue;
             };
-            if doc.trim_start().starts_with("```") {
-                in_fence = !in_fence;
-                continue;
-            }
-            if !in_fence || !names.iter().any(|n| find_word(doc, n).is_some()) {
-                continue;
-            }
-            let rel = path.strip_prefix(root).unwrap_or(&path);
-            if crate::runtime::crate_name_for(root, rel).is_some_and(|c| crates.contains(&c)) {
+            if let Some(line) = fence_mention(md.lines().map(Some), names) {
                 return Some(format!(
-                    "a doc test in `{}` line {} uses an edited symbol",
-                    rel.display(),
-                    idx + 1
+                    "a doc test in `{}` line {line} (included by `{}`) uses an edited symbol",
+                    file.strip_prefix(root).unwrap_or(&file).display(),
+                    rel.display()
                 ));
             }
-            break; // Another crate's doc tests don't run crate-level either.
+        }
+    }
+    None
+}
+
+/// The 1-based line of the first line inside a code fence that mentions one of
+/// `names`. `doc` yields each line's documentation text, or `None` for a line
+/// that isn't documentation (which ends any fence).
+fn fence_mention<'a>(
+    doc: impl Iterator<Item = Option<&'a str>>,
+    names: &BTreeSet<String>,
+) -> Option<usize> {
+    let mut in_fence = false;
+    for (idx, doc) in doc.enumerate() {
+        let Some(doc) = doc else {
+            in_fence = false;
+            continue;
+        };
+        if doc.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+        } else if in_fence && names.iter().any(|n| find_word(doc, n).is_some()) {
+            return Some(idx + 1);
         }
     }
     None
 }
 
 /// Whether `line` of `rel` is test code: a file under `tests/` or named
-/// `tests.rs`, or a line at or below the file's first `#[cfg(..)]` naming
-/// `test` (`#[cfg(test)]`, `#[cfg(all(test, ..))]`).
+/// `tests.rs`, a line at or below the file's first `#[cfg(..)]` naming `test`
+/// (`#[cfg(test)]`, `#[cfg(all(test, ..))]`), or any line of a file with no
+/// such `cfg` but a test attribute (`#[test]`, `#[tokio::test]`): a test module
+/// in a file of its own, gated where its parent declares it.
 ///
 /// ponytail: relies on the convention that a unit-test module sits at the
 /// bottom of its file; a `#[cfg(test)]` helper above production code makes
 /// the code below it read as test code. Upgrade path is asking tree-sitter
 /// for the attributes on the enclosing item.
 fn in_test_code(rel: &Path, text: &str, line: u32) -> bool {
+    let names_test = |l: &str| find_word(l, "test").is_some();
+    let mut attrs = text
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with("#["));
     rel.components().any(|c| c.as_os_str() == "tests")
         || rel.file_stem().is_some_and(|s| s == "tests")
-        || text
+        || match text
             .lines()
             .map(str::trim_start)
-            .position(|l| l.starts_with("#[cfg(") && find_word(l, "test").is_some())
-            .is_some_and(|i| (i as u32) < line)
+            .position(|l| l.starts_with("#[cfg(") && names_test(l))
+        {
+            Some(i) => (i as u32) < line,
+            None => attrs.any(names_test),
+        }
 }
 
-/// The functions (by name) that contain the test-code `sites`, and the crates
-/// those files belong to. Sites outside `root` (a dependency, the standard
-/// library) are dropped.
+/// The innermost items (by name: test functions, helpers, fixtures) that
+/// contain the test-code `sites`, and the crates those files belong to. Sites
+/// outside `root` (a dependency, the standard library) are dropped.
 fn test_fns_at(root: &Path, sites: &[(PathBuf, u32)]) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut by_file: BTreeMap<&Path, Vec<u32>> = BTreeMap::new();
     for (path, line) in sites {
@@ -286,9 +323,9 @@ fn test_fns_at(root: &Path, sites: &[(PathBuf, u32)]) -> (BTreeSet<String>, BTre
             let innermost = symbols
                 .iter()
                 .filter(|s| {
-                    matches!(
+                    !matches!(
                         s.kind,
-                        wingman_ts::SymbolKind::Function | wingman_ts::SymbolKind::Method
+                        wingman_ts::SymbolKind::Impl | wingman_ts::SymbolKind::Module
                     ) && s.start_line <= line
                         && line <= s.end_line
                 })
@@ -304,9 +341,28 @@ fn test_fns_at(root: &Path, sites: &[(PathBuf, u32)]) -> (BTreeSet<String>, BTre
     (fns, crates)
 }
 
-/// Listed tests whose final path segment is one of `fns`. Names that aren't
-/// plain `a::b::c` paths (doc tests, anything with spaces) are skipped, since
-/// the result goes on a shell command line.
+/// [`test_fns_at`] for `sites`, then again for every mention of what it found,
+/// until nothing new turns up: a test can reach an edit through a helper or
+/// fixture in test code.
+fn test_items_reaching(
+    root: &Path,
+    sites: &[(PathBuf, u32)],
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let (mut items, mut crates) = test_fns_at(root, sites);
+    let mut frontier = items.clone();
+    while !frontier.is_empty() {
+        let (found, more_crates) = test_fns_at(root, &name_sites(root, &frontier));
+        crates.extend(more_crates);
+        frontier = found.difference(&items).cloned().collect();
+        items.extend(frontier.iter().cloned());
+    }
+    (items, crates)
+}
+
+/// Listed tests with a path segment in `fns`: the test function itself, or the
+/// function a macro expanded into a module of cases (`parses::case_1`). Names
+/// that aren't plain `a::b::c` paths (doc tests, anything with spaces) are
+/// skipped, since the result goes on a shell command line.
 fn pick_tests(listed: Vec<String>, fns: &BTreeSet<String>) -> Vec<String> {
     listed
         .into_iter()
@@ -314,7 +370,7 @@ fn pick_tests(listed: Vec<String>, fns: &BTreeSet<String>) -> Vec<String> {
             t.chars()
                 .all(|c| c == '_' || c == ':' || c.is_ascii_alphanumeric())
         })
-        .filter(|t| fns.contains(t.rsplit("::").next().unwrap_or(t)))
+        .filter(|t| t.split("::").any(|seg| fns.contains(seg)))
         .collect()
 }
 
@@ -323,10 +379,11 @@ fn pick_tests(listed: Vec<String>, fns: &BTreeSet<String>) -> Vec<String> {
 /// index. Returns the edited symbol names, and either the narrowed tests or
 /// why the whole changed crates should run.
 ///
-/// ponytail: direct references only. A test that reaches the edit through
-/// another function isn't mapped (when no test references an edit directly,
-/// the whole crate runs, so the gap is only when some do). Upgrade path is
-/// walking incoming calls transitively up to the tests.
+/// ponytail: only test code is followed ([`test_items_reaching`]). A test
+/// that reaches the edit only through another non-test function isn't mapped
+/// (when no test is found at all the whole crate runs, so the gap is only when
+/// some are). Upgrade path is walking incoming calls transitively up to the
+/// tests.
 pub(crate) async fn narrow_to_tests(
     root: &Path,
     crates: &[String],
@@ -346,10 +403,10 @@ pub(crate) async fn narrow_to_tests(
     }
 
     let (via, (fns, test_crates)) = match lsp_sites(root, &symbols).await {
-        Some(sites) => (VIA_LSP, test_fns_at(root, &sites)),
+        Some(sites) => (VIA_LSP, test_items_reaching(root, &sites)),
         None => (
             VIA_TREE_SITTER,
-            test_fns_at(root, &name_sites(root, &names)),
+            test_items_reaching(root, &name_sites(root, &names)),
         ),
     };
     let names = names.into_iter().collect();
@@ -617,6 +674,25 @@ mod tests {
             [("src/lib.rs".to_string(), BTreeSet::from([1]))].into()
         );
         git(&["checkout", "-q", "--", "."]);
+        // An added line reading `++ z` is not a new file header.
+        std::fs::write(
+            root.join("src/lib.rs"),
+            lib.replacen("{\n", "{\n++ z\n", 1)
+                .replacen("    parse();", "    parse(); ", 1),
+        )
+        .unwrap();
+        let changed = crate::runtime::changed_lines_by_file(root);
+        assert_eq!(
+            changed,
+            [("src/lib.rs".to_string(), BTreeSet::from([2, 7]))].into()
+        );
+        git(&["checkout", "-q", "--", "."]);
+        // A rename changes both paths.
+        git(&["mv", "src/z.rs", "src/y.rs"]);
+        let paths = crate::runtime::changed_paths(root);
+        assert!(paths.contains(&"src/y.rs".to_string()), "{paths:?}");
+        assert!(paths.contains(&"src/z.rs".to_string()), "{paths:?}");
+        git(&["reset", "-q", "--hard"]);
 
         // A staged edit to the blank line between items is still seen.
         std::fs::write(
@@ -670,15 +746,37 @@ mod tests {
     }
 
     #[test]
+    fn tests_reaching_an_edit_through_a_test_helper_are_mapped() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(
+            root.join("tests/it.rs"),
+            "fn fixture() -> u32 {\n    foo::parse()\n}\n\n\
+             #[test]\nfn via_fixture() {\n    assert_eq!(fixture(), 1);\n}\n",
+        )
+        .unwrap();
+        let sites = name_sites(root, &BTreeSet::from(["parse".to_string()]));
+        let (items, _) = test_items_reaching(root, &sites);
+        let expected = ["fixture", "parses", "via_fixture"];
+        assert_eq!(items, expected.map(String::from).into());
+    }
+
+    #[test]
     fn picks_listed_tests_by_function_name() {
         let fns = BTreeSet::from(["parses".to_string()]);
         let listed = vec![
             "tests::parses".to_string(),
             "tests::parses_twice".to_string(),
+            "tests::parses::case_1".to_string(),
             "src/lib.rs - parses (line 3)".to_string(),
             "parses".to_string(),
         ];
-        assert_eq!(pick_tests(listed, &fns), vec!["tests::parses", "parses"]);
+        assert_eq!(
+            pick_tests(listed, &fns),
+            vec!["tests::parses", "tests::parses::case_1", "parses"]
+        );
     }
 
     #[test]
@@ -691,6 +789,10 @@ mod tests {
         let gated = "fn a() {}\n#[cfg(all(test, feature = \"x\"))]\nmod tests {}\n";
         assert!(!in_test_code(Path::new("src/lib.rs"), gated, 1));
         assert!(in_test_code(Path::new("src/lib.rs"), gated, 3));
+        // A test module in its own file, gated by its parent's `mod` line.
+        let own_file = "use super::*;\n\n#[tokio::test]\nasync fn a() {}\n";
+        assert!(in_test_code(Path::new("src/unit.rs"), own_file, 1));
+        assert!(!in_test_code(Path::new("src/unit.rs"), "fn a() {}\n", 1));
     }
 
     #[test]
@@ -713,6 +815,18 @@ mod tests {
         assert!(why.contains("line 2"), "{why}");
         // Only the changed crates' doc tests count.
         assert_eq!(doc_test_mention(root, &["bar".to_string()], &names), None);
+
+        // A README's examples, included as docs, are doc tests too.
+        std::fs::write(root.join("src/doc.rs"), "fn a() {}\n").unwrap();
+        let readme = "# foo\n\n```rust\nfoo::parse();\n```\n";
+        std::fs::write(root.join("README.md"), readme).unwrap();
+        std::fs::write(
+            root.join("src/readme.rs"),
+            "#![doc = include_str!(\"../README.md\")]\n",
+        )
+        .unwrap();
+        let why = doc_test_mention(root, &foo, &names).unwrap();
+        assert!(why.contains("README.md` line 4"), "{why}");
     }
 
     #[tokio::test]

@@ -80,26 +80,30 @@ files, or a server hiccup all pass with a note rather than trapping the agent.
 
 The affected-tests stage narrows to the tests that reference the symbols edited
 this turn. It finds each edited function or type with tree-sitter, asks the
-language server for its `textDocument/references`, keeps the sites in test code
-(files under `tests/`, or below a file's first `#[cfg(..test..)]`), and runs just the
-`#[test]` functions around them with `cargo test -- --exact`. With no server,
-or one that errors or answers nothing for any symbol (a cold server still
-indexing), it name-matches the edited symbols in test code instead. The receipt
-names which one mapped the tests:
+language server for its `textDocument/references`, and keeps the sites in test
+code: files under `tests/`, lines below a file's first `#[cfg(..test..)]`, or a
+file with no such `cfg` that has `#[test]` functions (a test module in its own
+file). It follows the helpers and fixtures around those sites through test code
+by name, so a test calling a helper that calls the edit is found too, and runs
+just the matching tests with `cargo test -- --exact`. With no server, or one
+that errors or answers nothing for any symbol (a cold server still indexing),
+it name-matches the edited symbols in test code instead. The receipt names
+which one mapped the tests:
 
 ```text
 edited symbols: parse
-narrowed via LSP textDocument/references to 1 test(s) referencing them: tests::parses
+narrowed via LSP textDocument/references (test helpers by name) to 1 test(s) referencing them: tests::parses
 $ cargo test --quiet -p foo -- --exact tests::parses
 ```
 
 It runs the whole changed crates instead, and the receipt says why, when the
 narrowed set could miss a test: a new, deleted or non-Rust file inside a crate,
 a line outside any function or type (a `use`, a doc comment that may be a doc
-test), a doc test in a changed crate that uses an edited symbol (doc tests
-can't be named on the `--exact` line), no test referencing an edited symbol, or
-more than 64 matching tests. Only direct references count: a test that reaches
-the edit through a helper function is not mapped.
+test), a doc test in a changed crate that uses an edited symbol (in a doc
+comment or a file included with `#[doc = include_str!(..)]`; doc tests can't be
+named on the `--exact` line), no test referencing an edited symbol, or more than
+64 matching tests. Production code is not followed: a test that reaches the
+edit only through a non-test function is not mapped.
 
 `wingman knows` flags a project memory as stale when it names a code symbol the
 project no longer has, as well as a file that is gone (global memories get only
