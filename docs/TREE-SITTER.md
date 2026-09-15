@@ -59,7 +59,11 @@ impl Language {
 
 `.h` is deliberately unmapped: it is as often C as C++, and C is not a parsed
 language. Functions nested in a class, struct, enum, impl, or namespace are reported as
-methods; a forward declaration (`class Foo;`) is not a symbol.
+methods; a forward declaration (`class Foo;`) is not a symbol. A Java or Kotlin signature starts
+after the declaration's annotations, a C++ template's span (and chunk) starts at
+its `template <...>` line, and `replace_function_body` skips bodyless
+declarations (interface or abstract methods, `= default`) to reach the
+definition.
 
 **`SymbolKind` enum** (`crates/wingman-ts/src/symbol.rs`):
 ```rust

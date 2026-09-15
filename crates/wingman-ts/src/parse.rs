@@ -181,25 +181,49 @@ fn symbol_from_node(lang: Language, src: &str, node: &Node) -> Option<Symbol> {
         Language::Java => java_symbol(src, node)?,
         Language::Kotlin => kotlin_symbol(src, node)?,
     };
-    let start = node.start_position();
-    let end = node.end_position();
-    let signature = first_line_of(src, node);
+    // A C++ template's `template <typename T>` line belongs to the item it
+    // introduces, so its chunk carries it instead of a chunk of its own.
+    let span = match node.parent() {
+        Some(p) if lang == Language::Cpp && p.kind() == "template_declaration" => p,
+        _ => *node,
+    };
+    let start = span.start_position();
+    let end = span.end_position();
+    let signature = first_line_of(src, signature_start(lang, node), node.end_byte());
     Some(Symbol {
         name,
         kind,
         start_line: (start.row + 1) as u32,
         end_line: (end.row + 1) as u32,
-        start_byte: node.start_byte(),
-        end_byte: node.end_byte(),
+        start_byte: span.start_byte(),
+        end_byte: span.end_byte(),
         signature,
     })
 }
 
-fn first_line_of(src: &str, node: &Node) -> String {
+/// Where a declaration's signature begins. Java and Kotlin keep annotations
+/// inside the declaration, so without skipping them every `@Override` or
+/// `@Test` method would be outlined as just its annotation.
+fn signature_start(lang: Language, node: &Node) -> usize {
+    if !matches!(lang, Language::Java | Language::Kotlin) {
+        return node.start_byte();
+    }
+    let Some(modifiers) = kotlin_child(node, "modifiers") else {
+        return node.start_byte();
+    };
+    let mut cursor = modifiers.walk();
+    let last_annotation = modifiers
+        .children(&mut cursor)
+        .filter(|m| m.kind().ends_with("annotation"))
+        .last();
+    last_annotation.map_or(node.start_byte(), |a| a.end_byte())
+}
+
+fn first_line_of(src: &str, start: usize, end: usize) -> String {
     let bytes = src.as_bytes();
-    let start = node.start_byte().min(bytes.len());
-    let end = node.end_byte().min(bytes.len());
-    let slice = &bytes[start..end];
+    let end = end.min(bytes.len());
+    let start = start.min(end);
+    let slice = bytes[start..end].trim_ascii_start();
     let line_end = slice
         .iter()
         .position(|&b| b == b'\n')
@@ -452,11 +476,12 @@ fn chunks_from_symbols(src: &str, mut top: Vec<Symbol>) -> Vec<SemanticChunk> {
     let mut cursor_line: u32 = 1;
     for sym in &top {
         // Pre-symbol gap (use statements, comments, etc.) → its own chunk
-        // when non-trivial.
+        // when non-trivial. Bare punctuation (the `;` after a C++ class) is
+        // not worth a chunk.
         if sym.start_byte > cursor_byte {
             let gap_text =
                 String::from_utf8_lossy(&bytes[cursor_byte..sym.start_byte]).into_owned();
-            if !gap_text.trim_start().is_empty() {
+            if gap_text.chars().any(char::is_alphanumeric) {
                 let gap_end_line = sym.start_line.saturating_sub(1).max(cursor_line);
                 out.push(SemanticChunk {
                     start_line: cursor_line,
@@ -516,7 +541,7 @@ fn chunks_from_symbols(src: &str, mut top: Vec<Symbol>) -> Vec<SemanticChunk> {
     // Trailing gap.
     if cursor_byte < bytes.len() {
         let gap_text = String::from_utf8_lossy(&bytes[cursor_byte..]).into_owned();
-        if !gap_text.trim().is_empty() {
+        if gap_text.chars().any(char::is_alphanumeric) {
             let total_lines = src.lines().count() as u32;
             out.push(SemanticChunk {
                 start_line: cursor_line,
@@ -607,11 +632,16 @@ fn find_body_span(lang: Language, src: &str, root: Node, name: &str) -> Option<(
             if let Some(this_name) = function_name(lang, src, &node) {
                 if this_name == name {
                     let body = match lang {
-                        Language::Kotlin => kotlin_child(&node, "function_body")?,
-                        _ => node.child_by_field_name("body")?,
+                        Language::Kotlin => kotlin_child(&node, "function_body"),
+                        _ => node.child_by_field_name("body"),
                     };
-                    // Slice exclusive of the outer braces / Python indent.
-                    return inner_body_span(lang, src, &body);
+                    // A declaration without a body (an interface or abstract
+                    // method, `Foo() = default;`) is not the one to edit;
+                    // keep looking for the definition with the same name.
+                    if let Some(body) = body {
+                        // Slice exclusive of the outer braces / Python indent.
+                        return inner_body_span(lang, src, &body);
+                    }
                 }
             }
         }
@@ -1171,6 +1201,55 @@ struct Pt { int len() const { return 0; } };
     }
 
     #[test]
+    fn bodyless_declarations_annotations_and_templates() {
+        // The edit lands on the definition, not on a declaration of the
+        // same name that has no body, whichever comes first.
+        let java = "interface Shape { int area(); }
+class Sq implements Shape { public int area() { return 4; } }
+abstract class B { abstract int area(); }
+";
+        let edited = replace_function_body(Language::Java, java, "area", " return 5; ").unwrap();
+        assert!(
+            edited.contains("public int area() { return 5; }"),
+            "{edited}"
+        );
+        let kotlin = "class Sq : Shape { override fun area(): Int { return 4 } }
+interface Shape { fun area(): Int }
+";
+        let edited = replace_function_body(Language::Kotlin, kotlin, "area", " return 5 ").unwrap();
+        assert!(edited.contains("fun area(): Int { return 5 }"), "{edited}");
+        let cpp =
+            "struct A { int f() { return 1; } };\nstruct B { B() = default; int f() = delete; };\n";
+        let edited = replace_function_body(Language::Cpp, cpp, "f", " return 2; ").unwrap();
+        assert!(edited.contains("int f() { return 2; }"), "{edited}");
+
+        // Annotations are skipped in the signature.
+        let out = outline(
+            Language::Java,
+            "class T {\n    @Test\n    @DisplayName(\"x\")\n    void works() {}\n}\n",
+        )
+        .unwrap();
+        assert!(out.contains("\n  2:method:works: void works() {}"), "{out}");
+        let out = outline(Language::Kotlin, "class T {\n    @Test fun works() {}\n}\n").unwrap();
+        assert!(out.contains("\n  2:method:works: fun works() {}"), "{out}");
+
+        // A template's header rides in its item's chunk, and the `;` after a
+        // class is not a chunk of its own.
+        let chunks = semantic_chunks(
+            Language::Cpp,
+            "template <typename T>\nclass V {\n  T get() const { return t; }\n};\n",
+        );
+        assert_eq!(chunks.len(), 1, "{chunks:?}");
+        assert_eq!((chunks[0].start_line, chunks[0].end_line), (1, 4));
+        assert!(chunks[0].content.starts_with("template <typename T>"));
+        let sym = chunks[0].symbol.as_ref().unwrap();
+        assert_eq!(
+            (sym.name.as_str(), sym.signature.as_str()),
+            ("V", "class V {")
+        );
+    }
+
+    #[test]
     fn semantic_chunks_keep_top_level_go_methods() {
         let src = "package p
 
@@ -1234,6 +1313,31 @@ func (s *S) B() {}
                 "class A:\n    def m(self):\n        return 1\n",
                 "class A:\n    def m(self):\n        return 1\n\n    def n(self):\n        pass\n",
                 "def f():\n    pass\nclass A:\n    def n(self):\n        pass\n",
+            ],
+        );
+        // The new grammars carry external scanners (raw strings, Kotlin's
+        // automatic semicolons), whose state an edit must not desync.
+        assert_incremental_matches_full(
+            Language::Cpp,
+            &[
+                "namespace n {\nint f() { return 1; }\n}\n",
+                "namespace n {\nint f() { return R\"(x)\"; }\nclass C { void g(); };\n}\n",
+                "namespace n {\nint f() { return R\"(x\n}\nclass C { void g(); };\n}\n",
+            ],
+        );
+        assert_incremental_matches_full(
+            Language::Java,
+            &[
+                "class A {\n    int f() { return 1; }\n}\n",
+                "class A {\n    @Override\n    int f() { return 2; }\n}\n",
+            ],
+        );
+        assert_incremental_matches_full(
+            Language::Kotlin,
+            &[
+                "class A {\n    fun f() = 1\n}\n",
+                "class A {\n    fun f() = 1\n    val s = \"\"\"$x\"\"\"\n}\nfun g() {}\n",
+                "class A {\n    fun f() =\n}\nfun g() {}\n",
             ],
         );
     }
