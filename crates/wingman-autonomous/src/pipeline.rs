@@ -92,6 +92,10 @@ pub struct PipelineInputs {
     /// J11 default sandbox tier ("host" | "container" | "vm"); per-task
     /// tiers are escalated from this floor by `sandbox::select_tier`.
     pub sandbox_default_tier: String,
+    /// J11 which non-host tiers this machine can honour, probed once by the
+    /// caller. The same answer drives the worker spawner, so the reported
+    /// tiers are the ones the workers actually ran in.
+    pub sandbox_availability: crate::sandbox::TierAvailability,
     /// J15 `[pilot.approval].dangerous_paths` globs. A write to one of these
     /// that the goal text never mentions raises a hard escalation trigger
     /// and blocks auto-merge. Empty disables the check.
@@ -137,9 +141,8 @@ pub struct PipelineOutcome {
     /// J10 critic veto. `true` means the critic flagged a high+ risk and
     /// auto-merge was blocked regardless of the other gates.
     pub critic_vetoed: bool,
-    /// J11 per-task sandbox tier chosen for the run, as `(task_id, tier)`.
-    /// Selection is always computed; actual container/vm execution is a
-    /// Docker/Firecracker-gated leaf invoked per tier.
+    /// J11 per-task sandbox tier the run used, as `(task_id, tier)`, after
+    /// degrading tiers this machine cannot honour.
     pub sandbox_tiers: Vec<(String, String)>,
     /// J15 hard escalation triggers detected over the integration diff +
     /// plan (dangerous-path-without-goal-mention, secrets, license-header
@@ -262,7 +265,13 @@ pub async fn run_to_completion(
     // Drive the manager loop. Manager system prompt is loaded inside
     // build_manager; the per-tick state block is injected by
     // drive_to_completion.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| project_root.clone());
+    // The process cwd only when it is inside the project: `pilot
+    // validate-providers` drives a scratch repo from wherever it was started,
+    // and the manager's read tools must not resolve against that directory.
+    let cwd = std::env::current_dir()
+        .ok()
+        .filter(|d| d.starts_with(&project_root))
+        .unwrap_or_else(|| project_root.clone());
     let registry = build_manager_registry(
         handle.clone(),
         cwd,
@@ -323,14 +332,13 @@ pub async fn run_to_completion(
         );
     }
 
-    // J11 — compute the sandbox tier each task should run in, escalating
-    // from the configured default by its writes/acceptance/reversibility,
-    // then degrading container/vm to host when no Docker daemon is
-    // reachable so the run never wedges on a missing executor.
+    // J11 — the sandbox tier each task ran in: escalated from the configured
+    // default by its writes/acceptance/reversibility, then degraded to what
+    // this machine can honour.
     let sandbox_tiers = compute_sandbox_tiers(
         &final_state,
         &inputs.sandbox_default_tier,
-        inputs.command_runner.as_ref(),
+        &inputs.sandbox_availability,
     );
 
     let failed: Vec<String> = final_state
@@ -743,28 +751,21 @@ pub async fn run_to_completion(
     })
 }
 
-/// J11 — compute the per-task sandbox tier for the run from the configured
-/// default floor + each task's writes/acceptance/reversibility. Pure;
-/// actual container/vm execution (`sandbox::run_in_container`) is the
-/// Docker/Firecracker-gated leaf invoked per chosen tier.
+/// J11 — the per-task sandbox tier for the run, from the configured default
+/// floor + each task's writes/acceptance/reversibility, resolved against what
+/// this machine can honour. Pure.
 fn compute_sandbox_tiers(
     state: &crate::model::RunState,
     default_tier: &str,
-    runner: &dyn CommandRunner,
+    avail: &crate::sandbox::TierAvailability,
 ) -> Vec<(String, String)> {
     let floor = crate::sandbox::IsolationTier::parse(default_tier);
-    // Probe Docker once; container/vm tiers degrade to host when absent.
-    let docker = crate::sandbox::docker_available(runner);
     state
         .tasks
         .iter()
         .map(|t| {
             let requested = crate::sandbox::select_tier(t, floor);
-            let effective = if docker {
-                requested
-            } else {
-                crate::sandbox::resolve_effective_tier(requested, runner).0
-            };
+            let effective = crate::sandbox::resolve_effective_tier(requested, avail).0;
             (t.id.clone(), effective.as_str().to_string())
         })
         .collect()
@@ -2177,7 +2178,7 @@ pub fn pipeline_succeeded(state: &crate::model::RunState) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{Event, Role, RunStatus, Task, TaskStatus};
     use crate::orchestrator::{fake_happy_spawner, OrchestratorConfig};
@@ -2481,12 +2482,12 @@ mod tests {
     /// the appropriate tool-use block. The manager system prompt + the
     /// rendered state block are part of the input so the provider can
     /// branch on what the manager is seeing.
-    struct ScriptedProvider {
+    pub(crate) struct ScriptedProvider {
         call_count: Mutex<u32>,
     }
 
     impl ScriptedProvider {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 call_count: Mutex::new(0),
             }
@@ -2584,6 +2585,22 @@ mod tests {
             let _call = *n;
             drop(n);
 
+            // One scheduling step per tick, like a real manager: once the
+            // step's tool result is back, end the turn. The state text in the
+            // history is still the pre-step picture, so acting on it again
+            // repeats a step the orchestrator has already taken.
+            let answered = req.messages.last().is_some_and(|m| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            });
+            if answered {
+                let events = vec![Ok(StreamEvent::Stop {
+                    reason: StopReason::EndTurn,
+                })];
+                return Ok(Box::pin(stream::iter(events)));
+            }
+
             // Inspect the user prompt to decide what to emit.
             let statuses = parse_state_from_request(&req);
             // For each task, classify Pending/Todo/Review/Done/etc.
@@ -2667,7 +2684,7 @@ mod tests {
 
     /// Mock CommandRunner that simulates a clean gh-present, git-push-ok
     /// environment. Useful for the e2e test below.
-    struct AllOkCommandRunner;
+    pub(crate) struct AllOkCommandRunner;
     impl CommandRunner for AllOkCommandRunner {
         fn run(&self, program: &str, args: &[&str], _cwd: &Path) -> std::io::Result<CommandOut> {
             let _ = (program, args);
@@ -2849,6 +2866,10 @@ mod tests {
             critic: None,
             reviewer_model: "stub".into(),
             sandbox_default_tier: "host".into(),
+            sandbox_availability: crate::sandbox::TierAvailability {
+                docker: false,
+                vm: Err("test".into()),
+            },
             dangerous_paths: Vec::new(),
             merge_fixer: true,
             knowledge_keeper: None,
@@ -3536,27 +3557,38 @@ mod tests {
             t.writes = vec!["db/migrations/001.sql".into()];
             t
         });
-        // No Docker → vm/container degrade to host. Use a runner that
-        // reports docker absent so the test is deterministic.
-        let no_docker = AllFailRunner;
-        let tiers = compute_sandbox_tiers(&state, "host", &no_docker);
+        // No Docker, no vm backend → vm/container degrade to host.
+        let tiers = compute_sandbox_tiers(&state, "host", &avail(false, false));
         assert_eq!(tiers.len(), 2);
         assert_eq!(tiers.iter().find(|(id, _)| id == "t1").unwrap().1, "host");
-        // t2 selects vm but degrades to host without a daemon.
+        // t2 selects vm but degrades to host without a backend.
         assert_eq!(tiers.iter().find(|(id, _)| id == "t2").unwrap().1, "host");
     }
 
+    fn avail(docker: bool, vm: bool) -> crate::sandbox::TierAvailability {
+        crate::sandbox::TierAvailability {
+            docker,
+            vm: if vm { Ok(()) } else { Err("no kvm".into()) },
+        }
+    }
+
     #[test]
-    fn j11_keeps_vm_tier_when_docker_present() {
+    fn j11_keeps_vm_tier_only_with_a_vm_backend() {
         let mut state = crate::model::RunState::new("r1", "g", "abc", "b");
         state.tasks.push({
             let mut t = Task::new("t2", Role::Developer, "migrate");
             t.writes = vec!["db/migrations/001.sql".into()];
             t
         });
-        let with_docker = AllOkCommandRunner;
-        let tiers = compute_sandbox_tiers(&state, "host", &with_docker);
-        assert_eq!(tiers[0].1, "vm");
+        assert_eq!(
+            compute_sandbox_tiers(&state, "host", &avail(false, true))[0].1,
+            "vm"
+        );
+        // Docker is a container, not a vm: the task reports what it got.
+        assert_eq!(
+            compute_sandbox_tiers(&state, "host", &avail(true, false))[0].1,
+            "container"
+        );
     }
 
     #[test]
@@ -3565,7 +3597,7 @@ mod tests {
         state.tasks.push(Task::new("t1", Role::Developer, "edit"));
         // Default container floor lifts even a plain task to container —
         // when Docker is available.
-        let tiers = compute_sandbox_tiers(&state, "container", &AllOkCommandRunner);
+        let tiers = compute_sandbox_tiers(&state, "container", &avail(true, false));
         assert_eq!(tiers[0].1, "container");
     }
 

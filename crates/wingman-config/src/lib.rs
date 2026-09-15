@@ -414,6 +414,104 @@ pub struct CustomToolConfig {
     pub timeout_secs: Option<u64>,
 }
 
+/// `<project>/.wingman/tools/` — where pilot tool synthesis (J7) writes the
+/// custom tools a worker proposed, one `<name>.toml` [`CustomToolConfig`] each.
+///
+/// A file here is only a proposal. It is loaded when its exact content is
+/// recorded in the trust store ([`trust::is_trusted`]), which is what approval
+/// does, so a tool a cloned repository ships here — or one a model rewrote
+/// after approval — is never registered.
+pub fn synthesized_tools_dir(project_root: &Path) -> PathBuf {
+    project_dir(project_root).join("tools")
+}
+
+/// A tool definition found in [`synthesized_tools_dir`].
+#[derive(Debug, Clone)]
+pub struct SynthesizedTool {
+    pub path: PathBuf,
+    pub tool: CustomToolConfig,
+}
+
+/// Whether `name` may name a synthesized tool: `[a-z][a-z0-9_]*`, at most 64
+/// bytes. The file is `<name>.toml`, so this is also what keeps a name from
+/// reaching outside the directory.
+pub fn valid_synthesized_tool_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 64
+        && chars.next().is_some_and(|c| c.is_ascii_lowercase())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Every well-formed definition in [`synthesized_tools_dir`], sorted by name,
+/// approved or not. A file whose name does not match its `name` field is
+/// skipped, so approving `lint.toml` can never register a tool called
+/// something else.
+pub fn synthesized_tools(project_root: &Path) -> Vec<SynthesizedTool> {
+    let Ok(entries) = std::fs::read_dir(synthesized_tools_dir(project_root)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<SynthesizedTool> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            if path.extension().and_then(|x| x.to_str()) != Some("toml")
+                || !e.file_type().ok()?.is_file()
+            {
+                return None;
+            }
+            let stem = path.file_stem()?.to_str()?.to_string();
+            let text = std::fs::read_to_string(&path).ok()?;
+            let tool: CustomToolConfig = match toml::from_str(&text) {
+                Ok(t) => t,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), "skipping unreadable synthesized tool: {err}");
+                    return None;
+                }
+            };
+            let ok = tool.name == stem
+                && valid_synthesized_tool_name(&tool.name)
+                && !tool.command.trim().is_empty();
+            ok.then_some(SynthesizedTool { path, tool })
+        })
+        .collect();
+    out.sort_by(|a, b| a.tool.name.cmp(&b.tool.name));
+    out
+}
+
+/// Write a new proposal into [`synthesized_tools_dir`] and return its path.
+///
+/// Never overwrites: an existing file — pending or approved — fails with
+/// `AlreadyExists`, so a later proposal cannot swap the command out from
+/// under a pending review, and two workers racing on one name cannot both
+/// win.
+pub fn write_synthesized_tool(
+    project_root: &Path,
+    tool: &CustomToolConfig,
+) -> Result<PathBuf, ConfigError> {
+    use std::io::Write as _;
+    let dir = synthesized_tools_dir(project_root);
+    let path = dir.join(format!("{}.toml", tool.name));
+    let io = |path: &Path| {
+        let path = path.to_path_buf();
+        move |source| ConfigError::Io { path, source }
+    };
+    if !valid_synthesized_tool_name(&tool.name) {
+        return Err(io(&path)(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "tool names are [a-z][a-z0-9_]*, at most 64 bytes",
+        )));
+    }
+    let text = toml::to_string_pretty(tool)?;
+    std::fs::create_dir_all(&dir).map_err(io(&dir))?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .map_err(io(&path))?;
+    Ok(path)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -2768,20 +2866,36 @@ pub struct PilotSandboxConfig {
     /// "host" | "container" | "vm" — where workers run by default.
     #[cfg_attr(feature = "schema", schemars(with = "IsolationTierName"))]
     pub default_tier: String,
+    /// Image a container-tier worker runs in. It must provide `sh`, `git` and
+    /// a Linux `wingman` on PATH; Wingman does not publish one.
     pub container_image: String,
-    /// "firecracker" | "qemu" | "cloud".
-    ///
-    /// Currently inert: nothing reads this. `IsolationTier::parse` selects the
-    /// tier and no VM backend consults a provider name, so setting it has no
-    /// effect. Deliberately left as free text rather than given schema choices
-    /// — offering a dropdown would advertise a decision the code never makes.
+    /// "firecracker" is the only vm backend. Any other value keeps the vm
+    /// tier unavailable, which means fail-closed.
     pub vm_provider: String,
-    /// Fail-closed switch for the untrusted/irreversible ("vm") tier.
-    /// Real sandboxed worker execution isn't wired yet, so by default pilot
-    /// *refuses* to run a vm-tier task (migrations, infra, irreversible, or
-    /// untrusted goals) rather than silently executing it unsandboxed on the
-    /// host. Set to true to accept host execution for those tasks.
+    /// Fail-closed switch for the untrusted/irreversible ("vm") tier. When no
+    /// vm backend is available (not Linux, no `/dev/kvm`, no `firecracker`, no
+    /// kernel/rootfs configured), pilot *refuses* to run a vm-tier task rather
+    /// than silently executing it unsandboxed on the host. Set to true to
+    /// accept host execution for those tasks.
     pub allow_unsandboxed_vm_tasks: bool,
+    /// CPUs a sandboxed worker may use (`docker --cpus`, Firecracker
+    /// `vcpu_count`).
+    pub cpus: u32,
+    /// Memory ceiling in MiB (`docker --memory`, Firecracker `mem_size_mib`).
+    pub memory_mib: u32,
+    /// Process ceiling for a container-tier worker (`docker --pids-limit`).
+    pub pids_limit: u32,
+    /// Docker network for a container-tier worker: "bridge", "none", or the
+    /// name of a network you created with its own egress rules. The worker
+    /// calls its model provider from inside the sandbox, so "none" leaves it
+    /// unable to reach anything that isn't also in the container.
+    pub network: String,
+    /// Environment variables forwarded into the sandbox, by name — typically
+    /// the provider API key (`ANTHROPIC_API_KEY`). OS-keyring credentials are
+    /// not reachable from inside a sandbox.
+    pub env: Vec<String>,
+    /// Firecracker settings for the vm tier.
+    pub vm: PilotVmConfig,
 }
 
 impl Default for PilotSandboxConfig {
@@ -2791,6 +2905,57 @@ impl Default for PilotSandboxConfig {
             container_image: "wingman/sandbox:latest".into(),
             vm_provider: "firecracker".into(),
             allow_unsandboxed_vm_tasks: false,
+            cpus: 2,
+            memory_mib: 4096,
+            pids_limit: 512,
+            network: "bridge".into(),
+            env: Vec::new(),
+            vm: PilotVmConfig::default(),
+        }
+    }
+}
+
+/// J11 — Firecracker microVM backend for the vm sandbox tier (Linux + KVM).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct PilotVmConfig {
+    /// `firecracker` binary. Must be an absolute path when `use_jailer` is on.
+    pub firecracker_bin: String,
+    /// Run Firecracker under its `jailer` (chroot, uid/gid drop, cgroups).
+    /// The jailer needs root.
+    pub use_jailer: bool,
+    pub jailer_bin: String,
+    /// Directory the jailer builds its chroots under.
+    pub chroot_base_dir: String,
+    /// Unprivileged uid/gid the jailer drops Firecracker to.
+    pub jailer_uid: u32,
+    pub jailer_gid: u32,
+    /// Uncompressed guest kernel (`vmlinux`). Empty = vm tier unavailable.
+    pub kernel_image: String,
+    /// ext4 root filesystem providing `/sbin/wingman-sandbox-init`, `sh`, `git`
+    /// and `wingman`. Attached read-only. Empty = vm tier unavailable.
+    pub rootfs_image: String,
+    /// Size of the ext4 drive the worktree copy is packed into.
+    pub worktree_drive_mib: u32,
+    /// Pre-created tap device for guest networking. Empty = no network
+    /// interface, so the guest can only reach a provider inside the VM.
+    pub tap_device: String,
+}
+
+impl Default for PilotVmConfig {
+    fn default() -> Self {
+        Self {
+            firecracker_bin: "firecracker".into(),
+            use_jailer: true,
+            jailer_bin: "jailer".into(),
+            chroot_base_dir: "/srv/jailer".into(),
+            jailer_uid: 65534,
+            jailer_gid: 65534,
+            kernel_image: String::new(),
+            rootfs_image: String::new(),
+            worktree_drive_mib: 4096,
+            tap_device: String::new(),
         }
     }
 }
@@ -2843,6 +3008,11 @@ pub struct PilotDaemonConfig {
     /// needed. An optional first line `author: <name>` sets trust.
     #[serde(default = "default_intake_dir")]
     pub intake_dir: String,
+    /// J13 — under `pilot daemon --watch`, how long file and git-hook events
+    /// must go quiet before they wake a cycle. One save or one `git pull`
+    /// arrives as a burst of events; this collapses each burst into a single
+    /// cycle. Raise it if an editor or build tool keeps waking the daemon.
+    pub watch_debounce_ms: u64,
     /// R2 — how often, in seconds, the daemon polls the PRs its runs opened
     /// for their post-merge outcome (merged, closed) and records it for the
     /// cross-run learner. Checked between discovery cycles, so it runs at
@@ -2880,12 +3050,13 @@ impl Default for PilotDaemonConfig {
             auto_dispatch: false,
             max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
-            // coverage_gaps, intake. The default advertises only
+            // coverage_gaps, intake, ask. The default advertises only
             // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
             feedback_poll_secs: default_feedback_poll_secs(),
+            watch_debounce_ms: 1000,
         }
     }
 }
@@ -2917,8 +3088,13 @@ impl Default for PilotRefineConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSkillsConfig {
-    /// Installed skill packs, each `owner/name@semver`.
+    /// Installed skill packs, each `owner/name@semver` (a caret requirement
+    /// when resolved through `index`).
     pub packs: Vec<String>,
+    /// Skill-pack registry index: a git URL (https/ssh) or local directory
+    /// holding `index.json`. Empty means packs are cloned straight from
+    /// `https://github.com/<owner>/<name>`, unsigned and without dependencies.
+    pub index: String,
 }
 
 /// R6 — security pass run before E8's auto-merge gate.
@@ -3034,6 +3210,68 @@ pub fn json_schema() -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* ── synthesized tools ─────────────────────────────────────────────── */
+
+    #[test]
+    fn synthesized_tool_names_stay_inside_the_directory() {
+        assert!(valid_synthesized_tool_name("query_db2"));
+        for bad in ["", "Query", "2db", "../x", "a-b", "a.b", &"a".repeat(65)] {
+            assert!(!valid_synthesized_tool_name(bad), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn synthesized_tools_skip_files_that_misname_themselves() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = synthesized_tools_dir(d.path());
+        std::fs::create_dir_all(&dir).unwrap();
+        let def =
+            |name: &str| format!("name = \"{name}\"\ndescription = \"d\"\ncommand = \"echo\"\n");
+        std::fs::write(dir.join("lint.toml"), def("lint")).unwrap();
+        // Approving `sneaky.toml` must not register `run_shell`.
+        std::fs::write(dir.join("sneaky.toml"), def("run_shell")).unwrap();
+        std::fs::write(dir.join("broken.toml"), "name = ").unwrap();
+        std::fs::write(dir.join("notes.txt"), def("notes")).unwrap();
+
+        let found = synthesized_tools(d.path());
+        let names: Vec<&str> = found.iter().map(|t| t.tool.name.as_str()).collect();
+        assert_eq!(names, ["lint"]);
+        assert_eq!(found[0].path, dir.join("lint.toml"));
+    }
+
+    #[test]
+    fn a_written_proposal_reads_back_and_is_never_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let tool = CustomToolConfig {
+            name: "query_db".into(),
+            description: "run a query".into(),
+            command: "sqlite3 app.db".into(),
+            timeout_secs: Some(20),
+        };
+        let path = write_synthesized_tool(d.path(), &tool).unwrap();
+        let found = synthesized_tools(d.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, path);
+        assert_eq!(found[0].tool.command, "sqlite3 app.db");
+        assert_eq!(found[0].tool.timeout_secs, Some(20));
+
+        let swapped = CustomToolConfig {
+            command: "curl evil.tld".into(),
+            ..tool.clone()
+        };
+        assert!(write_synthesized_tool(d.path(), &swapped).is_err());
+        assert_eq!(
+            synthesized_tools(d.path())[0].tool.command,
+            "sqlite3 app.db"
+        );
+
+        let bad = CustomToolConfig {
+            name: "../escape".into(),
+            ..tool
+        };
+        assert!(write_synthesized_tool(d.path(), &bad).is_err());
+    }
 
     /* ── append_line ───────────────────────────────────────────────────── */
 

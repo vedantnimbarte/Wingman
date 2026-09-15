@@ -39,6 +39,34 @@ impl fmt::Display for ApprovalTier {
     }
 }
 
+impl std::str::FromStr for ApprovalTier {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "auto" => Ok(Self::Auto),
+            "notify-only" => Ok(Self::NotifyOnly),
+            "hard-gate" => Ok(Self::Hard),
+            other => Err(format!(
+                "unknown approval tier '{other}' (expected auto, notify-only, hard-gate)"
+            )),
+        }
+    }
+}
+
+/// J7 — how a tool a worker proposes gets approved.
+///
+/// Auto only on `autopilot` in a project whose config the user has trusted
+/// (`wingman trust`); a hard gate everywhere else. There is no notify-only
+/// band: a synthesized tool runs shell commands in every later session, and a
+/// veto window nobody is watching during an unattended run is not a gate.
+pub fn tool_synthesis_tier(tier: PilotTier, project_trusted: bool) -> ApprovalTier {
+    if tier == PilotTier::Autopilot && project_trusted {
+        ApprovalTier::Auto
+    } else {
+        ApprovalTier::Hard
+    }
+}
+
 /// All the inputs the classifier needs. Built by the CLI from the
 /// resolved plan + config; kept separate from a giant function signature
 /// so tests don't have to construct a 7-arg call.
@@ -298,6 +326,22 @@ mod tests {
     use super::*;
     use crate::model::{Reversibility, Role};
     use wingman_config::PilotApprovalConfig;
+
+    #[test]
+    fn tool_synthesis_is_a_hard_gate_unless_autopilot_and_trusted() {
+        use PilotTier::*;
+        assert_eq!(tool_synthesis_tier(Autopilot, true), ApprovalTier::Auto);
+        for (tier, trusted) in [(Autopilot, false), (Copilot, true), (Assist, true)] {
+            assert_eq!(tool_synthesis_tier(tier, trusted), ApprovalTier::Hard);
+        }
+        for t in [
+            ApprovalTier::Auto,
+            ApprovalTier::NotifyOnly,
+            ApprovalTier::Hard,
+        ] {
+            assert_eq!(t.to_string().parse::<ApprovalTier>(), Ok(t));
+        }
+    }
 
     fn task(id: &str, role: Role, writes: Vec<&str>) -> PlannedTask {
         PlannedTask {

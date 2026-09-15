@@ -113,6 +113,12 @@ pub struct Cli {
     #[arg(long, hide = true)]
     pub checkpoint_hygiene: bool,
 
+    /// J7 — give the worker `propose_tool`, approving proposals at this tier
+    /// (`auto` or `hard-gate`). The orchestrator decides it from the run's
+    /// tier and the project's trust; absent, tool synthesis is off.
+    #[arg(long, hide = true, value_name = "TIER")]
+    pub tool_synthesis: Option<String>,
+
     /// Increase log verbosity (-v, -vv).
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
@@ -651,10 +657,31 @@ pub enum PilotAction {
         /// letting the daemon act on its own.
         #[arg(long)]
         dry_run: bool,
+        /// J13 — also wake between polls: a file change runs the local
+        /// sources (todos, coverage_gaps, intake, ask), a git hook installed
+        /// by `pilot hooks install` runs every source.
+        #[arg(long)]
+        watch: bool,
     },
-    /// J12 — install the skill packs listed in `[pilot.skills].packs` into
-    /// `~/.wingman/packs/` and link their roles into `~/.wingman/agents/`.
-    Skills,
+    /// J13 — git hooks that wake `pilot daemon --watch` on commit, merge,
+    /// checkout and rewrite. They run the wingman binary directly, no shell.
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+    /// J12 — skill packs: install (with dependencies and signature checks),
+    /// search the index, list and re-verify installs. Bare `pilot skills`
+    /// installs `[pilot.skills].packs`.
+    Skills {
+        #[command(subcommand)]
+        action: Option<SkillsAction>,
+    },
+    /// J7 — tools pilot workers proposed for this project
+    /// (`.wingman/tools/`). Bare `pilot tools` lists them.
+    Tools {
+        #[command(subcommand)]
+        action: Option<ToolsAction>,
+    },
     /// R4 — eval / regression gate. Summarize eval results, compare to the
     /// committed baseline, and exit non-zero on regression (the CI gate).
     Eval {
@@ -674,6 +701,26 @@ pub enum PilotAction {
         /// Rewrite the baseline from the current results instead of gating.
         #[arg(long)]
         update_baseline: bool,
+    },
+    /// Run the canned `--version-only` plan against every configured provider
+    /// that has credentials, each in a scratch repo under a strict cap, and
+    /// write the pass/fail matrix as markdown and JSON. Spends real money.
+    ValidateProviders {
+        /// Only these provider ids (repeatable). Default: every
+        /// `[providers.*]` section.
+        #[arg(long = "provider", value_name = "ID")]
+        providers: Vec<String>,
+        /// Spend cap per provider, in USD. Must be above 0.
+        #[arg(long, default_value_t = 0.50)]
+        max_usd: f64,
+        /// Token cap per provider (in + out); holds for unpriced models,
+        /// where the USD cap cannot trip. Must be above 0.
+        #[arg(long, default_value_t = 400_000)]
+        max_tokens: u64,
+        /// Directory for `matrix.md` and `matrix.json`.
+        /// Default: `.wingman/provider-validation/`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<std::path::PathBuf>,
     },
     /// R2 — post-merge feedback poller: for every run that opened a PR,
     /// query its terminal state (`gh`) and record a `pr.outcome` event the
@@ -760,6 +807,79 @@ pub enum IntakeChannel {
     Email {
         /// Directory your mail delivery drops `.eml` files into.
         maildir: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksAction {
+    /// Write post-commit, post-merge, post-checkout and post-rewrite hooks
+    /// into this repo's hooks directory. An existing hook that wingman did
+    /// not write is left alone and reported.
+    Install,
+    /// Remove the hooks `install` wrote, and nothing else.
+    Uninstall,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ToolsAction {
+    /// List proposed tools and whether each is approved.
+    List,
+    /// Approve a proposed tool: record its exact content in the trust store,
+    /// so the next worker spawned (and any session in this project) can call
+    /// it. Editing the file afterwards revokes the approval.
+    Approve {
+        /// The tool's name.
+        name: String,
+    },
+    /// Reject a proposed or approved tool: delete it and its trust record.
+    Reject {
+        /// The tool's name.
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SkillsAction {
+    /// Resolve packs and their dependencies against `[pilot.skills].index`,
+    /// verify each signature, and install into `~/.wingman/packs/`, linking
+    /// roles into `~/.wingman/agents/`.
+    Install {
+        /// `owner/name@X.Y[.Z]` specs; defaults to `[pilot.skills].packs`.
+        specs: Vec<String>,
+        /// Install packs that carry no signature (signed packs must still
+        /// verify).
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// Search the index by name or description.
+    Search {
+        /// Case-insensitive substring; omit to list every pack.
+        query: Option<String>,
+    },
+    /// List installed packs.
+    List,
+    /// Re-check installed packs against their signatures (or, for unsigned
+    /// packs, their install-time digest). Exits non-zero on any failure.
+    Verify {
+        /// `owner/name` or `owner/name@X.Y.Z`; omit to verify all.
+        specs: Vec<String>,
+        /// Accept unsigned packs whose files are unchanged.
+        #[arg(long)]
+        allow_unsigned: bool,
+    },
+    /// For pack authors: print the payload to sign with
+    /// `ssh-keygen -Y sign -n wingman-skillpack` for a pack directory.
+    Digest {
+        /// The `owner/name@X.Y.Z` being published.
+        spec: String,
+        /// A clean checkout of the pack's `v<version>` tag.
+        dir: std::path::PathBuf,
+        /// A dependency as listed in the index entry (repeatable).
+        #[arg(long = "dep", value_name = "SPEC")]
+        deps: Vec<String>,
+        /// Write the payload to this file instead of stdout.
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
     },
 }
 
@@ -1019,6 +1139,15 @@ static REASONING_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::ne
 static PRESET_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 pub async fn run() -> Result<ExitCode> {
+    // Git running a `pilot hooks install` hook: the hook file's `#!` line is
+    // this binary, so argv is `wingman <hook-file> <git args>`, which clap
+    // would reject. Handled before parsing, and before config or logging, so
+    // a hook costs one small file write.
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if let Some(hook) = wingman_autonomous::watcher::hook_invocation(&args) {
+        return Ok(commands::pilot::record_hook(hook));
+    }
+
     let cli = Cli::parse();
     if let Some(r) = cli.reasoning.clone() {
         let _ = REASONING_OVERRIDE.set(r);
@@ -1053,6 +1182,7 @@ pub async fn run() -> Result<ExitCode> {
             model_override: cli.model,
             turn_rollback_after: cli.turn_rollback_after.unwrap_or(0),
             checkpoint_hygiene: cli.checkpoint_hygiene,
+            tool_synthesis: cli.tool_synthesis,
         };
         return commands::worker::run(cfg, opts).await;
     }
@@ -1330,14 +1460,53 @@ pub async fn run() -> Result<ExitCode> {
                 let cfg = load_config()?;
                 commands::pilot::eval(cfg, goals, baseline, threshold, update_baseline).await
             }
-            PilotAction::Skills => {
+            PilotAction::ValidateProviders {
+                providers,
+                max_usd,
+                max_tokens,
+                out,
+            } => {
                 let cfg = load_config()?;
-                commands::pilot::skills_install(cfg).await
+                commands::pilot::validate_providers(cfg, providers, max_usd, max_tokens, out).await
             }
-            PilotAction::Daemon { cycles, dry_run } => {
+            PilotAction::Tools { action } => match action {
+                None | Some(ToolsAction::List) => commands::pilot::tools_list().await,
+                Some(ToolsAction::Approve { name }) => commands::pilot::tools_approve(name).await,
+                Some(ToolsAction::Reject { name }) => commands::pilot::tools_reject(name).await,
+            },
+            PilotAction::Skills { action } => match action {
+                None => commands::pilot::skills_install(load_config()?, Vec::new(), false).await,
+                Some(SkillsAction::Install {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_install(load_config()?, specs, allow_unsigned).await,
+                Some(SkillsAction::Search { query }) => {
+                    commands::pilot::skills_search(load_config()?, query.unwrap_or_default()).await
+                }
+                Some(SkillsAction::List) => commands::pilot::skills_list().await,
+                Some(SkillsAction::Verify {
+                    specs,
+                    allow_unsigned,
+                }) => commands::pilot::skills_verify(specs, allow_unsigned).await,
+                Some(SkillsAction::Digest {
+                    spec,
+                    dir,
+                    deps,
+                    out,
+                }) => commands::pilot::skills_digest(spec, dir, deps, out).await,
+            },
+            PilotAction::Daemon {
+                cycles,
+                dry_run,
+                watch,
+            } => {
                 let cfg = load_config()?;
-                commands::pilot::daemon(cfg, cycles, dry_run).await
+                commands::pilot::daemon(cfg, cycles, dry_run, watch).await
             }
+            PilotAction::Hooks { action } => match action {
+                HooksAction::Install => commands::pilot::hooks_install().await,
+                HooksAction::Uninstall => commands::pilot::hooks_uninstall().await,
+            },
             PilotAction::Abort { run_id, task } => {
                 commands::pilot::control_abort(run_id, task).await
             }

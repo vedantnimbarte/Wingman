@@ -1729,6 +1729,27 @@ async fn handle_assign(
         (task, agent_id, worktree, session_id)
     };
 
+    // An assigned task stays `Todo` until its worker records `InProgress`. A
+    // manager tick inside that window saw an assignable task, and this used to
+    // start a second worker in the same worktree. Reassign is unaffected: it
+    // removes the old handle before it gets here.
+    if task.status == TaskStatus::Todo {
+        if let Some(previous) = &task.agent {
+            if active
+                .lock()
+                .await
+                .get(previous)
+                .is_some_and(|h| !h.is_finished())
+            {
+                return Err(OrchestratorError::BadTransition(
+                    task_id.to_string(),
+                    task.status,
+                    "assign (its worker is still starting)",
+                ));
+            }
+        }
+    }
+
     // E9 — a worktree created for this task ahead of time is taken over as
     // it is: it branches from the same base commit a fresh one would.
     let adopted = prewarms.remove(task_id);
@@ -3324,6 +3345,42 @@ mod tests {
         }
         handle.shutdown().await;
         let _ = join.await;
+    }
+
+    /// A worker that has been assigned but not yet recorded `InProgress`
+    /// leaves the task `Todo`; a second assign in that window must not start
+    /// another worker in the same worktree.
+    #[tokio::test]
+    async fn assign_refuses_a_task_whose_worker_is_still_starting() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        let starting: WorkerSpawner = Arc::new(|_ctx: SpawnContext| {
+            Box::pin(async move {
+                futures::future::pending::<()>().await;
+                unreachable!("never resumed")
+            })
+        });
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), starting);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+        assert_eq!(
+            handle.snapshot().await.unwrap().task("t1").unwrap().status,
+            TaskStatus::Todo
+        );
+        match handle.assign_task("t1").await {
+            Err(OrchestratorError::BadTransition(id, TaskStatus::Todo, _)) => assert_eq!(id, "t1"),
+            other => panic!("expected BadTransition, got {other:?}"),
+        }
+        // The worker never returns, so don't await `join`.
+        join.abort();
     }
 
     /// Phase 8.1 acceptance: when a task hits Failed, the retry watchdog

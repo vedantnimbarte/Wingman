@@ -828,6 +828,22 @@ capability on, a worker that edits a second file without calling it first is
 failed before review, and the worker refuses to start when `[tools]` removals
 exclude it. Pilot workers only.
 
+### `propose_tool`
+
+Tool synthesis (J7): a pilot worker proposes a shell command as a named tool
+for this project. Args: `name` (`[a-z][a-z0-9_]*`, not an existing tool),
+`description`, `command`, `timeout_secs`. The proposal is written to the
+owning project's `.wingman/tools/<name>.toml` in the `[[tools.custom]]`
+format and becomes callable in registries built after it is approved — never
+in the proposing worker's own. Approved by the worker itself only on
+`autopilot` in a trusted project; otherwise it waits for
+`wingman pilot tools approve <name>`.
+
+Declares write and shell, needs the shell permission, and refuses a command
+the shell denylist blocks. Only registered for pilot workers when the
+`tool_synthesis` capability is on. See
+[PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
+
 ## User-Defined Tools
 
 ### `[[tools.custom]]`
@@ -841,6 +857,12 @@ Runs under the shell permission (auto-edit / yolo) and carries its own
 `timeout_secs` (default 30), so it opts out of the registry's backstop
 deadline. See [CONFIGURATION.md](CONFIGURATION.md) and
 [EXTENDING.md](EXTENDING.md).
+
+Approved synthesized tools from `.wingman/tools/` (see `propose_tool`) join
+the same family, with two differences: they run exactly as `run_shell` would
+run their command — `[tools].shell_sandbox`, credential scrub, Job Object —
+and receive their input in `$WINGMAN_TOOL_INPUT` only. They never replace a
+tool that is already registered, and none load when `run_shell` is disabled.
 
 ## Subagent Control
 
@@ -913,6 +935,7 @@ faster model while the parent session keeps the strongest one. An explicit
 | `ask_user`          | —    | —     | —     | always     | Pause and ask at a real fork   |
 | `task_complete`     | —    | —     | —     | always     | Pilot workers only; ends the task |
 | `checkpoint`        | —    | Y     | Y     | mode       | Pilot workers only; commits the worktree |
+| `propose_tool`      | —    | Y     | Y     | mode/list  | Pilot workers only; proposes a project tool |
 | `save_memory`       | —    | Y     | —     | always     | Persist across sessions        |
 | `recall_memory`     | Y    | —     | —     | always     | Fetch memory body              |
 | `forget_memory`     | —    | Y     | —     | always     | Delete memory                  |

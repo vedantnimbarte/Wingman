@@ -218,7 +218,9 @@ Three capability tiers — `assist` (you approve everything), `copilot` (the
 default; the agent flies, you intervene at decision points), and `autopilot`
 (experimental, adds the discovery daemon and critic agent). `copilot` runs
 end-to-end against a live provider and is user-validated, not CI-validated:
-use a spend cap and read the PR. Details in
+use a spend cap and read the PR. `wingman pilot validate-providers` runs a
+canned plan against each provider you have configured and writes a pass/fail
+matrix, so you can check yours before trusting a real run. Details in
 [docs/PILOT-MODE.md](docs/PILOT-MODE.md).
 
 ---

@@ -6,7 +6,7 @@
 //! 2. Loads the role's system prompt (`~/.wingman/agents/<role>.md` or the
 //!    built-in default shipped with `wingman-autonomous`).
 //! 3. Spins up the standard agent loop in `auto-edit` mode with the
-//!    configured `pilot.worker_model`.
+//!    model the parent passed as `--model` (else `pilot.worker_model`).
 //! 4. Streams every `AgentEvent` to stdout as NDJSON — the parent
 //!    supervisor parses each line.
 //! 5. Registers the `task_complete` tool, which the worker is prompted to
@@ -43,6 +43,7 @@ pub struct WorkerOptions {
     /// E11 — checkpoints are enforced at review: require the `checkpoint`
     /// tool and say so in the prompt.
     pub checkpoint_hygiene: bool,
+    pub tool_synthesis: Option<String>,
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
@@ -59,15 +60,24 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     let task: Task = serde_json::from_str(&task_json)
         .with_context(|| format!("parsing task file {} as JSON", opts.task_file))?;
     let role = parse_role(&opts.role)?;
+    let tool_synthesis = opts
+        .tool_synthesis
+        .as_deref()
+        .map(str::parse::<wingman_autonomous::approval::ApprovalTier>)
+        .transpose()
+        .map_err(|e| anyhow::anyhow!("--tool-synthesis: {e}"))?;
 
-    // Resolve the worker model — prefer pilot.worker_model, then --model,
-    // then the global default. We deliberately don't fall back to
+    // Resolve the worker model — prefer --model, then pilot.worker_model,
+    // then the global default. `--model` comes first because the parent has
+    // already resolved it from the project config this worker cannot see (see
+    // `worker_args`), and it carries the E5 escalation to the manager model and
+    // `pilot validate-providers`' choice of provider; a `pilot.worker_model` in
+    // global config used to override both. We deliberately don't fall back to
     // pilot.default_model: workers should be the cheap tier.
-    let model_string = cfg
-        .pilot
-        .worker_model
+    let model_string = opts
+        .model_override
         .clone()
-        .or_else(|| opts.model_override.clone())
+        .or_else(|| cfg.pilot.worker_model.clone())
         .or_else(|| cfg.default_model.clone());
     let selection = runtime::resolve_selection(&cfg, model_string.as_deref())?;
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
@@ -113,6 +123,13 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     registry.register_arc(Arc::new(wingman_tools::builtin::TaskComplete));
     registry.register_arc(Arc::new(wingman_autonomous::tools::RunAcceptance));
     registry.register_arc(Arc::new(wingman_autonomous::tools::Checkpoint));
+    // J7 — last, so it knows every name a proposal may not take.
+    if let Some(tier) = tool_synthesis {
+        registry.register_arc(Arc::new(wingman_autonomous::tools::ProposeTool::new(
+            tier,
+            registry.tool_names(),
+        )));
+    }
 
     // The removals now bind these as well, and a worker without them cannot
     // report its result — it would run the whole task and then fail in a way

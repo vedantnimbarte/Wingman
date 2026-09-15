@@ -436,6 +436,38 @@ pub fn api_key_env_var(provider_id: &str) -> Option<&'static str> {
     }
 }
 
+/// Why `provider_id` has no credential to call with, or `None` when it has one
+/// (or, like a local server, needs none). Looks where [`build_provider`] looks
+/// (config value, keyring marker, environment) without building anything,
+/// because the OpenAI-compatible adapter builds fine with no key and only
+/// fails on its first request. `env` stands in for `std::env::var`.
+pub fn missing_credential(
+    cfg: &Config,
+    provider_id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let from_config = cfg
+        .providers
+        .get(provider_id)
+        .and_then(|pc| pc.api_key.as_deref());
+    if check_config_value(from_config).is_some() {
+        return None;
+    }
+    let set = |name: &str| env(name).is_some_and(|v| !v.trim().is_empty());
+    let found = match provider_id {
+        "chatgpt" => {
+            set("CHATGPT_ACCESS_TOKEN") || secrets::load("chatgpt").ok().flatten().is_some()
+        }
+        "gemini" => set("GOOGLE_API_KEY") || set("GEMINI_API_KEY"),
+        "watsonx" => set("WATSONX_API_KEY") || set("WATSONX_ACCESS_TOKEN"),
+        id => api_key_env_var(id).is_none_or(set),
+    };
+    (!found).then(|| match api_key_env_var(provider_id) {
+        Some(name) => format!("no credential: set {name} or run `wingman login {provider_id}`"),
+        None => format!("no credential: run `wingman login {provider_id}`"),
+    })
+}
+
 fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> {
     if let Some(key) = check_config_value(from_config) {
         return Ok(key);
@@ -608,6 +640,8 @@ pub(crate) fn base_registry(
     // through, and a setting applied per-caller is how `disabled_tools`
     // shipped broken twice.
     let ctx = ctx.with_ask_timeout(cfg.tools.ask_user_desktop_timeout_secs);
+    let synthesized =
+        approved_synthesized_tools(&ctx.project_root, cfg, wingman_config::trust::is_trusted);
     let reg = ToolRegistry::new(ctx)
         .with_builtins()
         .with_hooks(cfg.hooks.clone())
@@ -619,6 +653,7 @@ pub(crate) fn base_registry(
             cfg.tools.repeat_exempt.clone(),
         )
         .with_custom_tools(&cfg.tools.custom)
+        .with_synthesized_tools(&synthesized)
         .with_deferred(cfg.tools.defer.clone());
 
     // Air-gapped guard: hard-remove the network tools so no code leaves the
@@ -629,6 +664,37 @@ pub(crate) fn base_registry(
         reg.unregister("web_search");
     }
     reg
+}
+
+/// The J7 synthesized tools this registry may carry: those under the owning
+/// project's `.wingman/tools/` whose content `approved` accepts (the trust
+/// store, in production).
+///
+/// The owning project, because a pilot worker's root is its worktree, which
+/// holds no `.wingman/tools/` and is deleted after the task — the tool one
+/// worker proposed has to be visible to the next one.
+///
+/// None at all when `run_shell` is excluded: a synthesized tool is a shell
+/// command under a name, so carrying it would hand back the shell that
+/// `[tools].disabled_tools` or a preset took away.
+fn approved_synthesized_tools(
+    project_root: &std::path::Path,
+    cfg: &Config,
+    approved: impl Fn(&std::path::Path) -> bool,
+) -> Vec<wingman_config::CustomToolConfig> {
+    let removals = ToolRemovals::new(
+        cfg.tools.preset_keep_list(),
+        cfg.tools.disabled_tools.clone(),
+    );
+    if removals.excludes("run_shell") {
+        return Vec::new();
+    }
+    let root = wingman_config::find_owning_project_root(project_root);
+    wingman_config::synthesized_tools(&root)
+        .into_iter()
+        .filter(|t| approved(&t.path))
+        .map(|t| t.tool)
+        .collect()
 }
 
 /// Register `tool_search` / `tool_call` when `[tools].defer` actually hides
@@ -2204,5 +2270,71 @@ mod affected_tests_tests {
         // A changed non-rs file contributes no crate.
         std::fs::write(root.join("README.md"), "x").unwrap();
         assert_eq!(changed_rust_crates(root), vec!["foo".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod synthesized_tool_tests {
+    use super::*;
+
+    /// A worker proposes from inside its worktree; the next worker (another
+    /// worktree) must find the approved tool, and nothing unapproved.
+    #[test]
+    fn approved_tools_come_from_the_owning_project_and_need_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("repo");
+        let worktree = project.join(".wingman").join("worktrees").join("auto-y");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../../../.git").unwrap();
+        let dir = wingman_config::synthesized_tools_dir(&project);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["approved_one", "pending_one"] {
+            std::fs::write(
+                dir.join(format!("{name}.toml")),
+                format!("name = \"{name}\"\ndescription = \"d\"\ncommand = \"echo\"\n"),
+            )
+            .unwrap();
+        }
+        let approve = |p: &std::path::Path| p.ends_with("approved_one.toml");
+
+        let cfg = Config::default();
+        let names: Vec<String> = approved_synthesized_tools(&worktree, &cfg, approve)
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(names, ["approved_one"]);
+
+        // Disabling run_shell takes synthesized shell tools with it.
+        let mut no_shell = Config::default();
+        no_shell.tools.disabled_tools = vec!["run_shell".into()];
+        assert!(approved_synthesized_tools(&worktree, &no_shell, approve).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod credential_tests {
+    use super::*;
+
+    #[test]
+    fn missing_credential_checks_config_then_env_and_lets_local_servers_through() {
+        let mut cfg = Config::default();
+        for id in ["anthropic", "openai", "ollama", "gemini"] {
+            cfg.providers.insert(id.into(), Default::default());
+        }
+        cfg.providers.get_mut("anthropic").unwrap().api_key = Some("sk-in-config".into());
+        // A `${VAR}` placeholder the loader could not fill is not a key.
+        cfg.providers.get_mut("openai").unwrap().api_key = Some("${OPENAI_API_KEY}".into());
+        let no_env = |_: &str| None;
+
+        assert_eq!(missing_credential(&cfg, "anthropic", &no_env), None);
+        assert_eq!(missing_credential(&cfg, "ollama", &no_env), None);
+        let why = missing_credential(&cfg, "openai", &no_env).unwrap();
+        assert!(why.contains("OPENAI_API_KEY"), "{why}");
+
+        let env = |k: &str| (k == "OPENAI_API_KEY" || k == "GEMINI_API_KEY").then(|| "k".into());
+        assert_eq!(missing_credential(&cfg, "openai", &env), None);
+        assert_eq!(missing_credential(&cfg, "gemini", &env), None);
+        let blank = |_: &str| Some("  ".into());
+        assert!(missing_credential(&cfg, "openai", &blank).is_some());
     }
 }

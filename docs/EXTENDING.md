@@ -54,3 +54,8 @@ Define a tool as a shell command under `[[tools.custom]]` (`name`, `description`
 `command`) and it becomes a tool the model can call. The tool input JSON arrives
 on stdin and in `$WINGMAN_TOOL_INPUT`; stdout is the result. Runs under the
 shell permission. See [CONFIGURATION.md](CONFIGURATION.md).
+
+Pilot workers can propose tools of the same shape for a project (tool
+synthesis): they land in `.wingman/tools/<name>.toml` and load once approved
+with `wingman pilot tools approve <name>`. See
+[PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).

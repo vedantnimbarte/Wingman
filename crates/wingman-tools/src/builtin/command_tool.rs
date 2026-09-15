@@ -2,6 +2,10 @@
 //! config (`[[tools.custom]]`), no recompile. The tool input JSON is passed on
 //! stdin and in `$WINGMAN_TOOL_INPUT`; stdout becomes the result. Gated behind
 //! the shell permission — these run arbitrary commands.
+//!
+//! The same type backs synthesized tools (J7, `.wingman/tools/`), built with
+//! [`CommandTool::contained`]: those were written by a model rather than the
+//! user, so they run through `run_shell`'s guards instead of beside them.
 
 use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
@@ -15,6 +19,9 @@ pub struct CommandTool {
     description: String,
     command: String,
     timeout: Duration,
+    /// Run through [`super::run_shell::run_contained`]: shell sandbox policy,
+    /// credential scrub and Job Object, like any other `run_shell` command.
+    contained: bool,
 }
 
 impl CommandTool {
@@ -29,7 +36,16 @@ impl CommandTool {
             description,
             command,
             timeout: Duration::from_secs(timeout_secs.unwrap_or(30).max(1)),
+            contained: false,
         }
+    }
+
+    /// A synthesized tool: same definition, but it gets exactly the
+    /// containment `run_shell` would give the command and no more. Its input
+    /// arrives in `$WINGMAN_TOOL_INPUT` only; stdin is not wired.
+    pub fn contained(mut self) -> Self {
+        self.contained = true;
+        self
     }
 }
 
@@ -48,13 +64,24 @@ impl Tool for CommandTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: self.name.clone(),
-            description: format!("{} (user-defined command tool)", self.description),
+            description: if self.contained {
+                format!(
+                    "{} (synthesized command tool; input JSON in $WINGMAN_TOOL_INPUT)",
+                    self.description
+                )
+            } else {
+                format!("{} (user-defined command tool)", self.description)
+            },
             // Free-form object: the command decides how to interpret its input.
             input_schema: json!({ "type": "object", "additionalProperties": true }),
         }
     }
 
     async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
+        if self.contained {
+            let input = serde_json::to_string(&args).unwrap_or_default();
+            return super::run_shell::run_contained(&self.command, input, self.timeout, ctx).await;
+        }
         // Custom tools run arbitrary shell — require shell permission.
         if !ctx.allows_shell() {
             return ToolOutcome::err(format!(
@@ -161,6 +188,46 @@ mod tests {
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("not permitted"));
+    }
+
+    #[tokio::test]
+    async fn a_contained_tool_sees_its_input_and_obeys_the_denylist() {
+        let echo = if cfg!(windows) {
+            "echo %WINGMAN_TOOL_INPUT%"
+        } else {
+            "echo \"$WINGMAN_TOOL_INPUT\""
+        };
+        let tool = CommandTool::new("say".into(), "d".into(), echo.into(), Some(5)).contained();
+        assert!(tool.spec().description.contains("synthesized"));
+        let out = tool
+            .run(serde_json::json!({"q": 7}), &ctx(PermissionMode::Yolo))
+            .await;
+        assert!(!out.is_error, "content: {}", out.content);
+        assert!(out.content.contains("\"q\":7"), "content: {}", out.content);
+
+        // Denied the same way run_shell would deny it.
+        let dir = std::env::temp_dir();
+        let denying = ToolCtx::new_with_config(
+            PermissionMode::Yolo,
+            dir.clone(),
+            dir,
+            vec!["echo".into()],
+            false,
+        );
+        let out = tool.run(serde_json::json!({}), &denying).await;
+        assert!(
+            out.is_error && out.content.contains("denylist"),
+            "{}",
+            out.content
+        );
+        let out = tool
+            .run(serde_json::json!({}), &ctx(PermissionMode::ReadOnly))
+            .await;
+        assert!(
+            out.is_error && out.content.contains("shell denied"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]

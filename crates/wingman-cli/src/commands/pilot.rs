@@ -633,42 +633,14 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         return Ok(ExitCode::SUCCESS);
     }
 
-    // J11 — fail closed on the untrusted/irreversible ("vm") tier. Real
-    // sandboxed worker execution isn't wired yet, so a vm-tier task
-    // (migrations, infra, Dockerfile/terraform edits, or an irreversible
-    // goal) would otherwise run with full host access. Refuse rather than
-    // silently execute unsandboxed, unless the operator opted in. Container-
-    // tier tasks still degrade to host (annotated post-run) — this gate only
-    // guards the genuinely dangerous top tier.
-    if !pilot.sandbox.allow_unsandboxed_vm_tasks {
-        let default_tier =
-            wingman_autonomous::sandbox::IsolationTier::parse(&pilot.sandbox.default_tier);
-        let vm_tasks: Vec<String> = store
-            .state()
-            .tasks
-            .iter()
-            .filter(|t| {
-                wingman_autonomous::sandbox::select_tier(t, default_tier)
-                    == wingman_autonomous::sandbox::IsolationTier::Vm
-            })
-            .map(|t| t.id.clone())
-            .collect();
-        if !vm_tasks.is_empty() {
-            eprintln!(
-                "[pilot] refusing to run: {} task(s) need vm-tier isolation \
-                 (migrations / infra / irreversible / untrusted) but sandboxed \
-                 execution isn't available — they would run unsandboxed on the host:",
-                vm_tasks.len()
-            );
-            for id in &vm_tasks {
-                eprintln!("[pilot]   - {id}");
-            }
-            eprintln!(
-                "[pilot] relabel/split the task, or set [pilot.sandbox].\
-                 allow_unsandboxed_vm_tasks = true to accept host execution."
-            );
-            return Ok(ExitCode::from(2));
-        }
+    // J11 — probe once which sandbox tiers this machine can honour; the gate
+    // below, the worker spawner and the run report all use this answer.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    if refuse_unisolated_vm_tasks(&pilot.sandbox, &sandbox_avail, &store.state().tasks) {
+        return Ok(ExitCode::from(2));
     }
 
     let base_branch =
@@ -705,6 +677,9 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             std::time::Duration::from_secs(pilot.task_timeout_secs),
             turn_rollback_after(&pilot),
             capability_on(&pilot, "checkpoint_hygiene"),
+            pilot.sandbox.clone(),
+            sandbox_avail.clone(),
+            tool_synthesis_for(&pilot, &project.config_file),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -739,6 +714,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             None => selection.model.clone(),
         },
         sandbox_default_tier: pilot.sandbox.default_tier.clone(),
+        sandbox_availability: sandbox_avail,
         dangerous_paths: pilot.approval.dangerous_paths.clone(),
         merge_fixer: capability_on(&pilot, "merge_fixer"),
         knowledge_keeper: knowledge_keeper(
@@ -1014,6 +990,8 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
         "merge_fixer" => matches!(pilot.tier, Copilot | Autopilot),
         // Knowledge-keeper agent after a merged run (J8): autopilot-only.
         "knowledge_keeper" => matches!(pilot.tier, Autopilot),
+        // Tool synthesis (J7): autopilot-only by default.
+        "tool_synthesis" => matches!(pilot.tier, Autopilot),
         // Unknown capability defaults off.
         _ => false,
     }
@@ -1111,6 +1089,22 @@ fn turn_rollback_after(pilot: &wingman_config::PilotConfig) -> u32 {
     } else {
         0
     }
+}
+
+/// J7 — whether workers get `propose_tool`, and at which approval tier:
+/// `None` when the `tool_synthesis` capability is off, otherwise
+/// [`wingman_autonomous::approval::tool_synthesis_tier`] over the run's tier
+/// and whether this project's config is trusted.
+fn tool_synthesis_for(
+    pilot: &wingman_config::PilotConfig,
+    project_config: &std::path::Path,
+) -> Option<wingman_autonomous::approval::ApprovalTier> {
+    capability_on(pilot, "tool_synthesis").then(|| {
+        wingman_autonomous::approval::tool_synthesis_tier(
+            pilot.tier,
+            wingman_config::trust::is_trusted(project_config),
+        )
+    })
 }
 
 /// Slice out the first balanced top-level JSON object from a chatty reply
@@ -1620,6 +1614,26 @@ pub async fn resume(
         .with_context(|| format!("building provider {}", selection.provider_id))?;
 
     let state = store.state().clone();
+    // J11 — the same vm gate as a fresh run, over the tasks a resume can
+    // still execute. Without it a resumed run was the way around fail-closed.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &cfg.pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    let pending: Vec<wingman_autonomous::Task> = state
+        .tasks
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.status,
+                wingman_autonomous::TaskStatus::Done | wingman_autonomous::TaskStatus::Review
+            )
+        })
+        .cloned()
+        .collect();
+    if refuse_unisolated_vm_tasks(&cfg.pilot.sandbox, &sandbox_avail, &pending) {
+        return Ok(ExitCode::from(2));
+    }
     let base_branch = std::env::var("WINGMAN_PILOT_BASE_BRANCH")
         .unwrap_or_else(|_| cfg.pilot.pr.base_branch.clone());
     let orch_cfg = wingman_autonomous::orchestrator::OrchestratorConfig {
@@ -1657,6 +1671,9 @@ pub async fn resume(
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
             turn_rollback_after(&cfg.pilot),
             capability_on(&cfg.pilot, "checkpoint_hygiene"),
+            cfg.pilot.sandbox.clone(),
+            sandbox_avail.clone(),
+            tool_synthesis_for(&cfg.pilot, &project.config_file),
         )?,
         base_branch,
         project_root: project.root,
@@ -1704,6 +1721,7 @@ pub async fn resume(
             None => selection.model.clone(),
         },
         sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
+        sandbox_availability: sandbox_avail,
         dangerous_paths: cfg.pilot.approval.dangerous_paths.clone(),
         merge_fixer: capability_on(&cfg.pilot, "merge_fixer"),
         knowledge_keeper: knowledge_keeper(
@@ -1748,6 +1766,88 @@ pub async fn resume(
     Ok(ExitCode::SUCCESS)
 }
 
+/// J11 — refuse to start when a task needs vm-tier isolation this machine
+/// cannot provide, rather than run migrations / infra / irreversible work
+/// with weaker isolation. `[pilot.sandbox].allow_unsandboxed_vm_tasks` opts
+/// out. Returns true (after explaining) when the run must not start.
+fn refuse_unisolated_vm_tasks(
+    sandbox: &wingman_config::PilotSandboxConfig,
+    avail: &wingman_autonomous::sandbox::TierAvailability,
+    tasks: &[wingman_autonomous::Task],
+) -> bool {
+    use wingman_autonomous::sandbox::{select_tier, IsolationTier};
+    let Err(reason) = &avail.vm else {
+        return false;
+    };
+    if sandbox.allow_unsandboxed_vm_tasks {
+        return false;
+    }
+    let default_tier = IsolationTier::parse(&sandbox.default_tier);
+    let vm_tasks: Vec<&str> = tasks
+        .iter()
+        .filter(|t| select_tier(t, default_tier) == IsolationTier::Vm)
+        .map(|t| t.id.as_str())
+        .collect();
+    if vm_tasks.is_empty() {
+        return false;
+    }
+    eprintln!(
+        "[pilot] refusing to run: {} task(s) need vm-tier isolation \
+         (migrations / infra / irreversible / untrusted) but the vm tier is \
+         unavailable here ({reason}):",
+        vm_tasks.len()
+    );
+    for id in &vm_tasks {
+        eprintln!("[pilot]   - {id}");
+    }
+    eprintln!(
+        "[pilot] relabel/split the task, configure [pilot.sandbox.vm], or set \
+         [pilot.sandbox].allow_unsandboxed_vm_tasks = true to accept weaker isolation."
+    );
+    true
+}
+
+/// J11 — the sandbox one task's worker runs in, or `None` for the host.
+///
+/// `Err` for a vm-tier task this machine cannot isolate, unless
+/// `allow_unsandboxed_vm_tasks`. The start-of-run gate
+/// ([`refuse_unisolated_vm_tasks`]) only sees the plan; this catches a task
+/// the manager adds (`add_task`) or splits off mid-run, which would otherwise
+/// quietly degrade to weaker isolation.
+fn worker_sandbox_for(
+    task: &wingman_autonomous::Task,
+    sandbox: &wingman_config::PilotSandboxConfig,
+    avail: &wingman_autonomous::sandbox::TierAvailability,
+) -> std::result::Result<Option<wingman_autonomous::sandbox::WorkerSandbox>, String> {
+    use wingman_autonomous::sandbox::{resolve_effective_tier, select_tier, IsolationTier};
+    let requested = select_tier(task, IsolationTier::parse(&sandbox.default_tier));
+    if let (IsolationTier::Vm, Err(why)) = (requested, &avail.vm) {
+        if !sandbox.allow_unsandboxed_vm_tasks {
+            return Err(format!(
+                "task {} needs vm-tier isolation, which is unavailable here ({why});                  refusing to run it with weaker isolation",
+                task.id
+            ));
+        }
+    }
+    let (tier, degraded) = resolve_effective_tier(requested, avail);
+    if degraded {
+        tracing::warn!(
+            target: "pilot::sandbox",
+            task = %task.id,
+            "task wants the {} tier but runs in {}: no backend for it here",
+            requested.as_str(),
+            tier.as_str()
+        );
+    }
+    Ok(
+        (tier != IsolationTier::Host).then(|| wingman_autonomous::sandbox::WorkerSandbox {
+            tier,
+            config: sandbox.clone(),
+            global_config: wingman_config::global_config_path().ok(),
+        }),
+    )
+}
+
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
 /// child processes via [`wingman_autonomous::worker::run_worker`].
 ///
@@ -1759,6 +1859,13 @@ pub async fn resume(
 /// chosen adaptively per role: a role whose cheap-model history is below
 /// threshold is dispatched straight to the capable model instead of
 /// burning a first attempt that history says will fail.
+///
+/// `sandbox` + `avail` pick each task's J11 tier: a container/vm task runs
+/// its worker in that sandbox, degraded to what this machine can honour.
+///
+/// `tool_synthesis` is [`tool_synthesis_for`]'s answer, handed to every
+/// worker.
+#[allow(clippy::too_many_arguments)]
 fn build_real_worker_spawner(
     worker_model: &str,
     manager_model: &str,
@@ -1766,6 +1873,9 @@ fn build_real_worker_spawner(
     task_timeout: std::time::Duration,
     turn_rollback_after: u32,
     checkpoint_hygiene: bool,
+    sandbox: wingman_config::PilotSandboxConfig,
+    avail: wingman_autonomous::sandbox::TierAvailability,
+    tool_synthesis: Option<wingman_autonomous::approval::ApprovalTier>,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1776,6 +1886,7 @@ fn build_real_worker_spawner(
             let worker_model = worker_model.clone();
             let manager_model = manager_model.clone();
             let routing = routing.clone();
+            let worker_sandbox = worker_sandbox_for(&ctx.task, &sandbox, &avail);
             Box::pin(async move {
                 // E5 rung 2: escalate to the manager model when the
                 // orchestrator flagged this attempt as needing it. Otherwise
@@ -1813,7 +1924,7 @@ fn build_real_worker_spawner(
                 // E10 — take the manager→worker command receiver so
                 // run_worker can drain it into the child's stdin.
                 let cmd_rx = ctx.cmd_rx.lock().await.take();
-                let spec = wingman_autonomous::worker::WorkerSpec {
+                let mut spec = wingman_autonomous::worker::WorkerSpec {
                     wingman_bin,
                     role: task.role.clone(),
                     task,
@@ -1825,7 +1936,27 @@ fn build_real_worker_spawner(
                     rung: ctx.rung,
                     turn_rollback_after,
                     checkpoint_hygiene,
+                    sandbox: None,
+                    tool_synthesis,
                 };
+                // Recorded on the task (with its ladder attempt), so the
+                // manager and `pilot status` see why it failed rather than a
+                // bare Failed.
+                match worker_sandbox {
+                    Ok(sb) => spec.sandbox = sb,
+                    Err(why) => {
+                        wingman_autonomous::worker::record_failure(
+                            &ctx.store,
+                            &spec,
+                            &ctx.agent_id,
+                            why.clone(),
+                        )
+                        .await;
+                        return Err(wingman_autonomous::orchestrator::OrchestratorError::Spawn(
+                            why,
+                        ));
+                    }
+                }
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
                 // instead of serializing on a guard held for the whole run.
@@ -1962,8 +2093,14 @@ pub async fn watch(run_id: Option<String>, interval_ms: u64, ascii: bool) -> Res
 /// to `<project>/.wingman/daemon-queue.jsonl` for follow-up. `cycles == 0`
 /// runs forever (Ctrl-C to stop); a positive value runs that many cycles
 /// then exits (used for one-shot triage / CI).
-pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCode> {
+///
+/// J13 — `watch` keeps the poll but also wakes on debounced file changes
+/// (local sources only) and on `pilot hooks install` git hooks (every
+/// source); see `wingman_autonomous::watcher`. Event-woken cycles count
+/// towards `cycles` and go through the same queue, trust and cap.
+pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> Result<ExitCode> {
     use std::time::Duration;
+    use wingman_autonomous::watcher::{self, Wake};
 
     let pilot = &cfg.pilot;
     if !pilot.daemon.enabled && cycles == 0 {
@@ -1984,6 +2121,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
         "dependabot",
         "coverage_gaps",
         "intake",
+        "ask",
     ];
     for s in &pilot.daemon.sources {
         if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
@@ -2001,15 +2139,36 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let queue_path = project.root.join(".wingman").join("daemon-queue.jsonl");
     let interval = Duration::from_secs(pilot.daemon.poll_interval_secs.max(1));
 
+    let mut watcher = if watch {
+        let intake = pilot
+            .daemon
+            .sources
+            .iter()
+            .any(|s| s == "intake")
+            .then(|| project.root.join(&pilot.daemon.intake_dir));
+        let debounce = Duration::from_millis(pilot.daemon.watch_debounce_ms);
+        Some(
+            watcher::Watcher::start(&project.root, intake, debounce)
+                .map_err(|e| anyhow::anyhow!("pilot daemon --watch: {e}"))?,
+        )
+    } else {
+        None
+    };
+
     eprintln!(
         "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s, \
-         feedback: {}){}",
+         feedback: {}{}){}",
         pilot.daemon.sources,
         pilot.daemon.auto_threshold,
         pilot.daemon.poll_interval_secs,
         match pilot.daemon.feedback_poll_secs {
             0 => "off".to_string(),
             s => format!("every {s}s"),
+        },
+        if watch {
+            ", watching files and git hooks"
+        } else {
+            ""
         },
         if cycles == 0 {
             " — Ctrl-C to stop".to_string()
@@ -2025,7 +2184,15 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let mut last_feedback: Option<std::time::Instant> = None;
 
     let mut n = 0usize;
+    // The first cycle, and every poll, asks every source.
+    let mut wake = Wake::Poll;
+    let mut next_poll = tokio::time::Instant::now() + interval;
     loop {
+        if wake == Wake::Poll {
+            next_poll = tokio::time::Instant::now() + interval;
+        } else {
+            eprintln!("[pilot] daemon cycle {n}: woken by {wake:?}");
+        }
         // R2 — the post-merge feedback pass rides the discovery loop on its
         // own, slower cadence. It only reads PR state and appends to run logs
         // this repo already holds, so `--dry-run` runs it too.
@@ -2038,7 +2205,7 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
         let results = wingman_autonomous::daemon::run_cycle(
             &runner,
             &project.root,
-            &pilot.daemon,
+            &watcher::cycle_config(&pilot.daemon, wake),
             propose_floor,
         );
         if results.is_empty() {
@@ -2129,7 +2296,8 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
 
         if deferred > 0 {
             eprintln!(
-                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a                  later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
+                "[pilot] daemon cycle {n}: dispatched {dispatched}, deferred {deferred} to a \
+                 later cycle ([pilot.daemon].max_auto_dispatch_per_cycle)"
             );
         }
 
@@ -2138,8 +2306,95 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
             eprintln!("[pilot] daemon: completed {n} cycle(s), exiting.");
             return Ok(ExitCode::SUCCESS);
         }
-        tokio::time::sleep(interval).await;
+        wake = match watcher.as_mut() {
+            // A file change only runs the local sources. With none of them
+            // configured its cycle would ask nothing, yet still log and count
+            // towards `--cycles`, so keep waiting instead.
+            Some(w) => loop {
+                let wake = w.wait(&runner, next_poll).await;
+                if wake != Wake::FileChange
+                    || !watcher::cycle_config(&pilot.daemon, wake)
+                        .sources
+                        .is_empty()
+                {
+                    break wake;
+                }
+            },
+            None => {
+                tokio::time::sleep(interval).await;
+                Wake::Poll
+            }
+        };
     }
+}
+
+/// J13 — install the git hooks that wake `pilot daemon --watch`.
+pub async fn hooks_install() -> Result<ExitCode> {
+    let root = ProjectPaths::discover(&std::env::current_dir()?).root;
+    let exe = std::env::current_exe().context("locating the wingman binary")?;
+    let result = wingman_autonomous::watcher::install_hooks(
+        &wingman_autonomous::pr::SystemCommandRunner,
+        &root,
+        &exe,
+    )
+    .map_err(|e| anyhow::anyhow!("pilot hooks install: {e}"))?;
+    for path in &result.installed {
+        println!("installed {}", path.display());
+    }
+    for path in &result.skipped {
+        eprintln!(
+            "[pilot] hooks: skipped {}: a hook wingman did not write is already there",
+            path.display()
+        );
+    }
+    // Git for Windows ignores the directory in a `#!` line and looks the
+    // binary's file name up on PATH; say so now rather than let every hook
+    // fail silently later.
+    if cfg!(windows) {
+        let name = exe.file_name().unwrap_or_default();
+        let on_path = std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(name).is_file()));
+        if !on_path {
+            eprintln!(
+                "[pilot] hooks: {} is not on PATH; Git for Windows finds the hooks' \
+                 interpreter there, so they will not run until it is",
+                name.to_string_lossy()
+            );
+        }
+    }
+    if !result.installed.is_empty() {
+        println!("Run `wingman pilot daemon --watch` to react to them.");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J13 — remove the git hooks `hooks_install` wrote.
+pub async fn hooks_uninstall() -> Result<ExitCode> {
+    let root = ProjectPaths::discover(&std::env::current_dir()?).root;
+    let removed = wingman_autonomous::watcher::uninstall_hooks(
+        &wingman_autonomous::pr::SystemCommandRunner,
+        &root,
+    )
+    .map_err(|e| anyhow::anyhow!("pilot hooks uninstall: {e}"))?;
+    if removed.is_empty() {
+        eprintln!("[pilot] hooks: no wingman hooks installed in this repo");
+    }
+    for path in &removed {
+        println!("removed {}", path.display());
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J13 — the body of an installed git hook: record that `hook` fired for a
+/// watching daemon. Always exits 0; git ignores a post-hook's status anyway,
+/// and a failure here must never look like a failed commit.
+pub fn record_hook(hook: &str) -> ExitCode {
+    let recorded = std::env::current_dir()
+        .and_then(|cwd| wingman_autonomous::watcher::record_hook_event(&cwd, hook));
+    if let Err(e) = recorded {
+        eprintln!("wingman: {hook} hook: {e}");
+    }
+    ExitCode::SUCCESS
 }
 
 /// R2 — post-merge feedback poll. Each cycle walks every recorded run that
@@ -2267,19 +2522,33 @@ async fn feedback_pending_runs(
     out
 }
 
-/// J12 — install the skill packs listed in `[pilot.skills].packs`. Each
-/// `owner/name@version` spec is fetched from `https://github.com/owner/name`
-/// (tag `v<version>`) into `~/.wingman/packs/<slug>/` and its role/lessons
-/// files are copied into `~/.wingman/agents/` so the role loader picks them
-/// up. Already-installed packs (exact version present) only re-install files.
-pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
+/// J12 — install skill packs: `specs`, or `[pilot.skills].packs` when none are
+/// given. With `[pilot.skills].index` set, the specs are resolved against the
+/// index together with their dependencies and each pack's signature is checked;
+/// without one, each `owner/name@version` is cloned from
+/// `https://github.com/owner/name` (tag `v<version>`), which is unsigned and so
+/// needs `allow_unsigned`. Packs land in `~/.wingman/packs/<slug>/` and their
+/// role/lessons files are copied into `~/.wingman/agents/` so the role loader
+/// picks them up.
+pub async fn skills_install(
+    cfg: Config,
+    specs: Vec<String>,
+    allow_unsigned: bool,
+) -> Result<ExitCode> {
     use wingman_autonomous::skillpack;
-    let (refs, errs) = skillpack::parse_pack_list(&cfg.pilot.skills.packs);
+    let specs = if specs.is_empty() {
+        cfg.pilot.skills.packs.clone()
+    } else {
+        specs
+    };
+    let (refs, errs) = skillpack::parse_pack_list(&specs);
     for e in &errs {
         eprintln!("[pilot] skills: bad spec — {e}");
     }
     if refs.is_empty() {
-        eprintln!("[pilot] skills: no valid packs in [pilot.skills].packs");
+        eprintln!(
+            "[pilot] skills: no valid packs to install (pass specs or set [pilot.skills].packs)"
+        );
         return Ok(if errs.is_empty() {
             ExitCode::SUCCESS
         } else {
@@ -2289,17 +2558,35 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     let home = wingman_config::user_home()
         .map_err(|e| anyhow!("cannot resolve home directory for pack install: {e}"))?;
     let runner = wingman_autonomous::pr::SystemCommandRunner;
-    let mut failures = 0;
-    for r in &refs {
-        let url = format!("https://github.com/{}/{}", r.owner, r.name);
-        match skillpack::fetch_pack(&runner, r, &url, &home) {
+    let resolved = if cfg.pilot.skills.index.trim().is_empty() {
+        refs.iter()
+            .map(|r| skillpack::ResolvedPack {
+                pack: r.clone(),
+                source: format!("https://github.com/{}/{}", r.owner, r.name),
+                signature: None,
+                deps: Vec::new(),
+            })
+            .collect()
+    } else {
+        let index = skillpack::load_index(&runner, &cfg.pilot.skills.index, &home)
+            .map_err(|e| anyhow!("skills: {e}"))?;
+        skillpack::resolve(&index, &refs).map_err(|e| anyhow!("skills: {e}"))?
+    };
+    let mut failures = errs.len();
+    for r in &resolved {
+        match skillpack::fetch_pack(&runner, r, &home, allow_unsigned) {
             Ok(dest) => eprintln!(
-                "[pilot] skills: installed {} → {}",
-                r.slug(),
+                "[pilot] skills: installed {} ({}) → {}",
+                r.pack,
+                if r.signature.is_some() {
+                    "signed"
+                } else {
+                    "unsigned"
+                },
                 dest.display()
             ),
             Err(e) => {
-                eprintln!("[pilot] skills: {} failed — {e}", r.slug());
+                eprintln!("[pilot] skills: {} failed — {e}", r.pack);
                 failures += 1;
             }
         }
@@ -2309,6 +2596,206 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
     } else {
         ExitCode::from(1)
     })
+}
+
+/// J12 — search `[pilot.skills].index` for packs whose name or description
+/// contains `query`, newest version of each.
+pub async fn skills_search(cfg: Config, query: String) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for the pack index: {e}"))?;
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let index = skillpack::load_index(&runner, &cfg.pilot.skills.index, &home)
+        .map_err(|e| anyhow!("skills: {e}"))?;
+    let hits = skillpack::search(&index, &query);
+    if hits.is_empty() {
+        eprintln!("[pilot] skills: no packs match `{query}`");
+    }
+    for (key, e) in hits {
+        let signed = if e.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        println!("{key}@{}  [{signed}]  {}", e.version, e.description);
+        if !e.deps.is_empty() {
+            println!("    deps: {}", e.deps.join(", "));
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J12 — list installed packs from their install receipts.
+pub async fn skills_list() -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for installed packs: {e}"))?;
+    let (receipts, errs) = skillpack::list_installed(&home);
+    for e in &errs {
+        eprintln!("[pilot] skills: unreadable receipt — {e}");
+    }
+    if receipts.is_empty() {
+        eprintln!("[pilot] skills: no packs installed");
+    }
+    for r in &receipts {
+        let signed = if r.signature.is_some() {
+            "signed"
+        } else {
+            "unsigned"
+        };
+        println!("{}  [{signed}]  {}", r.pack, r.source);
+        if !r.deps.is_empty() {
+            println!("    deps: {}", r.deps.join(", "));
+        }
+    }
+    Ok(if errs.is_empty() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// J12 — re-verify installed packs (all, or those matching `specs` by
+/// `owner/name` or exact `owner/name@X.Y.Z`). Non-zero exit on any failure,
+/// so it can gate a CI job or a cron check.
+pub async fn skills_verify(specs: Vec<String>, allow_unsigned: bool) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let home = wingman_config::user_home()
+        .map_err(|e| anyhow!("cannot resolve home directory for installed packs: {e}"))?;
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let (receipts, errs) = skillpack::list_installed(&home);
+    let mut failures = errs.len();
+    for e in &errs {
+        eprintln!("[pilot] skills: unreadable receipt — {e}");
+    }
+    let wanted = |pack: &str| {
+        specs.is_empty()
+            || specs
+                .iter()
+                .any(|s| pack == s || pack.starts_with(&format!("{s}@")))
+    };
+    let mut checked = 0;
+    for r in receipts.iter().filter(|r| wanted(&r.pack)) {
+        checked += 1;
+        match skillpack::verify_installed(&runner, r, &home, allow_unsigned) {
+            Ok(()) => eprintln!("[pilot] skills: {} ok", r.pack),
+            Err(e) => {
+                eprintln!("[pilot] skills: {} FAILED — {e}", r.pack);
+                failures += 1;
+            }
+        }
+    }
+    if checked == 0 {
+        eprintln!("[pilot] skills: no matching installed packs");
+        if !specs.is_empty() {
+            failures += 1;
+        }
+    }
+    Ok(if failures == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+/// J7 — the project whose `.wingman/tools/` the `pilot tools` commands act
+/// on: the owning project, so running them from inside a worktree still
+/// reaches the directory workers write to.
+fn synthesized_tools_project() -> Result<std::path::PathBuf> {
+    Ok(wingman_config::find_owning_project_root(
+        &std::env::current_dir()?,
+    ))
+}
+
+/// J7 — list proposed tools, approved or pending.
+pub async fn tools_list() -> Result<ExitCode> {
+    let tools = wingman_config::synthesized_tools(&synthesized_tools_project()?);
+    if tools.is_empty() {
+        eprintln!("[pilot] tools: no proposed tools in this project");
+    }
+    for t in &tools {
+        let state = if wingman_config::trust::is_trusted(&t.path) {
+            "approved"
+        } else {
+            "pending"
+        };
+        println!("{}  [{state}]  {}", t.tool.name, t.tool.description);
+        println!("    command: {}", t.tool.command);
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J7 — approve a proposed tool. Prints the command being approved, since
+/// that is what every later worker and session here will be able to run.
+pub async fn tools_approve(name: String) -> Result<ExitCode> {
+    let Some(t) = find_synthesized_tool(&name)? else {
+        return Ok(ExitCode::from(1));
+    };
+    let hash = wingman_config::trust::trust(&t.path)?;
+    println!("Approved `{}` ({})", t.tool.name, t.path.display());
+    println!("  command: {}", t.tool.command);
+    println!("  sha256:  {hash}");
+    println!("Editing the file revokes this; re-run `wingman pilot tools approve {name}`.");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// J7 — reject a proposed or approved tool: delete the file and forget it.
+pub async fn tools_reject(name: String) -> Result<ExitCode> {
+    let Some(t) = find_synthesized_tool(&name)? else {
+        return Ok(ExitCode::from(1));
+    };
+    wingman_config::trust::untrust(&t.path)?;
+    std::fs::remove_file(&t.path).with_context(|| format!("removing {}", t.path.display()))?;
+    println!("Rejected `{}`", t.tool.name);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn find_synthesized_tool(name: &str) -> Result<Option<wingman_config::SynthesizedTool>> {
+    let found = wingman_config::synthesized_tools(&synthesized_tools_project()?)
+        .into_iter()
+        .find(|t| t.tool.name == name);
+    if found.is_none() {
+        eprintln!(
+            "[pilot] tools: no proposed tool named `{name}` (see `wingman pilot tools list`)"
+        );
+    }
+    Ok(found)
+}
+
+/// J12 — for pack authors: the payload `ssh-keygen -Y sign -n
+/// wingman-skillpack` signs for `dir` published as `spec` with `deps`. The
+/// resulting `.sig` text goes in the index entry's `signature`.
+pub async fn skills_digest(
+    spec: String,
+    dir: std::path::PathBuf,
+    deps: Vec<String>,
+    out: Option<std::path::PathBuf>,
+) -> Result<ExitCode> {
+    use wingman_autonomous::skillpack;
+    let pack = skillpack::parse_pack_ref(&spec).map_err(|e| anyhow!("skills: {e}"))?;
+    let deps = deps
+        .iter()
+        .map(|d| skillpack::parse_pack_ref(d))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow!("skills: {e}"))?;
+    let digest = skillpack::pack_digest(&dir).map_err(|e| anyhow!("skills: {e}"))?;
+    let payload = skillpack::signed_payload(&pack, &digest, &deps);
+    match out {
+        // Written as exact bytes: a shell redirect can re-encode or append a
+        // newline (PowerShell does both), which would never verify.
+        Some(path) => {
+            std::fs::write(&path, &payload)?;
+            eprintln!(
+                "[pilot] skills: wrote payload to {}; sign it with \
+                 `ssh-keygen -Y sign -f <key> -n {} {}`",
+                path.display(),
+                skillpack::SIGNATURE_NAMESPACE,
+                path.display()
+            );
+        }
+        None => print!("{payload}"),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// R4 — eval / regression harness + CI gate.
@@ -2653,6 +3140,225 @@ fn write_eval_results(
     Ok(())
 }
 
+/// Phase 8.4 — `pilot validate-providers`: run the canned `--version-only`
+/// plan ([`wingman_autonomous::provider_matrix`]) against each configured
+/// provider with credentials, one scratch repo each, under `max_usd` and
+/// `max_tokens`, and write `matrix.md` + `matrix.json`.
+///
+/// Exit 1 when any provider failed, 2 when none could run, 0 otherwise.
+pub async fn validate_providers(
+    cfg: Config,
+    only: Vec<String>,
+    max_usd: f64,
+    max_tokens: u64,
+    out: Option<std::path::PathBuf>,
+) -> Result<ExitCode> {
+    use wingman_autonomous::provider_matrix::{self, MatrixReport, MatrixRow, Verdict};
+    // A cap of 0 means "no cap" everywhere else in pilot; here it would mean
+    // an unbounded bill per provider.
+    if !max_usd.is_finite() || max_usd <= 0.0 || max_tokens == 0 {
+        return Err(anyhow!(
+            "--max-usd and --max-tokens must both be above 0: every provider run spends real money"
+        ));
+    }
+    // Workers are real child processes; Ctrl+C must take them down too.
+    crate::shutdown::install();
+    let project = ProjectPaths::discover(&std::env::current_dir()?);
+    let out_dir = out.unwrap_or_else(|| project.root.join(".wingman").join("provider-validation"));
+
+    // The same vm gate a real run applies, over the canned task.
+    let sandbox_avail = wingman_autonomous::sandbox::TierAvailability::probe(
+        &cfg.pilot.sandbox,
+        &wingman_autonomous::pr::SystemCommandRunner,
+    );
+    let canned: Vec<wingman_autonomous::Task> = provider_matrix::canned_plan()
+        .into_iter()
+        .map(|p| {
+            let mut t = wingman_autonomous::Task::new(p.id, p.role, p.title);
+            t.writes = p.writes;
+            t.acceptance = p.acceptance;
+            t.reversibility = p.reversibility;
+            t
+        })
+        .collect();
+    if refuse_unisolated_vm_tasks(&cfg.pilot.sandbox, &sandbox_avail, &canned) {
+        return Ok(ExitCode::from(2));
+    }
+
+    let ids = if only.is_empty() {
+        cfg.providers.keys().cloned().collect()
+    } else {
+        only
+    };
+    let env = |k: &str| std::env::var(k).ok();
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let model = match validation_target(&cfg, &id, &env) {
+            Ok(model) => model,
+            Err((model, reason)) => {
+                eprintln!("[pilot] validate: {id}: skipped ({reason})");
+                rows.push(MatrixRow::skipped(&id, model, reason));
+                continue;
+            }
+        };
+        let provider = match runtime::build_provider(&cfg, &id) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[pilot] validate: {id}: skipped ({e})");
+                rows.push(MatrixRow::skipped(&id, Some(model), e.to_string()));
+                continue;
+            }
+        };
+        eprintln!("[pilot] validate: {id}/{model}: running the canned plan…");
+        // `provider/model`, so the worker resolves this provider rather than
+        // the default one a bare model id would fall back to.
+        let spec = format!("{id}/{model}");
+        let spawner = build_real_worker_spawner(
+            &spec,
+            &spec,
+            None,
+            std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+            // First-attempt behaviour, as below: no rollback, no hygiene gate.
+            0,
+            false,
+            cfg.pilot.sandbox.clone(),
+            sandbox_avail.clone(),
+            None,
+        )?;
+        // The id is a config key and this directory is deleted: keep it one
+        // plain path component.
+        let safe_id: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let scratch =
+            std::env::temp_dir().join(format!("wingman-validate-{}-{safe_id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        let mut row = provider_matrix::run_canned_plan(&scratch, &id, &model, |base| {
+            wingman_autonomous::pipeline::PipelineInputs {
+                provider,
+                manager_model: model.clone(),
+                worker_spawner: spawner,
+                base_branch: cfg.pilot.pr.base_branch.clone(),
+                project_root: scratch.clone(),
+                command_runner: Box::new(wingman_autonomous::pr::SystemCommandRunner),
+                no_pr: true,
+                orchestrator_cfg: wingman_autonomous::orchestrator::OrchestratorConfig {
+                    max_concurrent_agents: 1,
+                    task_timeout: std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+                    project_root: scratch.clone(),
+                    run_id: provider_matrix::RUN_ID.into(),
+                    base_commit: base.into(),
+                    use_real_worktrees: true,
+                    max_usd,
+                    max_total_tokens: max_tokens,
+                    // First-attempt behaviour is what the matrix reports, and
+                    // retries would multiply the spend the cap is meant to bound.
+                    max_retries_per_task: 0,
+                    desktop_inbox: None,
+                    sample_host_load: false,
+                    speculative_prespawn: false,
+                    warm_cmd: String::new(),
+                },
+                max_ticks: cfg.pilot.max_manager_ticks,
+                tier: wingman_config::PilotTier::Copilot,
+                worker_model: spec.clone(),
+                // Validation runs stay out of the adaptive-routing history.
+                stats_path: None,
+                auto_approved: false,
+                pr_config: cfg.pilot.pr.clone(),
+                security_config: cfg.pilot.security.clone(),
+                disabled_tools: cfg.tools.disabled_tools.clone(),
+                run_reviewer: false,
+                critic: None,
+                merge_fixer: false,
+                knowledge_keeper: None,
+                reviewer_model: model.clone(),
+                sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
+                sandbox_availability: sandbox_avail.clone(),
+                dangerous_paths: Vec::new(),
+            }
+        })
+        .await;
+
+        // Real spend, so `wingman cost` should see it like any pilot run.
+        if let Ok(store) = RunStore::load(&run_dir(&scratch, provider_matrix::RUN_ID)).await {
+            if let Ok(events) = store.read_events().await {
+                let by_model = wingman_autonomous::reporting::tokens_by_model(&events);
+                if !by_model.is_empty() {
+                    wingman_tui::usage_store::LifetimeUsage::load().save_merged(&by_model);
+                }
+            }
+        }
+        if row.verdict == Verdict::Pass {
+            let _ = std::fs::remove_dir_all(&scratch);
+        } else {
+            row.detail = format!("{} (scratch repo kept: {})", row.detail, scratch.display());
+        }
+        eprintln!(
+            "[pilot] validate: {id}/{model}: {:?} (${:.4}, {} tokens) {}",
+            row.verdict, row.usd, row.tokens, row.detail
+        );
+        rows.push(row);
+    }
+
+    let report = MatrixReport {
+        generated_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        goal: provider_matrix::GOAL.into(),
+        max_usd,
+        max_total_tokens: max_tokens,
+        rows,
+    };
+    let markdown = report.render_markdown();
+    std::fs::create_dir_all(&out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    std::fs::write(out_dir.join("matrix.md"), &markdown)?;
+    std::fs::write(
+        out_dir.join("matrix.json"),
+        serde_json::to_string_pretty(&report)?,
+    )?;
+    print!("{markdown}");
+    eprintln!(
+        "[pilot] validate: wrote {}",
+        out_dir.join("matrix.md").display()
+    );
+    if report.any_failed() {
+        Ok(ExitCode::from(1))
+    } else if !report.any_ran() {
+        eprintln!("[pilot] validate: no provider could run; see the skipped reasons above.");
+        Ok(ExitCode::from(2))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// The model to validate `id` with, or why it is skipped (with the model, when
+/// one is configured).
+fn validation_target(
+    cfg: &Config,
+    id: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> std::result::Result<String, (Option<String>, String)> {
+    let Some(pc) = cfg.providers.get(id) else {
+        return Err((None, format!("no [providers.{id}] section")));
+    };
+    let Some(model) = pc.model.clone().filter(|m| !m.trim().is_empty()) else {
+        return Err((None, format!("no model: set [providers.{id}].model")));
+    };
+    if let Err(why) = wingman_autonomous::provider_support::gate_run(id) {
+        return Err((Some(model), why));
+    }
+    match runtime::missing_credential(cfg, id, env) {
+        Some(why) => Err((Some(model), why)),
+        None => Ok(model),
+    }
+}
+
 /// Load the `source\x01title` keys already present in the daemon queue so a
 /// restarted daemon doesn't re-queue or re-dispatch work it already handled.
 /// Missing/unreadable queue → empty set (nothing seen yet).
@@ -2812,6 +3518,118 @@ mod tests {
 
         pilot.capabilities.insert("critic".into(), false);
         assert!(critic(&cfg, &pilot, worker, manager()).unwrap().is_none());
+    }
+
+    fn migration_task() -> wingman_autonomous::Task {
+        let mut t = wingman_autonomous::Task::new(
+            "t-mig",
+            wingman_autonomous::model::Role::Developer,
+            "migrate",
+        );
+        t.writes = vec!["db/migrations/001.sql".into()];
+        t
+    }
+
+    fn avail(docker: bool, vm: bool) -> wingman_autonomous::sandbox::TierAvailability {
+        wingman_autonomous::sandbox::TierAvailability {
+            docker,
+            vm: if vm { Ok(()) } else { Err("no kvm".into()) },
+        }
+    }
+
+    #[test]
+    fn vm_tasks_are_refused_unless_isolated_or_opted_out() {
+        let mut cfg = wingman_config::PilotSandboxConfig::default();
+        let plain = wingman_autonomous::Task::new(
+            "t-edit",
+            wingman_autonomous::model::Role::Developer,
+            "edit",
+        );
+        // Docker alone is not a vm: still refused.
+        assert!(refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(true, false),
+            &[migration_task()]
+        ));
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, true),
+            &[migration_task()]
+        ));
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, false),
+            &[plain]
+        ));
+        cfg.allow_unsandboxed_vm_tasks = true;
+        assert!(!refuse_unisolated_vm_tasks(
+            &cfg,
+            &avail(false, false),
+            &[migration_task()]
+        ));
+    }
+
+    #[test]
+    fn tool_synthesis_is_off_below_autopilot_and_gated_without_trust() {
+        use wingman_autonomous::approval::ApprovalTier;
+        let untrusted = std::path::Path::new("no-such-project/.wingman/config.toml");
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert_eq!(tool_synthesis_for(&pilot, untrusted), None);
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(
+            tool_synthesis_for(&pilot, untrusted),
+            Some(ApprovalTier::Hard)
+        );
+        pilot.tier = wingman_config::PilotTier::Copilot;
+        pilot.capabilities.insert("tool_synthesis".into(), true);
+        assert_eq!(
+            tool_synthesis_for(&pilot, untrusted),
+            Some(ApprovalTier::Hard)
+        );
+    }
+
+    #[test]
+    fn each_worker_gets_the_sandbox_its_tier_resolves_to() {
+        use wingman_autonomous::sandbox::IsolationTier;
+        let cfg = wingman_config::PilotSandboxConfig::default();
+        let plain = wingman_autonomous::Task::new(
+            "t-edit",
+            wingman_autonomous::model::Role::Developer,
+            "edit",
+        );
+        assert!(worker_sandbox_for(&plain, &cfg, &avail(true, true))
+            .unwrap()
+            .is_none());
+        let tier = |cfg: &wingman_config::PilotSandboxConfig, t: &wingman_autonomous::Task, a| {
+            worker_sandbox_for(t, cfg, &a).map(|s| s.map(|s| s.tier))
+        };
+        assert_eq!(
+            tier(&cfg, &migration_task(), avail(true, true)),
+            Ok(Some(IsolationTier::Vm))
+        );
+        // A vm task that reaches a worker without a vm backend (added
+        // mid-run, past the start gate) is refused, not degraded...
+        let refused = tier(&cfg, &migration_task(), avail(true, false)).unwrap_err();
+        assert!(refused.contains("t-mig"), "{refused}");
+        // ...unless the operator opted in.
+        let mut opted = cfg.clone();
+        opted.allow_unsandboxed_vm_tasks = true;
+        assert_eq!(
+            tier(&opted, &migration_task(), avail(true, false)),
+            Ok(Some(IsolationTier::Container))
+        );
+        assert_eq!(
+            tier(&opted, &migration_task(), avail(false, false)),
+            Ok(None)
+        );
+
+        let mut floor = cfg.clone();
+        floor.default_tier = "container".into();
+        let sb = worker_sandbox_for(&plain, &floor, &avail(true, false))
+            .unwrap()
+            .unwrap();
+        assert_eq!(sb.tier, IsolationTier::Container);
+        assert_eq!(sb.config.container_image, floor.container_image);
     }
 
     #[test]
@@ -3127,5 +3945,50 @@ mod ask_tests {
     fn a_run_with_no_events_yields_no_answers() {
         let dir = tempfile::tempdir().unwrap();
         assert!(answers(dir.path()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    #[test]
+    fn validation_skips_providers_it_cannot_run_and_says_why() {
+        let mut cfg = Config::default();
+        let section = |model: Option<&str>, key: Option<&str>| wingman_config::ProviderConfig {
+            model: model.map(Into::into),
+            api_key: key.map(Into::into),
+            ..Default::default()
+        };
+        cfg.providers
+            .insert("anthropic".into(), section(Some("claude-x"), Some("sk")));
+        cfg.providers
+            .insert("openai".into(), section(Some("gpt-x"), None));
+        cfg.providers.insert("ollama".into(), section(None, None));
+        let no_env = |_: &str| None;
+
+        assert_eq!(
+            validation_target(&cfg, "anthropic", &no_env),
+            Ok("claude-x".into())
+        );
+        let (model, why) = validation_target(&cfg, "openai", &no_env).unwrap_err();
+        assert_eq!(model.as_deref(), Some("gpt-x"));
+        assert!(why.contains("OPENAI_API_KEY"), "{why}");
+        let (_, why) = validation_target(&cfg, "ollama", &no_env).unwrap_err();
+        assert!(why.contains("[providers.ollama].model"), "{why}");
+        let (_, why) = validation_target(&cfg, "groq", &no_env).unwrap_err();
+        assert!(why.contains("no [providers.groq]"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn validation_refuses_an_uncapped_run() {
+        let err = validate_providers(Config::default(), Vec::new(), 0.0, 1000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("above 0"), "{err}");
+        let err = validate_providers(Config::default(), Vec::new(), f64::NAN, 1000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("above 0"), "{err}");
     }
 }

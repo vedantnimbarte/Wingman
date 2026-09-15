@@ -290,6 +290,41 @@ Wingman different; this is everything else it does.
   (`[team]`), merging non-destructively.
 - **Multi-channel pilot intake.** `wingman pilot intake slack | email`
   turns Slack events or delivered `.eml` files into pilot requests.
+- **Sandboxed pilot workers.** A task whose plan touches dependencies, build
+  scripts or risky commands runs its worker in `docker run` against a copy of
+  its worktree; migrations, infra and irreversible work run in a Firecracker
+  microVM (Linux + KVM, optionally jailed). The resulting diff is applied back
+  and committed; CPU, memory, pid and network limits come from
+  `[pilot.sandbox]`. Without Firecracker the vm tier stays fail-closed, and
+  `wingman doctor` reports which tiers are available. Unvalidated against a
+  real Docker daemon or Firecracker host. See
+  [PILOT-MODE.md](PILOT-MODE.md#sandbox-tiers).
+- **Tool synthesis.** A pilot worker that keeps needing a command the toolset
+  lacks calls `propose_tool`; the proposal lands in `.wingman/tools/` as a
+  custom command tool and every registry built after approval carries it, so
+  the next worker can call it by name. Approval is automatic only on
+  `autopilot` in a trusted project, otherwise `wingman pilot tools approve`.
+  Synthesized tools run under `run_shell`'s own guards. Unvalidated against a
+  live provider. See [PILOT-MODE.md](PILOT-MODE.md#tool-synthesis).
+- **Watch mode.** `wingman pilot daemon --watch` wakes the discovery daemon
+  between polls. A saved file runs the local sources, including `// ASK:`
+  comments. A commit, merge, checkout or rebase runs every source, through
+  hooks `wingman pilot hooks install` writes. The hooks run the wingman binary
+  directly on every platform, no shell script. Candidates go through the same
+  queue, trust and per-cycle dispatch cap. See
+  [PILOT-MODE.md](PILOT-MODE.md#watch-mode).
+- **Provider validation matrix.** `wingman pilot validate-providers` runs one
+  canned pilot plan (add a `--version-only` flag to a throwaway CLI) against
+  every configured provider that has credentials, each in a scratch repo under
+  a strict USD and token cap, and writes a pass/fail/skipped matrix to
+  `.wingman/provider-validation/matrix.md` and `matrix.json`. A pass means the
+  flag reached the merged integration branch, not that the worker said so.
+  See [PILOT-MODE.md](PILOT-MODE.md#validating-your-providers).
+- **Skill packs.** `wingman pilot skills install | search | list | verify`
+  shares pilot roles as versioned packs from a git-hosted index, resolving
+  dependencies with caret rules and refusing unsigned packs unless told
+  otherwise; signatures are checked with `ssh-keygen`. See
+  [PILOT-MODE.md](PILOT-MODE.md#skill-packs).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,

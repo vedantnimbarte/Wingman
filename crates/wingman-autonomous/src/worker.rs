@@ -42,6 +42,8 @@ pub enum WorkerError {
     EarlyExit(Option<i32>),
     #[error("worker task timed out after {0:?}")]
     Timeout(Duration),
+    #[error("sandbox: {0}")]
+    Sandbox(String),
 }
 
 /// Spec for one worker launch. All paths absolute; relative paths confuse
@@ -78,6 +80,15 @@ pub struct WorkerSpec {
     /// satisfy checkpoint hygiene ([`crate::checkpoint::verify`]), and tell the
     /// worker so in its prompt. Forwarded as `--checkpoint-hygiene`.
     pub checkpoint_hygiene: bool,
+    /// J11 — run the worker in a container or Firecracker VM against a copy
+    /// of `worktree`, and apply its diff back when it completes. `None` runs
+    /// it on the host.
+    pub sandbox: Option<crate::sandbox::WorkerSandbox>,
+    /// J7 — register `propose_tool` on the worker, approving its proposals
+    /// at this tier ([`crate::approval::tool_synthesis_tier`]). `None` leaves
+    /// tool synthesis off. Ignored for a sandboxed worker, which runs against
+    /// a copy with no `.wingman/` and no trust store to write to.
+    pub tool_synthesis: Option<crate::approval::ApprovalTier>,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -116,43 +127,65 @@ pub async fn run_worker(
     // command channel (E10).
     let task_path = write_task_file(&spec.task, &spec.worktree)?;
 
-    let mut sc = SupervisedCommand::new(&spec.wingman_bin);
-    sc.command_mut()
-        .arg("--worker-mode")
-        .arg("--task-file")
-        .arg(&task_path)
-        .arg("--role")
-        .arg(spec.role.as_str())
-        .arg("--session-id")
-        .arg(&spec.session_id)
-        .arg("--worktree")
-        .arg(&spec.worktree)
-        .arg("--print") // signal headless to suppress TUI init
-        .arg("noop") // headless --print needs a prompt; the worker-mode
-        // entry runs before headless is invoked, so the
-        // value is never read
-        .arg("--json")
-        .current_dir(&spec.worktree);
+    // J11 — a sandboxed worker is the same `wingman --worker-mode`, run by
+    // docker/firecracker against a copy, with its paths as the guest sees
+    // them. Preparing copies the worktree (and packs a drive for a VM), so
+    // it runs off the async threads.
+    let sandbox_run = match spec.sandbox.clone() {
+        None => None,
+        Some(sb) => {
+            let guest = crate::sandbox::GUEST_WORK;
+            let args: Vec<String> = worker_args(
+                &spec,
+                format!("{guest}/.wingman/pilot/task-{}.json", spec.task.id).as_ref(),
+                guest.as_ref(),
+                None,
+            )
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+            let (worktree, session) = (spec.worktree.clone(), spec.session_id.clone());
+            let prepared = tokio::task::spawn_blocking(move || {
+                crate::sandbox::prepare(
+                    &sb,
+                    &worktree,
+                    &session,
+                    &args,
+                    &crate::pr::SystemCommandRunner,
+                    &std::env::temp_dir(),
+                )
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("sandbox setup panicked: {e}")));
+            match prepared {
+                Ok(run) => Some(run),
+                Err(e) => {
+                    let summary = format!("could not prepare the sandbox: {e}");
+                    record_failure(store, &spec, agent_id, summary.clone()).await;
+                    return Err(WorkerError::Sandbox(summary));
+                }
+            }
+        }
+    };
 
-    // Forward the resolved model. The worker `cd`s into the worktree, which
-    // does not contain the project's untracked `.wingman/config.toml`, so it
-    // cannot rediscover `pilot.worker_model` on its own — without this the
-    // child falls back to global config and dies with "no default_provider
-    // configured", deadlocking every run. `--model` (env WINGMAN_MODEL) is
-    // read as `opts.model_override` by worker-mode.
-    if let Some(model) = &spec.model {
-        sc.command_mut().arg("--model").arg(model);
-    }
-    // Like the model, the tier that decides this lives in project config the
-    // worker cannot see from inside its worktree.
-    if spec.turn_rollback_after > 0 {
-        sc.command_mut()
-            .arg("--turn-rollback-after")
-            .arg(spec.turn_rollback_after.to_string());
-    }
-    if spec.checkpoint_hygiene {
-        sc.command_mut().arg("--checkpoint-hygiene");
-    }
+    let mut sc = match &sandbox_run {
+        Some(run) => {
+            let mut sc = SupervisedCommand::new(&run.program);
+            sc.command_mut().args(&run.args);
+            sc
+        }
+        None => {
+            let mut sc = SupervisedCommand::new(&spec.wingman_bin);
+            sc.command_mut().args(worker_args(
+                &spec,
+                task_path.as_os_str(),
+                spec.worktree.as_os_str(),
+                spec.tool_synthesis,
+            ));
+            sc
+        }
+    };
+    sc.command_mut().current_dir(&spec.worktree);
 
     let mut supervisor = sc.spawn()?;
     let pid = supervisor.pid();
@@ -377,6 +410,43 @@ pub async fn run_worker(
     };
     let exit_code = status.code();
 
+    // J11 patch-back. Only a worker that would pass the E3 gate (clean exit,
+    // `task_complete`, green acceptance) gets its diff applied: a failed
+    // attempt leaves the host worktree exactly as it was. Committed here
+    // because the squash-merge reads the task branch, and the worker's own
+    // commits stayed in the copy. The task file goes first so that commit
+    // cannot pick it up.
+    if let Some(run) = sandbox_run {
+        let passes = compute_final_status(
+            &outcome,
+            status.success(),
+            &spec.task.acceptance,
+            &acceptance,
+        ) == TaskStatus::Review;
+        if passes {
+            let _ = std::fs::remove_file(&task_path);
+            let worktree = spec.worktree.clone();
+            let message = format!("pilot({}): sandboxed worker changes", spec.task.id);
+            let applied = tokio::task::spawn_blocking(move || {
+                crate::sandbox::patch_back(&run, &worktree, &crate::pr::SystemCommandRunner)
+                    .and_then(|changed| {
+                        if changed {
+                            crate::worktree::commit_checkpoint(&worktree, &message)
+                                .map_err(|e| e.to_string())?;
+                        }
+                        Ok(())
+                    })
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("patch-back panicked: {e}")));
+            if let Err(e) = applied {
+                let summary = format!("sandbox patch-back failed: {e}");
+                record_failure(store, &spec, agent_id, summary.clone()).await;
+                return Err(WorkerError::Sandbox(summary));
+            }
+        }
+    }
+
     // Salvage a silent-success worker. A worker can do everything right —
     // edit files, commit, pass every acceptance check — yet stop on
     // `max_turns` (or simply forget) without calling `task_complete`. Without
@@ -387,11 +457,11 @@ pub async fn run_worker(
     // they're all green, synthesize the outcome the worker never sent. This
     // doubles as a trust check — the parent now verifies acceptance itself
     // rather than taking the worker's self-report on faith.
-    let (outcome, acceptance) = if should_reverify(
-        outcome.is_some(),
-        status.success(),
-        &spec.task.acceptance,
-    ) {
+    // Never for a sandboxed worker: re-running its acceptance commands here
+    // would run them on the host, which is what the sandbox exists to avoid.
+    let (outcome, acceptance) = if spec.sandbox.is_none()
+        && should_reverify(outcome.is_some(), status.success(), &spec.task.acceptance)
+    {
         // Bounded by the task's own timeout rather than a constant: this is
         // usually the first compile in a brand-new worktree, and judging it
         // against 60s produced a red check for a tree that builds fine.
@@ -569,7 +639,7 @@ async fn checkpoint_violation(
 /// dead worker looked identical to a worker that had simply not finished yet.
 /// The retry ladder then reported "failed without outcome summary" to the next
 /// rung, which re-ran the same work blind.
-async fn record_failure(
+pub async fn record_failure(
     store: &tokio::sync::Mutex<RunStore>,
     spec: &WorkerSpec,
     agent_id: &str,
@@ -978,6 +1048,59 @@ pub async fn drive_stdout_for_test(
     Ok(outcome)
 }
 
+/// `wingman` arguments for one worker, shared by the host spawn and the
+/// sandbox script (which passes guest paths).
+fn worker_args(
+    spec: &WorkerSpec,
+    task_file: &std::ffi::OsStr,
+    worktree: &std::ffi::OsStr,
+    tool_synthesis: Option<crate::approval::ApprovalTier>,
+) -> Vec<std::ffi::OsString> {
+    let mut args: Vec<std::ffi::OsString> = vec![
+        "--worker-mode".into(),
+        "--task-file".into(),
+        task_file.into(),
+        "--role".into(),
+        spec.role.as_str().into(),
+        "--session-id".into(),
+        spec.session_id.as_str().into(),
+        "--worktree".into(),
+        worktree.into(),
+        // Signals headless to suppress TUI init. Headless `--print` needs a
+        // prompt, but the worker-mode entry runs first, so it is never read.
+        "--print".into(),
+        "noop".into(),
+        "--json".into(),
+    ];
+    // Forward the resolved model. The worker `cd`s into the worktree, which
+    // does not contain the project's untracked `.wingman/config.toml`, so it
+    // cannot rediscover `pilot.worker_model` on its own — without this the
+    // child falls back to global config and dies with "no default_provider
+    // configured", deadlocking every run. `--model` (env WINGMAN_MODEL) is
+    // read as `opts.model_override` by worker-mode.
+    if let Some(model) = &spec.model {
+        args.extend(["--model".into(), model.into()]);
+    }
+    // Like the model, the tier that decides these lives in project config the
+    // worker cannot see from inside its worktree.
+    if spec.turn_rollback_after > 0 {
+        args.extend([
+            "--turn-rollback-after".into(),
+            spec.turn_rollback_after.to_string().into(),
+        ]);
+    }
+    if spec.checkpoint_hygiene {
+        args.push("--checkpoint-hygiene".into());
+    }
+    // Decided here, not in the worker: the worker's config comes from inside
+    // the worktree, so it sees neither `pilot run --tier` nor the project
+    // config the trust decision is about.
+    if let Some(tier) = tool_synthesis {
+        args.extend(["--tool-synthesis".into(), tier.to_string().into()]);
+    }
+    args
+}
+
 fn write_task_file(task: &Task, worktree: &Path) -> Result<PathBuf, WorkerError> {
     // Put the task JSON inside the worktree's .wingman/ subdir so it's
     // visible to the worker without needing extra env vars.
@@ -993,6 +1116,74 @@ fn write_task_file(task: &Task, worktree: &Path) -> Result<PathBuf, WorkerError>
 mod tests {
     use super::*;
     use crate::model::Role;
+
+    /// The host spawn and the sandbox script share one argument list; the
+    /// sandbox only swaps in guest paths.
+    #[test]
+    fn worker_args_carry_paths_and_model() {
+        let spec = |model: Option<&str>| WorkerSpec {
+            wingman_bin: PathBuf::from("wingman"),
+            task: Task::new("t1", Role::Developer, "x"),
+            role: Role::Developer,
+            worktree: PathBuf::from("w"),
+            session_id: "s1".into(),
+            model: model.map(Into::into),
+            timeout: Duration::from_secs(1),
+            cmd_rx: None,
+            rung: 0,
+            turn_rollback_after: 0,
+            checkpoint_hygiene: false,
+            sandbox: None,
+            tool_synthesis: None,
+        };
+        let strings = |args: Vec<std::ffi::OsString>| {
+            args.iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let args = |model| {
+            strings(worker_args(
+                &spec(model),
+                "/work/.wingman/pilot/task-t1.json".as_ref(),
+                "/work".as_ref(),
+                None,
+            ))
+        };
+        let with = args(Some("m1"));
+        assert_eq!(
+            &with[..3],
+            [
+                "--worker-mode",
+                "--task-file",
+                "/work/.wingman/pilot/task-t1.json"
+            ]
+        );
+        let at = |flag: &str| &with[with.iter().position(|a| a == flag).unwrap() + 1];
+        assert_eq!(at("--role"), "developer");
+        assert_eq!(at("--session-id"), "s1");
+        assert_eq!(at("--worktree"), "/work");
+        assert_eq!(&with[with.len() - 2..], ["--model", "m1"]);
+        assert!(!args(None).iter().any(|a| a == "--model"));
+        assert!(!with.iter().any(|a| a == "--tool-synthesis"));
+        assert!(!with.iter().any(|a| a == "--checkpoint-hygiene"));
+
+        let synth = strings(worker_args(
+            &spec(None),
+            "t".as_ref(),
+            "w".as_ref(),
+            Some(crate::approval::ApprovalTier::Hard),
+        ));
+        assert_eq!(&synth[synth.len() - 2..], ["--tool-synthesis", "hard-gate"]);
+
+        let mut gated = spec(None);
+        gated.turn_rollback_after = 3;
+        gated.checkpoint_hygiene = true;
+        let gated = strings(worker_args(&gated, "t".as_ref(), "w".as_ref(), None));
+        assert_eq!(
+            &gated[gated.len() - 3..],
+            ["--turn-rollback-after", "3", "--checkpoint-hygiene"]
+        );
+    }
 
     /// Phase 3 acceptance (plan.md line 638): a single task executes
     /// end-to-end, events stream into tasks.jsonl, run exits cleanly.
@@ -1282,6 +1473,8 @@ mod tests {
             rung: 2,
             turn_rollback_after: 0,
             checkpoint_hygiene: false,
+            sandbox: None,
+            tool_synthesis: None,
         };
         record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 

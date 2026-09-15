@@ -48,9 +48,12 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > worker's reply. **Auto-dispatch** (`[pilot.daemon].auto_dispatch`, off by default)
 > opens real PRs autonomously; validate its trust config safely with
 > `pilot daemon --dry-run` (logs what it *would* dispatch, opens nothing)
-> before enabling it. Genuinely still open: the **`vm` sandbox tier** (real
-> VM/Firecracker isolation — fail-closed today: pilot refuses vm-tier tasks
-> rather than run them unsandboxed).
+> before enabling it. **Watch mode** (`pilot daemon --watch`) wakes the daemon
+> on file saves and on git hooks that `pilot hooks install` writes. See
+> [Watch mode](#watch-mode). The **container and vm sandbox tiers** run workers in
+> Docker or a Firecracker microVM and apply their diff back, but are
+> **unvalidated against a real daemon**; without a vm backend, pilot still
+> refuses vm-tier tasks. See [Sandbox tiers](#sandbox-tiers).
 
 Pick a tier in `~/.wingman/config.toml`:
 
@@ -120,14 +123,15 @@ squash-merge, gh PR creation, dashboard, cost-cap enforcement, and the
 provider-support gate). On top of that, the crate now ships the
 `copilot`/`autopilot` machinery: a live control channel (`approve` /
 `veto` / `abort` / `retry`), run `resume`, a per-run plan-approval gate,
-sandbox tiers (`host` / `container` / `vm`, degrading to `host` when no
-Docker daemon is present), and the always-on discovery `daemon` (five
+sandbox tiers (`host` / `container` / `vm`: workers run in Docker or a
+Firecracker microVM against a copy of their worktree; container degrades to
+`host` without Docker, vm fails closed without Firecracker/KVM), and the always-on discovery `daemon` (five
 sources: GitHub issues, TODOs, CI failures, Dependabot PRs, coverage gaps).
 End-to-end `copilot` runs have been validated on a live provider
 (OpenRouter/DeepSeek) — plan through PR; they need real API keys and are
 **user-validated, not CI-validated** (CI runs the unit suite). Remaining
-`autopilot`-only gaps: inbound Slack/email intake, the `vm` sandbox tier,
-and live-validated auto-dispatch.
+`autopilot`-only gaps: inbound Slack/email intake, live validation of the
+container and vm sandbox tiers, and live-validated auto-dispatch.
 
 ## Worker transcripts
 
@@ -537,6 +541,367 @@ used, but quality depends on the local model's tool-use training.
 refuses to start when the planner provider is `unsupported` (no current
 backends are; the tier exists for future providers that can't emit
 tool calls at all).
+
+### Validating your providers
+
+The tier column above is a static classification. To see which of *your*
+providers actually carry a pilot run, run:
+
+```bash
+wingman pilot validate-providers                     # every [providers.*] section
+wingman pilot validate-providers --provider anthropic --provider openrouter
+```
+
+For each provider it runs one canned plan: a single developer task that adds a
+`--version-only` flag to a tiny `src/main.rs`, with a `grep` acceptance check.
+The planner is skipped so every provider gets the same plan; the manager and
+worker still have to use tool calls (`assign_task`, file edits,
+`run_acceptance`, `task_complete`, `finalize_task`). Each run gets its own
+scratch git repo under the system temp directory, `--no-pr`, no retries, no
+reviewer or critic, and stays out of the adaptive-routing stats. The workers
+are real `wingman --worker-mode` processes running `[providers.<id>].model`,
+in the sandbox tier `[pilot.sandbox]` selects.
+
+| Result    | Meaning                                                                                   |
+| --------- | ----------------------------------------------------------------------------------------- |
+| `pass`    | The run finished and `src/main.rs` on its integration branch contains `--version-only`.   |
+| `fail`    | Anything else: a task failed or was aborted by the cap, the pipeline errored, or the flag never landed. The scratch repo is kept and its path is in the detail. |
+| `skipped` | No model configured, no credential (config value, keyring or the provider's env var), an `unsupported` tier, or the provider could not be built (e.g. `[privacy].local_only`). Local servers need no credential, so they run and fail if nothing is listening. |
+
+Each provider is capped by `--max-usd` (default $0.50) and `--max-tokens`
+(default 400000, the bound that holds for models missing from the price
+table). The spend lands in `wingman cost` like any pilot run. The matrix is
+printed and written to `.wingman/provider-validation/matrix.md` and
+`matrix.json` (`--out <dir>` to change). Exit status is 1 if any provider
+failed, 2 if none could run, 0 otherwise.
+
+Workers read the global config, so a provider defined only in a project's
+`.wingman/config.toml` builds for the manager but not for its worker; that
+row fails rather than passes.
+
+---
+
+## Watch mode
+
+`wingman pilot daemon` polls every `poll_interval_secs`. With `--watch` it
+still polls, since nothing local announces a new issue or a red CI run, but it
+also wakes early when something happens in the repo:
+
+| Event | Wakes after | Sources asked |
+|-------|-------------|---------------|
+| A file changes in the working tree | `watch_debounce_ms` of quiet | the local ones: `todos`, `coverage_gaps`, `intake`, `ask` |
+| A `pilot hooks` git hook fires (`post-commit`, `post-merge`, `post-checkout`, `post-rewrite`) | `watch_debounce_ms` of quiet | every configured source |
+| `poll_interval_secs` passes | | every configured source |
+
+An event-woken cycle is an ordinary cycle: candidates are scored, deduplicated
+against the queue, and trust and `max_auto_dispatch_per_cycle` apply
+unchanged. `--cycles N` counts them too. If none of the local sources is
+configured, file changes are ignored and only hooks and the poll wake it.
+
+```toml
+[pilot.daemon]
+enabled           = true
+sources           = ["github_issues", "todos", "intake", "ask"]
+watch_debounce_ms = 1000   # raise it if an editor or build keeps waking the daemon
+```
+
+```bash
+wingman pilot hooks install     # once per clone
+wingman pilot daemon --watch
+wingman pilot hooks uninstall   # removes only the hooks wingman wrote
+```
+
+**What doesn't wake it.** Changes under `.git/`, anything `.gitignore`
+excludes (asked of `git check-ignore`, so build output doesn't trigger
+cycles), and the daemon's own `.wingman/` state. The exceptions under
+`.wingman/` are the intake directory, when the `intake` source is on, and
+the hook signals.
+
+**`ASK:` comments.** The `ask` source finds `// ASK: <question>` and
+`# ASK: <question>` comments with `git grep`, untracked files included. Each
+becomes the goal "answer it with a reply comment beside it, then remove the
+marker". Under `--watch`, saving the file surfaces it within the debounce
+window. ASKs are always proposals, never auto-run: the daemon cannot tell a
+comment you typed from one that came in with a `git pull`.
+
+**The hooks.** They are not shell scripts. Each hook's `#!` line is the path
+of the wingman binary that installed it, so git runs wingman directly and
+wingman writes a timestamp to `.wingman/watch/<hook>`, which the watcher
+notices. Consequences:
+
+- **Windows.** Git for Windows uses only the interpreter's file name and
+  looks it up on `PATH`, so `wingman.exe` must be on `PATH`.
+  `pilot hooks install` warns when it isn't.
+- **Linux and macOS.** The kernel reads the path as written, so it can't
+  contain whitespace. `install` refuses such a path rather than write a hook
+  that never runs.
+- **Moving the binary.** If you move or reinstall wingman somewhere else,
+  run `install` again. It rewrites its own hooks.
+- **Existing hooks.** A hook wingman didn't write (husky, pre-commit, your
+  own) is left alone and reported as skipped. The hook directory comes from
+  `git rev-parse --git-path hooks`, so `core.hooksPath` is respected.
+- **Post-hooks only.** Git ignores their exit status, so a missing or broken
+  wingman never blocks a commit.
+- **Shared hook directories.** A hook records only in a repo that has
+  `.wingman/watch/`, which `install` (and a watching daemon) creates. A
+  `core.hooksPath` shared with other repos therefore never creates `.wingman/`
+  in them.
+- **Linked worktrees.** A hook firing in a linked worktree records nothing.
+  Pilot's own task worktrees share the repo's hooks, and their commits are
+  the daemon's own work.
+
+**Limits.** Webhook-driven reactions from the original J13 design (a
+dependabot PR going green, a labelled issue arriving) are not part of watch
+mode. Those still arrive on the poll, or sooner through
+[intake](#capability-tiers) or `wingman serve`'s goals endpoint. The watch is
+one recursive watch over the whole repo, so on Linux a very large tree can
+exhaust `fs.inotify.max_user_watches`.
+
+---
+
+## Sandbox tiers
+
+> **Unvalidated against a real daemon.** Both backends are implemented and
+> tested with mock runners (the `docker` and jailer/Firecracker argv, the
+> Firecracker config, jail staging, the guest script, and patch-back with real
+> git), but neither has been run against a real Docker daemon or a
+> Firecracker/KVM host. Treat the first real run as a trial.
+
+Each task gets a tier from its plan. Dependency or build files, or a risky
+acceptance command (`npm install`, `curl`, `deploy`, ...), mean `container`;
+migrations, infra, Dockerfile/terraform edits or an irreversible goal mean
+`vm`. `[pilot.sandbox].default_tier` (or `pilot run --sandbox`) is a floor
+under both.
+
+| Tier        | Where the worker runs                        | When this machine has no backend for it |
+| ----------- | -------------------------------------------- | --------------------------------------- |
+| `host`      | its git worktree, on your machine            | n/a                                     |
+| `container` | `docker run`, against a copy of the worktree | runs on the host (logged)               |
+| `vm`        | a Firecracker microVM, against a copy        | **refused**: `pilot run` / `pilot resume` exit 2, and a vm-tier task the manager adds mid-run fails instead of starting. With `allow_unsandboxed_vm_tasks` it gets `container` if Docker is up, else host |
+
+`wingman doctor` reports which tiers this machine can honour, and why not.
+
+**How a sandboxed task runs.** The worktree, minus `.git`, is copied to a temp
+directory along with a generated `.wingman-sandbox/run.sh`. The script commits
+the copy as a base, runs `wingman --worker-mode` for the task, then writes
+`git diff --binary` against that base (committed and uncommitted work alike)
+followed by a completion line. If the worker reported `task_complete` and
+exited cleanly, the diff is applied to the host worktree with `git apply` and
+committed as `pilot(<task>): sandboxed worker changes`, where the squash-merge
+picks it up. A failed attempt leaves the host worktree untouched, and the
+supervisor does not re-run a sandboxed task's acceptance checks on the host to
+salvage it, because that would run them on the host.
+
+Two things do not come back: anything under the top-level `.wingman/` (the
+worker's session transcript included), and the worker's own commit messages.
+`.wingman/` and `.wingman-sandbox/` (which holds the copied global config) are
+excluded when the patch is applied, so a worker that force-adds them still
+cannot bring them back.
+
+The patch is untrusted input. `git apply` refuses paths under `.git` or
+through a symlink, a patch file replaced by a link is refused, a patch without
+its completion line (a failed or truncated diff) is refused rather than
+half-applied, and a VM's patch is read off a raw drive, so no guest filesystem
+is parsed on the host.
+
+```toml
+[pilot.sandbox]
+default_tier     = "host"                    # floor: host | container | vm
+container_image  = "wingman/sandbox:latest"  # needs sh, git and a Linux `wingman`
+cpus             = 2                         # docker --cpus / Firecracker vcpu_count
+memory_mib       = 4096                      # docker --memory / mem_size_mib
+pids_limit       = 512                       # docker --pids-limit
+network          = "bridge"                  # bridge | none | a network you created
+env              = ["ANTHROPIC_API_KEY"]     # forwarded into the sandbox by name
+allow_unsandboxed_vm_tasks = false
+
+[pilot.sandbox.vm]
+firecracker_bin    = "/usr/local/bin/firecracker"  # absolute when use_jailer
+use_jailer         = true                          # the jailer needs root
+jailer_bin         = "jailer"
+chroot_base_dir    = "/srv/jailer"
+jailer_uid         = 65534
+jailer_gid         = 65534
+kernel_image       = "/var/lib/wingman/vmlinux"     # empty = vm tier unavailable
+rootfs_image       = "/var/lib/wingman/rootfs.ext4"
+worktree_drive_mib = 4096
+tap_device         = ""                            # pre-created tap; empty = no NIC
+```
+
+**Credentials and network.** The worker calls its model provider from inside
+the sandbox, so it needs both. The global `config.toml` is copied in, but keys
+kept in the OS keyring are out of reach: list the provider's key variable in
+`env`. A container is attached to `network`, so `"none"` leaves the worker
+unable to reach a hosted provider; a network of your own with egress rules is
+the useful middle. A VM has no NIC unless `tap_device` names one you created
+and routed. Env values forwarded into a VM are written into the guest script
+on the worktree drive, which is deleted when the task ends.
+
+**Container image.** Wingman does not publish one: it needs `sh`, `git` and a
+Linux `wingman` on `PATH`. The container gets `--security-opt
+no-new-privileges` and the CPU, memory and pid limits above; on Linux it runs
+as your uid so its files stay removable. It is removed with `docker rm -f` when
+the task ends, including on timeout.
+
+**VM backend** (Linux only). It needs a read-write `/dev/kvm`, `firecracker`
+(and `jailer` with `use_jailer`), `mke2fs` from e2fsprogs 1.43 or later, and a
+kernel and rootfs you provide. The guest sees `/dev/vda`, the rootfs
+(read-only); `/dev/vdb`, the worktree copy as ext4; and `/dev/vdc`, a raw
+64 MiB drive for the patch. The kernel is booted with
+`init=/sbin/wingman-sandbox-init`, which the rootfs must provide, along these
+lines:
+
+```sh
+#!/bin/sh
+mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
+mount -t tmpfs tmp /tmp
+mkdir -p /work && mount /dev/vdb /work
+sh /work/.wingman-sandbox/run.sh </dev/console >/dev/console 2>&1
+sync; reboot -f
+```
+
+Firecracker exits when the guest reboots. The worker's NDJSON reaches pilot
+over the serial console, which is Firecracker's stdout; kernel messages on the
+same console are ignored. The guest's exit code does not reach the host, which
+is what the patch's completion line is for.
+
+## Skill packs
+
+A skill pack is a versioned bundle of role definitions (`<role>.md`), lessons
+(`<role>.lessons.md`), tool registrations (`tools/`) and acceptance templates,
+published as a git repo tagged `v<X.Y.Z>`. Installing one copies its roles and
+lessons into `~/.wingman/agents/`, where the role loader picks them up.
+
+```toml
+[pilot.skills]
+packs = ["acme/rust-reviewer@1.4"]                   # caret requirements
+index = "https://github.com/acme/wingman-packs"      # git URL or local dir
+```
+
+```bash
+wingman pilot skills install                # [pilot.skills].packs
+wingman pilot skills install acme/app@1.0   # or name them
+wingman pilot skills search reviewer
+wingman pilot skills list
+wingman pilot skills verify                 # non-zero exit on any failure
+```
+
+**Index.** `index` names a git repo (shallow-cloned on each use) or a local
+directory holding `index.json`:
+
+```json
+{"packs": {"acme/app": [
+  {"version": "1.2.0", "source": "https://github.com/acme/app",
+   "deps": ["acme/base@1.3"], "description": "App roles",
+   "signature": "-----BEGIN SSH SIGNATURE-----\n...\n-----END SSH SIGNATURE-----\n"}
+]}}
+```
+
+**Dependencies.** Each requirement is caret-style: `acme/base@1.3` accepts any
+`1.x` at or above `1.3.0`. Install resolves the requested packs and everything
+they depend on, choosing the newest indexed version that satisfies every
+requirement on a pack, and stops with a `version conflict` error naming the
+requirements when none does. One version per pack, because every pack's roles
+share one agents directory. The resolver does not backtrack, so in a rare
+case it reports a conflict that a different choice upstream would have
+avoided.
+
+**Signatures.** Unsigned packs are refused unless you pass
+`--allow-unsigned`; a pack that *is* signed must verify either way. Without an
+`index`, packs are cloned from `https://github.com/<owner>/<name>` and are
+always unsigned. Checking uses `ssh-keygen -Y verify` (OpenSSH 8.1+, which
+ships with Git and with Windows 10+) against
+`~/.wingman/packs/allowed_signers`, with the pack **owner** as the principal,
+so a key you trust for `acme` cannot vouch for `evil/…`:
+
+```
+acme namespaces="wingman-skillpack" ssh-ed25519 AAAAC3Nza...
+```
+
+The signed message covers the exact pack version, a SHA-256 digest of its
+files (`.git` excluded, symlinks refused, checked out with
+`core.autocrlf=false`) and its dependency list, so neither the source nor the
+index can change what was signed. Content that fails the check is deleted.
+Each install leaves a receipt, `~/.wingman/packs/<slug>.json`; `verify`
+re-hashes the installed files against it, so later edits on disk are caught
+too, including for unsigned packs.
+
+**Publishing.** Sign a clean checkout of the tag. Write the payload with
+`--out` rather than a shell redirect, which can re-encode it:
+
+```bash
+git clone --branch v1.2.0 https://github.com/acme/app app
+wingman pilot skills digest acme/app@1.2.0 app --dep acme/base@1.3 --out payload.txt
+ssh-keygen -Y sign -f ~/.ssh/id_ed25519 -n wingman-skillpack payload.txt
+# put the text of payload.txt.sig in the index entry's "signature"
+```
+
+## Tool synthesis
+
+A worker that keeps needing a command the toolset lacks — querying the dev
+database, regenerating a fixture — can propose it as a named tool with
+`propose_tool`. The proposal is an ordinary custom command tool, written to
+the owning project (not the worker's worktree, which is deleted after the
+task):
+
+```toml
+# .wingman/tools/query_db.toml
+name = "query_db"
+description = "Run a read-only SQL query against the dev database"
+command = "python scripts/query_db.py"   # reads $WINGMAN_TOOL_INPUT
+timeout_secs = 20
+```
+
+Once approved, every registry built from then on carries it: the next worker
+spawned in this run, later runs, and interactive sessions in the project. The
+proposing worker does not get it mid-task.
+
+**Turning it on.** The `tool_synthesis` capability is on by default for
+`autopilot` only; turn it on (or off) for any tier with
+
+```toml
+[pilot.capabilities]
+tool_synthesis = true
+```
+
+**Approval.** A tool is approved when its exact file content is recorded in
+the trust store (`~/.wingman/trusted.toml`, the same store `wingman trust`
+uses), so editing an approved file revokes it.
+
+| Run | Gate |
+|-----|------|
+| `autopilot`, and the project config is trusted (`wingman trust`) | auto: the proposal approves itself |
+| anything else | hard gate: waits for you |
+
+```bash
+wingman pilot tools                  # list, with [approved] / [pending]
+wingman pilot tools approve query_db # prints the command it approves
+wingman pilot tools reject query_db  # deletes it and its trust record
+```
+
+There is no notify-only band: a synthesized tool runs shell commands in every
+later session, and a veto window during an unattended run is not a gate.
+
+**The ceiling.** A synthesized tool is a name for a command the worker could
+already run, never more:
+
+- `propose_tool` needs the shell permission and refuses a command the shell
+  denylist blocks.
+- A synthesized tool runs through `run_shell`'s guards —
+  `[tools].shell_sandbox` (including `required`), credential scrubbing, the
+  Windows Job Object — unlike a user-defined `[[tools.custom]]` entry. Its
+  input arrives in `$WINGMAN_TOOL_INPUT` only, not on stdin.
+- It never replaces a tool already registered, and a file whose name does not
+  match its `name` is ignored.
+- None load when `run_shell` is removed by `[tools].disabled_tools` or a
+  preset.
+
+**Limits.** Workers in the container and vm [sandbox tiers](#sandbox-tiers)
+do not get `propose_tool`: they run against a copy with no `.wingman/` and
+no trust store, so a proposal could not come back. They do not see approved
+tools either. A proposal names a command that already works; nothing writes a
+tool's implementation for it. Unvalidated against a live provider: the
+worker-side flow is covered by unit tests only.
 
 ---
 

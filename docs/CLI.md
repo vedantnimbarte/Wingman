@@ -31,7 +31,7 @@ wingman [OPTIONS] [COMMAND]
 | `login [provider]`   | Probe a provider key, store it in the OS keyring, record the default model. `--list` shows provider ids; `--oauth` forces the ChatGPT browser flow; `--no-probe` / `--no-default` / `--base-url` / `--model` refine it. |
 | `logout <provider>`  | Delete a provider's stored credential from the OS keyring. |
 | `knows`              | Show what Wingman knows about this project: memories, skills, model routing, the verification gate, and index freshness. |
-| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, and git/gh tooling. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
+| `doctor`             | Health check: config, provider credentials, local model servers, the semantic index, language servers on PATH, git/gh tooling, and which pilot sandbox tiers (Docker, Firecracker) this machine can run. `--fix` repairs config keys that are unambiguous misspellings (backing the file up first); `--lint` runs config checks only — read-only, no probes, non-zero on a problem, for CI; `--json` emits findings as JSON. |
 | `mcp-serve`          | Expose Wingman itself as an MCP server over stdio (tools + memory resources). Read-only by default; raise with `--mode`. |
 | `serve`              | Serve the HTTP/SSE API so another machine, a phone, or CI can drive Wingman. `--addr`, `--init-token`, `--list`, `--allow-yolo`, `--pair`. See [HTTP-API.md](HTTP-API.md). |
 | `explain`            | Explain-and-teach the working diff (per-file what/why). `--local <base>`, `--staged`. |
@@ -68,14 +68,24 @@ wingman [OPTIONS] [COMMAND]
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. |
 | `pilot feedback`     | Poll every run's opened PR for its terminal state (`gh`) and record a `pr.outcome` event. `--cycles N` (0 = forever). |
 | `pilot eval`         | Score eval results against a baseline and exit 1 on regression. `--goals <file>` runs the goals live first (no PR); `--baseline <file>`, `--threshold <f>` (default 0.10), `--update-baseline`. |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). `--cycles N`, `--dry-run`, and `--watch` to also wake on file changes and `pilot hooks` git hooks (see [Watch mode](PILOT-MODE.md#watch-mode)). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. |
+| `pilot validate-providers` | Run the canned `--version-only` pilot plan against every configured provider with credentials, one scratch repo each, and write a pass/fail/skipped matrix (`matrix.md`, `matrix.json`). `--provider <id>` (repeatable), `--max-usd <f>` (default 0.50), `--max-tokens <n>` (default 400000), `--out <dir>` (default `.wingman/provider-validation/`). Exit 1 if any provider failed, 2 if none could run. Spends real money. |
+| `pilot hooks install\|uninstall` | Write (or remove) post-commit/merge/checkout/rewrite hooks that run the wingman binary directly, no shell, and wake `pilot daemon --watch`. Leaves hooks it didn't write alone. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |
 | `pilot ask "<msg>" [run-id]` | Same, but wait for the worker's reply and print it (`--wait <secs>`, default 120). |
 | `pilot intake slack\|email` | External intake transports → pilot request files (Slack Events server, `.eml` ingestion). |
+| `pilot skills install [spec…]` | Resolve skill packs (default `[pilot.skills].packs`) and their dependencies against `[pilot.skills].index`, verify signatures, install. `--allow-unsigned` to accept packs without one. Bare `pilot skills` does the same. |
+| `pilot skills search [query]` | Search the pack index by name or description. |
+| `pilot skills list` | List installed packs, signed or not. |
+| `pilot skills verify [spec…]` | Re-check installed packs against their signatures / install digest; non-zero exit on failure. `--allow-unsigned`. |
+| `pilot skills digest <spec> <dir>` | For pack authors: the payload to sign with `ssh-keygen -Y sign -n wingman-skillpack`. `--dep <spec>` (repeatable), `--out <file>`. |
+| `pilot tools [list]` | List the tools pilot workers proposed for this project (`.wingman/tools/`), approved or pending. |
+| `pilot tools approve <name>` | Approve a proposed tool: records its exact content in the trust store, so workers spawned afterwards (and sessions in this project) can call it. Editing the file revokes it. |
+| `pilot tools reject <name>` | Delete a proposed or approved tool and its trust record. |
 | `board`              | Kanban board over pilot runs: a persistent, multi-project backlog. Cards are goals that outlive their runs; columns are derived from run state. |
 | `board add "<title>"` | Create a Backlog card. `--goal <text>` (the prompt sent to pilot; defaults to the title), `--project <id>`, `--label <l>`, `--notes <text>`. |
 | `board list`         | List cards with derived columns. `--project`, `--column backlog\|planned\|in-progress\|review\|done`, `--label`, `--all`, `--json`. |

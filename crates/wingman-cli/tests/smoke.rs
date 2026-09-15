@@ -229,6 +229,58 @@ fn pilot_help_lists_subcommands() {
 }
 
 #[test]
+fn pilot_skills_digest_writes_the_exact_payload_to_sign() {
+    // The one skills subcommand that touches neither the network nor the
+    // real home. `--out` must write bytes a later `ssh-keygen -Y verify` sees
+    // unchanged, so they must equal what stdout prints.
+    let s = Scratch::new();
+    let pack = s.dir.join("pack");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(pack.join("r.md"), "# r").unwrap();
+    let out = wingman()
+        .args([
+            "pilot",
+            "skills",
+            "digest",
+            "acme/x@1.2",
+            "pack",
+            "--dep",
+            "acme/base@1.0",
+        ])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot skills digest");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(printed.starts_with("wingman-skillpack v1\npack acme/x@1.2.0\ndigest sha256:"));
+    assert!(printed.ends_with("\ndeps acme/base@1.0.0\n"), "{printed}");
+
+    let status = wingman()
+        .args([
+            "pilot",
+            "skills",
+            "digest",
+            "acme/x@1.2",
+            "pack",
+            "--dep",
+            "acme/base@1.0",
+        ])
+        .args(["--out", "payload.txt"])
+        .current_dir(&s.dir)
+        .status()
+        .expect("run pilot skills digest --out");
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(s.dir.join("payload.txt")).unwrap(),
+        printed
+    );
+}
+
+#[test]
 fn pilot_status_without_runs_does_not_panic() {
     // `pilot status` reads run artifacts under .wingman/autonomous and needs no
     // provider. In an empty scratch project it must exit cleanly (no runs), not
@@ -248,6 +300,59 @@ fn pilot_status_without_runs_does_not_panic() {
         !combined.contains("panicked"),
         "pilot status must not panic on an empty project: {combined}"
     );
+}
+
+/// J13 — the installed hooks are run by real git, through the real binary,
+/// with no shell script in between. This is the only test that proves the
+/// `#!<wingman>` hook actually executes on each CI platform (Git for Windows
+/// resolves the interpreter on PATH, hence the PATH prefix).
+#[test]
+fn pilot_hooks_signal_the_watcher_from_a_real_commit() {
+    let s = Scratch::new();
+    let bin_dir = PathBuf::from(env!("CARGO_BIN_EXE_wingman"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .current_dir(&s.dir)
+            .env("PATH", &path)
+            .output()
+            .expect("run git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+
+    let out = wingman()
+        .args(["pilot", "hooks", "install"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot hooks install");
+    assert!(out.status.success(), "hooks install: {out:?}");
+    let hook = s.dir.join(".git").join("hooks").join("post-commit");
+    assert!(hook.is_file());
+
+    git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+    let signal = s.dir.join(".wingman").join("watch").join("post-commit");
+    assert!(
+        signal.is_file(),
+        "the post-commit hook did not run wingman: {:?}",
+        std::fs::read_to_string(&hook)
+    );
+
+    let out = wingman()
+        .args(["pilot", "hooks", "uninstall"])
+        .current_dir(&s.dir)
+        .output()
+        .expect("run pilot hooks uninstall");
+    assert!(out.status.success(), "hooks uninstall: {out:?}");
+    assert!(!hook.exists());
 }
 
 #[test]
