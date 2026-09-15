@@ -60,6 +60,15 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
     section("tooling");
     emit(bin_status("git", &["--version"]));
     emit(bin_status("gh", &["--version"]));
+    // Optional: only `notebook_run` needs it, so missing is a warning.
+    emit(match bin_status("jupyter", &["nbconvert", "--version"]) {
+        Status::Ok(v) => Status::Ok(format!("{v} (nbconvert) — notebook_run available")),
+        _ => Status::Warn(
+            "jupyter nbconvert: not found on PATH — notebook_run needs it \
+             (`pip install nbconvert ipykernel`)"
+                .into(),
+        ),
+    });
 
     // 1b. Shell containment.
     section("shell sandbox");

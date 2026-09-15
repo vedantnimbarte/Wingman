@@ -59,7 +59,10 @@ Read a file and return its content with line numbers.
 
 **Notes:**
 - Absolute path required.
-- `.ipynb` files are parsed; cells returned as fenced code blocks + markdown.
+- `.ipynb` files are parsed; cells returned as fenced code blocks + markdown,
+  each marked `<!-- cell N: kind -->` (the index `notebook_edit` takes). Code
+  cell outputs follow as `> stdout:` / `> result:` / `> error:` quote blocks,
+  each capped at 4 KiB; images and HTML are named, not inlined.
 - `.pdf` files have their text extracted, so a spec or design doc handed over
   as a PDF is readable rather than "refusing to read binary file". Text only:
   layout and images are dropped. A scan with no text layer says it needs OCR
@@ -196,6 +199,69 @@ Apply a multi-file edit atomically. Updates, adds, and deletes are all-or-nothin
 **Notes:**
 - Atomic: all changes or none. Prevents partial-write bugs.
 - Useful for multi-file refactors.
+
+### `notebook_edit`
+
+Change one cell of a Jupyter notebook without hand-editing its JSON. Args:
+`path` (must be `.ipynb`), `operation` (`replace` | `insert` | `delete`), the
+cell as a 0-based `index` or — on nbformat 4.5+ notebooks — a `cell_id`, plus
+`source` (replace, insert) and `cell_type` (`code` | `markdown`, insert only;
+default `code`). Insert places the new cell at the position, shifting the rest
+down; `index` equal to the cell count appends. Returns a unified diff of the
+cell source and one summary line.
+
+**Permission:** Same as `edit_file`: the registry's write gate, per-path
+containment, the protected paths, and a `/undo` checkpoint of the whole
+notebook taken before the edit. Audited like any other call.
+
+**What it preserves:** everything outside the edited cell — metadata, other
+cells' outputs, `nbformat`/`nbformat_minor`, the file's indent (Jupyter's
+one space), line endings and trailing newline. Keys come out sorted, which is
+how Jupyter writes them, so a Jupyter-saved notebook changes only in the cell.
+Source is stored as a list of lines, as nbformat does.
+
+**Notes:**
+- Replacing a code cell's source clears its `outputs` and `execution_count`:
+  they describe code that no longer exists.
+- A cell inserted into a 4.5+ notebook gets a fresh 8-hex-char id; a 4.4
+  notebook gets none.
+- Refused: nbformat other than 4, an out-of-range index (the error names the
+  valid range), `cell_id` on a pre-4.5 notebook, both or neither of `index` /
+  `cell_id`, and changing a cell's type (delete and insert instead).
+- Numbers in metadata round-trip through f64, so an unusual float spelling
+  (`1e-05`) is rewritten in normal form.
+
+### `notebook_run`
+
+Execute a notebook top to bottom and report its outputs. Args: `path`,
+optional `cell` (0-based: report only that cell — the whole notebook still
+runs) and `timeout_secs` (default 300, max 600; nbconvert's per-cell limit and
+the overall spawn limit).
+
+Runs `jupyter nbconvert --to notebook --execute --inplace
+--ExecutePreprocessor.allow_errors=True` in the notebook's directory, through
+`run_shell`'s contained spawn path — the same permission check, project
+denylist, `[tools].shell_sandbox`, Windows Job Object and credential scrub.
+
+**Permission:** needs the shell grant *and* write access to the notebook
+(`--inplace` rewrites it). The notebook is checkpointed before the run, so
+`/undo` restores the pre-run outputs.
+
+**Returns:** `executed; N error(s)`, then a `## errors` section (each error's
+name, value and ANSI-stripped traceback, tail-clipped to 4 KiB), then
+`## cells` rendered as `read_file` renders a notebook, capped at 24 KiB.
+
+**Error cases:**
+- `jupyter` not on PATH: says so and names what to install
+  (`pip install nbconvert ipykernel`). `wingman doctor` reports it.
+- nbconvert itself fails (no kernel, timeout, invalid notebook): the tail of
+  its output; the notebook is not updated.
+- On Windows, a file name containing a space or a cmd.exe metacharacter is
+  refused, because `run_shell`'s `cmd /C` path cannot pass a quoted argument.
+  Rename the notebook or call jupyter via `run_shell`.
+
+**Not validated live:** tested at the argv and output-parsing level only; no
+test executes a real Jupyter kernel.
 
 ## Search & Discovery
 
@@ -928,6 +994,8 @@ faster model while the parent session keeps the strongest one. An explicit
 | `write_file`        | —    | Y     | —     | mode/tree  | Overwrites; destructive        |
 | `edit_file`         | —    | Y     | —     | mode/tree  | Exact-match safe edit          |
 | `apply_patch`       | —    | Y     | —     | mode/tree  | Atomic multi-file             |
+| `notebook_edit`     | —    | Y     | —     | mode/tree  | Replace/insert/delete one notebook cell |
+| `notebook_run`      | —    | Y     | Y     | mode/list  | Execute a notebook via nbconvert |
 | `glob`              | Y    | —     | —     | always     | File discovery                 |
 | `grep`              | Y    | —     | —     | always     | Content search                 |
 | `list_dir`          | Y    | —     | —     | always     | Directory listing              |

@@ -469,7 +469,9 @@ impl ToolRegistry {
         self.register(crate::builtin::WriteFile);
         self.register(crate::builtin::EditFile);
         self.register(crate::builtin::ApplyPatch);
+        self.register(crate::builtin::NotebookEdit);
         self.register(crate::builtin::RunShell);
+        self.register(crate::builtin::NotebookRun);
         self.register(crate::builtin::JobOutput);
         self.register(crate::builtin::JobSend);
         self.register(crate::builtin::JobStop);

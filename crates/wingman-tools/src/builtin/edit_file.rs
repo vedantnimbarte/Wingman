@@ -102,7 +102,7 @@ impl Tool for EditFile {
     }
 }
 
-fn unified_diff(old: &str, new: &str, label: &str) -> String {
+pub(crate) fn unified_diff(old: &str, new: &str, label: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
     let mut out = String::new();
     out.push_str(&format!("--- a/{label}\n+++ b/{label}\n"));
