@@ -579,12 +579,7 @@ async fn run_inner(
                             steer.clone(),
                         )
                         .await?;
-                        record_routing(
-                            &gates,
-                            &ui.status,
-                            &ctx.project_root,
-                            &session_id,
-                        );
+                        record_routing(&gates, &ui.status, &ctx.project_root, &session_id);
                         // Persist after every turn: an LLM round-trip already
                         // took seconds, so one small atomic write is noise, and
                         // it means an external kill/SIGHUP between turns can't
