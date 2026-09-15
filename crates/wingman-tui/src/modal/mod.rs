@@ -14,6 +14,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 
 pub mod diff_preview;
 pub mod file_picker;
+pub mod file_view;
 pub mod help;
 pub mod login;
 pub mod mcp;
@@ -27,6 +28,7 @@ pub mod usage;
 
 pub use diff_preview::{DiffDecision, DiffPreviewModal};
 pub use file_picker::FilePicker;
+pub use file_view::FileViewModal;
 pub use help::HelpModal;
 pub use login::{LoginPayload, LoginTask, LoginWizard};
 pub use mcp::{McpAddPayload, McpServerSummary, McpTask, McpView};
@@ -77,6 +79,7 @@ pub enum ActiveModal {
     SessionPicker(SessionPicker),
     SkillVars(SkillVarsModal),
     DiffPreview(DiffPreviewModal),
+    FileView(FileViewModal),
 }
 
 impl ActiveModal {
@@ -99,6 +102,7 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.handle_key(key),
             Self::SkillVars(v) => v.handle_key(key),
             Self::DiffPreview(v) => v.handle_key(key),
+            Self::FileView(v) => v.handle_key(key),
         }
     }
 
@@ -118,6 +122,7 @@ impl ActiveModal {
             Self::SessionPicker(_) => None,
             Self::SkillVars(_) => None,
             Self::DiffPreview(_) => None,
+            Self::FileView(_) => None,
         }
     }
 
@@ -149,6 +154,7 @@ impl ActiveModal {
             Self::SessionPicker(_) => {}
             Self::SkillVars(_) => {}
             Self::DiffPreview(_) => {}
+            Self::FileView(_) => {}
         }
     }
 
@@ -167,6 +173,7 @@ impl ActiveModal {
             Self::SessionPicker(v) => v.render(area, buf),
             Self::SkillVars(v) => v.render(area, buf),
             Self::DiffPreview(v) => v.render(area, buf),
+            Self::FileView(v) => v.render(area, buf),
         }
     }
 }

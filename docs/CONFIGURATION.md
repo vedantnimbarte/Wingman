@@ -44,7 +44,7 @@ allow_global_memory_writes = false   # may the agent write ~/.wingman/memory/
 search_hint_tokens = 300
 
 [tui]
-theme = "default"
+theme = "default"             # default | light | mono; NO_COLOR=1 in the environment overrides it
 show_token_usage = true
 
 [tools]

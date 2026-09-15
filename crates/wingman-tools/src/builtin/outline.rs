@@ -28,7 +28,7 @@ impl Tool for Outline {
             name: "outline".into(),
             description: "Return a signatures-only outline of a source file (one line per fn/struct/class/etc) \
                           so you can see its shape without reading every body. Supported languages: rust, python, \
-                          javascript, typescript, tsx, go. Falls back to a short message for unsupported types."
+                          javascript, typescript, tsx, go, cpp, java, kotlin. Falls back to a short message for unsupported types."
                 .into(),
             input_schema: json!({
                 "type": "object",

@@ -70,6 +70,24 @@ a local-only tool.
 permissive licence, or keep the feature permanently local-only and never
 publish a binary built with it.
 
+## Tree-sitter grammars held at the 0.22 ABI
+
+**Status:** tracked; clears with the tree-sitter 0.23 migration.
+
+`wingman-ts` is on `tree-sitter` 0.22, and every grammar crate has to link
+against that runtime, so each is pinned to its last release before the move to
+the `tree-sitter-language` shim: `tree-sitter-cpp` 0.22.3, `tree-sitter-java`
+0.21.0 and `tree-sitter-kotlin` 0.3.8 (alongside the older Rust, Python,
+JavaScript, TypeScript and Go grammars). All are MIT, all build their parser
+from bundled C through `cc` with no extra system dependency, and none declares a
+`rust-version` that conflicts with the workspace MSRV.
+
+`tree-sitter-kotlin` (fwcd's grammar) caps `tree-sitter` at `<0.23` and has no
+0.23 release, so the migration swaps it for `tree-sitter-kotlin-ng` rather than
+bumping it. The Kotlin grammar also declares no field names; `wingman-ts` finds
+declaration names by child kind instead, which is the part to re-check after
+that swap.
+
 ## Advisories we currently tolerate
 
 Each of these is an `[advisories].ignore` entry in `.cargo/audit.toml`.

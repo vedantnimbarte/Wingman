@@ -234,10 +234,10 @@ failing.
 **Key components:**
 - **Composer** — input box at bottom; `/` prefix triggers slash commands.
 - **Transcript** — scrollable conversation history (model and user messages, tool output).
-- **File sidebar** — `Ctrl+B` toggles; file browser for quick path insertion.
+- **File sidebar** — `Ctrl+B` toggles; file browser for quick path insertion; `v` opens a highlighted read-only file view.
 - **Status bar** — token usage, model/provider, mode, theme.
 - **Welcome screen** — initial prompt hint.
-- **Themes** — default, light, mono; per-role color overrides.
+- **Themes** — default, light, mono; per-role color overrides; syntax highlighting follows the theme; `NO_COLOR` strips colour from every frame.
 
 **Event handling:**
 - Keyboard input fed to the composer (or sidebar if active).
@@ -392,7 +392,7 @@ When the user asks for Y, respond with Z and call these tools:
 **Purpose:** Tree-sitter facade for language-aware parsing.
 
 **Supported languages:**
-- Rust, Python, JavaScript, TypeScript, Go.
+- Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin.
 
 **Key functions:**
 

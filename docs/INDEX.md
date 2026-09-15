@@ -30,7 +30,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
 
 ### Major Subsystems
 
-- **[TREE-SITTER.md](TREE-SITTER.md)** — Language-aware parsing integration (Rust, Python, JavaScript, TypeScript, Go).
+- **[TREE-SITTER.md](TREE-SITTER.md)** — Language-aware parsing integration (Rust, Python, JavaScript, TypeScript, Go, C++, Java, Kotlin).
   - Best for: Understanding semantic chunking, symbol extraction, code understanding.
   - Read this if: You're working with the RAG index, diff tools, or adding new languages.
 
@@ -179,7 +179,7 @@ Read **[ARCHITECTURE.md](ARCHITECTURE.md)** → **Crate Responsibilities** for:
 
 1. Update `crates/wingman-ts/Cargo.toml` — add grammar crate.
 2. Update `crates/wingman-ts/src/lang.rs` — add Language variant, detection.
-3. Update `crates/wingman-ts/src/parse.rs` — add parser initialization.
+3. Update `crates/wingman-ts/src/parse.rs` — add parser initialization and symbol mapping.
 4. Update **[TREE-SITTER.md](TREE-SITTER.md)** with the new language.
 
 ## Feature Flags

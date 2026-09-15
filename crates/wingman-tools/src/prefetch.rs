@@ -98,6 +98,9 @@ fn import_candidates(path: &Path, root: &Path) -> Vec<PathBuf> {
                 out.extend(resolve_js(dir, &spec))
             }
             Language::Go => out.extend(resolve_go(dir, &spec)),
+            // `imports` does not read these yet; prefetch falls back to the
+            // file's directory neighbours for them.
+            Language::Cpp | Language::Java | Language::Kotlin => {}
         }
     }
     out

@@ -1,3 +1,4 @@
+pub mod code;
 pub mod composer;
 pub mod file_tree;
 pub mod slash_suggest;
