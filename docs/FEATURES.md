@@ -384,6 +384,18 @@ Wingman different; this is everything else it does.
   `wingman doctor` reports which tiers are available. Unvalidated against a
   real Docker daemon or Firecracker host. See
   [PILOT-MODE.md](PILOT-MODE.md#sandbox-tiers).
+- **Hand-off background runs.** `wingman bg start "<prompt>"` gives one task
+  to a detached agent in its own worktree on `wingman/bg/<id>`, commits the
+  result there when the agent exits clean (gate not red), and with `--pr` opens
+  a PR; `bg list | logs <id> [--follow] | stop <id>` pick it back up after the
+  terminal is gone. The single-agent sibling of `pilot run -d`: no planner.
+  `--devcontainer` runs the agent in the repo's `devcontainer.json` image
+  (`image` or `build.dockerfile` only) under `[pilot.sandbox]`'s limits, with
+  only the provider key forwarded. Over `--remote` it runs on the server. The
+  host path has been run end to end once (to a failed run, with no provider
+  configured); a committing run, `--pr`, `stop` against a live agent, the
+  devcontainer path (never run against a real Docker daemon) and the remote
+  path are unvalidated. See [CLI.md](CLI.md).
 - **Tool synthesis.** A pilot worker that keeps needing a command the toolset
   lacks calls `propose_tool`; the proposal lands in `.wingman/tools/` as a
   custom command tool and every registry built after approval carries it, so

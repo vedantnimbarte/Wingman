@@ -130,6 +130,22 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
                 "vm — unavailable ({why}); pilot refuses vm-tier tasks"
             )),
         });
+        // `bg start --devcontainer` runs through the same Docker probe.
+        let devcontainer = paths.root.join(".devcontainer").join("devcontainer.json");
+        if devcontainer.exists() {
+            emit(
+                match (avail.docker, super::bg::devcontainer_spec(&paths.root)) {
+                    (true, Ok(spec)) => Status::Ok(format!(
+                        "bg --devcontainer — {spec} (unvalidated against a real daemon)"
+                    )),
+                    (false, Ok(_)) => Status::Warn(
+                        "bg --devcontainer — no Docker daemon reachable; it will refuse to start"
+                            .into(),
+                    ),
+                    (_, Err(e)) => Status::Warn(format!("bg --devcontainer — {e:#}")),
+                },
+            );
+        }
     }
 
     // 2. Providers + credentials.

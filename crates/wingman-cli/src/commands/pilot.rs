@@ -1278,18 +1278,9 @@ fn resolve_base_commit(repo_root: &std::path::Path, base: Option<&str>) -> Resul
 /// Unix / `DETACHED_PROCESS` on Windows) so it survives this shell. The run id
 /// is passed through so the child adopts it and the printed id matches the log.
 fn spawn_detached(run_id: &str, run_path: &std::path::Path) -> Result<()> {
-    use std::process::{Command, Stdio};
-
     std::fs::create_dir_all(run_path)
         .with_context(|| format!("creating run dir {}", run_path.display()))?;
     let log_path = run_path.join("pilot.log");
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .with_context(|| format!("opening log {}", log_path.display()))?;
-
-    let exe = std::env::current_exe().context("resolving current executable")?;
     // Drop the detach flag so the child runs in the foreground path. `-d` and
     // `--detached` are standalone clap tokens, so an exact-match filter is
     // enough. ponytail: won't strip a bundled short flag like `-dv`; clap
@@ -1297,11 +1288,41 @@ fn spawn_detached(run_id: &str, run_path: &std::path::Path) -> Result<()> {
     let args = std::env::args_os()
         .skip(1)
         .filter(|a| a != "-d" && a != "--detached");
+    let child = spawn_self_detached(
+        args,
+        &[("WINGMAN_DETACHED_CHILD", "1"), ("WINGMAN_RUN_ID", run_id)],
+        &log_path,
+    )
+    .context("spawning detached pilot run")?;
+    println!(
+        "[pilot] run {run_id} detached (pid {}, log: {})",
+        child.id(),
+        log_path.display()
+    );
+    println!("[pilot] watch:  wingman pilot watch {run_id}");
+    println!("[pilot] stop:   wingman pilot abort {run_id}");
+    Ok(())
+}
 
+/// Re-exec the current binary with `args` and `envs`, stdio on `log_path`
+/// (appended), in its own session (`setsid` on Unix / `DETACHED_PROCESS` on
+/// Windows) so it survives this shell. Shared by `pilot run -d` and `bg start`.
+pub(crate) fn spawn_self_detached(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+    envs: &[(&str, &str)],
+    log_path: &std::path::Path,
+) -> Result<std::process::Child> {
+    use std::process::{Command, Stdio};
+
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("opening log {}", log_path.display()))?;
+    let exe = std::env::current_exe().context("resolving current executable")?;
     let mut cmd = Command::new(exe);
     cmd.args(args)
-        .env("WINGMAN_DETACHED_CHILD", "1")
-        .env("WINGMAN_RUN_ID", run_id)
+        .envs(envs.iter().copied())
         .stdin(Stdio::null())
         .stdout(log.try_clone().context("cloning log handle")?)
         .stderr(log);
@@ -1325,15 +1346,7 @@ fn spawn_detached(run_id: &str, run_path: &std::path::Path) -> Result<()> {
         cmd.creation_flags(0x0000_0008 | 0x0000_0200);
     }
 
-    let child = cmd.spawn().context("spawning detached pilot run")?;
-    println!(
-        "[pilot] run {run_id} detached (pid {}, log: {})",
-        child.id(),
-        log_path.display()
-    );
-    println!("[pilot] watch:  wingman pilot watch {run_id}");
-    println!("[pilot] stop:   wingman pilot abort {run_id}");
-    Ok(())
+    Ok(cmd.spawn()?)
 }
 
 /// The run id for this invocation: `WINGMAN_RUN_ID` when a caller supplied
@@ -1352,7 +1365,7 @@ fn resolve_run_id() -> String {
 }
 
 /// Generate a run id of the form `YYYY-MM-DD-HHMM-<rand6>`.
-fn new_run_id() -> String {
+pub(crate) fn new_run_id() -> String {
     use rand::distr::SampleString;
     let now = chrono::Utc::now();
     let suffix = rand::distr::Alphanumeric
