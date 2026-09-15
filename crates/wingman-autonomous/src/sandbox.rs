@@ -894,6 +894,11 @@ mod tests {
                 args.iter().map(|s| s.to_string()).collect(),
             ));
             let ok = self.fail.as_deref() != Some(program);
+            // Like the real mke2fs, leave the image behind: the jailer path
+            // chowns it on Unix, which fails on a file that was never made.
+            if ok && program == "mke2fs" && args.contains(&"-d") {
+                std::fs::File::create(args[args.len() - 2])?;
+            }
             Ok(CommandOut {
                 status: Some(if ok { 0 } else { 1 }),
                 stdout: if program == "id" {
