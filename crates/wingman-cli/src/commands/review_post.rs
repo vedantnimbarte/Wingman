@@ -10,10 +10,12 @@
 //! finding.
 //!
 //! Every body wingman posts carries [`MARKER`] and renders each finding as
-//! ``**severity** `file:line`: message``. On the next run the PR's existing
-//! review comments and review bodies are read back, and a finding whose
-//! `(file, message)` was already posted is dropped — line is left out of the
-//! key so a push that shifts the code doesn't re-post the same finding.
+//! ``**severity** `file:line`: message``. On the next run the reviews the `gh`
+//! user posted on the PR (their bodies and inline comments) are read back, and
+//! a finding whose `(file, message)` was already posted is dropped. Only the
+//! `gh` user's reviews count: anyone can paste the marker, and the PR author
+//! must not be able to pre-empt a finding that way. The line is left out of
+//! the key so a push that shifts the code doesn't re-post the same finding.
 //! `--dry-run` does all of that and prints the payload instead of posting.
 
 use std::collections::HashSet;
@@ -29,11 +31,22 @@ use super::review_multi::{normalize_message, parse_finding};
 /// Tags every body wingman posts, so dedup only ever matches its own output.
 const MARKER: &str = "<!-- wingman-review -->";
 
+// ponytail: first 100 inline comments per review; a wingman review past that
+// re-posts the overflow. Page `comments` when one shows up.
+const REVIEWS_QUERY: &str = "query($url: URI!, $endCursor: String) { resource(url: $url) { \
+    ... on PullRequest { reviews(first: 100, after: $endCursor) { \
+    pageInfo { hasNextPage endCursor } \
+    nodes { viewerDidAuthor body comments(first: 100) { nodes { body } } } } } } }";
+
+/// One review per line, so the pages `--paginate` prints read as one list.
+const REVIEWS_JQ: &str = ".data.resource.reviews.nodes[] | @json";
+
 /// The PR as `gh api` needs to address it, resolved from whatever the user
 /// passed (`42`, a branch, or a PR URL — anything `gh pr view` accepts).
 #[derive(Debug, PartialEq)]
 pub struct PrTarget {
     host: String,
+    url: String,
     /// `repos/<owner>/<repo>/pulls/<number>`
     api_path: String,
     /// The head commit the review is pinned to.
@@ -72,6 +85,7 @@ pub fn resolve_pr(runner: &dyn CommandRunner, cwd: &Path, pr: &str) -> Result<Pr
     };
     Ok(PrTarget {
         host: host.to_string(),
+        url: url.to_string(),
         api_path: format!("repos/{owner}/{repo}/pulls/{number}"),
         head_sha: head.to_string(),
     })
@@ -88,8 +102,7 @@ pub fn post(
     reviewer_text: &str,
     dry_run: bool,
 ) -> Result<String> {
-    let mut bodies = gh_bodies(runner, cwd, target, "comments")?;
-    bodies.extend(gh_bodies(runner, cwd, target, "reviews")?);
+    let bodies = own_review_bodies(runner, cwd, target)?;
     let Some(payload) = build_payload(reviewer_text, diff, &posted_keys(&bodies), target) else {
         return Ok("wingman: no new findings to post".into());
     };
@@ -128,38 +141,51 @@ pub fn post(
     Ok(format!("wingman: posted review {}", out.stdout.trim()))
 }
 
-/// Every review-comment or review body on the PR, one JSON string per line
-/// (`@json`) so multi-line bodies survive `--paginate`.
-fn gh_bodies(
+/// The bodies of every review the `gh` user posted on the PR, and of those
+/// reviews' inline comments.
+fn own_review_bodies(
     runner: &dyn CommandRunner,
     cwd: &Path,
     target: &PrTarget,
-    kind: &str,
 ) -> Result<Vec<String>> {
-    let endpoint = format!("{}/{kind}", target.api_path);
+    let query = format!("query={REVIEWS_QUERY}");
+    let url = format!("url={}", target.url);
     let out = runner.run(
         "gh",
         &[
             "api",
+            "graphql",
             "--hostname",
             &target.host,
             "--paginate",
+            "-f",
+            &query,
+            "-f",
+            &url,
             "--jq",
-            ".[] | .body | @json",
-            &endpoint,
+            REVIEWS_JQ,
         ],
         cwd,
     )?;
-    // Fail closed: without the existing comments we can't dedup, and posting
+    // Fail closed: without the existing reviews we can't dedup, and posting
     // duplicates on every run is the thing this exists to avoid.
     if !out.success() {
-        anyhow::bail!("listing PR {kind} failed: {}", out.stderr.trim());
+        anyhow::bail!("listing the PR's reviews failed: {}", out.stderr.trim());
     }
-    Ok(out
-        .stdout
-        .lines()
-        .filter_map(|l| serde_json::from_str::<String>(l).ok())
-        .collect())
+    let mut bodies = Vec::new();
+    for line in out.stdout.lines() {
+        let Ok(review) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if review["viewerDidAuthor"] != true {
+            continue;
+        }
+        let comments = review["comments"]["nodes"].as_array().into_iter().flatten();
+        for body in std::iter::once(&review["body"]).chain(comments.map(|c| &c["body"])) {
+            bodies.extend(body.as_str().map(str::to_string));
+        }
+    }
+    Ok(bodies)
 }
 
 /// `(file, normalized message)` for every finding in a body wingman posted.
@@ -259,30 +285,22 @@ diff --git a/src/lib.rs b/src/lib.rs
  let d = 4;
 ";
 
-    /// Records every call and answers from canned stdout keyed by the last
-    /// argument (the endpoint), like the mock gh runners in
-    /// `wingman-autonomous`. The POST's `--input` file is read at call time,
-    /// since it's deleted once `post` returns.
+    /// Records every call and answers from canned stdout, like the mock gh
+    /// runners in `wingman-autonomous`. The POST's `--input` file is read at
+    /// call time, since it's deleted once `post` returns.
     struct MockGh {
         view: &'static str,
-        comments: String,
+        /// What the reviews query prints after `--jq`: one review per line.
         reviews: String,
         calls: Mutex<Vec<Vec<String>>>,
         posted: Mutex<Option<Value>>,
     }
 
     impl MockGh {
-        fn new(comments: &[&str], reviews: &[&str]) -> Self {
-            let lines = |bodies: &[&str]| {
-                bodies
-                    .iter()
-                    .map(|b| serde_json::to_string(b).unwrap() + "\n")
-                    .collect()
-            };
+        fn new(reviews: &[Value]) -> Self {
             Self {
                 view: r#"{"number":42,"headRefOid":"abc123","url":"https://github.com/o/r/pull/42"}"#,
-                comments: lines(comments),
-                reviews: lines(reviews),
+                reviews: reviews.iter().map(|r| format!("{r}\n")).collect(),
                 calls: Mutex::new(Vec::new()),
                 posted: Mutex::new(None),
             }
@@ -307,9 +325,9 @@ diff --git a/src/lib.rs b/src/lib.rs
                 let text = std::fs::read_to_string(args[i + 1]).unwrap();
                 *self.posted.lock().unwrap() = Some(serde_json::from_str(&text).unwrap());
                 "https://github.com/o/r/pull/42#pullrequestreview-1\n".to_string()
-            } else if args.last() == Some(&"repos/o/r/pulls/42/comments") {
-                self.comments.clone()
-            } else if args.last() == Some(&"repos/o/r/pulls/42/reviews") {
+            } else if args[..2] == ["api", "graphql"] {
+                assert!(args.contains(&"url=https://github.com/o/r/pull/42"));
+                assert!(args.contains(&"github.com"));
                 self.reviews.clone()
             } else {
                 panic!("unexpected gh call {args:?}");
@@ -328,11 +346,12 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn resolve_pr_reads_repo_number_and_head_from_the_url() {
-        let gh = MockGh::new(&[], &[]);
+        let gh = MockGh::new(&[]);
         assert_eq!(
             target(&gh),
             PrTarget {
                 host: "github.com".into(),
+                url: "https://github.com/o/r/pull/42".into(),
                 api_path: "repos/o/r/pulls/42".into(),
                 head_sha: "abc123".into(),
             }
@@ -341,7 +360,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn posts_one_review_with_inline_and_unanchored_findings() {
-        let gh = MockGh::new(&[], &[]);
+        let gh = MockGh::new(&[]);
         let text = "Some preamble.\n\
                     major|src/lib.rs:11|unwrap on a value that can be None\n\
                     minor|src/other.rs:5|name shadows the import\n\
@@ -370,7 +389,7 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn a_line_outside_the_diff_goes_to_the_body() {
-        let gh = MockGh::new(&[], &[]);
+        let gh = MockGh::new(&[]);
         // Line 20 is past the hunk's new-side range (10..=13).
         let text = "major|src/lib.rs:20|off the diff\n";
         post(&gh, Path::new("."), &target(&gh), DIFF, text, false).unwrap();
@@ -384,16 +403,24 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn findings_posted_by_a_previous_run_are_not_reposted() {
-        // One earlier inline comment (line has since moved) and one earlier
-        // review body entry, plus a human comment with the same shape but no
-        // marker, which must not suppress anything.
-        let gh = MockGh::new(
-            &[
-                "**major** `src/lib.rs:12`: Unwrap on a value that can be None\n\n<!-- wingman-review -->",
-                "**minor** `src/lib.rs:13`: d is unused",
-            ],
-            &["wingman review: 1 new finding(s).\n\nNot on a diff line:\n\n- **minor** `src/other.rs:5`: name shadows the import\n\n<!-- wingman-review -->"],
-        );
+        // An earlier wingman review: one body entry and one inline comment
+        // whose line has since moved. Neither an unmarked comment in it nor
+        // someone else's review pasting the marker may suppress anything.
+        let gh = MockGh::new(&[
+            json!({
+                "viewerDidAuthor": true,
+                "body": "wingman review: 2 new finding(s).\n\nNot on a diff line:\n\n- **minor** `src/other.rs:5`: name shadows the import\n\n<!-- wingman-review -->",
+                "comments": {"nodes": [
+                    {"body": "**major** `src/lib.rs:12`: Unwrap on a value that can be None\n\n<!-- wingman-review -->"},
+                    {"body": "**minor** `src/lib.rs:13`: d is unused"},
+                ]},
+            }),
+            json!({
+                "viewerDidAuthor": false,
+                "body": "**minor** `src/lib.rs:13`: d is unused\n\n<!-- wingman-review -->",
+                "comments": {"nodes": []},
+            }),
+        ]);
         let text = "major|src/lib.rs:11|unwrap on a value that can be None\n\
                     minor|src/other.rs:5|name shadows the import\n\
                     minor|src/lib.rs:13|d is unused\n\
@@ -411,10 +438,13 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn nothing_new_posts_nothing() {
-        let gh = MockGh::new(
-            &["**major** `src/lib.rs:11`: unwrap on a value that can be None\n\n<!-- wingman-review -->"],
-            &[],
-        );
+        let gh = MockGh::new(&[json!({
+            "viewerDidAuthor": true,
+            "body": "",
+            "comments": {"nodes": [
+                {"body": "**major** `src/lib.rs:11`: unwrap on a value that can be None\n\n<!-- wingman-review -->"},
+            ]},
+        })]);
         let text = "major|src/lib.rs:11|unwrap on a value that can be None\nok|-:-|no findings\n";
         let msg = post(&gh, Path::new("."), &target(&gh), DIFF, text, false).unwrap();
         assert_eq!(msg, "wingman: no new findings to post");
@@ -423,12 +453,12 @@ diff --git a/src/lib.rs b/src/lib.rs
 
     #[test]
     fn dry_run_reads_existing_comments_but_never_posts() {
-        let gh = MockGh::new(&[], &[]);
+        let gh = MockGh::new(&[]);
         let text = "major|src/lib.rs:11|unwrap on a value that can be None\n";
         let msg = post(&gh, Path::new("."), &target(&gh), DIFF, text, true).unwrap();
         assert!(msg.contains("dry run"));
         assert_eq!(gh.posts(), 0);
-        assert_eq!(gh.calls.lock().unwrap().len(), 3); // view + comments + reviews
+        assert_eq!(gh.calls.lock().unwrap().len(), 2); // view + reviews
     }
 
     #[test]
@@ -443,7 +473,7 @@ diff --git a/src/lib.rs b/src/lib.rs
                 })
             }
         }
-        let gh = MockGh::new(&[], &[]);
+        let gh = MockGh::new(&[]);
         let err = post(
             &Failing,
             Path::new("."),
