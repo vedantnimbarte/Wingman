@@ -65,3 +65,5 @@ pointer. The history of what we believed is the point.
 | [0018](0018-the-notifier-is-not-a-workspace-member.md) | The desktop notifier is excluded from the workspace | accepted |
 | [0019](0019-the-notifier-ships-an-unsigned-installer.md) | The notifier ships an installer, and it is unsigned | accepted |
 | [0020](0020-repetition-is-guarded-twice.md) | Repetition is guarded twice, and only the second one stops a turn | accepted |
+| [0021](0021-sandboxed-work-comes-back-as-a-patch.md) | Sandboxed pilot work comes back as a patch, and Docker is not a VM | accepted |
+| [0022](0022-skill-packs-are-verified-with-ssh-keygen.md) | Skill packs are verified with `ssh-keygen`, not a signature crate | accepted |
