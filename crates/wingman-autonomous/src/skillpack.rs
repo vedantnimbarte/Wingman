@@ -563,31 +563,36 @@ pub fn fetch_pack(
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir failed: {e}"))?;
         }
+        // A remote URL is always cloned, even if a directory of that name
+        // exists here, so an index limited to git sources stays limited.
         let local = Path::new(source);
-        if local.is_dir() {
-            copy_dir_recursive(local, &dest).map_err(|e| format!("local copy failed: {e}"))?;
-        } else {
+        if !is_safe_clone_url(source) {
             // Only clone over https/ssh. Git's `ext::`/`file://` transports are
-            // an RCE vector (`git clone 'ext::sh -c evil'`); reject anything
-            // that isn't a normal remote URL so a hostile pack manifest can't
-            // run commands during install.
-            if !is_safe_clone_url(source) {
+            // an RCE vector (`git clone 'ext::sh -c evil'`), so anything that
+            // isn't a normal remote URL must be a local directory.
+            if !local.is_dir() {
                 return Err(format!(
                     "refusing to clone skillpack from unsafe source '{source}' \
                      (only https:// and git@host: are allowed)"
                 ));
             }
+            copy_dir_recursive(local, &dest).map_err(|e| format!("local copy failed: {e}"))?;
+        } else {
             let tag = format!("v{}", pack.version);
             let dest_str = dest.to_string_lossy().to_string();
             let out = runner
                 .run(
                     "git",
-                    // autocrlf off: a CRLF checkout on Windows would change
-                    // the digest the author signed. `--` terminates options so
-                    // a source starting with `-` can't be parsed as a flag.
+                    // autocrlf off and eol=lf: a CRLF checkout on Windows
+                    // (from autocrlf, or a `text` attribute following the
+                    // native eol) would change the digest the author signed.
+                    // `--` terminates options so a source starting with `-`
+                    // can't be parsed as a flag.
                     &[
                         "-c",
                         "core.autocrlf=false",
+                        "-c",
+                        "core.eol=lf",
                         "clone",
                         "--depth",
                         "1",
@@ -700,8 +705,12 @@ fn is_safe_clone_url(source: &str) -> bool {
         return true;
     }
     // scp-style `user@host:path`: a single-colon remote with no `::` transport
-    // marker. The `::` check is what rejects `ext::` / `fd::`.
-    !s.contains("::") && s.contains('@') && s.contains(':')
+    // marker. The `::` check is what rejects `ext::` / `fd::`. The `@` must
+    // come before the first `:` and there is no `\`, so a Windows path such as
+    // `C:\Users\me@corp\pack` is never taken for a remote.
+    !s.contains("::")
+        && !s.contains('\\')
+        && matches!((s.find('@'), s.find(':')), (Some(at), Some(colon)) if at < colon)
 }
 
 /// Recursively copy a directory tree (skipping `.git`).
@@ -738,6 +747,9 @@ mod tests {
         assert!(!is_safe_clone_url("fd::17/foo"));
         assert!(!is_safe_clone_url("file:///etc/passwd"));
         assert!(!is_safe_clone_url("/local/path"));
+        // A Windows path with an `@` in it is not an scp-style remote.
+        assert!(!is_safe_clone_url(r"C:\Users\me@corp\pack"));
+        assert!(!is_safe_clone_url("C:/Users/me@corp/pack"));
     }
 
     #[test]
@@ -878,10 +890,12 @@ mod tests {
         fetch_pack(&runner, &resolved, home.path(), true).unwrap();
         let (_, args, _) = &runner.calls()[0];
         assert_eq!(
-            &args[..8],
+            &args[..10],
             [
                 "-c",
                 "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
                 "clone",
                 "--depth",
                 "1",
