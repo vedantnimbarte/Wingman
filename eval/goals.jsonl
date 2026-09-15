@@ -1,0 +1,6 @@
+# Canned goals for `wingman pilot eval` (.github/workflows/eval.yml).
+# Each goal runs from its golden commit's parent; the LLM judge grades the
+# run's diff against that commit. A plain line is a goal with no golden
+# reference, scored by the success proxy.
+{"goal":"SessionLog::write issues a record's body and its newline as two writes and never flushes, so two appends through fresh handles can land on one line and the session log stops parsing. Write each record and its newline as one write and flush it, with a test that two appends produce two parseable lines.","golden_commit":"8a9c0a9f293a4a0217c8208d71506c79b9b76928"}
+{"goal":"`wingman --print` spawns a task to index the finished session and returns immediately, so the runtime drops it mid-embed and logs 'session indexing failed ... task was cancelled'. Stop starting that exit-time indexing; backfill_project_sessions already indexes past sessions when the registry is built.","golden_commit":"671eae414d16f2dd742c1cd09216114f0834bb5c"}

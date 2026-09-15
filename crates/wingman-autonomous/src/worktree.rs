@@ -8,9 +8,10 @@
 //! When every worker is in `Review`, the orchestrator runs the
 //! integration merge: a fresh branch (`wingman/auto/<run-id>`) off
 //! `base_commit`, then `git merge --squash <task-branch>` per task in
-//! topological order. A merge conflict halts the run and is surfaced via
-//! a `run.conflict` event for the user to resolve (or for the
-//! `merge-fixer` worker — E4 — to take a swing at).
+//! topological order. A merge conflict is handed to the caller's resolver
+//! (the pipeline records a `run.conflict` event and tries a one-shot model
+//! rewrite, then `merge-fixer` workers — E4); one it cannot resolve halts the
+//! run for the user.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -175,6 +176,83 @@ fn prune_stale_worktree(repo_root: &Path, worktree_path: &Path, branch: &str) {
         .output();
 }
 
+/// E9 — throw away a worktree speculatively created for `task_id` that no
+/// worker ended up using: the directory and its branch, both best-effort.
+pub fn discard_worktree(repo_root: &Path, run_id: &str, task_id: &str, worktree_path: &Path) {
+    prune_stale_worktree(repo_root, worktree_path, &task_branch(run_id, task_id));
+}
+
+/// E5.5 — capture every file in the worktree at `root` as a git tree object
+/// and return its id. Untracked files are included and ignored ones are not,
+/// as `git add -A` sees them; `.wingman/` is left out, since it holds the
+/// worker's own bookkeeping rather than its work.
+///
+/// Goes through a private index file beside the worktree's own, so neither
+/// HEAD nor whatever the worker staged is touched. That index persists between
+/// calls (seeded from the real one the first time) so git re-hashes only the
+/// files that changed.
+pub fn snapshot_tree(root: &Path) -> Result<String, WorktreeError> {
+    let index = rollback_index(root)?;
+    git_with_index(
+        root,
+        &index,
+        &["add", "-A", "--", ".", ":(exclude).wingman"],
+    )?;
+    git_with_index(root, &index, &["write-tree"])
+}
+
+/// E5.5 — make the worktree at `root` match `tree` (from [`snapshot_tree`]):
+/// files that differ are rewritten, files added since are deleted, and
+/// anything identical is left alone so build tools do not see it as changed.
+/// Returns the tree the worktree held before, so the caller can undo this.
+pub fn restore_tree(root: &Path, tree: &str) -> Result<String, WorktreeError> {
+    let current = snapshot_tree(root)?;
+    let index = rollback_index(root)?;
+    // The two-tree form is a checkout: it moves the index and the files from
+    // `current` to `tree`, touching only what differs between them.
+    git_with_index(root, &index, &["read-tree", "-m", "-u", &current, tree])?;
+    Ok(current)
+}
+
+fn rollback_index(root: &Path) -> Result<PathBuf, WorktreeError> {
+    let git_path = |name: &str| -> Result<PathBuf, WorktreeError> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["rev-parse", "--git-path", name])
+            .output()?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "git rev-parse --git-path {name} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(root.join(String::from_utf8_lossy(&out.stdout).trim()))
+    };
+    let index = git_path("wingman-rollback.index")?;
+    if !index.exists() {
+        let _ = std::fs::copy(git_path("index")?, &index);
+    }
+    Ok(index)
+}
+
+fn git_with_index(root: &Path, index: &Path, args: &[&str]) -> Result<String, WorktreeError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_INDEX_FILE", index)
+        .output()?;
+    if !out.status.success() {
+        return Err(WorktreeError::Git(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or_default(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 /// Remove a worktree (and its branch reference under
 /// `.git/worktrees/`). Force-removes so workers that left a dirty tree
 /// don't strand the worktree forever.
@@ -196,62 +274,51 @@ pub fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> Result<(), Wor
     Ok(())
 }
 
-/// Belt-and-braces: if the worker left uncommitted changes in the
-/// worktree, commit them. Workers are expected to commit themselves, but
-/// this guarantees the squash-merge has *something* to merge.
-pub fn commit_residual_changes(
+/// E11 — commit everything the worker has changed in `worktree_path` onto its
+/// task branch, as a checkpoint it can return to with git. `.wingman/` is left
+/// out, as in [`snapshot_tree`]. Returns the new commit, or `None` when there
+/// was nothing to commit.
+///
+/// Hooks are skipped: a checkpoint is taken mid-edit, when a pre-commit lint
+/// or format hook is expected to fail, and the squash merge that lands the
+/// task's work is where the repository's own rules apply.
+pub fn commit_checkpoint(
     worktree_path: &Path,
-    fallback_message: &str,
+    message: &str,
 ) -> Result<Option<String>, WorktreeError> {
-    let dirty = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("status")
-        .arg("--porcelain")
-        .output()?;
-    if !dirty.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git status failed: {}",
-            String::from_utf8_lossy(&dirty.stderr).trim()
-        )));
+    let git = |args: &[&str]| -> Result<std::process::Output, WorktreeError> {
+        Ok(Command::new("git")
+            .arg("-C")
+            .arg(worktree_path)
+            .args(args)
+            // Workers may not have user.email / user.name configured in their
+            // worktree; supply defaults so the commit doesn't fail on a vanilla
+            // machine.
+            .env("GIT_AUTHOR_NAME", "wingman pilot")
+            .env("GIT_AUTHOR_EMAIL", "pilot@wingman.local")
+            .env("GIT_COMMITTER_NAME", "wingman pilot")
+            .env("GIT_COMMITTER_EMAIL", "pilot@wingman.local")
+            .output()?)
+    };
+    let failed = |what: &str, out: &std::process::Output| {
+        WorktreeError::Git(format!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    };
+    let add = git(&["add", "-A", "--", ".", ":(exclude).wingman"])?;
+    if !add.status.success() {
+        return Err(failed("git add -A", &add));
     }
-    if dirty.stdout.is_empty() {
+    // Exit 0 means nothing is staged.
+    if git(&["diff", "--cached", "--quiet"])?.status.success() {
         return Ok(None);
     }
-    let add = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("add")
-        .arg("-A")
-        .output()?;
-    if !add.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git add -A failed: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        )));
-    }
-    let commit = Command::new("git")
-        .arg("-C")
-        .arg(worktree_path)
-        .arg("commit")
-        .arg("-m")
-        .arg(fallback_message)
-        // Workers may not have user.email / user.name configured in their
-        // worktree; supply env-level defaults so the commit doesn't fail
-        // on a vanilla machine.
-        .env("GIT_AUTHOR_NAME", "wingman pilot")
-        .env("GIT_AUTHOR_EMAIL", "pilot@wingman.local")
-        .env("GIT_COMMITTER_NAME", "wingman pilot")
-        .env("GIT_COMMITTER_EMAIL", "pilot@wingman.local")
-        .output()?;
+    let commit = git(&["commit", "-q", "--no-verify", "-m", message])?;
     if !commit.status.success() {
-        return Err(WorktreeError::Git(format!(
-            "git commit failed: {}",
-            String::from_utf8_lossy(&commit.stderr).trim()
-        )));
+        return Err(failed("git commit", &commit));
     }
-    let sha = rev_parse(worktree_path, "HEAD")?;
-    Ok(Some(sha))
+    rev_parse(worktree_path, "HEAD").map(Some)
 }
 
 /// Paths the worker left modified in `worktree_path`, committed or not.
@@ -416,11 +483,12 @@ pub fn merge_integration(
     merge_integration_with_resolver(repo_root, base_commit, integration_branch, state, None)
 }
 
-/// Type of the in-run conflict resolver: given the conflicted paths (which
-/// carry git conflict markers in the working tree), edit them to a resolved
-/// state and return `true`. Returning `false` (or no resolver) preserves the
-/// old behavior — abort the merge and surface [`WorktreeError::Conflict`].
-pub type ConflictResolver<'a> = &'a dyn Fn(&[String]) -> bool;
+/// Type of the in-run conflict resolver: given the id of the task whose squash
+/// conflicted and the conflicted paths (which carry git conflict markers in
+/// the working tree), edit them to a resolved state and return `true`.
+/// Returning `false` (or no resolver) preserves the old behavior — abort the
+/// merge and surface [`WorktreeError::Conflict`].
+pub type ConflictResolver<'a> = &'a dyn Fn(&str, &[String]) -> bool;
 
 /// [`merge_integration`] with an optional [`ConflictResolver`]. When a squash
 /// conflicts and the resolver resolves it, the task still lands instead of
@@ -519,7 +587,7 @@ pub fn merge_integration_with_resolver(
             // success, stage the resolutions and fall through to the normal
             // squash-commit below so this task still lands on the branch.
             let resolved = !files.is_empty()
-                && resolver.map(|r| r(&files)).unwrap_or(false)
+                && resolver.map(|r| r(task_id, &files)).unwrap_or(false)
                 && Command::new("git")
                     .arg("-C")
                     .arg(repo_root)
@@ -608,6 +676,72 @@ fn has_conflict_markers(repo_root: &Path, files: &[String]) -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+/// E4 — set up a merge-fixer's worktree for the conflict
+/// [`merge_integration_with_resolver`] hit on `task_id`: `fixer_id`'s branch
+/// at the integration branch's current tip (every task merged so far) with
+/// `task_id`'s branch squash-merged on top, so the worktree holds the same
+/// conflict markers the integration checkout does. Recreates the worktree
+/// from scratch when an earlier attempt left one.
+pub fn prepare_merge_fixer_worktree(
+    repo_root: &Path,
+    integration_branch: &str,
+    run_id: &str,
+    task_id: &str,
+    fixer_id: &str,
+    worktree_path: &Path,
+) -> Result<(), WorktreeError> {
+    create_worktree(
+        repo_root,
+        integration_branch,
+        run_id,
+        fixer_id,
+        worktree_path,
+    )?;
+    // Exits non-zero on exactly the conflict this worktree exists to hold.
+    Command::new("git")
+        .arg("-C")
+        .arg(worktree_path)
+        .args(["merge", "--squash"])
+        .arg(task_branch(run_id, task_id))
+        .output()?;
+    Ok(())
+}
+
+/// E4 — carry a merge-fixer's resolution from its worktree into the
+/// integration checkout at `repo_root`, which is stopped on the same conflict.
+/// The checkout's files and index are set to the worktree's, committed by the
+/// fixer or not (`.wingman/` aside); HEAD stays where it is, so the caller's
+/// squash commit lands the result. Returns `false` and touches nothing while
+/// any of `files` in the worktree still holds a conflict marker.
+pub fn adopt_merge_fixer_resolution(
+    repo_root: &Path,
+    worktree_path: &Path,
+    files: &[String],
+) -> Result<bool, WorktreeError> {
+    if has_conflict_markers(worktree_path, files) {
+        return Ok(false);
+    }
+    let tree = snapshot_tree(worktree_path)?;
+    for args in [
+        vec!["reset", "-q", "--hard"],
+        vec!["read-tree", "-m", "-u", "HEAD", tree.as_str()],
+    ] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(&args)
+            .output()?;
+        if !out.status.success() {
+            return Err(WorktreeError::Git(format!(
+                "git {} failed: {}",
+                args[0],
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    Ok(true)
 }
 
 /// Remove every per-task worktree under `<project>/.wingman/worktrees/`
@@ -842,6 +976,104 @@ mod tests {
             .trim()
             .to_string();
         Some((root, head))
+    }
+
+    /// E5.5: a restore puts back what the snapshot held, deletes what was
+    /// added since, keeps ignored files, and leaves HEAD and the real index
+    /// alone.
+    #[test]
+    fn restore_tree_returns_the_worktree_to_its_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, head)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        std::fs::write(
+            repo.join(".gitignore"),
+            "target/
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("seed.txt"),
+            "green
+",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.join("kept.txt"),
+            "untracked but green
+",
+        )
+        .unwrap();
+        let green = snapshot_tree(&repo).unwrap();
+
+        std::fs::write(
+            repo.join("seed.txt"),
+            "broken
+",
+        )
+        .unwrap();
+        std::fs::remove_file(repo.join("kept.txt")).unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(
+            repo.join("src/new.rs"),
+            "fn broken(
+",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("target")).unwrap();
+        std::fs::write(repo.join("target/build.out"), "cache").unwrap();
+        std::fs::create_dir_all(repo.join(".wingman")).unwrap();
+        std::fs::write(repo.join(".wingman/task.json"), "{}").unwrap();
+
+        let broken = restore_tree(&repo, &green).unwrap();
+        assert_ne!(broken, green);
+        let read = |p: &str| std::fs::read_to_string(repo.join(p)).unwrap();
+        assert_eq!(
+            read("seed.txt"),
+            "green
+"
+        );
+        assert_eq!(
+            read("kept.txt"),
+            "untracked but green
+"
+        );
+        assert!(!repo.join("src/new.rs").exists());
+        assert_eq!(read("target/build.out"), "cache");
+        assert_eq!(read(".wingman/task.json"), "{}");
+        // HEAD did not move, and the real index still has only the seed.
+        assert_eq!(rev_parse(&repo, "HEAD").unwrap(), head);
+        let staged = git(&repo, &["diff", "--cached", "--name-only"]);
+        assert!(staged.stdout.is_empty(), "{staged:?}");
+
+        // And the returned tree undoes the restore.
+        restore_tree(&repo, &broken).unwrap();
+        assert_eq!(
+            read("seed.txt"),
+            "broken
+"
+        );
+        assert!(repo.join("src/new.rs").exists());
+    }
+
+    /// E9: a discarded speculative worktree takes its branch with it, so the
+    /// real assignment can create both afresh.
+    #[test]
+    fn discard_worktree_removes_directory_and_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, head)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let wt = repo.join(".wingman/worktrees/auto-r-t2");
+        create_worktree(&repo, &head, "r", "t2", &wt).unwrap();
+        assert!(wt.exists());
+        discard_worktree(&repo, "r", "t2", &wt);
+        assert!(!wt.exists());
+        let branches = git(&repo, &["branch", "--list", &task_branch("r", "t2")]);
+        assert!(branches.stdout.is_empty());
     }
 
     /// E4 rebase-as-you-go: `rebase_branch_onto` replays a non-conflicting
@@ -1177,7 +1409,8 @@ mod tests {
 
         // Resolver: write a clean merged body for any conflicted file.
         let repo_for_resolver = repo.clone();
-        let resolver = move |files: &[String]| -> bool {
+        let resolver = move |task_id: &str, files: &[String]| -> bool {
+            assert_eq!(task_id, "t2", "the later task is the one that conflicts");
             for f in files {
                 std::fs::write(repo_for_resolver.join(f), b"hello A\nhello B\n").unwrap();
             }
@@ -1190,6 +1423,93 @@ mod tests {
         assert_eq!(outcome.commits.len(), 2, "both tasks land");
         let merged = std::fs::read_to_string(repo.join("shared.txt")).unwrap();
         assert!(merged.contains("hello A") && merged.contains("hello B"));
+
+        let _ = cleanup_worktrees(&repo, run_id);
+    }
+
+    /// E4 merge-fixer: the resolver sets up a fixer worktree holding the same
+    /// conflict, a resolution made there (uncommitted, with a file the conflict
+    /// did not touch) is refused while markers remain, then carried into the
+    /// integration checkout so the conflicting task still lands.
+    #[test]
+    fn merge_fixer_worktree_resolution_lands_the_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((repo, base)) = init_repo(tmp.path()) else {
+            eprintln!("skipping: git not available");
+            return;
+        };
+        let run_id = "fixer-test";
+        let branch = "wingman/auto/fixer-test";
+        let mut state = RunState::new(run_id, "demo", &base, branch);
+        for (id, body) in [("t1", "hello A"), ("t2", "hello B")] {
+            let mut task = Task::new(id, Role::Developer, format!("edit {id}"));
+            task.status = TaskStatus::Review;
+            state.tasks.push(task);
+            let wt = repo
+                .join(".wingman")
+                .join("worktrees")
+                .join(format!("auto-{run_id}-{id}"));
+            create_worktree(&repo, &base, run_id, id, &wt).unwrap();
+            std::fs::write(wt.join("shared.txt"), body.as_bytes()).unwrap();
+            git(&wt, &["add", "-A"]);
+            git(&wt, &["commit", "-m", &format!("touch from {id}")]);
+        }
+
+        let repo_for_resolver = repo.clone();
+        let resolver = move |task_id: &str, files: &[String]| -> bool {
+            let repo = &repo_for_resolver;
+            let wt = repo
+                .join(".wingman")
+                .join("worktrees")
+                .join(format!("auto-{run_id}-merge-fixer-{task_id}"));
+            let fixer = format!("merge-fixer-{task_id}");
+            prepare_merge_fixer_worktree(repo, branch, run_id, task_id, &fixer, &wt).unwrap();
+            let held = std::fs::read_to_string(wt.join("shared.txt")).unwrap();
+            assert!(
+                held.contains("<<<<<<<"),
+                "fixer worktree holds the conflict"
+            );
+            assert!(!adopt_merge_fixer_resolution(repo, &wt, files).unwrap());
+            std::fs::write(
+                wt.join("shared.txt"),
+                b"hello A
+hello B
+",
+            )
+            .unwrap();
+            std::fs::write(
+                wt.join("extra.txt"),
+                b"fixup
+",
+            )
+            .unwrap();
+            adopt_merge_fixer_resolution(repo, &wt, files).unwrap()
+        };
+
+        let outcome =
+            merge_integration_with_resolver(&repo, &base, branch, &state, Some(&resolver))
+                .expect("the fixer's resolution should let the merge complete");
+        assert_eq!(outcome.commits.len(), 2, "both tasks land");
+        let show = |path: &str| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["show", &format!("{branch}:{path}")])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).to_string()
+        };
+        assert_eq!(
+            show("shared.txt"),
+            "hello A
+hello B
+"
+        );
+        assert_eq!(
+            show("extra.txt"),
+            "fixup
+"
+        );
 
         let _ = cleanup_worktrees(&repo, run_id);
     }

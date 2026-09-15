@@ -6,6 +6,7 @@
 //! exponential backoff (honoring `Retry-After` when present) before giving up.
 
 use std::future::Future;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use wingman_core::WingmanError;
@@ -15,7 +16,39 @@ const BASE_DELAY_SECS: f64 = 0.5;
 const MAX_DELAY_SECS: f64 = 8.0;
 
 fn is_retryable_status(code: u16) -> bool {
-    matches!(code, 429 | 500 | 502 | 503 | 504)
+    matches!(code, 429 | 500 | 502 | 503 | 504 | 529)
+}
+
+/// A provider pushed back for capacity: `429 Too Many Requests`, or Anthropic's
+/// `529 overloaded_error`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateLimitHit {
+    pub status: u16,
+    /// The response's `Retry-After`, in seconds, when it sent one.
+    pub retry_after_secs: Option<f64>,
+}
+
+type RateLimitObserver = Box<dyn Fn(RateLimitHit) + Send + Sync>;
+
+static RATE_LIMIT_OBSERVER: OnceLock<RateLimitObserver> = OnceLock::new();
+
+/// Report every rate-limit response from any provider in this process to `f`,
+/// retried or not. The pilot worker registers one to tell its orchestrator,
+/// which narrows how many workers it runs (E9). Process-wide and set once: a
+/// second registration is ignored.
+pub fn observe_rate_limits(f: impl Fn(RateLimitHit) + Send + Sync + 'static) {
+    let _ = RATE_LIMIT_OBSERVER.set(Box::new(f));
+}
+
+fn report_rate_limit(status: u16, retry_after_secs: Option<f64>) {
+    if matches!(status, 429 | 529) {
+        if let Some(observe) = RATE_LIMIT_OBSERVER.get() {
+            observe(RateLimitHit {
+                status,
+                retry_after_secs,
+            });
+        }
+    }
 }
 
 /// Exponential backoff for `attempt` (1-based), capped.
@@ -55,6 +88,7 @@ where
         match build_and_send().await {
             Ok(resp) => {
                 let status = resp.status();
+                report_rate_limit(status.as_u16(), retry_after_secs(&resp));
                 if status.is_success()
                     || attempt >= MAX_ATTEMPTS
                     || !is_retryable_status(status.as_u16())
@@ -92,12 +126,36 @@ mod tests {
 
     #[test]
     fn retryable_statuses() {
-        for c in [429, 500, 502, 503, 504] {
+        for c in [429, 500, 502, 503, 504, 529] {
             assert!(is_retryable_status(c), "{c} should retry");
         }
         for c in [200, 400, 401, 403, 404, 422] {
             assert!(!is_retryable_status(c), "{c} should not retry");
         }
+    }
+
+    /// Only capacity pushback reaches the observer; a 500 is retried but says
+    /// nothing about how hard the provider may be driven.
+    #[test]
+    fn rate_limits_reach_the_observer() {
+        static SEEN: std::sync::Mutex<Vec<RateLimitHit>> = std::sync::Mutex::new(Vec::new());
+        observe_rate_limits(|hit| SEEN.lock().unwrap().push(hit));
+        for (status, after) in [(200, None), (500, Some(1.0)), (429, Some(7.0)), (529, None)] {
+            report_rate_limit(status, after);
+        }
+        assert_eq!(
+            *SEEN.lock().unwrap(),
+            vec![
+                RateLimitHit {
+                    status: 429,
+                    retry_after_secs: Some(7.0)
+                },
+                RateLimitHit {
+                    status: 529,
+                    retry_after_secs: None
+                },
+            ]
+        );
     }
 
     #[test]

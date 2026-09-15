@@ -68,7 +68,9 @@ wingman [OPTIONS] [COMMAND]
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
 | `pilot resume <run-id>` | Resume an interrupted run; re-queues stuck tasks. |
-| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). |
+| `pilot daemon`       | Always-on discovery daemon (requires `[pilot.daemon] enabled`). Also polls opened PRs for their outcome every `[pilot.daemon].feedback_poll_secs`. |
+| `pilot feedback`     | Poll every run's opened PR for its terminal state (`gh`) and record a `pr.outcome` event. `--cycles N` (0 = forever). |
+| `pilot eval`         | Score eval results against a baseline and exit 1 on regression. `--goals <file>` runs the goals live first (no PR); `--baseline <file>`, `--threshold <f>` (default 0.10), `--update-baseline`. |
 | `pilot abort` / `pilot retry <task>` | Control a live run via its control channel. |
 | `pilot approve` / `pilot veto` | Approve or reject a run waiting at the plan-approval gate. |
 | `pilot tell "<msg>" [run-id]` | Inject a message into the live worker's next turn (`--task <id>` to address one). |

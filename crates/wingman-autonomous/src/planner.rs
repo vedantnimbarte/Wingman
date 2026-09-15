@@ -623,7 +623,7 @@ pub async fn persist_plan(store: &mut RunStore, plan: &[PlannedTask]) -> Result<
 /// Extract the first balanced top-level JSON object from a string. Used to
 /// peel off Markdown fences or surrounding prose when models stray from
 /// the "respond with only JSON" instruction.
-fn extract_json_object(s: &str) -> Option<String> {
+pub(crate) fn extract_json_object(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
     let start = bytes.iter().position(|b| *b == b'{')?;
     let mut depth = 0i32;

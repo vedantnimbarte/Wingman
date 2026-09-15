@@ -31,8 +31,29 @@ Wingman different; this is everything else it does.
   model; `wingman logout <provider>` clears it. ChatGPT uses a browser
   OAuth flow.
 - **Multi-agent pilot mode.** `wingman pilot run "<goal>"` plans, spawns
-  worker agents in isolated worktrees, and opens a PR. See
-  [PILOT-MODE.md](PILOT-MODE.md).
+  worker agents in isolated worktrees, and opens a PR. Tasks are gated on
+  executable acceptance checks (including HTTP responses validated against a
+  JSON schema), and every PR gets a security pass (secrets, gitleaks, lockfile
+  license policy, cargo audit) whose summary is posted as a PR comment. Hard
+  escalation triggers (fewer passing tests than the base commit, 80%/100% of
+  the budget, three failures in a row, a force-push outside `wingman/auto/*`)
+  fire while the run is live and block auto-merge. The concurrency cap narrows
+  under provider rate limits and host CPU load, a task about to become ready
+  gets its worktree created and built ahead of assignment, and on autopilot a
+  worker whose turn gate keeps failing is rolled back to its last green state.
+  A merge conflict the one-shot resolver cannot clear goes to merge-fixer
+  workers before the run stops. After each merged run the project knowledge
+  layer (architecture summary, decisions, merge hotspots) is updated, by a
+  knowledge-keeper agent on autopilot, and the planner reads it back. On
+  autopilot, multi-file work that never called the `checkpoint` tool is failed
+  before review. A critic model, which can be required to come from a different
+  model family than the workers, adds guardrail tasks to the plan and can veto
+  auto-merge. Cross-run stats count a task as a first-try success only when no
+  retry rung ran. The daemon polls opened PRs for their post-merge outcome on
+  its own cadence, and `wingman pilot eval` scores canned goals, with an LLM
+  judge grading each run's diff against a golden commit, and fails on a
+  regression against a committed baseline (run weekly by
+  `.github/workflows/eval.yml`). See [PILOT-MODE.md](PILOT-MODE.md).
 - **`wingman knows`.** Prints what Wingman knows about the current project:
   memories, skills, model routing, the verification gate, and index
   freshness.

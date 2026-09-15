@@ -1,4 +1,4 @@
-//! Manager-only tools.
+//! Manager-only tools, plus the worker-only `run_acceptance` and `checkpoint`.
 //!
 //! These are the only tools registered on the manager's [`wingman_core::AgentLoop`].
 //! Each is a thin Tool that translates JSON args from the model into a
@@ -26,6 +26,7 @@ pub const ORCHESTRATION_TOOLS: &[&str] = &[
 mod abort_task;
 mod add_task;
 mod assign_task;
+mod checkpoint;
 mod finalize_task;
 mod message_agent;
 mod reassign_task;
@@ -34,6 +35,7 @@ mod run_acceptance;
 pub use abort_task::AbortTask;
 pub use add_task::AddTask;
 pub use assign_task::AssignTask;
+pub use checkpoint::Checkpoint;
 pub use finalize_task::FinalizeTask;
 pub use message_agent::MessageAgent;
 pub use reassign_task::ReassignTask;

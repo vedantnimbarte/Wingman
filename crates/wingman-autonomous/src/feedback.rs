@@ -106,8 +106,9 @@ pub fn poll_pr_outcome(
 /// R2 poll-and-record: poll the PR and, if it has reached a terminal
 /// state, append a [`crate::model::Event::PrOutcome`] to the run store so
 /// the cross-run learning loop (E6) sees it. Returns the recorded outcome
-/// (or `None` if the PR is still open). The scheduling cadence that calls
-/// this is the daemon's concern.
+/// (or `None` if the PR is still open). `wingman pilot feedback` calls it
+/// each cycle, and `wingman pilot daemon` every
+/// `[pilot.daemon].feedback_poll_secs`.
 pub async fn poll_and_record(
     runner: &dyn CommandRunner,
     store: &mut crate::store::RunStore,

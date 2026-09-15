@@ -310,6 +310,17 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     );
     let provider = runtime::build_provider(&cfg, &selection.provider_id)
         .with_context(|| format!("building provider for {}", selection.provider_id))?;
+    // J10 — resolved before planning, so a critic that breaks
+    // `critic_other_family` stops the run before any model is paid for.
+    let critic = critic(
+        &cfg,
+        &pilot,
+        pilot.worker_model.as_deref().unwrap_or(&selection.model),
+        wingman_autonomous::pipeline::AuxAgent {
+            provider: provider.clone(),
+            model: selection.model.clone(),
+        },
+    )?;
 
     // J1 — goal refinement & negotiation (autopilot, or wherever the
     // `goal_refinement` capability is enabled). Runs a refinement agent
@@ -393,7 +404,16 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     if priming.is_some() {
         eprintln!("[pilot] priming planner with similar past runs (E6).");
     }
-    let plan = wingman_autonomous::planner::plan_from_goal_with_priming(
+    // J8 — and with what earlier merged runs left in the project's knowledge
+    // layer: the architecture summary, recent decisions, merge hotspots.
+    let priming = match (
+        priming,
+        wingman_autonomous::knowledge::render_planner_context(&project.root),
+    ) {
+        (Some(p), Some(k)) => Some(format!("{p}\n\n{k}")),
+        (p, k) => p.or(k),
+    };
+    let mut plan = wingman_autonomous::planner::plan_from_goal_with_priming(
         &llm as &dyn PlannerLlm,
         &goal,
         &project.root,
@@ -401,6 +421,27 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     )
     .await
     .context("planner call failed")?;
+
+    // J10 — the critic reads the plan before anyone approves it; its medium+
+    // risks become guardrail tasks that run after the plan's own.
+    if let Some(critic) = &critic {
+        eprintln!("[pilot] critic reviewing the plan ({})…", critic.model);
+        let critic_llm = ProviderLlm {
+            provider: critic.provider.as_ref(),
+            model: critic.model.clone(),
+            max_tokens: 4096,
+        };
+        match wingman_autonomous::critic::review_plan(&critic_llm, &goal, &plan).await {
+            Some(report) => {
+                let added = wingman_autonomous::critic::append_guardrails(&mut plan, &report);
+                eprintln!(
+                    "[pilot] critic: {} risk(s), {added} guardrail task(s) added.",
+                    report.risks.len()
+                );
+            }
+            None => eprintln!("[pilot] critic: no usable plan review; no guardrails added."),
+        }
+    }
 
     eprintln!(
         "[pilot] proposed {} task(s) (run id: {run_id}).",
@@ -642,24 +683,28 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         max_usd: pilot.max_usd,
         max_total_tokens: pilot.max_total_tokens,
         max_retries_per_task: pilot.max_retries_per_task,
-        enforce_checkpoint_hygiene: capability_on(&pilot, "checkpoint_hygiene"),
         desktop_inbox: wingman_autonomous::notify::desktop_target(
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &pilot.notifications,
         ),
+        sample_host_load: capability_on(&pilot, "adaptive_concurrency"),
+        speculative_prespawn: capability_on(&pilot, "speculative_prespawn"),
+        warm_cmd: pilot.turn_gate_cmd.clone(),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
         .map(|g| g.join("stats.jsonl"));
     let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = wingman_autonomous::pipeline::PipelineInputs {
-        provider,
+        provider: provider.clone(),
         manager_model: selection.model.clone(),
         worker_spawner: build_real_worker_spawner(
             pilot.worker_model.as_deref().unwrap_or(&selection.model),
             &selection.model,
             routing,
             std::time::Duration::from_secs(pilot.task_timeout_secs),
+            turn_rollback_after(&pilot),
+            capability_on(&pilot, "checkpoint_hygiene"),
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -678,7 +723,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         security_config: pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&pilot, "per_task_reviewer"),
-        run_critic: capability_on(&pilot, "critic"),
+        critic,
         // Resolve through the same provider/model split the manager uses so a
         // `provider/model` config value (e.g. `openrouter/deepseek/…`) becomes
         // the bare model id the provider's API expects — the prefixed string
@@ -695,6 +740,15 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         },
         sandbox_default_tier: pilot.sandbox.default_tier.clone(),
         dangerous_paths: pilot.approval.dangerous_paths.clone(),
+        merge_fixer: capability_on(&pilot, "merge_fixer"),
+        knowledge_keeper: knowledge_keeper(
+            &cfg,
+            &pilot,
+            wingman_autonomous::pipeline::AuxAgent {
+                provider,
+                model: selection.model.clone(),
+            },
+        ),
     };
 
     eprintln!(
@@ -745,11 +799,28 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             !outcome.failed_tasks.is_empty(),
         );
     }
-    if !outcome.failed_tasks.is_empty() {
+    // J15 — every hard trigger the run hit, live or at the PR gate.
+    for trigger in &outcome.escalation_triggers {
         eprintln!(
-            "[pilot] some tasks did not reach Done: {:?}",
-            outcome.failed_tasks
+            "[pilot] escalation: {} — {}",
+            trigger.short_label(),
+            trigger.render()
         );
+    }
+    // E11 — finished tasks that skipped checkpoints. With `checkpoint_hygiene`
+    // on they were failed before review instead, so this is the advisory view.
+    for (task, reason) in &outcome.checkpoint_violations {
+        eprintln!("[pilot] checkpoint hygiene (advisory): {task}: {reason}");
+    }
+    // A packet with no failed task is a run blocked on a trigger (a refused
+    // force-push), which is not a finished run either.
+    if !outcome.failed_tasks.is_empty() || outcome.escalation_packet.is_some() {
+        if !outcome.failed_tasks.is_empty() {
+            eprintln!(
+                "[pilot] some tasks did not reach Done: {:?}",
+                outcome.failed_tasks
+            );
+        }
         if let Some(packet) = &outcome.escalation_packet {
             eprintln!("[pilot] escalation packet written: {}", packet.display());
         }
@@ -759,6 +830,16 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         eprintln!("[pilot] PR opened: {}", pr.url);
     } else if outcome.merged.is_some() {
         eprintln!("[pilot] integration branch ready; PR step skipped (--no-pr).");
+    }
+    // R6 — say which scanners ran; a skipped one is not a clean result.
+    if let Some(security) = &outcome.security {
+        eprintln!(
+            "[pilot] security pass: {} finding(s)",
+            security.findings.len()
+        );
+        for note in &security.notes {
+            eprintln!("[pilot]   {note}");
+        }
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -913,14 +994,122 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
     match key {
         // Per-task reviewer (E7): on for copilot and autopilot.
         "per_task_reviewer" => matches!(pilot.tier, Copilot | Autopilot),
-        // Mandatory checkpoint hygiene (E11): on for copilot and autopilot.
-        "checkpoint_hygiene" => matches!(pilot.tier, Copilot | Autopilot),
+        // Mandatory checkpoint hygiene (E11): fails multi-file work that never
+        // checkpointed, so autopilot-only by default.
+        "checkpoint_hygiene" => matches!(pilot.tier, Autopilot),
         // Critic (J10): autopilot-only by default.
         "critic" => matches!(pilot.tier, Autopilot),
         // Goal refinement / negotiation (J1): autopilot-only by default.
         "goal_refinement" => matches!(pilot.tier, Autopilot),
+        // Host-load-aware concurrency cap (E9): every tier. Rate limits and
+        // budget burn narrow the cap regardless.
+        "adaptive_concurrency" => true,
+        // Speculative worktree pre-spawn (E9): on for copilot and autopilot.
+        "speculative_prespawn" => matches!(pilot.tier, Copilot | Autopilot),
+        // Per-turn rollback to the last green checkpoint (E5.5): discards
+        // worker edits, so autopilot-only by default.
+        "turn_rollback" => matches!(pilot.tier, Autopilot),
+        // Merge-fixer workers on an unresolved merge conflict (E4): copilot
+        // and autopilot, with write-set scheduling.
+        "merge_fixer" => matches!(pilot.tier, Copilot | Autopilot),
+        // Knowledge-keeper agent after a merged run (J8): autopilot-only.
+        "knowledge_keeper" => matches!(pilot.tier, Autopilot),
         // Unknown capability defaults off.
         _ => false,
+    }
+}
+
+/// J8 — the knowledge-keeper pass, while its capability is on. It runs on the
+/// `summarize` task class (`[router.classes]`, usually the fast model); when
+/// that class is unrouted, or its provider cannot be built, it runs on
+/// `manager` instead.
+fn knowledge_keeper(
+    cfg: &Config,
+    pilot: &wingman_config::PilotConfig,
+    manager: wingman_autonomous::pipeline::AuxAgent,
+) -> Option<wingman_autonomous::pipeline::AuxAgent> {
+    if !capability_on(pilot, "knowledge_keeper") {
+        return None;
+    }
+    let routed = cfg
+        .router
+        .resolve_class("summarize")
+        .and_then(|spec| cfg.resolve_model_spec(&spec))
+        .and_then(
+            |(provider_id, model)| match runtime::build_provider(cfg, &provider_id) {
+                Ok(provider) => Some(wingman_autonomous::pipeline::AuxAgent { provider, model }),
+                Err(e) => {
+                    eprintln!(
+                        "[pilot] knowledge-keeper: cannot build provider {provider_id} for the \
+                         summarize class ({e}); using the manager model"
+                    );
+                    None
+                }
+            },
+        );
+    Some(routed.unwrap_or(manager))
+}
+
+/// J10 — the critic agent, while its capability is on. It runs on
+/// `[pilot].critic_model`, else `reviewer_model`, else `default_model`, and
+/// only without any of those on `manager`. With `critic_other_family` set, a
+/// critic from `worker_model`'s family, or one whose family (either side) the
+/// name does not tell, refuses the run: without that check the critic would
+/// quietly share the workers' blind spots.
+fn critic(
+    cfg: &Config,
+    pilot: &wingman_config::PilotConfig,
+    worker_model: &str,
+    manager: wingman_autonomous::pipeline::AuxAgent,
+) -> Result<Option<wingman_autonomous::pipeline::AuxAgent>> {
+    if !capability_on(pilot, "critic") {
+        return Ok(None);
+    }
+    let spec = pilot
+        .critic_model
+        .as_ref()
+        .or(pilot.reviewer_model.as_ref())
+        .or(pilot.default_model.as_ref());
+    let critic = match spec {
+        Some(spec) => {
+            let sel = runtime::resolve_selection(cfg, Some(spec))
+                .with_context(|| format!("resolving the critic model {spec}"))?;
+            let provider = runtime::build_provider(cfg, &sel.provider_id)
+                .with_context(|| format!("building provider {} for the critic", sel.provider_id))?;
+            wingman_autonomous::pipeline::AuxAgent {
+                provider,
+                model: sel.model,
+            }
+        }
+        None => manager,
+    };
+    if pilot.critic_other_family {
+        use wingman_autonomous::critic::model_family;
+        match (model_family(&critic.model), model_family(worker_model)) {
+            (Some(c), Some(w)) if c != w => {}
+            (c, w) => {
+                return Err(anyhow!(
+                    "[pilot].critic_other_family is set, but the critic `{}` ({}) is not from \
+                     another model family than the workers' `{worker_model}` ({}). Set \
+                     [pilot].critic_model to a model from another family, or turn \
+                     critic_other_family off.",
+                    critic.model,
+                    c.unwrap_or("unknown family"),
+                    w.unwrap_or("unknown family"),
+                ))
+            }
+        }
+    }
+    Ok(Some(critic))
+}
+
+/// E5.5 — the `--turn-rollback-after` a worker gets: `[pilot].turn_rollback_after`
+/// while the `turn_rollback` capability is on, 0 (off) otherwise.
+fn turn_rollback_after(pilot: &wingman_config::PilotConfig) -> u32 {
+    if capability_on(pilot, "turn_rollback") {
+        pilot.turn_rollback_after
+    } else {
+        0
     }
 }
 
@@ -1443,18 +1632,20 @@ pub async fn resume(
         max_usd: cfg.pilot.max_usd,
         max_total_tokens: cfg.pilot.max_total_tokens,
         max_retries_per_task: cfg.pilot.max_retries_per_task,
-        enforce_checkpoint_hygiene: capability_on(&cfg.pilot, "checkpoint_hygiene"),
         desktop_inbox: wingman_autonomous::notify::desktop_target(
             wingman_autonomous::notify::NotificationSeverity::Escalation,
             &cfg.pilot.notifications,
         ),
+        sample_host_load: capability_on(&cfg.pilot, "adaptive_concurrency"),
+        speculative_prespawn: capability_on(&cfg.pilot, "speculative_prespawn"),
+        warm_cmd: cfg.pilot.turn_gate_cmd.clone(),
     };
     let stats_path = wingman_config::global_dir()
         .ok()
         .map(|g| g.join("stats.jsonl"));
     let routing = load_routing_aggregates(stats_path.as_deref());
     let inputs = wingman_autonomous::pipeline::PipelineInputs {
-        provider,
+        provider: provider.clone(),
         manager_model: selection.model.clone(),
         worker_spawner: build_real_worker_spawner(
             cfg.pilot
@@ -1464,6 +1655,8 @@ pub async fn resume(
             &selection.model,
             routing,
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
+            turn_rollback_after(&cfg.pilot),
+            capability_on(&cfg.pilot, "checkpoint_hygiene"),
         )?,
         base_branch,
         project_root: project.root,
@@ -1485,7 +1678,18 @@ pub async fn resume(
         security_config: cfg.pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&cfg.pilot, "per_task_reviewer"),
-        run_critic: capability_on(&cfg.pilot, "critic"),
+        critic: critic(
+            &cfg,
+            &cfg.pilot,
+            cfg.pilot
+                .worker_model
+                .as_deref()
+                .unwrap_or(&selection.model),
+            wingman_autonomous::pipeline::AuxAgent {
+                provider: provider.clone(),
+                model: selection.model.clone(),
+            },
+        )?,
         // See the run() path: strip the provider prefix so the reviewer model
         // is a bare id the provider's API accepts.
         reviewer_model: match cfg
@@ -1501,17 +1705,41 @@ pub async fn resume(
         },
         sandbox_default_tier: cfg.pilot.sandbox.default_tier.clone(),
         dangerous_paths: cfg.pilot.approval.dangerous_paths.clone(),
+        merge_fixer: capability_on(&cfg.pilot, "merge_fixer"),
+        knowledge_keeper: knowledge_keeper(
+            &cfg,
+            &cfg.pilot,
+            wingman_autonomous::pipeline::AuxAgent {
+                provider,
+                model: selection.model.clone(),
+            },
+        ),
     };
 
     eprintln!("[pilot] resume: driving manager loop for run {run_id}");
     let outcome = wingman_autonomous::pipeline::run_to_completion(store, inputs)
         .await
         .context("pipeline run_to_completion")?;
-    if !outcome.failed_tasks.is_empty() {
+    for trigger in &outcome.escalation_triggers {
         eprintln!(
-            "[pilot] resume: tasks ended in non-Done state: {:?}",
-            outcome.failed_tasks
+            "[pilot] resume: escalation: {} — {}",
+            trigger.short_label(),
+            trigger.render()
         );
+    }
+    if !outcome.failed_tasks.is_empty() || outcome.escalation_packet.is_some() {
+        if !outcome.failed_tasks.is_empty() {
+            eprintln!(
+                "[pilot] resume: tasks ended in non-Done state: {:?}",
+                outcome.failed_tasks
+            );
+        }
+        if let Some(packet) = &outcome.escalation_packet {
+            eprintln!(
+                "[pilot] resume: escalation packet written: {}",
+                packet.display()
+            );
+        }
         return Ok(ExitCode::from(2));
     }
     if let Some(pr) = outcome.pr {
@@ -1536,6 +1764,8 @@ fn build_real_worker_spawner(
     manager_model: &str,
     routing: Option<std::sync::Arc<wingman_autonomous::learning::Aggregates>>,
     task_timeout: std::time::Duration,
+    turn_rollback_after: u32,
+    checkpoint_hygiene: bool,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1592,6 +1822,9 @@ fn build_real_worker_spawner(
                     model,
                     timeout: task_timeout,
                     cmd_rx,
+                    rung: ctx.rung,
+                    turn_rollback_after,
+                    checkpoint_hygiene,
                 };
                 // Pass the shared store by reference; run_worker locks it only
                 // per event append, so workers actually run concurrently
@@ -1769,10 +2002,15 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     let interval = Duration::from_secs(pilot.daemon.poll_interval_secs.max(1));
 
     eprintln!(
-        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s){}",
+        "[pilot] daemon starting (sources: {:?}, auto_threshold: {:.2}, interval: {}s, \
+         feedback: {}){}",
         pilot.daemon.sources,
         pilot.daemon.auto_threshold,
         pilot.daemon.poll_interval_secs,
+        match pilot.daemon.feedback_poll_secs {
+            0 => "off".to_string(),
+            s => format!("every {s}s"),
+        },
         if cycles == 0 {
             " — Ctrl-C to stop".to_string()
         } else {
@@ -1784,9 +2022,19 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool) -> Result<ExitCod
     // queued is remembered by source+title, so the same issue isn't
     // re-queued or re-dispatched every poll.
     let mut seen: std::collections::HashSet<String> = load_queued_keys(&queue_path);
+    let mut last_feedback: Option<std::time::Instant> = None;
 
     let mut n = 0usize;
     loop {
+        // R2 — the post-merge feedback pass rides the discovery loop on its
+        // own, slower cadence. It only reads PR state and appends to run logs
+        // this repo already holds, so `--dry-run` runs it too.
+        let now = std::time::Instant::now();
+        if feedback_due(last_feedback, now, pilot.daemon.feedback_poll_secs) {
+            last_feedback = Some(now);
+            poll_feedback(&runner, &project.root, n).await;
+        }
+
         let results = wingman_autonomous::daemon::run_cycle(
             &runner,
             &project.root,
@@ -1919,33 +2167,7 @@ pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
 
     let mut n = 0usize;
     loop {
-        let pending = feedback_pending_runs(&project.root).await;
-        if pending.is_empty() {
-            eprintln!("[pilot] feedback cycle {n}: no open PRs awaiting outcome");
-        }
-        for (dir, pr_url) in pending {
-            let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
-                    continue;
-                }
-            };
-            match wingman_autonomous::feedback::poll_and_record(
-                &runner,
-                &mut store,
-                &project.root,
-                &pr_url,
-            )
-            .await
-            {
-                Ok(Some(kind)) => {
-                    eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
-                }
-                Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
-                Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
-            }
-        }
+        poll_feedback(&runner, &project.root, n).await;
 
         n += 1;
         if cycles != 0 && n >= cycles {
@@ -1954,6 +2176,59 @@ pub async fn feedback(cfg: Config, cycles: usize) -> Result<ExitCode> {
         }
         tokio::time::sleep(interval).await;
     }
+}
+
+/// One R2 feedback pass: poll every run awaiting an outcome and record the
+/// terminal ones. Returns how many outcomes it recorded. `pilot feedback` runs
+/// it each cycle; `pilot daemon` on `[pilot.daemon].feedback_poll_secs`.
+async fn poll_feedback(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    project_root: &std::path::Path,
+    cycle: usize,
+) -> usize {
+    let pending = feedback_pending_runs(project_root).await;
+    if pending.is_empty() {
+        eprintln!("[pilot] feedback cycle {cycle}: no open PRs awaiting outcome");
+    }
+    let mut recorded = 0;
+    for (dir, pr_url) in pending {
+        let mut store = match wingman_autonomous::store::RunStore::load(&dir).await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[pilot] feedback: load {} failed: {e}", dir.display());
+                continue;
+            }
+        };
+        match wingman_autonomous::feedback::poll_and_record(
+            runner,
+            &mut store,
+            project_root,
+            &pr_url,
+        )
+        .await
+        {
+            Ok(Some(kind)) => {
+                recorded += 1;
+                eprintln!("[pilot] feedback: {pr_url} → {kind:?}")
+            }
+            Ok(None) => eprintln!("[pilot] feedback: {pr_url} still open"),
+            Err(e) => eprintln!("[pilot] feedback: {pr_url} poll failed: {e}"),
+        }
+    }
+    recorded
+}
+
+/// Whether the daemon's R2 feedback pass is due: never with `every_secs == 0`,
+/// on the first cycle, then once `every_secs` have passed since the last pass.
+/// Checked at cycle boundaries, so a cycle busy with a dispatched run delays
+/// the pass rather than running it alongside.
+fn feedback_due(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    every_secs: u64,
+) -> bool {
+    every_secs != 0
+        && last.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(every_secs))
 }
 
 /// Runs that opened a PR (`pr_url` set) but have no `pr.outcome` event yet.
@@ -2039,18 +2314,20 @@ pub async fn skills_install(cfg: Config) -> Result<ExitCode> {
 /// R4 — eval / regression harness + CI gate.
 ///
 /// Two modes:
-/// - `--goals <FILE>` runs each goal line live through the pilot pipeline,
-///   harvesting success/usd/wall, and writes `<eval>/results.jsonl`.
+/// - `--goals <FILE>` runs each goal live through the pilot pipeline,
+///   harvesting success/usd/wall and a quality score, and writes
+///   `<eval>/results.jsonl`.
 /// - otherwise reads an existing `<eval>/results.jsonl` (produced earlier or
 ///   hand-authored).
 ///
-/// Then it summarizes, compares to `<eval>/baseline.json`, prints the
-/// markdown report, and **exits non-zero on regression** — that exit code is
-/// the CI gate. `--update-baseline` rewrites the baseline from the current
-/// results and skips gating.
+/// Then it summarizes, compares to the baseline (`--baseline`, default
+/// `<eval>/baseline.json`), prints the markdown report, and **exits non-zero
+/// on regression** — that exit code is the CI gate. `--update-baseline`
+/// rewrites the baseline from the current results and skips gating.
 pub async fn eval(
     cfg: Config,
     goals_file: Option<std::path::PathBuf>,
+    baseline: Option<std::path::PathBuf>,
     threshold: f64,
     update_baseline: bool,
 ) -> Result<ExitCode> {
@@ -2058,22 +2335,22 @@ pub async fn eval(
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let eval_dir = project.root.join(".wingman").join("eval");
     let results_path = eval_dir.join("results.jsonl");
-    let baseline_path = eval_dir.join("baseline.json");
+    let baseline_path = baseline.unwrap_or_else(|| eval_dir.join("baseline.json"));
 
     // Gather this run's results: live if --goals given, else from disk.
     let results: Vec<EvalResult> = if let Some(gf) = goals_file {
-        let goals: Vec<String> = std::fs::read_to_string(&gf)
-            .with_context(|| format!("reading goals file {}", gf.display()))?
-            .lines()
-            .map(|l| l.trim().to_string())
-            .filter(|l| !l.is_empty() && !l.starts_with('#'))
-            .collect();
+        let text = std::fs::read_to_string(&gf)
+            .with_context(|| format!("reading goals file {}", gf.display()))?;
+        let goals = wingman_autonomous::eval::parse_goals(&text)
+            .map_err(|e| anyhow!("goals file {}: {e}", gf.display()))?;
         if goals.is_empty() {
             eprintln!("[pilot] eval: no goals in {}", gf.display());
             return Ok(ExitCode::from(1));
         }
+        // Golden diff paths are relative to the goals file.
+        let goals_dir = gf.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         eprintln!("[pilot] eval: running {} canned goal(s) live…", goals.len());
-        let res = run_eval_goals(&cfg, &project.root, &goals).await;
+        let res = run_eval_goals(&cfg, &project.root, &goals, &goals_dir).await;
         write_eval_results(&results_path, &res)?;
         res
     } else {
@@ -2123,39 +2400,114 @@ fn eval_gate(
     threshold: f64,
 ) -> (String, bool) {
     use wingman_autonomous::eval;
+    // Quality from the judge and from the success proxy average together, so
+    // say how much of each side was judged.
+    let judged = |rs: &[eval::EvalResult]| {
+        format!("{}/{}", rs.iter().filter(|r| r.judged).count(), rs.len())
+    };
     let cur = eval::summarize(current);
     match baseline {
         None => (
             format!(
                 "# Eval report\n\nNo baseline to compare against. {} result(s), \
-                 {:.0}% success, avg ${:.2}.\n\nRun `wingman pilot eval --update-baseline` \
-                 to set one.\n",
+                 {:.0}% success, avg ${:.2}.\n\nQuality judged against a golden reference \
+                 for {} goal(s); the rest are success-proxied.\n\nRun `wingman pilot eval \
+                 --update-baseline` to set one.\n",
                 cur.n,
                 cur.success_rate * 100.0,
-                cur.avg_usd
+                cur.avg_usd,
+                judged(current)
             ),
             false,
         ),
         Some(base) => {
             let b = eval::summarize(base);
             let report = eval::compare(&cur, &b, threshold);
-            (eval::render_report(&report), report.regressed)
+            (
+                format!(
+                    "{}\nQuality judged against a golden reference for {} goal(s) \
+                     (baseline: {}); the rest are success-proxied.\n",
+                    eval::render_report(&report),
+                    judged(current),
+                    judged(base)
+                ),
+                report.regressed,
+            )
         }
     }
 }
 
+/// R4 — the eval judge. It runs on the `judge` task class (`[router.classes]`)
+/// when that is routed, else on the planner model `pilot run` uses
+/// (`[pilot].default_model`, then `default_model`). `None` when neither can be
+/// built; goals with a golden reference then fall back to the success proxy.
+fn eval_judge(cfg: &Config) -> Option<wingman_autonomous::pipeline::AuxAgent> {
+    use wingman_autonomous::pipeline::AuxAgent;
+    let routed = cfg
+        .router
+        .resolve_class("judge")
+        .and_then(|spec| cfg.resolve_model_spec(&spec))
+        .and_then(
+            |(provider_id, model)| match runtime::build_provider(cfg, &provider_id) {
+                Ok(provider) => Some(AuxAgent { provider, model }),
+                Err(e) => {
+                    eprintln!(
+                        "[pilot] eval: cannot build provider {provider_id} for the judge class \
+                         ({e}); using the planner model"
+                    );
+                    None
+                }
+            },
+        );
+    routed.or_else(|| {
+        let spec = cfg
+            .pilot
+            .default_model
+            .clone()
+            .or_else(|| cfg.default_model.clone());
+        let built = runtime::resolve_selection(cfg, spec.as_deref()).and_then(|sel| {
+            runtime::build_provider(cfg, &sel.provider_id).map(|provider| AuxAgent {
+                provider,
+                model: sel.model,
+            })
+        });
+        match built {
+            Ok(judge) => Some(judge),
+            Err(e) => {
+                eprintln!("[pilot] eval: no judge model ({e:#}); golden goals are success-proxied");
+                None
+            }
+        }
+    })
+}
+
 /// Run each canned goal live through the pilot pipeline, harvesting metrics
 /// from the resulting run state. success = the run reached Done; usd from the
-/// run's recorded totals; wall from the wall clock around the call.
-/// ponytail: quality is success-proxied (1.0/0.0) — a real LLM-judge needs a
-/// golden diff per goal, which doesn't exist yet. Add it when golden refs do.
+/// run's recorded totals; wall from the wall clock around the call; quality
+/// from [`wingman_autonomous::eval::score_quality`] — the judge's grade of the
+/// run's diff against the goal's golden reference, else the success proxy.
+///
+/// A goal runs from its `base` (a golden commit's parent by default) and
+/// never opens a PR: an eval's attempts are measurements, not contributions.
+///
+/// A run leaves the checkout on its integration branch, built from that
+/// goal's base, where the goals file's golden diffs, the next goal and the
+/// baseline read after the suite may not exist. So after each run the
+/// checkout is put back where the suite found it, before the run is scored.
 async fn run_eval_goals(
     cfg: &Config,
     project_root: &std::path::Path,
-    goals: &[String],
+    goals: &[wingman_autonomous::eval::EvalGoal],
+    goals_dir: &std::path::Path,
 ) -> Vec<wingman_autonomous::eval::EvalResult> {
     use std::time::Instant;
     use wingman_autonomous::eval::EvalResult;
+    let has_golden = goals
+        .iter()
+        .any(|g| g.golden_commit.is_some() || g.golden_diff.is_some());
+    let judge = if has_golden { eval_judge(cfg) } else { None };
+    let runner = wingman_autonomous::pr::SystemCommandRunner;
+    let home = current_checkout(&runner, project_root);
     let mut out = Vec::with_capacity(goals.len());
     for goal in goals {
         let before: std::collections::HashSet<String> =
@@ -2166,41 +2518,105 @@ async fn run_eval_goals(
                 .collect();
         let started = Instant::now();
         let opts = PilotOptions {
-            goal: goal.clone(),
+            goal: goal.goal.clone(),
             yes: true,
+            no_pr: true,
+            base: goal.base(),
             ..PilotOptions::default()
         };
-        let _ = run(cfg.clone(), opts).await;
+        if let Err(e) = run(cfg.clone(), opts).await {
+            eprintln!("[pilot] eval: {:?} run failed: {e:#}", goal.goal);
+        }
         let wall_min = started.elapsed().as_secs_f64() / 60.0;
+        if let Some(home) = &home {
+            if let Err(e) = restore_checkout(&runner, project_root, home) {
+                eprintln!("[pilot] eval: could not return the checkout to {home}: {e}");
+            }
+        }
 
         // Find the run this goal produced (newest id not seen before) and
         // read its terminal status + spend.
-        let (success, usd) = wingman_autonomous::dashboard::list_runs(project_root)
+        let state = wingman_autonomous::dashboard::list_runs(project_root)
             .unwrap_or_default()
             .into_iter()
             .find(|r| !before.contains(&r.run_id))
-            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok())
-            .map(|s| {
-                (
-                    s.status == wingman_autonomous::RunStatus::Done,
-                    s.totals.usd,
-                )
-            })
-            .unwrap_or((false, 0.0));
+            .and_then(|r| wingman_autonomous::dashboard::load_state(&r.dir).ok());
+        let success = state
+            .as_ref()
+            .is_some_and(|s| s.status == wingman_autonomous::RunStatus::Done);
+        let usd = state.as_ref().map_or(0.0, |s| s.totals.usd);
+
+        let judge_llm = judge.as_ref().map(|j| ProviderLlm {
+            provider: j.provider.as_ref(),
+            model: j.model.clone(),
+            max_tokens: 1024,
+        });
+        let score = wingman_autonomous::eval::score_quality(
+            judge_llm.as_ref().map(|l| l as &dyn PlannerLlm),
+            &runner,
+            project_root,
+            goals_dir,
+            goal,
+            success,
+            state
+                .as_ref()
+                .map(|s| (s.base_commit.as_str(), s.integration_branch.as_str())),
+        )
+        .await;
 
         out.push(EvalResult {
-            goal: goal.clone(),
+            goal: goal.goal.clone(),
             success,
             usd,
             wall_min,
-            quality: if success { 1.0 } else { 0.0 },
+            quality: score.quality,
+            judged: score.judged,
         });
         eprintln!(
-            "[pilot] eval: {goal:?} → {} (${usd:.2}, {wall_min:.1}m)",
-            if success { "ok" } else { "fail" }
+            "[pilot] eval: {:?} → {} (${usd:.2}, {wall_min:.1}m, quality {:.2} {})",
+            goal.goal,
+            if success { "ok" } else { "fail" },
+            score.quality,
+            if score.judged { "judged" } else { "proxied" }
         );
+        if let Some(note) = &score.note {
+            eprintln!("[pilot] eval:   {note}");
+        }
     }
     out
+}
+
+/// Where HEAD is in `root`: its branch, or the commit when detached. `None`
+/// outside a git repository.
+fn current_checkout(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    root: &std::path::Path,
+) -> Option<String> {
+    let read = |args: &[&str]| {
+        runner
+            .run("git", args, root)
+            .ok()
+            .filter(|o| o.success())
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    read(&["symbolic-ref", "--short", "-q", "HEAD"]).or_else(|| read(&["rev-parse", "HEAD"]))
+}
+
+/// Check out `checkout` (from [`current_checkout`]) in `root` again.
+fn restore_checkout(
+    runner: &dyn wingman_autonomous::pr::CommandRunner,
+    root: &std::path::Path,
+    checkout: &str,
+) -> std::result::Result<(), String> {
+    let out = runner
+        .run("git", &["checkout", "-q", checkout], root)
+        .map_err(|e| e.to_string())?;
+    if out.success() {
+        Ok(())
+    } else {
+        Err(out.stderr.trim().to_string())
+    }
 }
 
 fn read_eval_results(path: &std::path::Path) -> Result<Vec<wingman_autonomous::eval::EvalResult>> {
@@ -2277,6 +2693,127 @@ mod tests {
     use std::time::Duration;
     use wingman_autonomous::control::{append, ControlCommand};
 
+    /// Rollback discards a worker's edits, so it is autopilot's by default and
+    /// an explicit capability wins either way; the threshold only travels to
+    /// the worker while it is on.
+    #[test]
+    fn turn_rollback_follows_the_tier_unless_overridden() {
+        let mut pilot = wingman_config::PilotConfig {
+            turn_rollback_after: 3,
+            ..Default::default()
+        };
+        assert_eq!(turn_rollback_after(&pilot), 0);
+        assert!(!capability_on(&pilot, "checkpoint_hygiene"));
+        assert!(capability_on(&pilot, "speculative_prespawn"));
+        assert!(capability_on(&pilot, "adaptive_concurrency"));
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(turn_rollback_after(&pilot), 3);
+        assert!(capability_on(&pilot, "checkpoint_hygiene"));
+
+        pilot.capabilities.insert("turn_rollback".into(), false);
+        assert_eq!(turn_rollback_after(&pilot), 0);
+
+        pilot.tier = wingman_config::PilotTier::Assist;
+        assert!(!capability_on(&pilot, "speculative_prespawn"));
+        pilot.capabilities.insert("turn_rollback".into(), true);
+        assert_eq!(turn_rollback_after(&pilot), 3);
+    }
+
+    /// E4's merge-fixer follows write-set scheduling (copilot and autopilot);
+    /// J8's knowledge-keeper is autopilot's, and runs on the `summarize` class
+    /// when that is routed.
+    #[test]
+    fn merge_fixer_and_knowledge_keeper_follow_the_tier() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            [router]
+            fast_model = "ollama/llama3.2"
+            "#,
+        )
+        .unwrap();
+        let manager = || wingman_autonomous::pipeline::AuxAgent {
+            provider: runtime::build_provider(&cfg, "ollama").unwrap(),
+            model: "manager".into(),
+        };
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert!(capability_on(&pilot, "merge_fixer"));
+        assert!(knowledge_keeper(&cfg, &pilot, manager()).is_none());
+
+        pilot.tier = wingman_config::PilotTier::Assist;
+        assert!(!capability_on(&pilot, "merge_fixer"));
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        let keeper = knowledge_keeper(&cfg, &pilot, manager()).unwrap();
+        assert_eq!(keeper.model, "manager", "summarize is unrouted");
+
+        let mut routed = cfg.clone();
+        routed
+            .router
+            .classes
+            .insert("summarize".into(), "fast".into());
+        let keeper = knowledge_keeper(&routed, &pilot, manager()).unwrap();
+        assert_eq!(keeper.model, "llama3.2");
+
+        pilot.capabilities.insert("knowledge_keeper".into(), false);
+        assert!(knowledge_keeper(&routed, &pilot, manager()).is_none());
+    }
+
+    /// J10: the critic is autopilot's; `critic_model` wins over the reviewer
+    /// and manager models; `critic_other_family` refuses a critic from the
+    /// workers' family and one whose family the name does not tell.
+    #[test]
+    fn critic_follows_the_tier_and_can_require_another_family() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            "#,
+        )
+        .unwrap();
+        let manager = || wingman_autonomous::pipeline::AuxAgent {
+            provider: runtime::build_provider(&cfg, "ollama").unwrap(),
+            model: "manager".into(),
+        };
+        let worker = "ollama/llama3.2";
+        let mut pilot = wingman_config::PilotConfig::default();
+        assert!(critic(&cfg, &pilot, worker, manager()).unwrap().is_none());
+
+        pilot.tier = wingman_config::PilotTier::Autopilot;
+        assert_eq!(
+            critic(&cfg, &pilot, worker, manager())
+                .unwrap()
+                .unwrap()
+                .model,
+            "manager"
+        );
+        pilot.reviewer_model = Some("ollama/llama3.1:70b".into());
+        pilot.critic_model = Some("ollama/qwen2.5-coder".into());
+        assert_eq!(
+            critic(&cfg, &pilot, worker, manager())
+                .unwrap()
+                .unwrap()
+                .model,
+            "qwen2.5-coder"
+        );
+
+        pilot.critic_other_family = true;
+        assert!(critic(&cfg, &pilot, worker, manager()).is_ok());
+        pilot.critic_model = None;
+        let err = critic(&cfg, &pilot, worker, manager()).err().unwrap();
+        assert!(err.to_string().contains("(meta)"), "{err}");
+        pilot.critic_model = Some("ollama/house-model".into());
+        let err = critic(&cfg, &pilot, worker, manager()).err().unwrap();
+        assert!(err.to_string().contains("unknown family"), "{err}");
+
+        pilot.capabilities.insert("critic".into(), false);
+        assert!(critic(&cfg, &pilot, worker, manager()).unwrap().is_none());
+    }
+
     #[test]
     fn r4_eval_gate_flags_regression_and_passes_on_parity() {
         use wingman_autonomous::eval::EvalResult;
@@ -2286,6 +2823,7 @@ mod tests {
             usd: 0.10,
             wall_min: 1.0,
             quality: 1.0,
+            judged: g == "a",
         };
         let baseline = vec![good("a"), good("b")];
 
@@ -2303,6 +2841,10 @@ mod tests {
         let (report, fail) = eval_gate(&worse, Some(&baseline), 0.10);
         assert!(fail, "halved success rate must fail the gate");
         assert!(report.contains("REGRESSED"));
+        assert!(
+            report.contains("golden reference for 1/2 goal(s) (baseline: 1/2)"),
+            "{report}"
+        );
 
         // baseline round-trips through disk
         let dir = tempfile::tempdir().unwrap();
@@ -2351,6 +2893,132 @@ mod tests {
         let pending = feedback_pending_runs(dir.path()).await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1, "https://gh/pr/1");
+    }
+
+    /// R2 in the daemon: a pass records each terminal PR once, and the daemon
+    /// runs one on its first cycle and then every `feedback_poll_secs`.
+    #[tokio::test]
+    async fn r2_daemon_polls_feedback_on_its_cadence() {
+        use std::time::{Duration, Instant};
+        use wingman_autonomous::model::Event;
+        use wingman_autonomous::pr::{CommandOut, CommandRunner};
+        use wingman_autonomous::store::RunStore;
+
+        struct MergedGh;
+        impl CommandRunner for MergedGh {
+            fn run(
+                &self,
+                program: &str,
+                args: &[&str],
+                _cwd: &std::path::Path,
+            ) -> std::io::Result<CommandOut> {
+                assert_eq!((program, &args[..2]), ("gh", &["pr", "view"][..]));
+                Ok(CommandOut {
+                    status: Some(0),
+                    stdout: r#"{"state":"MERGED"}"#.into(),
+                    stderr: String::new(),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join(".wingman").join("autonomous").join("r1");
+        let mut store = RunStore::create(&run, "r1", "g", "base", "wingman/auto/r1")
+            .await
+            .unwrap();
+        store
+            .append(Event::RunPr {
+                t: RunStore::now(),
+                url: "https://gh/pr/1".into(),
+            })
+            .await
+            .unwrap();
+        drop(store);
+
+        assert_eq!(poll_feedback(&MergedGh, dir.path(), 0).await, 1);
+        assert_eq!(
+            poll_feedback(&MergedGh, dir.path(), 1).await,
+            0,
+            "an outcome is recorded once"
+        );
+
+        let t0 = Instant::now();
+        assert!(feedback_due(None, t0, 3600));
+        assert!(!feedback_due(None, t0, 0), "0 turns it off");
+        let later = t0 + Duration::from_secs(3599);
+        assert!(!feedback_due(Some(t0), later, 3600));
+        assert!(feedback_due(Some(t0), later + Duration::from_secs(1), 3600));
+        assert_eq!(
+            wingman_config::PilotDaemonConfig::default().feedback_poll_secs,
+            3600
+        );
+    }
+
+    /// R4: a goal's run leaves the checkout on its integration branch; the
+    /// suite returns it to the branch (or detached commit) it started on.
+    #[test]
+    fn r4_eval_returns_the_checkout_where_it_found_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+        };
+        if git(&["init", "-q", "-b", "trunk"]).is_err() {
+            eprintln!("skipping: git not available");
+            return;
+        }
+        for kv in [["user.email", "t@t.t"], ["user.name", "t"]] {
+            git(&["config", kv[0], kv[1]]).unwrap();
+        }
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        git(&["add", "-A"]).unwrap();
+        git(&["commit", "-qm", "base"]).unwrap();
+        let runner = wingman_autonomous::pr::SystemCommandRunner;
+        let home = current_checkout(&runner, root).expect("on a branch");
+        assert_eq!(home, "trunk");
+
+        // What a run does: switch to a rebuilt integration branch.
+        git(&["switch", "-q", "-c", "wingman/auto/r1"]).unwrap();
+        std::fs::remove_file(root.join("a.txt")).unwrap();
+        git(&["commit", "-qam", "run"]).unwrap();
+        restore_checkout(&runner, root, &home).unwrap();
+        assert_eq!(current_checkout(&runner, root).as_deref(), Some("trunk"));
+        assert!(root.join("a.txt").exists());
+
+        // Detached: comes back as the commit.
+        git(&["checkout", "-q", "--detach", "trunk"]).unwrap();
+        let detached = current_checkout(&runner, root).unwrap();
+        assert_eq!(detached.len(), 40, "{detached}");
+        git(&["switch", "-q", "wingman/auto/r1"]).unwrap();
+        restore_checkout(&runner, root, &detached).unwrap();
+        assert_eq!(current_checkout(&runner, root), Some(detached));
+        assert!(restore_checkout(&runner, root, "no-such-branch").is_err());
+    }
+
+    /// R4: the judge runs on the `judge` class when routed, else on the
+    /// planner model.
+    #[test]
+    fn r4_eval_judge_routes_through_the_judge_class() {
+        let cfg: Config = toml::from_str(
+            r#"
+            default_provider = "ollama"
+            default_model = "ollama/qwen2.5-coder"
+            [providers.ollama]
+            base_url = "http://localhost:11434/v1"
+            [router]
+            fast_model = "ollama/llama3.2"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(eval_judge(&cfg).unwrap().model, "qwen2.5-coder");
+
+        let mut routed = cfg.clone();
+        routed.router.classes.insert("judge".into(), "fast".into());
+        assert_eq!(eval_judge(&routed).unwrap().model, "llama3.2");
     }
 
     #[test]

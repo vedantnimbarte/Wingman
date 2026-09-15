@@ -1,0 +1,124 @@
+name: eval
+
+# R4 eval gate: run the canned goals in eval/goals.jsonl live through
+# `wingman pilot eval`, score each run (success, cost, wall time, and an LLM
+# judge's grade of its diff against the goal's golden commit), and fail when
+# any axis regresses more than 10% against the committed eval/baseline.jsonl.
+#
+# It spends real provider money, so it runs weekly and on demand, never per
+# PR. Without the provider secret it skips with a notice and passes: forks
+# and unconfigured clones stay green.
+#
+# Setup (repository settings):
+#   - secret   OPENROUTER_API_KEY  the provider key
+#   - variable WINGMAN_EVAL_MODEL  a tool-use-capable model, `openrouter/<model>`
+#   - optional variable WINGMAN_EVAL_JUDGE_MODEL  routes the `judge` class;
+#     keep it fixed, or quality moves with the judge rather than the agent
+#
+# To set or move the baseline, download the `eval-results` artifact of a run
+# you accept and commit its results.jsonl as eval/baseline.jsonl.
+#
+# Actions are pinned to commit SHAs, as in ci.yml; dtolnay/rust-toolchain is
+# the same deliberate exception (it selects the toolchain by ref name).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+
+concurrency:
+  group: eval
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  eval:
+    name: eval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      WINGMAN_EVAL_MODEL: ${{ vars.WINGMAN_EVAL_MODEL }}
+      WINGMAN_EVAL_JUDGE_MODEL: ${{ vars.WINGMAN_EVAL_JUDGE_MODEL }}
+    steps:
+      - name: Check for the provider secret
+        id: gate
+        shell: bash
+        run: |
+          if [ -z "$OPENROUTER_API_KEY" ]; then
+            echo "::notice title=eval skipped::OPENROUTER_API_KEY is not set; no eval was run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$WINGMAN_EVAL_MODEL" ]; then
+            echo "::notice title=eval skipped::the WINGMAN_EVAL_MODEL variable is not set; no eval was run."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.gate.outputs.run == 'true'
+        with:
+          # Golden commits and their parents must be reachable.
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        if: steps.gate.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo build
+        if: steps.gate.outputs.run == 'true'
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+      - name: Build wingman
+        if: steps.gate.outputs.run == 'true'
+        run: cargo build --release -p wingman-cli
+
+      - name: Write the eval config
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          # A global dir of its own, outside the checkout.
+          export WINGMAN_HOME="$RUNNER_TEMP/wingman-home"
+          echo "WINGMAN_HOME=$WINGMAN_HOME" >> "$GITHUB_ENV"
+          mkdir -p "$WINGMAN_HOME"
+          {
+            echo 'default_provider = "openrouter"'
+            echo "default_model = \"$WINGMAN_EVAL_MODEL\""
+            echo '[providers.openrouter]'
+            echo 'api_key = "${OPENROUTER_API_KEY}"'
+            if [ -n "$WINGMAN_EVAL_JUDGE_MODEL" ]; then
+              echo '[router.classes]'
+              echo "judge = \"$WINGMAN_EVAL_JUDGE_MODEL\""
+            fi
+          } > "$WINGMAN_HOME/config.toml"
+          # Workers commit in their worktrees.
+          git config --global user.name "wingman eval"
+          git config --global user.email "eval@wingman.local"
+
+      - name: Run the goals and gate on the baseline
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          if [ ! -s eval/baseline.jsonl ]; then
+            echo "::notice title=no eval baseline::eval/baseline.jsonl is missing or empty, so nothing is gated. Commit this run's eval-results artifact as the baseline."
+          fi
+          status=0
+          ./target/release/wingman pilot eval \
+            --goals eval/goals.jsonl \
+            --baseline eval/baseline.jsonl \
+            --threshold 0.10 > "$RUNNER_TEMP/eval-report.md" || status=$?
+          # Written outside the checkout while the runs work in it.
+          cp "$RUNNER_TEMP/eval-report.md" .wingman/eval/report.md 2>/dev/null || true
+          cat "$RUNNER_TEMP/eval-report.md"
+          cat "$RUNNER_TEMP/eval-report.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Upload results
+        if: always() && steps.gate.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: eval-results
+          path: .wingman/eval/
+          if-no-files-found: ignore

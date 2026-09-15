@@ -7,16 +7,21 @@
 //! shared [`Severity`] scale so the same `block_severity` gate applies:
 //!
 //! 1. **Secrets scan** — built-in heuristic (known key prefixes + Shannon
-//!    entropy) over added diff lines. An external scanner (`gitleaks`) can
-//!    layer on top via the orchestrator; this module is the dependency-free
-//!    baseline so a scan always runs.
+//!    entropy) over added diff lines, so a scan always runs. When `gitleaks`
+//!    is on PATH the pipeline runs it too and [`parse_gitleaks_report`]
+//!    folds its report in.
 //! 2. **Dependency audit** — [`parse_cargo_audit`] folds `cargo audit
 //!    --json` output into findings.
-//! 3. **License scan** — [`scan_licenses`] flags new dependencies whose
-//!    SPDX license isn't in the allowlist.
+//! 3. **License scan** — [`parse_cargo_lock`] / [`parse_package_lock`] find
+//!    the dependencies a run added to a lockfile, and [`scan_licenses`] checks
+//!    their SPDX licenses against the allow/deny policy.
 //!
-//! Findings are rendered to `security.md` ([`render_report`]) and the
-//! report can [`SecurityReport::blocks_merge`] the auto-merge gate.
+//! Findings are rendered by [`render_report`] (posted as a PR comment) and
+//! the report can [`SecurityReport::blocks_merge`] the auto-merge gate.
+//! External tools that were absent or failed are recorded in
+//! [`SecurityReport::notes`] rather than silently skipped.
+
+use std::collections::BTreeSet;
 
 use crate::severity::{max_severity, Severity};
 
@@ -35,6 +40,9 @@ pub struct SecurityFinding {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SecurityReport {
     pub findings: Vec<SecurityFinding>,
+    /// What each external scanner did: ran, was not installed, or failed.
+    /// A skipped scanner is not a clean result, so the summary says so.
+    pub notes: Vec<String>,
 }
 
 impl SecurityReport {
@@ -197,6 +205,35 @@ pub fn scan_secrets(added: &[(String, String)]) -> Vec<SecurityFinding> {
     findings
 }
 
+/// Parse a gitleaks JSON report (`--report-format json`) into findings.
+/// gitleaks rules are specific, so every hit is [`Severity::High`]. Run it
+/// with `--redact`; the secret itself is never copied into the message
+/// either way, because the message ends up in a PR comment.
+pub fn parse_gitleaks_report(json: &str) -> Result<Vec<SecurityFinding>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("invalid gitleaks report: {e}"))?;
+    let list = v
+        .as_array()
+        .ok_or_else(|| "invalid gitleaks report: expected an array".to_string())?;
+    Ok(list
+        .iter()
+        .map(|item| {
+            let s = |k: &str| item.get(k).and_then(|x| x.as_str()).unwrap_or("");
+            let line = item.get("StartLine").and_then(|x| x.as_u64()).unwrap_or(0);
+            SecurityFinding {
+                severity: Severity::High,
+                kind: "secret".into(),
+                message: format!(
+                    "gitleaks: {} (rule `{}`, line {line})",
+                    s("Description"),
+                    s("RuleID")
+                ),
+                file: Some(s("File").to_string()).filter(|f| !f.is_empty()),
+            }
+        })
+        .collect())
+}
+
 // ---------------------------------------------------------------------------
 // 2. Dependency audit (cargo audit --json)
 // ---------------------------------------------------------------------------
@@ -273,16 +310,24 @@ fn cvss_score_to_severity(score: f64) -> Severity {
 // 3. License scan
 // ---------------------------------------------------------------------------
 
-/// Flag dependencies whose license isn't in the allowlist. `deps` is a
-/// list of `(crate_name, spdx_license)`. SPDX `OR` / `/` expressions pass
-/// if *any* alternative is allowed; `AND` expressions require *all*.
-pub fn scan_licenses(deps: &[(String, String)], allowed: &[String]) -> Vec<SecurityFinding> {
-    let allowed_lc: Vec<String> = allowed.iter().map(|s| s.to_ascii_lowercase()).collect();
-    let is_allowed = |lic: &str| {
-        allowed_lc
-            .iter()
-            .any(|a| a == &lic.trim().to_ascii_lowercase())
-    };
+/// Check dependency licenses against the allow/deny policy. `deps` is a
+/// list of `(package_name, spdx_license)` from `lockfile`, which findings are
+/// attributed to.
+///
+/// A license term is acceptable when it is not in `denied` and, if `allowed`
+/// is non-empty, is in `allowed`. SPDX `OR` / `/` expressions pass if *any*
+/// alternative is acceptable; `AND` expressions require *all*. A failing
+/// expression that names a denied license is [`Severity::Critical`]; one that
+/// is merely not allowlisted is [`Severity::High`].
+pub fn scan_licenses(
+    deps: &[(String, String)],
+    lockfile: &str,
+    allowed: &[String],
+    denied: &[String],
+) -> Vec<SecurityFinding> {
+    let listed = |list: &[String], lic: &str| list.iter().any(|a| a.eq_ignore_ascii_case(lic));
+    let acceptable =
+        |lic: &str| !listed(denied, lic) && (allowed.is_empty() || listed(allowed, lic));
     let mut findings = Vec::new();
     for (name, license) in deps {
         if license.trim().is_empty() {
@@ -290,29 +335,91 @@ pub fn scan_licenses(deps: &[(String, String)], allowed: &[String]) -> Vec<Secur
                 severity: Severity::Medium,
                 kind: "license".into(),
                 message: format!("`{name}` has no declared license"),
-                file: Some("Cargo.toml".into()),
+                file: Some(lockfile.into()),
             });
             continue;
         }
-        let ok = if license.contains(" OR ") || license.contains('/') {
-            split_spdx(license, &["OR", "/"])
-                .iter()
-                .any(|l| is_allowed(l))
+        let (terms, any) = if license.contains(" OR ") || license.contains('/') {
+            (split_spdx(license, &["OR", "/"]), true)
         } else if license.contains(" AND ") {
-            split_spdx(license, &["AND"]).iter().all(|l| is_allowed(l))
+            (split_spdx(license, &["AND"]), false)
         } else {
-            is_allowed(license)
+            (vec![license.trim().to_string()], false)
         };
-        if !ok {
-            findings.push(SecurityFinding {
-                severity: Severity::High,
-                kind: "license".into(),
-                message: format!("`{name}` uses non-allowlisted license `{license}`"),
-                file: Some("Cargo.toml".into()),
-            });
+        let ok = if any {
+            terms.iter().any(|l| acceptable(l))
+        } else {
+            terms.iter().all(|l| acceptable(l))
+        };
+        if ok {
+            continue;
         }
+        let (severity, why) = if terms.iter().any(|l| listed(denied, l)) {
+            (Severity::Critical, "denied")
+        } else {
+            (Severity::High, "non-allowlisted")
+        };
+        findings.push(SecurityFinding {
+            severity,
+            kind: "license".into(),
+            message: format!("`{name}` uses {why} license `{license}`"),
+            file: Some(lockfile.into()),
+        });
     }
     findings
+}
+
+/// `(name, version)` of every registry/git package in a `Cargo.lock`.
+/// Workspace members and path dependencies carry no `source` and are left
+/// out: they are the project itself, not dependencies it pulled in.
+/// `Cargo.lock` holds no license data; the pipeline gets that from
+/// `cargo metadata`, which resolves against the same lockfile.
+pub fn parse_cargo_lock(text: &str) -> BTreeSet<(String, String)> {
+    text.split("[[package]]")
+        .skip(1)
+        .filter_map(|block| {
+            let field = |key: &str| {
+                block.lines().find_map(|l| {
+                    let value = l.trim().strip_prefix(key)?.trim_start().strip_prefix('=')?;
+                    Some(value.trim().trim_matches('"').to_string())
+                })
+            };
+            field("source")?;
+            Some((field("name")?, field("version")?))
+        })
+        .collect()
+}
+
+/// `(name, version, license)` of every installed package in an npm
+/// `package-lock.json` (lockfileVersion 2 or 3). Workspace links are left
+/// out for the same reason as in [`parse_cargo_lock`]. lockfileVersion 1 has
+/// no `packages` map and no license data, which is an error rather than an
+/// empty (and falsely clean) list.
+pub fn parse_package_lock(json: &str) -> Result<Vec<(String, String, String)>, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("invalid package-lock.json: {e}"))?;
+    let packages = v
+        .get("packages")
+        .and_then(|p| p.as_object())
+        .ok_or_else(|| {
+            "package-lock.json has no `packages` map (lockfileVersion 1 carries no license data)"
+                .to_string()
+        })?;
+    Ok(packages
+        .iter()
+        .filter(|(_, entry)| entry.get("link").and_then(|l| l.as_bool()) != Some(true))
+        .filter_map(|(key, entry)| {
+            let name = &key[key.rfind("node_modules/")? + "node_modules/".len()..];
+            let s = |k: &str| {
+                entry
+                    .get(k)
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            Some((name.to_string(), s("version"), s("license")))
+        })
+        .collect())
 }
 
 fn split_spdx(expr: &str, seps: &[&str]) -> Vec<String> {
@@ -351,8 +458,19 @@ pub fn render_report(report: &SecurityReport, block_gate: Severity) -> String {
     let mut out = String::from("# Security pass\n\n");
     if report.findings.is_empty() {
         out.push_str("✅ No findings.\n");
-        return out;
+    } else {
+        render_findings(&mut out, report, block_gate);
     }
+    if !report.notes.is_empty() {
+        out.push_str("\n## Scanners\n\n");
+        for n in &report.notes {
+            out.push_str(&format!("- {n}\n"));
+        }
+    }
+    out
+}
+
+fn render_findings(out: &mut String, report: &SecurityReport, block_gate: Severity) {
     let blocking = report.blocks_merge(block_gate);
     out.push_str(&format!(
         "{} {} finding(s); highest severity **{}**. Auto-merge {}.\n\n",
@@ -372,7 +490,6 @@ pub fn render_report(report: &SecurityReport, block_gate: Severity) -> String {
             f.severity, f.kind, loc, f.message
         ));
     }
-    out
 }
 
 #[cfg(test)]
@@ -472,28 +589,28 @@ mod tests {
     fn license_allowlist_passes_mit() {
         let deps = vec![("serde".to_string(), "MIT".to_string())];
         let allowed = vec!["MIT".to_string(), "Apache-2.0".to_string()];
-        assert!(scan_licenses(&deps, &allowed).is_empty());
+        assert!(scan_licenses(&deps, "Cargo.lock", &allowed, &[]).is_empty());
     }
 
     #[test]
     fn license_or_expression_passes_if_any_allowed() {
         let deps = vec![("foo".to_string(), "MIT OR Apache-2.0".to_string())];
         let allowed = vec!["Apache-2.0".to_string()];
-        assert!(scan_licenses(&deps, &allowed).is_empty());
+        assert!(scan_licenses(&deps, "Cargo.lock", &allowed, &[]).is_empty());
     }
 
     #[test]
     fn license_slash_expression_passes_if_any_allowed() {
         let deps = vec![("foo".to_string(), "MIT/Apache-2.0".to_string())];
         let allowed = vec!["MIT".to_string()];
-        assert!(scan_licenses(&deps, &allowed).is_empty());
+        assert!(scan_licenses(&deps, "Cargo.lock", &allowed, &[]).is_empty());
     }
 
     #[test]
     fn license_gpl_is_flagged() {
         let deps = vec![("copyleft".to_string(), "GPL-3.0".to_string())];
         let allowed = vec!["MIT".to_string()];
-        let f = scan_licenses(&deps, &allowed);
+        let f = scan_licenses(&deps, "Cargo.lock", &allowed, &[]);
         assert_eq!(f.len(), 1);
         assert_eq!(f[0].severity, Severity::High);
     }
@@ -501,7 +618,7 @@ mod tests {
     #[test]
     fn license_missing_is_flagged_medium() {
         let deps = vec![("mystery".to_string(), "".to_string())];
-        let f = scan_licenses(&deps, &["MIT".to_string()]);
+        let f = scan_licenses(&deps, "Cargo.lock", &["MIT".to_string()], &[]);
         assert_eq!(f[0].severity, Severity::Medium);
     }
 
@@ -510,7 +627,7 @@ mod tests {
         let deps = vec![("dual".to_string(), "MIT AND GPL-3.0".to_string())];
         let allowed = vec!["MIT".to_string()];
         // GPL not allowed → AND fails.
-        assert_eq!(scan_licenses(&deps, &allowed).len(), 1);
+        assert_eq!(scan_licenses(&deps, "Cargo.lock", &allowed, &[]).len(), 1);
     }
 
     #[test]
@@ -518,7 +635,9 @@ mod tests {
         let mut r = SecurityReport::default();
         r.extend(scan_licenses(
             &[("copyleft".to_string(), "GPL-3.0".to_string())],
+            "Cargo.lock",
             &["MIT".to_string()],
+            &[],
         ));
         assert!(r.blocks_merge(Severity::Medium));
         assert!(!r.blocks_merge(Severity::Critical));
@@ -534,5 +653,131 @@ mod tests {
         let md = render_report(&dirty, Severity::Medium);
         assert!(md.contains("blocked"));
         assert!(md.contains("critical"));
+    }
+
+    /// A denied license fails even when the allowlist also names it, is
+    /// critical, and an `OR` expression still passes through an acceptable
+    /// alternative. With an empty allowlist, only the denylist applies.
+    #[test]
+    fn license_denylist_wins_and_is_critical() {
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        let allowed = vec!["MIT".to_string(), "GPL-3.0".to_string()];
+        let denied = vec!["GPL-3.0".to_string()];
+
+        let f = scan_licenses(
+            &[s("copyleft", "GPL-3.0")],
+            "package-lock.json",
+            &allowed,
+            &denied,
+        );
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::Critical);
+        assert!(f[0].message.contains("denied"), "{}", f[0].message);
+        assert_eq!(f[0].file.as_deref(), Some("package-lock.json"));
+
+        let dual = [s("dual", "MIT OR GPL-3.0")];
+        assert!(scan_licenses(&dual, "Cargo.lock", &allowed, &denied).is_empty());
+        let both = [s("both", "MIT AND GPL-3.0")];
+        assert_eq!(
+            scan_licenses(&both, "Cargo.lock", &allowed, &denied)[0].severity,
+            Severity::Critical
+        );
+
+        // Deny-only policy: anything not denied passes.
+        let deps = [s("a", "Zlib"), s("b", "AGPL-3.0")];
+        let f = scan_licenses(&deps, "Cargo.lock", &[], &["AGPL-3.0".to_string()]);
+        assert_eq!(f.len(), 1);
+        assert!(f[0].message.contains("`b`"));
+    }
+
+    #[test]
+    fn parse_cargo_lock_keeps_only_sourced_packages() {
+        let lock = r#"
+version = 4
+
+[[package]]
+name = "serde"
+version = "1.0.200"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "abc"
+dependencies = [
+ "serde_derive",
+]
+
+[[package]]
+name = "wingman-core"
+version = "0.4.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "forked"
+version = "0.1.0"
+source = "git+https://example.com/forked#deadbeef"
+"#;
+        let pkgs = parse_cargo_lock(lock);
+        assert_eq!(pkgs.len(), 2, "{pkgs:?}");
+        assert!(pkgs.contains(&("serde".into(), "1.0.200".into())));
+        assert!(pkgs.contains(&("forked".into(), "0.1.0".into())));
+    }
+
+    #[test]
+    fn parse_package_lock_reads_nested_packages_and_licenses() {
+        let lock = r#"{
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "app", "version": "1.0.0"},
+                "node_modules/react": {"version": "18.3.1", "license": "MIT"},
+                "node_modules/a/node_modules/@scope/b": {"version": "2.0.0", "license": "GPL-3.0"},
+                "node_modules/local": {"resolved": "packages/local", "link": true},
+                "packages/local": {"version": "0.0.1"}
+            }
+        }"#;
+        let mut pkgs = parse_package_lock(lock).unwrap();
+        pkgs.sort();
+        assert_eq!(
+            pkgs,
+            vec![
+                ("@scope/b".into(), "2.0.0".into(), "GPL-3.0".into()),
+                ("react".into(), "18.3.1".into(), "MIT".into()),
+            ]
+        );
+        // lockfileVersion 1 cannot be scanned and says so.
+        assert!(parse_package_lock(r#"{"lockfileVersion": 1, "dependencies": {}}"#).is_err());
+    }
+
+    #[test]
+    fn parse_gitleaks_report_keeps_the_secret_out_of_the_message() {
+        let json = r#"[{
+            "Description": "AWS Access Key",
+            "RuleID": "aws-access-token",
+            "File": "src/config.rs",
+            "StartLine": 12,
+            "Secret": "AKIAIOSFODNN7EXAMPLE",
+            "Match": "key = AKIAIOSFODNN7EXAMPLE"
+        }]"#;
+        let f = parse_gitleaks_report(json).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].severity, Severity::High);
+        assert_eq!(f[0].file.as_deref(), Some("src/config.rs"));
+        assert!(f[0].message.contains("aws-access-token"));
+        assert!(!f[0].message.contains("AKIAIOSFODNN7EXAMPLE"));
+        assert!(parse_gitleaks_report("[]").unwrap().is_empty());
+        assert!(parse_gitleaks_report("not json").is_err());
+    }
+
+    /// Skipped scanners are listed in the summary, clean or not, so "no
+    /// findings" is never mistaken for "every scanner ran".
+    #[test]
+    fn render_report_lists_scanner_notes() {
+        let report = SecurityReport {
+            findings: Vec::new(),
+            notes: vec!["gitleaks not found on PATH; skipped".into()],
+        };
+        let md = render_report(&report, Severity::Medium);
+        assert!(md.contains("No findings"));
+        assert!(md.contains("## Scanners"));
+        assert!(md.contains("gitleaks not found on PATH"));
     }
 }

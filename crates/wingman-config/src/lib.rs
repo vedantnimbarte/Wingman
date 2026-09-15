@@ -438,6 +438,12 @@ fn default_max_total_tokens() -> u64 {
     20_000_000
 }
 
+/// Two red gates in a row is where re-prompting has stopped paying: the model
+/// is now patching its own patches.
+fn default_turn_rollback_after() -> u32 {
+    2
+}
+
 impl Default for ToolsConfig {
     fn default() -> Self {
         Self {
@@ -2575,10 +2581,22 @@ pub struct PilotConfig {
     /// ladder as exhausted when it had barely started.
     #[serde(default = "default_max_retries_per_task")]
     pub max_retries_per_task: u32,
-    /// Model for the per-task reviewer / critic. Defaults to `default_model`
-    /// when unset — point it at a stronger model for tougher review.
+    /// Model for the per-task reviewer, and for the critic when `critic_model`
+    /// is unset. Defaults to `default_model` when unset — point it at a
+    /// stronger model for tougher review.
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// J10 — model for the critic agent (`provider/model_id`). Defaults to
+    /// `reviewer_model`, then `default_model`. Choose one from another family
+    /// than `worker_model`: a critic with the workers' blind spots agrees
+    /// with them.
+    #[serde(default)]
+    pub critic_model: Option<String>,
+    /// J10 — refuse to start a run whose critic shares `worker_model`'s model
+    /// family, or whose family (either side) Wingman cannot tell from the
+    /// name. Checked only while the `critic` capability is on.
+    #[serde(default)]
+    pub critic_other_family: bool,
     pub max_concurrent_agents: u32,
     pub max_usd: f64,
     /// Hard cap on total tokens (in + out) for a pilot run. 0 disables.
@@ -2611,6 +2629,13 @@ pub struct PilotConfig {
     /// Shell command run between worker turns as a sanity gate (E5).
     /// Empty disables the per-turn check.
     pub turn_gate_cmd: String,
+    /// E5.5 — how many times in a row `turn_gate_cmd` may fail before the
+    /// worker restores its worktree to the last state that passed it. Only
+    /// used while the `turn_rollback` capability is on (autopilot by
+    /// default). Each rollback also buys the worker a fresh round of gate
+    /// retries.
+    #[serde(default = "default_turn_rollback_after")]
+    pub turn_rollback_after: u32,
 
     pub approval: PilotApprovalConfig,
     pub pr: PilotPrConfig,
@@ -2635,6 +2660,8 @@ impl Default for PilotConfig {
             worker_model: None,
             max_retries_per_task: default_max_retries_per_task(),
             reviewer_model: None,
+            critic_model: None,
+            critic_other_family: false,
             max_concurrent_agents: 4,
             max_usd: 10.0,
             max_total_tokens: default_max_total_tokens(),
@@ -2642,6 +2669,7 @@ impl Default for PilotConfig {
             worker_max_turns: default_worker_max_turns(),
             max_manager_ticks: default_max_manager_ticks(),
             turn_gate_cmd: "cargo check --workspace".into(),
+            turn_rollback_after: default_turn_rollback_after(),
             approval: PilotApprovalConfig::default(),
             pr: PilotPrConfig::default(),
             sandbox: PilotSandboxConfig::default(),
@@ -2815,6 +2843,17 @@ pub struct PilotDaemonConfig {
     /// needed. An optional first line `author: <name>` sets trust.
     #[serde(default = "default_intake_dir")]
     pub intake_dir: String,
+    /// R2 — how often, in seconds, the daemon polls the PRs its runs opened
+    /// for their post-merge outcome (merged, closed) and records it for the
+    /// cross-run learner. Checked between discovery cycles, so it runs at
+    /// most once per `poll_interval_secs` even when set lower. `0` turns it
+    /// off; `wingman pilot feedback` still polls on demand.
+    #[serde(default = "default_feedback_poll_secs")]
+    pub feedback_poll_secs: u64,
+}
+
+fn default_feedback_poll_secs() -> u64 {
+    3600
 }
 
 fn default_intake_dir() -> String {
@@ -2846,6 +2885,7 @@ impl Default for PilotDaemonConfig {
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
+            feedback_poll_secs: default_feedback_poll_secs(),
         }
     }
 }
@@ -2886,14 +2926,21 @@ pub struct PilotSkillsConfig {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, deny_unknown_fields)]
 pub struct PilotSecurityConfig {
-    /// Secrets scanner binary to invoke on the diff (e.g. "gitleaks").
-    /// Empty disables the external scanner (the built-in heuristic scan
-    /// still runs).
+    /// Secrets scanner binary to run over the run's commits: "gitleaks", or a
+    /// path to it. Skipped, and said so in the security summary, when it is
+    /// not on PATH. Empty disables the external scanner (the built-in
+    /// heuristic scan still runs).
     pub secrets_scanner: String,
-    /// Run `cargo audit` / `npm audit` on lockfile changes.
+    /// Run `cargo audit` when the run changed a `Cargo.lock`. Skipped, and
+    /// said so, when cargo-audit is not installed.
     pub dependency_audit: bool,
-    /// SPDX identifiers permitted for new dependencies.
+    /// SPDX identifiers permitted for dependencies a run adds to a lockfile
+    /// (`Cargo.lock`, `package-lock.json`). Empty allows any license not in
+    /// `denied_licenses`.
     pub allowed_licenses: Vec<String>,
+    /// SPDX identifiers never permitted, even when also allowed. A denied
+    /// license is a critical finding.
+    pub denied_licenses: Vec<String>,
     /// Findings at or above this severity block auto-merge.
     /// "info" | "low" | "medium" | "high" | "critical".
     #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
@@ -2963,6 +3010,7 @@ impl Default for PilotSecurityConfig {
                 "MPL-2.0".into(),
                 "Unicode-DFS-2016".into(),
             ],
+            denied_licenses: Vec::new(),
             block_severity: "medium".into(),
         }
     }
@@ -3548,6 +3596,7 @@ max_retries_per_task = 1
         assert!((cfg.max_usd - 10.0).abs() < 1e-9);
         assert_eq!(cfg.task_timeout_secs, 1800);
         assert_eq!(cfg.turn_gate_cmd, "cargo check --workspace");
+        assert_eq!(cfg.turn_rollback_after, 2);
         // Auto-merge is opt-in: nothing merges to the base branch without the
         // user having asked for it in config.
         assert!(!cfg.pr.auto_merge);
