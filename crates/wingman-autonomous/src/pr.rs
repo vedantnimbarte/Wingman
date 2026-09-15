@@ -173,12 +173,22 @@ impl CommandRunner for SystemCommandRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        // Payloads here are a few hundred bytes, well under a pipe buffer, so
-        // writing before draining stdout cannot deadlock.
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(stdin)?;
-        }
-        let out = child.wait_with_output()?;
+        // Written from a thread while `wait_with_output` drains stdout and
+        // stderr. A program that answers line by line as it reads (`git
+        // check-ignore --stdin`, fed a build's worth of paths by the J13
+        // watcher) stops reading once nobody drains its full stdout pipe, so
+        // writing everything first can deadlock. A write error (the child
+        // exited early) shows up in its status instead.
+        let pipe = child.stdin.take();
+        let input = stdin.to_vec();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.write_all(&input);
+            }
+        });
+        let out = child.wait_with_output();
+        let _ = writer.join();
+        let out = out?;
         Ok(CommandOut {
             status: out.status.code(),
             stdout: String::from_utf8_lossy(&out.stdout).into_owned(),

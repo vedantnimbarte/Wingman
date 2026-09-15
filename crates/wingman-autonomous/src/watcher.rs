@@ -214,8 +214,8 @@ pub fn classify(
 /// Whether any of `paths` is not excluded by `.gitignore`. Fails open: if
 /// `git check-ignore` can't answer (not a repo, no git), every path counts.
 fn any_not_ignored(runner: &dyn CommandRunner, root: &Path, paths: &[&PathBuf]) -> bool {
-    // Chunked so git's echoed output always fits a pipe buffer while we are
-    // still writing its stdin (`run_with_stdin` writes before it reads).
+    // Chunked so a batch with a relevant path near the front stops asking git
+    // early instead of sending a whole build's worth of paths.
     // ponytail: a build flooding target/ costs one git process per 256 paths
     // per debounce window; skip ignored directories up front if that shows.
     for chunk in paths.chunks(256) {
@@ -499,6 +499,32 @@ mod tests {
             Some(Wake::FileChange)
         );
         assert_eq!(git.stdins.lock().unwrap().len(), 1);
+    }
+
+    /// Real git on a full chunk of long ignored paths (~500 KiB): git echoes
+    /// each one back while its stdin is still being written, past any
+    /// platform's pipe buffers, so this stalls if stdin is written before
+    /// stdout is drained.
+    #[test]
+    fn j13_a_build_flood_is_checked_against_real_git_without_hanging() {
+        let repo = tempfile::tempdir().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(repo.path())
+            .status();
+        if !init.is_ok_and(|s| s.success()) {
+            return; // no git on this machine
+        }
+        std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+        let flood: Vec<PathBuf> = (0..256)
+            .map(|i| PathBuf::from(format!("target/debug/deps/{}-{i}.d", "x".repeat(2000))))
+            .collect();
+        let runner = crate::pr::SystemCommandRunner;
+        assert_eq!(classify(&runner, repo.path(), None, &flood), None);
+        assert_eq!(
+            classify(&runner, repo.path(), None, &paths(&["src/lib.rs"])),
+            Some(Wake::FileChange)
+        );
     }
 
     #[test]

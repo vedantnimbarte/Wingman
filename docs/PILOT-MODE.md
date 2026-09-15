@@ -268,7 +268,8 @@ also wakes early when something happens in the repo:
 
 An event-woken cycle is an ordinary cycle: candidates are scored, deduplicated
 against the queue, and trust and `max_auto_dispatch_per_cycle` apply
-unchanged. `--cycles N` counts them too.
+unchanged. `--cycles N` counts them too. If none of the local sources is
+configured, file changes are ignored and only hooks and the poll wake it.
 
 ```toml
 [pilot.daemon]

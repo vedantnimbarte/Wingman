@@ -2024,7 +2024,19 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
             return Ok(ExitCode::SUCCESS);
         }
         wake = match watcher.as_mut() {
-            Some(w) => w.wait(&runner, next_poll).await,
+            // A file change only runs the local sources. With none of them
+            // configured its cycle would ask nothing, yet still log and count
+            // towards `--cycles`, so keep waiting instead.
+            Some(w) => loop {
+                let wake = w.wait(&runner, next_poll).await;
+                if wake != Wake::FileChange
+                    || !watcher::cycle_config(&pilot.daemon, wake)
+                        .sources
+                        .is_empty()
+                {
+                    break wake;
+                }
+            },
             None => {
                 tokio::time::sleep(interval).await;
                 Wake::Poll
