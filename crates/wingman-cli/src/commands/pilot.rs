@@ -1580,13 +1580,27 @@ fn refuse_unisolated_vm_tasks(
 }
 
 /// J11 — the sandbox one task's worker runs in, or `None` for the host.
+///
+/// `Err` for a vm-tier task this machine cannot isolate, unless
+/// `allow_unsandboxed_vm_tasks`. The start-of-run gate
+/// ([`refuse_unisolated_vm_tasks`]) only sees the plan; this catches a task
+/// the manager adds (`add_task`) or splits off mid-run, which would otherwise
+/// quietly degrade to weaker isolation.
 fn worker_sandbox_for(
     task: &wingman_autonomous::Task,
     sandbox: &wingman_config::PilotSandboxConfig,
     avail: &wingman_autonomous::sandbox::TierAvailability,
-) -> Option<wingman_autonomous::sandbox::WorkerSandbox> {
+) -> std::result::Result<Option<wingman_autonomous::sandbox::WorkerSandbox>, String> {
     use wingman_autonomous::sandbox::{resolve_effective_tier, select_tier, IsolationTier};
     let requested = select_tier(task, IsolationTier::parse(&sandbox.default_tier));
+    if let (IsolationTier::Vm, Err(why)) = (requested, &avail.vm) {
+        if !sandbox.allow_unsandboxed_vm_tasks {
+            return Err(format!(
+                "task {} needs vm-tier isolation, which is unavailable here ({why});                  refusing to run it with weaker isolation",
+                task.id
+            ));
+        }
+    }
     let (tier, degraded) = resolve_effective_tier(requested, avail);
     if degraded {
         tracing::warn!(
@@ -1597,11 +1611,13 @@ fn worker_sandbox_for(
             tier.as_str()
         );
     }
-    (tier != IsolationTier::Host).then(|| wingman_autonomous::sandbox::WorkerSandbox {
-        tier,
-        config: sandbox.clone(),
-        global_config: wingman_config::global_config_path().ok(),
-    })
+    Ok(
+        (tier != IsolationTier::Host).then(|| wingman_autonomous::sandbox::WorkerSandbox {
+            tier,
+            config: sandbox.clone(),
+            global_config: wingman_config::global_config_path().ok(),
+        }),
+    )
 }
 
 /// Build the production WorkerSpawner: spawns real `wingman --worker-mode`
@@ -1641,6 +1657,23 @@ fn build_real_worker_spawner(
             let routing = routing.clone();
             let worker_sandbox = worker_sandbox_for(&ctx.task, &sandbox, &avail);
             Box::pin(async move {
+                // Recorded on the task, so the manager and `pilot status`
+                // see why it failed rather than a bare Failed.
+                let worker_sandbox = match worker_sandbox {
+                    Ok(sb) => sb,
+                    Err(why) => {
+                        wingman_autonomous::worker::record_failure(
+                            &ctx.store,
+                            &ctx.task.id,
+                            &ctx.agent_id,
+                            why.clone(),
+                        )
+                        .await;
+                        return Err(wingman_autonomous::orchestrator::OrchestratorError::Spawn(
+                            why,
+                        ));
+                    }
+                };
                 // E5 rung 2: escalate to the manager model when the
                 // orchestrator flagged this attempt as needing it. Otherwise
                 // E6 adaptive routing picks the base model per role.
@@ -2705,7 +2738,7 @@ pub async fn validate_providers(
     use wingman_autonomous::provider_matrix::{self, MatrixReport, MatrixRow, Verdict};
     // A cap of 0 means "no cap" everywhere else in pilot; here it would mean
     // an unbounded bill per provider.
-    if max_usd <= 0.0 || max_tokens == 0 {
+    if !max_usd.is_finite() || max_usd <= 0.0 || max_tokens == 0 {
         return Err(anyhow!(
             "--max-usd and --max-tokens must both be above 0: every provider run spends real money"
         ));
@@ -2771,8 +2804,20 @@ pub async fn validate_providers(
             sandbox_avail.clone(),
             None,
         )?;
+        // The id is a config key and this directory is deleted: keep it one
+        // plain path component.
+        let safe_id: String = id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         let scratch =
-            std::env::temp_dir().join(format!("wingman-validate-{}-{id}", std::process::id()));
+            std::env::temp_dir().join(format!("wingman-validate-{}-{safe_id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&scratch);
         let mut row = provider_matrix::run_canned_plan(&scratch, &id, &model, |base| {
             wingman_autonomous::pipeline::PipelineInputs {
@@ -3006,22 +3051,37 @@ mod tests {
             wingman_autonomous::model::Role::Developer,
             "edit",
         );
-        assert!(worker_sandbox_for(&plain, &cfg, &avail(true, true)).is_none());
-        let tier =
-            |t: &wingman_autonomous::Task, a| worker_sandbox_for(t, &cfg, &a).map(|s| s.tier);
+        assert!(worker_sandbox_for(&plain, &cfg, &avail(true, true))
+            .unwrap()
+            .is_none());
+        let tier = |cfg: &wingman_config::PilotSandboxConfig, t: &wingman_autonomous::Task, a| {
+            worker_sandbox_for(t, cfg, &a).map(|s| s.map(|s| s.tier))
+        };
         assert_eq!(
-            tier(&migration_task(), avail(true, true)),
-            Some(IsolationTier::Vm)
+            tier(&cfg, &migration_task(), avail(true, true)),
+            Ok(Some(IsolationTier::Vm))
+        );
+        // A vm task that reaches a worker without a vm backend (added
+        // mid-run, past the start gate) is refused, not degraded...
+        let refused = tier(&cfg, &migration_task(), avail(true, false)).unwrap_err();
+        assert!(refused.contains("t-mig"), "{refused}");
+        // ...unless the operator opted in.
+        let mut opted = cfg.clone();
+        opted.allow_unsandboxed_vm_tasks = true;
+        assert_eq!(
+            tier(&opted, &migration_task(), avail(true, false)),
+            Ok(Some(IsolationTier::Container))
         );
         assert_eq!(
-            tier(&migration_task(), avail(true, false)),
-            Some(IsolationTier::Container)
+            tier(&opted, &migration_task(), avail(false, false)),
+            Ok(None)
         );
-        assert_eq!(tier(&migration_task(), avail(false, false)), None);
 
         let mut floor = cfg.clone();
         floor.default_tier = "container".into();
-        let sb = worker_sandbox_for(&plain, &floor, &avail(true, false)).unwrap();
+        let sb = worker_sandbox_for(&plain, &floor, &avail(true, false))
+            .unwrap()
+            .unwrap();
         assert_eq!(sb.tier, IsolationTier::Container);
         assert_eq!(sb.config.container_image, floor.container_image);
     }
@@ -3246,6 +3306,10 @@ mod validate_tests {
     #[tokio::test]
     async fn validation_refuses_an_uncapped_run() {
         let err = validate_providers(Config::default(), Vec::new(), 0.0, 1000, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("above 0"), "{err}");
+        let err = validate_providers(Config::default(), Vec::new(), f64::NAN, 1000, None)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("above 0"), "{err}");

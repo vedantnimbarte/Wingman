@@ -23,7 +23,10 @@
 //! recognises that argv and [`record_hook_event`] drops a signal file under
 //! `.wingman/watch/`, which the watcher sees like any other file change.
 //! Nothing talks to a socket, and a hook that fires with no daemon running
-//! just rewrites one small file.
+//! just rewrites one small file. A hook records nothing in a repo that has no
+//! `.wingman/watch/` (made by `pilot hooks install` or a watching daemon), so
+//! hooks installed into a `core.hooksPath` shared by other repos leave those
+//! repos alone.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -314,6 +317,11 @@ pub fn install_hooks(
     let script = hook_script(exe)?;
     let dir = hooks_dir(runner, repo_root)?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    // Marks this repo as one the hooks should record for (see
+    // `record_hook_event`).
+    let signal_dir = repo_root.join(SIGNAL_DIR);
+    std::fs::create_dir_all(&signal_dir)
+        .map_err(|e| format!("creating {}: {e}", signal_dir.display()))?;
     let mut result = HookInstall::default();
     for name in HOOK_NAMES {
         let path = dir.join(name);
@@ -368,12 +376,16 @@ pub fn hook_invocation(args: &[OsString]) -> Option<&'static str> {
 /// one per task — its commits and checkouts are the daemon's own work, not
 /// events to react to, and a signal file written there would end up in the
 /// task's diff.
+///
+/// Nor unless `worktree_root/.wingman/watch/` already exists. A
+/// `core.hooksPath` can be shared by every repo on the machine (a global
+/// setting), and a hook installed there must not create `.wingman/` in each
+/// repo that happens to commit.
 pub fn record_hook_event(worktree_root: &Path, hook: &str) -> std::io::Result<()> {
-    if !worktree_root.join(".git").is_dir() {
+    let dir = worktree_root.join(SIGNAL_DIR);
+    if !worktree_root.join(".git").is_dir() || !dir.is_dir() {
         return Ok(());
     }
-    let dir = worktree_root.join(SIGNAL_DIR);
-    std::fs::create_dir_all(&dir)?;
     // A changing body, so the write is seen as a modification on every
     // platform even when the file already exists.
     std::fs::write(
@@ -582,6 +594,10 @@ mod tests {
         let git = FakeGit::default();
 
         let first = install_hooks(&git, repo.path(), &exe).unwrap();
+        assert!(
+            repo.path().join(SIGNAL_DIR).is_dir(),
+            "install marks the repo"
+        );
         assert_eq!(first.installed.len(), HOOK_NAMES.len() - 1);
         assert_eq!(first.skipped, [hooks.join("post-merge")]);
         assert!(is_wingman_hook(&hooks.join("post-commit")));
@@ -637,6 +653,11 @@ mod tests {
     fn j13_hook_event_is_recorded_only_in_a_main_worktree() {
         let main = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(main.path().join(".git")).unwrap();
+        // A repo nobody installed into or watched (a shared hooksPath).
+        record_hook_event(main.path(), "post-commit").unwrap();
+        assert!(!main.path().join(".wingman").exists());
+
+        std::fs::create_dir_all(main.path().join(SIGNAL_DIR)).unwrap();
         record_hook_event(main.path(), "post-commit").unwrap();
         assert!(main.path().join(SIGNAL_DIR).join("post-commit").is_file());
 

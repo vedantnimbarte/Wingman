@@ -315,6 +315,10 @@ notices. Consequences:
   `git rev-parse --git-path hooks`, so `core.hooksPath` is respected.
 - **Post-hooks only.** Git ignores their exit status, so a missing or broken
   wingman never blocks a commit.
+- **Shared hook directories.** A hook records only in a repo that has
+  `.wingman/watch/`, which `install` (and a watching daemon) creates. A
+  `core.hooksPath` shared with other repos therefore never creates `.wingman/`
+  in them.
 - **Linked worktrees.** A hook firing in a linked worktree records nothing.
   Pilot's own task worktrees share the repo's hooks, and their commits are
   the daemon's own work.
@@ -346,7 +350,7 @@ under both.
 | ----------- | -------------------------------------------- | --------------------------------------- |
 | `host`      | its git worktree, on your machine            | n/a                                     |
 | `container` | `docker run`, against a copy of the worktree | runs on the host (logged)               |
-| `vm`        | a Firecracker microVM, against a copy        | **refused**: `pilot run` / `pilot resume` exit 2. With `allow_unsandboxed_vm_tasks` it gets `container` if Docker is up, else host |
+| `vm`        | a Firecracker microVM, against a copy        | **refused**: `pilot run` / `pilot resume` exit 2, and a vm-tier task the manager adds mid-run fails instead of starting. With `allow_unsandboxed_vm_tasks` it gets `container` if Docker is up, else host |
 
 `wingman doctor` reports which tiers this machine can honour, and why not.
 
@@ -363,6 +367,9 @@ salvage it, because that would run them on the host.
 
 Two things do not come back: anything under the top-level `.wingman/` (the
 worker's session transcript included), and the worker's own commit messages.
+`.wingman/` and `.wingman-sandbox/` (which holds the copied global config) are
+excluded when the patch is applied, so a worker that force-adds them still
+cannot bring them back.
 
 The patch is untrusted input. `git apply` refuses paths under `.git` or
 through a symlink, a patch file replaced by a link is refused, a patch without

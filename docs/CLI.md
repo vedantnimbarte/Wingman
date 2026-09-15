@@ -80,10 +80,10 @@ wingman [OPTIONS] [COMMAND]
 | `pilot skills search [query]` | Search the pack index by name or description. |
 | `pilot skills list` | List installed packs, signed or not. |
 | `pilot skills verify [spec…]` | Re-check installed packs against their signatures / install digest; non-zero exit on failure. `--allow-unsigned`. |
+| `pilot skills digest <spec> <dir>` | For pack authors: the payload to sign with `ssh-keygen -Y sign -n wingman-skillpack`. `--dep <spec>` (repeatable), `--out <file>`. |
 | `pilot tools [list]` | List the tools pilot workers proposed for this project (`.wingman/tools/`), approved or pending. |
 | `pilot tools approve <name>` | Approve a proposed tool: records its exact content in the trust store, so workers spawned afterwards (and sessions in this project) can call it. Editing the file revokes it. |
 | `pilot tools reject <name>` | Delete a proposed or approved tool and its trust record. |
-| `pilot skills digest <spec> <dir>` | For pack authors: the payload to sign with `ssh-keygen -Y sign -n wingman-skillpack`. `--dep <spec>` (repeatable), `--out <file>`. |
 | `board`              | Kanban board over pilot runs: a persistent, multi-project backlog. Cards are goals that outlive their runs; columns are derived from run state. |
 | `board add "<title>"` | Create a Backlog card. `--goal <text>` (the prompt sent to pilot; defaults to the title), `--project <id>`, `--label <l>`, `--notes <text>`. |
 | `board list`         | List cards with derived columns. `--project`, `--column backlog\|planned\|in-progress\|review\|done`, `--label`, `--all`, `--json`. |

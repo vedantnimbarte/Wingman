@@ -334,6 +334,11 @@ fn sandbox_id(session_id: &str) -> String {
     format!("wingman-{id}")
 }
 
+/// `[pilot.sandbox].env` entries are variable names; anything else is skipped.
+fn is_env_name(k: &str) -> bool {
+    !k.is_empty() && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -412,7 +417,8 @@ pub fn container_worker_argv(
     if let Some((uid, gid)) = user {
         a.extend(["--user".into(), format!("{uid}:{gid}")]);
     }
-    for e in &cfg.env {
+    // A `NAME=value` entry would put the value in argv, so only names pass.
+    for e in cfg.env.iter().filter(|k| is_env_name(k)) {
         a.extend(["-e".into(), e.clone()]);
     }
     a.extend([
@@ -614,7 +620,7 @@ pub fn prepare(
                 .config
                 .env
                 .iter()
-                .filter(|k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .filter(|k| is_env_name(k))
                 .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
                 .collect();
             write_script(&exports, "/dev/vdc")?;
@@ -744,10 +750,22 @@ pub fn patch_back(
     let patch = run.scratch.join("patch");
     std::fs::write(&patch, diff).map_err(|e| e.to_string())?;
     let patch_s = patch.to_string_lossy();
+    // The guest script leaves Wingman's own trees out of the diff, but the
+    // worker controls the guest and can force-add them: `.wingman-sandbox/`
+    // holds the copied global config (provider keys), which would otherwise be
+    // committed to the task branch. Enforced here, where the patch lands.
+    let exclude_sandbox = format!("--exclude={SANDBOX_DIR}/*");
     let out = runner
         .run(
             "git",
-            &["apply", "--binary", "--whitespace=nowarn", &patch_s],
+            &[
+                "apply",
+                "--binary",
+                "--whitespace=nowarn",
+                &exclude_sandbox,
+                "--exclude=.wingman/*",
+                &patch_s,
+            ],
             worktree,
         )
         .map_err(|e| format!("git apply: {e}"))?;
@@ -1016,11 +1034,12 @@ mod tests {
             cpus: 3,
             memory_mib: 1024,
             pids_limit: 99,
-            env: vec!["ANTHROPIC_API_KEY".into()],
+            env: vec!["ANTHROPIC_API_KEY".into(), "LEAK=value".into()],
             ..Default::default()
         };
         let argv =
             container_worker_argv(&cfg, Path::new("/tmp/copy"), "wingman-x", Some((1000, 50)));
+        assert!(!argv.iter().any(|a| a.contains("value")));
         assert_eq!(&argv[..3], ["run", "--rm", "-i"]);
         assert_eq!(value_after(&argv, "--name"), "wingman-x");
         assert_eq!(value_after(&argv, "--network"), "none");
@@ -1320,6 +1339,11 @@ mod tests {
         guest_git(copy, &["commit", "-qam", "worker commit"]);
         std::fs::write(copy.join("new.bin"), [0u8, 1, 2, 255]).unwrap();
         guest_git(copy, &["add", "-A"]);
+        // A hostile worker force-adds Wingman's own trees past the exclude.
+        std::fs::create_dir_all(copy.join(".wingman/deep")).unwrap();
+        std::fs::write(copy.join(".wingman/deep/leak"), "x").unwrap();
+        std::fs::write(copy.join(".wingman-sandbox/home/config.toml"), "k").unwrap();
+        guest_git(copy, &["add", "-f", ".wingman-sandbox", ".wingman"]);
         let mut diff = guest_git(copy, &["diff", "--cached", "--binary", base.trim()]);
         diff.extend_from_slice(PATCH_END.as_bytes());
         diff
@@ -1344,8 +1368,9 @@ mod tests {
             std::fs::read(wt.path().join("new.bin")).unwrap(),
             [0u8, 1, 2, 255]
         );
-        // Wingman's own files never come back.
+        // Wingman's own files never come back, even when force-added.
         assert!(!wt.path().join(".wingman-sandbox").exists());
+        assert!(!wt.path().join(".wingman").exists());
     }
 
     #[test]

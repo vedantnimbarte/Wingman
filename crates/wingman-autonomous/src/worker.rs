@@ -552,7 +552,7 @@ pub async fn run_worker(
 /// dead worker looked identical to a worker that had simply not finished yet.
 /// The retry ladder then reported "failed without outcome summary" to the next
 /// rung, which re-ran the same work blind.
-async fn record_failure(
+pub async fn record_failure(
     store: &tokio::sync::Mutex<RunStore>,
     task_id: &str,
     agent_id: &str,
