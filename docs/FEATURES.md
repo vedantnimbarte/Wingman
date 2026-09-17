@@ -198,6 +198,12 @@ Wingman different; this is everything else it does.
   of hand-carrying a 43-character secret to it. Enrolment only — the paired
   device gets the same token and the same ceiling. See
   [HTTP-API.md](HTTP-API.md#pairing-a-device).
+- **Steering from a phone, by voice.** The panel's sign-in card takes a
+  pairing code, the conversation and a live run's tell/ask composer pin to the
+  bottom of a phone screen, and both get a mic button on the browser's own
+  speech recognition — it fills the field, you still press Send. Needs HTTPS or
+  localhost, so a plain-HTTP LAN address shows no mic. Not yet tried on a real
+  phone. See [WEB-UI.md](WEB-UI.md#from-a-phone-by-voice).
 - **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a

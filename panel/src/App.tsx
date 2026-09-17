@@ -82,13 +82,16 @@ function SignIn({ onDone }: { onDone: () => void }) {
   const [token, setToken] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // A pairing code is the phone path: short-lived, and it saves carrying the
+  // 43-character token across by hand. Same field, same cookie at the end.
+  const [pairing, setPairing] = useState(false)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
     setBusy(true)
     setError(null)
     try {
-      await api.signIn(token)
+      await (pairing ? api.pair(token) : api.signIn(token))
       onDone()
     } catch (err) {
       // The server refuses to say whether a wrong token was close, so neither
@@ -111,12 +114,13 @@ function SignIn({ onDone }: { onDone: () => void }) {
         </p>
 
         <div>
-          <label htmlFor="token">API token</label>
+          <label htmlFor="token">{pairing ? 'Pairing code' : 'API token'}</label>
           <input
             id="token"
             className="input"
             type="password"
-            autoComplete="current-password"
+            autoComplete={pairing ? 'one-time-code' : 'current-password'}
+            autoCapitalize="off"
             autoFocus
             value={token}
             onChange={(e) => setToken(e.target.value)}
@@ -135,12 +139,33 @@ function SignIn({ onDone }: { onDone: () => void }) {
           className="button button-primary"
           disabled={busy || token.trim() === ''}
         >
-          {busy ? 'Signing in…' : 'Sign in'}
+          {busy ? 'Signing in…' : pairing ? 'Pair this device' : 'Sign in'}
+        </button>
+
+        <button
+          type="button"
+          className="button button-quiet"
+          onClick={() => {
+            setPairing((p) => !p)
+            setToken('')
+            setError(null)
+          }}
+        >
+          {pairing ? 'Use the API token instead' : 'Have a pairing code?'}
         </button>
 
         <p className="signin-foot">
-          Generate one with <code className="figure">wingman serve --init-token</code>. It is
-          printed exactly once.
+          {pairing ? (
+            <>
+              Start the daemon with <code className="figure">wingman serve --pair</code> and enter
+              the code it prints. It works once, for 10 minutes.
+            </>
+          ) : (
+            <>
+              Generate one with <code className="figure">wingman serve --init-token</code>. It is
+              printed exactly once.
+            </>
+          )}
         </p>
       </form>
     </div>

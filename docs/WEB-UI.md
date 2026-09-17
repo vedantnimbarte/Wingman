@@ -114,6 +114,14 @@ An explicit `Authorization` or `X-Wingman-Token` header always wins over the
 cookie, so a script or CI job that sends a credential never has a stale browser
 cookie substituted for the one it just supplied.
 
+**A pairing code works on the sign-in card too.** *Have a pairing code?* swaps
+the field for the code `wingman serve --pair` prints: the panel posts it to
+`POST /v1/pair/redeem` and hands the token that comes back straight to
+`POST /v1/ui/session`. The token is in page memory for that one request and
+ends up in the same `HttpOnly` cookie a typed-in token does — it is not stored,
+logged, or put in a URL. A refused code shows the server's own reason, including
+"already used", which is the signal that someone else redeemed it.
+
 > **Why this matters beyond exfiltration:** `EventSource` cannot set request
 > headers. With a bearer token the panel would have had to put it in the query
 > string of `/v1/events` — and therefore into every access log. The cookie
@@ -217,6 +225,12 @@ command to the run's `control.jsonl`; the orchestrator's watchdog picks it up
 on its own schedule, and the API never reaches into the running process. The
 panel says so ("Sent `approve` — the run applies it on its next check") rather
 than optimistically flipping the status to something that has not happened yet.
+
+**Tell and ask.** A live run's detail view ends in a composer pinned to the
+bottom of the screen: *Tell* is `pilot tell`, *Ask* is `pilot ask`, both
+addressed to every worker holding a task (per-task `--task` targeting is still
+terminal-only). Ask does not wait for the answer — it shows up under
+**Activity** as `t1 answer: …` when the worker replies on its next turn.
 
 ### Elapsed time
 
@@ -339,6 +353,40 @@ embedded into the global session store for `recall_session`, so removing only
 the JSONL would leave the conversation findable by search — a delete that does
 not delete. The response says whether the index entry went too, and the panel
 repeats it.
+
+### From a phone, by voice
+
+Below 40rem the conversation composer and the run's tell/ask composer sit
+flush on the bottom edge (clear of the home indicator), their controls are
+44px tap targets, and the field is 16px so iOS does not zoom the page on focus.
+The desktop layout is unchanged.
+
+**Dictation.** Both composers get a mic button that uses the browser's own
+speech recognition (`SpeechRecognition` / `webkitSpeechRecognition`) — no
+dependency and nothing new on the server. Tap to start; the interim transcript
+appears in the field after whatever you had typed; tap again, or pause, to
+stop. **It never sends.** You read what it heard and press Send yourself,
+because a misheard instruction to a running fleet should be caught before it
+goes. The button is `aria-pressed`, relabels itself *Stop dictation* while
+listening, announces "Listening" to a screen reader, and says when the
+microphone is blocked. On Chrome the audio goes to the browser vendor's
+recogniser; that is the browser's behaviour, not something Wingman configures.
+
+**Where the browser has no recogniser, the button is not rendered** — and
+browsers only offer one in a secure context: `https://` or `localhost`. So a
+phone opening `http://192.168.1.20:8787/` over the LAN gets no mic. Wingman
+does not terminate TLS; put something in front that does, for example
+`tailscale serve 8787` (a `https://<machine>.<tailnet>.ts.net` URL), or Caddy
+with `reverse_proxy 127.0.0.1:8787` on a name it can get a certificate for.
+
+**Read aloud** (shown where `speechSynthesis` exists) speaks the final reply —
+the text after the last tool call — when a turn finishes. Off by default;
+the choice persists in the browser.
+
+**Not validated live.** None of this has been tried on a real phone. The mic
+flow is tested against a faked recogniser and the layout was only checked by
+reading the CSS; Safari's recogniser, permission prompts and the TLS setups
+above are untested.
 
 ## Insights
 

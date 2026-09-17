@@ -319,9 +319,11 @@ fn read_from(log: &Path, offset: u64) -> (Vec<String>, u64) {
 #[serde(default)]
 pub struct ControlBody {
     pub task: Option<String>,
+    /// What `tell` / `ask` says to the worker(s).
+    pub message: Option<String>,
 }
 
-/// `POST …/pilot/runs/{run}/{approve|veto|abort|retry}`
+/// `POST …/pilot/runs/{run}/{approve|veto|abort|retry|tell|ask}`
 pub async fn control(
     project: &Project,
     run_id: &str,
@@ -389,6 +391,42 @@ pub async fn control(
                     .await;
             }
             ControlCommand::RetryTask { id }
+        }
+        // `pilot tell` / `pilot ask`. Ask returns as soon as the question is
+        // recorded: the answer arrives as a `worker_msg:` event on the run's
+        // stream, which is where the CLI polls for it too — holding the
+        // request open for minutes would be a second, worse channel for it.
+        "tell" | "ask" => {
+            if is_terminal(state.status) {
+                return http::write_err(
+                    sock,
+                    409,
+                    &format!(
+                        "run already finished ('{}') — no worker is listening",
+                        status_name(state.status)
+                    ),
+                )
+                .await;
+            }
+            let message = body.message.unwrap_or_default();
+            if message.trim().is_empty() {
+                return http::write_err(
+                    sock,
+                    400,
+                    &format!("{action} needs {{\"message\": \"…\"}}"),
+                )
+                .await;
+            }
+            if let Some(id) = &body.task {
+                if !state.tasks.iter().any(|t| &t.id == id) {
+                    return http::write_err(sock, 404, "no such task in this run").await;
+                }
+            }
+            ControlCommand::Tell {
+                task: body.task,
+                message,
+                reply: action == "ask",
+            }
         }
         _ => return http::write_err(sock, 404, "unknown control action").await,
     };
