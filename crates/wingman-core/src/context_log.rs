@@ -60,7 +60,15 @@ pub enum ContextFact {
     /// "why did it do that" needs to see it.
     SystemInjected { text: String },
     /// Cumulative token usage for the turn.
-    Usage { usage: Usage },
+    ///
+    /// Carries the provider and model that billed it: a session can switch
+    /// model mid-way (`/model`), and telemetry priced against the model the
+    /// session started with would be wrong. Not written to the session log.
+    Usage {
+        usage: Usage,
+        provider: String,
+        model: String,
+    },
     /// The turn ended.
     ///
     /// Also carries the two measurements only the loop can take, because they

@@ -527,7 +527,7 @@ fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> 
 ///   - `keyring:<provider_id>`  — look up the OS keyring (Phase B)
 ///   - non-empty, non-placeholder string — use directly (legacy)
 ///   - `${ENV_VAR}` placeholder, empty, or missing — return None
-fn check_config_value(from_config: Option<&str>) -> Option<String> {
+pub(crate) fn check_config_value(from_config: Option<&str>) -> Option<String> {
     let s = from_config?;
     let trimmed = s.trim();
     if trimmed.is_empty() || looks_like_placeholder(trimmed) {

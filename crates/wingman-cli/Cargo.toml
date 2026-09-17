@@ -62,7 +62,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Private file for the `gh api --input` body `wingman review --comment` posts.
 # Already the dev-dependency every crate tests with.
 tempfile = "3"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 
 # `setsid` for detaching a `-d` background run from the controlling terminal;
