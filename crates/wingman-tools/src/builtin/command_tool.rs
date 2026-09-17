@@ -111,16 +111,8 @@ impl Tool for CommandTool {
 
         let fut = tokio::task::spawn_blocking(move || {
             use std::io::Write;
-            use std::process::{Command, Stdio};
-            let mut cmd = if cfg!(windows) {
-                let mut c = Command::new("cmd");
-                c.args(["/C", &command]);
-                c
-            } else {
-                let mut c = Command::new("sh");
-                c.args(["-c", &command]);
-                c
-            };
+            use std::process::Stdio;
+            let mut cmd = crate::child_process::shell_command(&command);
             cmd.current_dir(&cwd)
                 .env("WINGMAN_TOOL_INPUT", &input)
                 .stdin(Stdio::piped())
