@@ -1216,15 +1216,10 @@ async fn warm_worktree(
     if cmd.trim().is_empty() {
         return;
     }
-    let (shell, flag) = if cfg!(windows) {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let mut sc = crate::child_process::SupervisedCommand::new(shell);
+    let mut sc = crate::child_process::SupervisedCommand::from_command(
+        crate::child_process::shell_command(&cmd).into(),
+    );
     sc.command_mut()
-        .arg(flag)
-        .arg(&cmd)
         .current_dir(&worktree)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())

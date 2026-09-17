@@ -256,15 +256,7 @@ fn prepare(args: &Args, ctx: &ToolCtx) -> Result<(Command, String), String> {
             if policy == "auto" {
                 warn_unconfined_once();
             }
-            if cfg!(windows) {
-                let mut c = Command::new("cmd.exe");
-                c.arg("/C").arg(&args.command);
-                c
-            } else {
-                let mut c = Command::new("sh");
-                c.arg("-c").arg(&args.command);
-                c
-            }
+            Command::from(crate::child_process::shell_command(&args.command))
         }
     };
     cmd.current_dir(&cwd);

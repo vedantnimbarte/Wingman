@@ -22,6 +22,31 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 
+/// A command that runs `cmd` through the platform shell: `sh -c` on Unix,
+/// `cmd.exe /S /C "<cmd>"` on Windows. Every caller that hands a command
+/// string to a shell goes through here.
+///
+/// Windows needs `raw_arg`: `Command::arg` escapes embedded quotes MSVCRT-style
+/// (`\"`), which cmd.exe does not understand, so `echo "a b"` printed
+/// `\"a b\"` and a quoted path or argument never reached the program intact.
+/// `/S` makes cmd strip exactly the outer pair of quotes added here, so a
+/// command that itself starts with a quoted path survives too.
+pub fn shell_command(cmd: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd.exe");
+        c.raw_arg(format!("/S /C \"{cmd}\""));
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(cmd);
+        c
+    }
+}
+
 /// Pids (== pgid on Unix) of every supervised child that is spawned and not
 /// yet dropped. Populated at spawn, cleared on `Supervisor::drop`. The CLI's
 /// signal handler drains this on Ctrl+C / SIGTERM so an interrupted run
@@ -442,6 +467,25 @@ mod windows_impl {
 
 #[cfg(test)]
 mod tests {
+
+    /// Quotes in a shell command reach the program intact on every platform.
+    /// On Windows `Command::arg` used to turn `"a b"` into `\"a b\"`, and a
+    /// command starting with a quoted path lost its quotes entirely.
+    #[test]
+    fn shell_command_passes_quotes_through() {
+        let out = super::shell_command(r#"echo "a b""#).output().expect("run");
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let want = if cfg!(windows) { r#""a b""# } else { "a b" };
+        assert_eq!(got, want);
+
+        #[cfg(windows)]
+        {
+            let out = super::shell_command(r#""%ComSpec%" /C "echo x y""#)
+                .output()
+                .expect("run");
+            assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "x y");
+        }
+    }
 
     /// `LIVE_GROUPS` is process-wide and `kill_all_live_groups` SIGKILLs every
     /// group in it. `cargo test` runs these in parallel threads of one
