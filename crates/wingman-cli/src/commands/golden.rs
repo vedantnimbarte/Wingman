@@ -150,12 +150,9 @@ fn load_all(dir: &Path, only: Option<&str>) -> Result<Vec<(String, Golden)>> {
 
 /// Run `cmd` via the shell and return stdout (or stdout+stderr on failure).
 fn run(cmd: &str) -> Result<String> {
-    let output = if cfg!(windows) {
-        std::process::Command::new("cmd").args(["/C", cmd]).output()
-    } else {
-        std::process::Command::new("sh").args(["-c", cmd]).output()
-    }
-    .with_context(|| format!("running `{cmd}`"))?;
+    let output = wingman_tools::child_process::shell_command(cmd)
+        .output()
+        .with_context(|| format!("running `{cmd}`"))?;
     let mut s = String::from_utf8_lossy(&output.stdout).into_owned();
     if !output.status.success() {
         s.push_str(&String::from_utf8_lossy(&output.stderr));
