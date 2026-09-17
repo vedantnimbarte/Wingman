@@ -521,6 +521,11 @@ fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> AcceptanceResult {
     let child = Command::new(program)
         .args(&args)
         .current_dir(cwd)
+        // Never the worker's stdin: that is the manager's IPC pipe, with a
+        // thread blocked reading it. On Windows an MSYS tool (`test`, `[`)
+        // that inherits a pipe handle with a read pending hangs at startup,
+        // so the check never finishes.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn();

@@ -680,9 +680,12 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let inputs = wingman_autonomous::pipeline::PipelineInputs {
         provider: provider.clone(),
         manager_model: selection.model.clone(),
+        // `provider/model`: a worker resolves its model from inside a worktree
+        // that has no project config, so a bare id would land on whatever
+        // global default provider exists (or none).
         worker_spawner: build_real_worker_spawner(
-            pilot.worker_model.as_deref().unwrap_or(&selection.model),
-            &selection.model,
+            pilot.worker_model.as_deref().unwrap_or(&selection.spec()),
+            &selection.spec(),
             routing,
             learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(pilot.task_timeout_secs),
@@ -1676,8 +1679,8 @@ pub async fn resume(
             cfg.pilot
                 .worker_model
                 .as_deref()
-                .unwrap_or(&selection.model),
-            &selection.model,
+                .unwrap_or(&selection.spec()),
+            &selection.spec(),
             routing,
             learned_routing(&cfg, &project.root),
             std::time::Duration::from_secs(cfg.pilot.task_timeout_secs),
