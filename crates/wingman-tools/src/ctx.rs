@@ -39,6 +39,9 @@ pub struct ToolCtx {
     /// rather than to a child that is about to disappear; giving children
     /// their own table would orphan whatever they left running.
     pub jobs: Arc<crate::jobs::JobTable>,
+    /// Debug-adapter sessions for this session, shared across clones for the
+    /// same reason as `jobs`; dropping the table kills every debuggee tree.
+    pub debug: Arc<crate::dap::DebugSessions>,
     /// How tools read and write files.
     ///
     /// Shared across clones like  and . Note this is a tool's
@@ -81,6 +84,7 @@ impl ToolCtx {
             ask_user_desktop_timeout_secs: 0,
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
+            debug: Arc::new(crate::dap::DebugSessions::new()),
             fs: Arc::new(crate::filesystem::OsFileSystem),
         }
     }
@@ -104,6 +108,7 @@ impl ToolCtx {
             ask_user_desktop_timeout_secs: 0,
             plan_approved: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(crate::jobs::JobTable::new()),
+            debug: Arc::new(crate::dap::DebugSessions::new()),
             fs: Arc::new(crate::filesystem::OsFileSystem),
         }
     }

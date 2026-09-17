@@ -299,6 +299,34 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         ));
     }
 
+    // 6. Debug adapters on PATH, for the debug_* tools.
+    section("debug adapters (DAP)");
+    for lang in wingman_tools::dap::DebugLang::ALL {
+        match wingman_tools::dap::Adapter::detect(lang) {
+            Some(adapter) => emit(Status::Ok(format!("{}: {}", lang.label(), adapter.program))),
+            None => emit(Status::Warn(format!(
+                "{}: none on PATH (install {})",
+                lang.label(),
+                lang.install_hint()
+            ))),
+        }
+    }
+
+    // 7. Headless browser (verify gate + the `browser` tool).
+    section("browser");
+    if cfg!(feature = "browser") {
+        match wingman_browser::find_chrome() {
+            Ok(path) => emit(Status::Ok(format!("Chrome/Chromium: {}", path.display()))),
+            Err(e) => emit(Status::Warn(format!(
+                "no Chrome/Chromium found ({e}) — the `browser` tool and [verify.browser] gate will not run; set CHROME to its path"
+            ))),
+        }
+    } else {
+        emit(Status::Warn(
+            "built without the `browser` feature — no `browser` tool or visual verification".into(),
+        ));
+    }
+
     // Claude Code hooks are never imported silently, so the only way to
     // discover the option is to be told it applies to you.
     if !cfg.hooks.import_claude_code {

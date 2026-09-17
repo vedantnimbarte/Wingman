@@ -401,6 +401,96 @@ already-finished job is not an error.
 
 One line per job: id, state, elapsed time, and the command. No arguments.
 
+## Debugger — Ask the Runtime
+
+The LSP tools ask the compiler what code *means*; these ask a real debugger
+what it *did*. They drive whatever Debug Adapter Protocol adapter is on
+`PATH`: `lldb-dap` (or `lldb-vscode`, or CodeLLDB's `codelldb`) for Rust, C,
+and C++; `python -m debugpy.adapter` for Python; `dlv dap` for Go. Reach for
+them when a test fails and reading the code has not said why — stop at the
+line, look at the locals, evaluate the suspicious expression.
+
+A debug session runs a program, so every `debug_*` tool needs the same grant
+as `run_shell`. The adapter is started through `run_shell`'s own preparation
+(permission mode, project denylist, OS sandbox, credential scrub), and the
+debuggee's command line is checked against the denylist as well. The adapter
+and the program under it are killed as one process tree on `debug_stop` or
+when the session ends, like background jobs.
+
+With no adapter installed, `debug_start` returns a note naming what to
+install rather than failing. `wingman doctor` lists which adapters it found.
+
+```
+debug_start(program="target/debug/deps/parser-1a2b3c", args=["tokenizes_nested"],
+            breakpoints=[{file: "src/lex.rs", line: 88}])
+→ started dbg-1 … stopped: breakpoint (thread 1)
+    frame 1000: parser::lex::next  /repo/src/lex.rs:88
+  Locals:
+    depth = 3 (usize)
+debug_eval(session="dbg-1", expression="self.pos")   → 41 (usize)
+debug_continue(session="dbg-1", action="over")
+debug_stop(session="dbg-1")
+```
+
+Not validated live: these tools are tested against an in-process fake
+adapter only. No real `lldb-dap`, debugpy, Delve, or CodeLLDB was run while
+building them, so adapter-specific launch quirks (debugpy's `module`
+launches, Delve's `mode: "test"`, CodeLLDB's port handshake, whether the
+bubblewrap/Seatbelt sandbox permits `ptrace`) are unconfirmed.
+
+### `debug_start`
+
+Launch a program under a debugger and return a session id (`dbg-1`). Args:
+`program` (binary, script, or Go package) or `module` (Python `-m`, e.g.
+`pytest`); `args`, `cwd`, `language` (`rust`/`c`/`cpp`/`python`/`go`,
+inferred from `program` otherwise — `.py`, `.go`, else native); `test` (Go:
+debug the package's tests); `breakpoints` (`[{file, line, condition?}]`);
+`stop_on_entry` (default: true when no breakpoints are given); `wait_secs`
+(default 30, max 120).
+
+Pass breakpoints here rather than afterwards: the adapter only holds the
+program for configuration until launch finishes, so a breakpoint set later
+can miss code that already ran. It waits for the first stop and returns what
+`debug_state` would. For a Rust test, `program` is the test binary cargo built
+under `target/debug/deps/`.
+
+### `debug_breakpoints`
+
+Set line breakpoints on a live session. Args: `session`, `breakpoints`,
+`clear` (files). For each file named, the given breakpoints **replace** that
+file's existing ones — that is DAP's own model — and files not named are left
+alone. Each breakpoint reports `verified` or `pending` (usually "not loaded
+yet", not "wrong").
+
+### `debug_continue`
+
+Resume a stopped session. Args: `session`, `action` (`continue`, `over`,
+`in`, `out`; default `continue`), `wait_secs` (default 30). Waits for the next
+stop or exit and reports it like `debug_state`. If it is still running when
+the wait ends it says so; call `debug_state` to keep waiting.
+
+### `debug_state`
+
+Where the session is now: the stop reason, up to 20 stack frames (with the
+frame ids `debug_eval` takes), the top frame's locals (scopes the adapter
+flags as expensive — globals, registers — are skipped; 40 variables and 200
+characters per value at most), and program output since the last check,
+buffered like a job's. Args: `session`, `wait_secs` (default 0).
+
+Gated as shell rather than read: formatting a value can run the program's own
+code (Python's `__repr__`).
+
+### `debug_eval`
+
+Evaluate an expression in a stopped session. Args: `session`, `expression`,
+`frame_id` (default the top frame). The expression can call functions and
+change program state. Results are capped at 4000 characters.
+
+### `debug_stop`
+
+End the session: ask the adapter to terminate the program, then kill the
+adapter and everything under it. Args: `session`.
+
 ## Web Tools
 
 ### `web_fetch`
@@ -458,6 +548,63 @@ Search the web using DuckDuckGo (no API key).
 - Top 10 results returned.
 - Pairs well with `web_fetch` (search, then fetch top result).
 - No API key needed.
+
+## Browser
+
+### `browser`
+
+*(Opt-in build: `--features browser`, plus a Chrome/Chromium binary.)* Drive
+one headless Chrome tab that persists across calls — load the dev server a
+background job started, click through it, read what broke. One tool with an
+`action`, not six, because every schema is paid for on every request.
+
+**Signature:**
+```json
+{ "tool": "browser", "args": { "action": "navigate", "url": "http://localhost:5173/" } }
+{ "tool": "browser", "args": { "action": "click", "selector": "button#save" } }
+{ "tool": "browser", "args": { "action": "type", "selector": "input[name=q]", "text": "hello" } }
+{ "tool": "browser", "args": { "action": "screenshot" } }
+{ "tool": "browser", "args": { "action": "console" } }
+{ "tool": "browser", "args": { "action": "eval", "expression": "document.querySelectorAll('li').length" } }
+```
+
+**Returns:**
+- `navigate`, `click`, `type`: the URL the tab ended up on, the page title,
+  and `document.body.innerText` capped at 16 KiB, fenced as untrusted content.
+  `click` and `type` wait for the selector to appear first.
+- `screenshot`: a **path**, not an image. Tool results are text-only in
+  Wingman (`ToolOutcome` carries a string; images reach a model only as `@file`
+  attachments in a user message), so the PNG is saved to
+  `.wingman/browser/screenshot-<ms>.png` and the path is returned. The model
+  does not see the picture unless someone attaches it.
+- `console`: `console.*` calls, uncaught exceptions, and browser log entries
+  (failed requests, CSP violations) since the last `console` call. Keeps the
+  most recent 200 lines and says how many older ones were dropped.
+- `eval`: the expression's `JSON.stringify` result (promises are awaited),
+  capped at 8 KiB. A throw comes back as an error.
+
+**Notes:**
+- Permission: declared `NETWORK | WRITE` — it reaches the network, writes the
+  screenshot, and clicking in an app changes its state. So auto-edit or yolo;
+  `[tools].allow_network` alone is not enough in read-only mode.
+- http(s) URLs only (`file://` would read past path containment). Unlike
+  `web_fetch`, localhost and private addresses are allowed — a dev server is
+  the point. Link-local IP literals (the cloud metadata endpoint) are refused.
+  After every action the tab's actual URL is re-checked, so a click or redirect
+  onto a refused URL blanks the page instead of returning it.
+- Under `[privacy].local_only` only `localhost`, `127.0.0.1` and `[::1]` open,
+  and Chrome is launched behind a dead proxy so the page's own requests to
+  anything off-box fail too. WebRTC can ignore proxy settings and is not
+  blocked.
+- Chrome starts on the first call and is killed when the session ends, like
+  background jobs. A subagent gets its own browser if it uses one. A wingman
+  process that is hard-killed can leave Chrome behind.
+- If Chrome crashes or disconnects, the next call relaunches it (a fresh tab:
+  the previous page, cookies and console are gone).
+- Not validated live: this has been unit-tested (URL policy, argument checks,
+  output bounds, console buffering) and compile-checked against
+  `headless_chrome`, but not yet exercised end to end against a real Chrome.
+  `wingman doctor` reports whether a Chrome binary was found.
 
 ## Semantic Search
 
@@ -936,8 +1083,15 @@ faster model while the parent session keeps the strongest one. An explicit
 | `job_send`          | —    | —     | Y     | mode/list  | Write a line to a job's stdin   |
 | `job_stop`          | —    | —     | Y     | mode/list  | Kill a job and its process tree |
 | `job_list`          | Y    | —     | —     | always     | List this session's jobs        |
+| `debug_start`       | —    | —     | Y     | mode/list  | Launch a program under a debugger |
+| `debug_breakpoints` | —    | —     | Y     | mode       | Set/clear line breakpoints      |
+| `debug_continue`    | —    | —     | Y     | mode       | Continue or step over/in/out    |
+| `debug_state`       | —    | —     | Y     | mode       | Stop reason, stack, locals      |
+| `debug_eval`        | —    | —     | Y     | mode       | Evaluate in a frame             |
+| `debug_stop`        | —    | —     | Y     | mode       | Kill the session's process tree |
 | `web_fetch`         | Y    | —     | —     | always     | Download URL → text            |
 | `web_search`        | Y    | —     | —     | always     | DuckDuckGo search (no key)     |
+| `browser`           | Y    | Y     | —     | mode       | Opt-in build; headless Chrome tab |
 | `semantic_search`   | Y    | —     | —     | always     | RAG index search               |
 | `find_symbol`       | Y    | —     | —     | always     | Where a symbol is defined      |
 | `who_calls`         | Y    | —     | —     | always     | References + enclosing symbol  |

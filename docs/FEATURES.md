@@ -135,6 +135,18 @@ Wingman different; this is everything else it does.
   denylist, sandbox, and credential scrub as a foreground one, and every job is
   killed with its whole process tree when the session ends — a forgotten dev
   server doesn't outlive the agent.
+- **Debugger tools (DAP).** Where the LSP tools ask the compiler, `debug_start`,
+  `debug_breakpoints`, `debug_continue`, `debug_state`, `debug_eval`, and
+  `debug_stop` ask the runtime: launch a program or test under whatever Debug
+  Adapter Protocol adapter is on `PATH` (`lldb-dap`/`codelldb` for Rust/C/C++,
+  debugpy for Python, `dlv dap` for Go), stop at a line, read the stack and the
+  top frame's locals, evaluate an expression, step. They need the same grant as
+  `run_shell`, start the adapter through its preparation (denylist, sandbox,
+  credential scrub), and kill the adapter and debuggee as one process tree on
+  stop or session end. No adapter installed is a note naming what to install;
+  `wingman doctor` lists what it found. Not validated live: tested against an
+  in-process fake adapter only — no real lldb-dap, debugpy, Delve, or CodeLLDB
+  was run. See [TOOLS.md](TOOLS.md#debugger--ask-the-runtime).
 - **Two-layer loop protection.** The tools layer nudges the model when it
   repeats a call with identical arguments (`[tools].repeat_thresholds`,
   advisory, never blocks). Above it, a rolling window
@@ -370,6 +382,15 @@ Wingman different; this is everything else it does.
   and set `[verify.browser].url` to make the turn gate load a URL, screenshot
   it, and fail if it drifts from a baseline. Not in the default build, and it
   fails open — with no browser present the gate passes rather than blocking.
+- **Agent browser.** *(Opt-in build.)* The same `--features browser` build
+  gives the agent a `browser` tool: one headless Chrome tab, started on first
+  use and closed with the session, that it can navigate, click and type into,
+  screenshot (saved under `.wingman/browser/` — tool results can't carry
+  images, so the model gets a path), read console errors from, and run JS in.
+  Localhost dev servers are the target: under `[privacy].local_only` it opens
+  loopback URLs only. `wingman doctor` says whether a Chrome binary was found.
+  Unit-tested and compile-checked, but not yet run end to end against a real
+  Chrome. See [TOOLS.md](TOOLS.md#browser).
 - **Server-backed team memory.** Beyond the git-backed `memory sync`,
   `wingman memory push` / `pull` sync memories through a team HTTP endpoint
   (`[team]`), merging non-destructively.

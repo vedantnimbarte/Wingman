@@ -146,6 +146,23 @@ pub(crate) async fn run_contained(
     }
 }
 
+/// `run_shell`'s preparation for a long-lived process started under another
+/// tool's name (a debug adapter), so it cannot be a way around these guards.
+pub(crate) fn prepare_command(
+    command: &str,
+    cwd: Option<String>,
+    ctx: &ToolCtx,
+) -> Result<Command, String> {
+    let args = Args {
+        command: command.to_string(),
+        cwd,
+        timeout_secs: None,
+        background: false,
+        tool_input: None,
+    };
+    prepare(&args, ctx).map(|(cmd, _)| cmd)
+}
+
 /// Run a prepared command in the foreground and format its result.
 async fn capture(cmd: Command, timeout: Duration, policy: &str) -> ToolOutcome {
     let output = match run_captured(cmd, timeout, policy).await {
