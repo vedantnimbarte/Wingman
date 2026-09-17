@@ -708,6 +708,13 @@ pub(crate) fn base_registry(
         reg.unregister("web_fetch");
         reg.unregister("web_search");
     }
+    // Not removed under local_only: localhost dev servers are its main use,
+    // so the tool enforces loopback-only itself (and launches Chrome behind a
+    // dead proxy). `register_arc` still honours disabled_tools / presets.
+    #[cfg(feature = "browser")]
+    reg.register_arc(Arc::new(wingman_tools::builtin::Browser::new(
+        cfg.privacy.local_only,
+    )));
     reg
 }
 

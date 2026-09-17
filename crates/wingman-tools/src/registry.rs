@@ -125,6 +125,7 @@ pub const CONDITIONALLY_REGISTERED: &[&str] = &[
     "spawn_subagent",
     "task_complete",
     "run_plan",
+    "browser",
 ];
 
 impl ToolRegistry {
