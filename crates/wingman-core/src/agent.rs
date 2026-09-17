@@ -710,7 +710,12 @@ impl AgentLoop {
                         }
                         StreamEvent::Usage { usage } => {
                             if let Some(s) = &sink {
-                                s.record(crate::ContextFact::Usage { usage }).await;
+                                s.record(crate::ContextFact::Usage {
+                                    usage,
+                                    provider: provider.id().to_string(),
+                                    model: config.model.clone(),
+                                })
+                                .await;
                             }
                             yield AgentEvent::Usage { usage };
                         }

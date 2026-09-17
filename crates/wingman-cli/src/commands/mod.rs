@@ -2,6 +2,7 @@ pub mod acp_serve;
 pub mod attest;
 pub mod batch;
 pub mod bench;
+pub mod bg;
 pub mod board;
 pub mod board_tui;
 pub mod checkpoint;

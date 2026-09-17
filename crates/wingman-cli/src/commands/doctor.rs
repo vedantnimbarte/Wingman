@@ -130,6 +130,22 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
                 "vm — unavailable ({why}); pilot refuses vm-tier tasks"
             )),
         });
+        // `bg start --devcontainer` runs through the same Docker probe.
+        let devcontainer = paths.root.join(".devcontainer").join("devcontainer.json");
+        if devcontainer.exists() {
+            emit(
+                match (avail.docker, super::bg::devcontainer_spec(&paths.root)) {
+                    (true, Ok(spec)) => Status::Ok(format!(
+                        "bg --devcontainer — {spec} (unvalidated against a real daemon)"
+                    )),
+                    (false, Ok(_)) => Status::Warn(
+                        "bg --devcontainer — no Docker daemon reachable; it will refuse to start"
+                            .into(),
+                    ),
+                    (_, Err(e)) => Status::Warn(format!("bg --devcontainer — {e:#}")),
+                },
+            );
+        }
     }
 
     // 2. Providers + credentials.
@@ -227,6 +243,27 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
             "indexd not running — `wingman indexd start` keeps the index warm between sessions"
                 .into(),
         )),
+    }
+
+    // 4b. OTLP export. A TCP probe only: it says a collector is listening,
+    // not that it accepts OTLP/HTTP JSON or these headers.
+    section("telemetry (OTLP)");
+    match wingman_session::otlp::settings(&cfg, |k| std::env::var(k).ok()) {
+        Ok(None) => emit(Status::Ok("not configured — nothing is exported".into())),
+        Err(e) => emit(Status::Bad(format!("refused, export is off: {e}"))),
+        Ok(Some(s)) => {
+            let shown = wingman_session::otlp::display_endpoint(&s.endpoint);
+            let hostport = reqwest::Url::parse(&s.endpoint)
+                .ok()
+                .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)));
+            if hostport.as_deref().is_some_and(tcp_reachable) {
+                emit(Status::Ok(format!("exporting to {shown} (reachable)")));
+            } else {
+                emit(Status::Warn(format!(
+                    "exporting to {shown}, but it is not reachable — spans will be dropped"
+                )));
+            }
+        }
     }
 
     // 5. Language servers on PATH.
