@@ -371,6 +371,14 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// Claude Code–format plugin bundles: commands, skills, hooks, and MCP
+    /// servers in one install. Commands and skills load at once; hooks and MCP
+    /// servers stay inert until `wingman plugin trust <name>`.
+    #[command(display_order = 25)]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
     /// Multi-model code review: run review against several models in
     /// parallel and merge findings.
     #[command(display_order = 44)]
@@ -468,6 +476,14 @@ pub enum Command {
         #[command(subcommand)]
         action: PilotAction,
     },
+    /// Hand a task off to a background agent: its own worktree and
+    /// `wingman/bg/<id>` branch, committed when the run exits clean, optionally
+    /// a PR. Close the terminal; `bg logs` picks it back up.
+    #[command(display_order = 39)]
+    Bg {
+        #[command(subcommand)]
+        action: BgAction,
+    },
     /// Kanban board over pilot runs: a persistent, multi-project backlog.
     ///
     /// Cards are goals you author; they outlive the runs that execute them.
@@ -496,6 +512,33 @@ pub enum Command {
         #[arg(long, value_name = "FLOAT")]
         max_usd: Option<f64>,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BgAction {
+    /// Start a background run and return immediately.
+    Start {
+        /// What to do, in natural language.
+        prompt: String,
+        /// Once the result is committed, open a PR (`gh`, else push and print
+        /// a compare URL).
+        #[arg(long)]
+        pr: bool,
+        /// Run the agent inside `.devcontainer/devcontainer.json`'s image
+        /// (`image` or `build.dockerfile` only). Needs Docker.
+        #[arg(long)]
+        devcontainer: bool,
+    },
+    /// List this project's background runs.
+    List,
+    /// Print a run's events; `--follow` tails it until it finishes.
+    Logs {
+        id: String,
+        #[arg(long)]
+        follow: bool,
+    },
+    /// Stop a run: kills the agent (and its container), keeps the worktree.
+    Stop { id: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -943,6 +986,24 @@ pub enum SkillAction {
         /// Output directory to write the skill bundle under.
         out_dir: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// Install from a local directory or a git URL (`url#ref` for a branch or
+    /// tag) into ~/.wingman/plugins/<name>/. Reinstalling replaces it.
+    Install { source: String },
+    /// List installed plugins with their enabled and trust state.
+    List,
+    /// Delete an installed plugin and its trust record.
+    Remove { name: String },
+    /// Re-enable a disabled plugin.
+    Enable { name: String },
+    /// Stop loading a plugin's commands, skills, hooks, and MCP servers.
+    Disable { name: String },
+    /// Let a plugin's hooks and MCP servers run, pinned to its current
+    /// content. Any change to the plugin lapses it.
+    Trust { name: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1416,6 +1477,7 @@ pub async fn run() -> Result<ExitCode> {
             } => commands::skill::import(path, project, force).await,
             SkillAction::Export { name, out_dir } => commands::skill::export(name, out_dir).await,
         },
+        Some(Command::Plugin { action }) => commands::plugin::run(action),
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
         }
@@ -1426,6 +1488,19 @@ pub async fn run() -> Result<ExitCode> {
         },
         Some(Command::Explain { local, staged }) => commands::explain::run(local, staged).await,
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
+        Some(Command::Bg { action }) => match action {
+            BgAction::Start {
+                prompt,
+                pr,
+                devcontainer,
+            } => {
+                let mode = parse_mode(cli.mode.as_deref())?;
+                commands::bg::start(prompt, pr, devcontainer, mode, cli.model).await
+            }
+            BgAction::List => commands::bg::list().await,
+            BgAction::Logs { id, follow } => commands::bg::logs(id, follow).await,
+            BgAction::Stop { id } => commands::bg::stop(id).await,
+        },
         Some(Command::Board { action }) => match action {
             None => commands::board_tui::run(commands::pilot::resolve_ascii(false)).await,
             Some(BoardAction::Add {
@@ -1645,6 +1720,7 @@ pub async fn run() -> Result<ExitCode> {
         }
         None => {
             let cfg = load_config()?;
+            start_telemetry(&cfg);
             let mode_override = parse_mode(cli.mode.as_deref())?;
             let mode = mode_override.unwrap_or(cfg.permission_mode);
 
@@ -1972,7 +2048,18 @@ pub async fn run() -> Result<ExitCode> {
     }
 }
 
-fn load_config() -> Result<Config> {
+/// Start OTLP export for the surfaces that record turns (TUI, headless and
+/// everything built on it, pilot workers). A refused configuration (e.g. a
+/// remote endpoint under `[privacy].local_only`) is said out loud and the
+/// session carries on without export — telemetry never stops a turn.
+pub(crate) fn start_telemetry(cfg: &Config) {
+    if let Err(e) = wingman_session::otlp::init(cfg) {
+        tracing::warn!(target: "wingman::telemetry", "{e}");
+        eprintln!("wingman: OTLP export disabled: {e}");
+    }
+}
+
+pub(crate) fn load_config() -> Result<Config> {
     let global = global_config_path()?;
     let project = ProjectPaths::discover(&std::env::current_dir()?);
     let project_file = if project.config_file.exists() {
@@ -1981,6 +2068,11 @@ fn load_config() -> Result<Config> {
         None
     };
     let mut cfg = Config::load(Some(&global), project_file.as_deref())?;
+    // Trusted plugins' hooks and MCP servers. Here rather than in
+    // `Config::load`, which `/mcp add` uses to rewrite the global file.
+    if let Some(dir) = global.parent() {
+        wingman_config::plugins::apply(&mut cfg, dir);
+    }
     // CLI beats config and env, per the documented layering. Clap already
     // restricted this to the four valid levels.
     if let Some(r) = REASONING_OVERRIDE.get() {

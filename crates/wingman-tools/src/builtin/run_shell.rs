@@ -121,29 +121,48 @@ impl Tool for RunShell {
 
 /// Run `command` exactly as `run_shell` would — permission mode, denylist,
 /// `[tools].shell_sandbox`, env scrub, Job Object, timeout — with `input`
-/// exported as `$WINGMAN_TOOL_INPUT`.
+/// (if any) exported as `$WINGMAN_TOOL_INPUT`, run in `cwd` (default: the
+/// project root).
 ///
 /// For tools that are a shell command under another name (synthesized tools,
-/// J7). Going through here is what keeps such a tool from being a way around
-/// the guards `run_shell` applies: running it unconfined would widen the very
-/// ceiling that made the command acceptable.
+/// J7, and `notebook_run`). Going through here is what keeps such a tool from
+/// being a way around the guards `run_shell` applies: running it unconfined
+/// would widen the very ceiling that made the command acceptable.
 pub(crate) async fn run_contained(
     command: &str,
-    input: String,
+    input: Option<String>,
+    cwd: Option<String>,
     timeout: Duration,
     ctx: &ToolCtx,
 ) -> ToolOutcome {
     let args = Args {
         command: command.to_string(),
-        cwd: None,
+        cwd,
         timeout_secs: None,
         background: false,
-        tool_input: Some(input),
+        tool_input: input,
     };
     match prepare(&args, ctx) {
         Ok((cmd, policy)) => capture(cmd, timeout.min(Duration::from_secs(600)), &policy).await,
         Err(e) => ToolOutcome::err(e),
     }
+}
+
+/// `run_shell`'s preparation for a long-lived process started under another
+/// tool's name (a debug adapter), so it cannot be a way around these guards.
+pub(crate) fn prepare_command(
+    command: &str,
+    cwd: Option<String>,
+    ctx: &ToolCtx,
+) -> Result<Command, String> {
+    let args = Args {
+        command: command.to_string(),
+        cwd,
+        timeout_secs: None,
+        background: false,
+        tool_input: None,
+    };
+    prepare(&args, ctx).map(|(cmd, _)| cmd)
 }
 
 /// Run a prepared command in the foreground and format its result.

@@ -6,7 +6,9 @@
 
 mod apply_patch;
 mod ask_user;
+mod browser;
 mod command_tool;
+mod debug_tools;
 mod edit_file;
 mod forget_memory;
 mod glob_tool;
@@ -18,6 +20,7 @@ mod present_plan;
 mod update_tasks;
 
 mod jobs_tools;
+mod notebook;
 mod read_file;
 mod read_session;
 mod recall_memory;
@@ -44,7 +47,11 @@ mod who_calls;
 
 pub use apply_patch::ApplyPatch;
 pub use ask_user::AskUser;
+pub use browser::Browser;
 pub use command_tool::CommandTool;
+pub use debug_tools::{
+    DebugBreakpoints, DebugContinue, DebugEval, DebugStart, DebugState, DebugStop,
+};
 pub use edit_file::EditFile;
 pub use forget_memory::ForgetMemory;
 pub use glob_tool::Glob;
@@ -55,6 +62,7 @@ pub use list_dir::ListDir;
 pub use lsp_tools::{
     LspCodeAction, LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename,
 };
+pub use notebook::{NotebookEdit, NotebookRun};
 pub use present_plan::PresentPlan;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;

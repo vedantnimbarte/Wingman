@@ -47,6 +47,7 @@ pub struct WorkerOptions {
 }
 
 pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
+    crate::cli::start_telemetry(&cfg);
     // Set cwd to the worktree, if one was passed. Relative paths inside
     // tool calls (edit_file, run_shell, etc.) then resolve against the
     // worker's isolated branch.

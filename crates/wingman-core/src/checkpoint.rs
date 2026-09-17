@@ -100,7 +100,8 @@ fn now_secs() -> u64 {
 /// Which file path(s) a tool call will mutate. Empty for non-mutating tools.
 pub fn mutating_paths(name: &str, args: &serde_json::Value) -> Vec<String> {
     match name {
-        "write_file" | "edit_file" | "edit_symbol" => args
+        // `notebook_run` too: `nbconvert --inplace` rewrites the notebook.
+        "write_file" | "edit_file" | "edit_symbol" | "notebook_edit" | "notebook_run" => args
             .get("path")
             .and_then(|p| p.as_str())
             .map(|s| vec![s.to_string()])
