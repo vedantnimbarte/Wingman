@@ -195,6 +195,18 @@ enabled = false
 # endpoint = "https://memory.example.com"
 # token = "${WINGMAN_TEAM_TOKEN}"
 
+# OpenTelemetry export over OTLP/HTTP JSON. Off unless an endpoint is set here,
+# or by WINGMAN_OTLP_ENDPOINT / OTEL_EXPORTER_OTLP_ENDPOINT. One span per user
+# turn (provider, model, tokens, estimated USD, stop reason, gate verdict), a
+# child span per tool call (name, duration, error flag), and delta counters.
+# Prompts, replies, tool input and tool output are never exported. Refused
+# under [privacy].local_only unless the endpoint is localhost/loopback, and a
+# project config cannot set it without `wingman trust`.
+# [telemetry.otlp]
+# endpoint = "http://localhost:4318"     # /v1/traces and /v1/metrics are appended
+# headers = { "x-honeycomb-team" = "${HONEYCOMB_API_KEY}" }   # or "keyring:<id>"
+# service_name = "wingman"
+
 # Extend the agent with your own shell-command tools (no recompile).
 # [[tools.custom]]
 # name = "run_migration"
@@ -271,6 +283,10 @@ file = true
 | `WINGMAN_REMOTE`                    | Default `--remote` server URL for this shell.                       |
 | `WINGMAN_SERVE_TOKEN`               | Bearer token `--remote` presents (else the OS keyring entry).       |
 | `WINGMAN_PROJECT`                   | Default `--project` id for `--remote`.                              |
+| `WINGMAN_OTLP_ENDPOINT`             | Overrides `telemetry.otlp.endpoint` (and `OTEL_EXPORTER_OTLP_ENDPOINT`). |
+| `WINGMAN_OTLP_HEADERS`              | `k=v,k2=v2`, percent-encoded values; wins per header name.          |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`       | Standard OTel variable. Overrides config; setting it turns export on. |
+| `OTEL_EXPORTER_OTLP_HEADERS`        | Standard OTel variable, same format as `WINGMAN_OTLP_HEADERS`.      |
 
 Any string field of the form `${ENV_VAR}` (e.g. `api_key = "${ANTHROPIC_API_KEY}"`)
 is resolved against the environment at load time.

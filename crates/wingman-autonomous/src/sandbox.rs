@@ -397,6 +397,27 @@ pub fn container_worker_argv(
     name: &str,
     user: Option<(u32, u32)>,
 ) -> Vec<String> {
+    container_argv(
+        cfg,
+        copy,
+        name,
+        user,
+        &cfg.container_image,
+        &["sh".into(), format!("{GUEST_WORK}/{SANDBOX_DIR}/run.sh")],
+    )
+}
+
+/// `docker run` argv under `[pilot.sandbox]`'s limits: `mount` at
+/// [`GUEST_WORK`], then `image` running `command`. The shared half of
+/// [`container_worker_argv`], also used by `wingman bg --devcontainer`.
+pub fn container_argv(
+    cfg: &PilotSandboxConfig,
+    mount: &Path,
+    name: &str,
+    user: Option<(u32, u32)>,
+    image: &str,
+    command: &[String],
+) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "run".into(),
         "--rm".into(),
@@ -423,13 +444,12 @@ pub fn container_worker_argv(
     }
     a.extend([
         "-v".into(),
-        format!("{}:{GUEST_WORK}", copy.display()),
+        format!("{}:{GUEST_WORK}", mount.display()),
         "-w".into(),
         GUEST_WORK.into(),
-        cfg.container_image.clone(),
-        "sh".into(),
-        format!("{GUEST_WORK}/{SANDBOX_DIR}/run.sh"),
+        image.into(),
     ]);
+    a.extend(command.iter().cloned());
     a
 }
 
@@ -551,13 +571,14 @@ fn stage(from: &Path, to: &Path) -> Result<(), String> {
         .map_err(|e| format!("staging {} into the jail: {e}", from.display()))
 }
 
+/// The host uid/gid owning `path` (Unix), for `docker run --user`.
 #[cfg(unix)]
-fn owner_of(path: &Path) -> Option<(u32, u32)> {
+pub fn owner_of(path: &Path) -> Option<(u32, u32)> {
     use std::os::unix::fs::MetadataExt as _;
     std::fs::metadata(path).ok().map(|m| (m.uid(), m.gid()))
 }
 #[cfg(not(unix))]
-fn owner_of(_path: &Path) -> Option<(u32, u32)> {
+pub fn owner_of(_path: &Path) -> Option<(u32, u32)> {
     None
 }
 
