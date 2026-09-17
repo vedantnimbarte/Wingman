@@ -72,6 +72,10 @@ wingman [OPTIONS] [COMMAND]
 | `plugin remove <name>` | Delete the plugin and its trust record. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
+| `bg start "<prompt>"` | Hand one task to a background agent and get the shell back. Creates a worktree on a fresh `wingman/bg/<id>` branch off HEAD, runs `--print --json --mode auto-edit` there detached, and commits the result on the branch when the agent exits 0 (a red verification gate exits 2 and leaves the changes uncommitted in the worktree). Your checkout is never touched. `--pr` opens a PR against `[pilot.pr].base_branch` once committed (`gh`, else push + compare URL). `--devcontainer` runs the agent in `.devcontainer/devcontainer.json`'s image with the worktree mounted — see below. Refuses a `--mode` below `auto-edit`. |
+| `bg list`            | This project's background runs: id, status (`starting`/`running`/`done`/`failed`/`stopped`, or `died` when the supervisor is gone), branch, prompt, and the PR URL or failure note. |
+| `bg logs <id>`       | A run's events from `.wingman/bg/<id>/events.jsonl`, rendered (text, tool calls, gate results, supervisor notes). `--follow` tails until the run finishes. |
+| `bg stop <id>`       | Stop a run: the supervisor kills the agent's process tree (and its container), and the worktree is kept. Marks the run stopped itself when the supervisor is already gone. |
 | `pilot run "<goal>"` | Plan a goal, spawn worker agents in isolated worktrees, open a PR. Flags: `--plan-only`, `--yes`, `--review`, `--watch`, `--no-pr`, `--base <rev>`, `--max-agents <n>`, `--max-usd <f>`, `--sandbox <host\|container\|vm>`, `--await-approval`. |
 | `pilot status [run-id]` | One-shot ASCII summary of a run.                  |
 | `pilot watch [run-id]` | Live dashboard that redraws on `state.json` changes. |
@@ -110,6 +114,30 @@ provider and model.
 
 > `wingman autonomous "<goal>"` is a deprecated alias for `wingman pilot
 > run` — kept through M3, removed at M4.
+
+**`bg start --devcontainer`** reads `.devcontainer/devcontainer.json` (JSONC:
+comments and trailing commas are fine) from the new worktree, so it must be
+committed. Only `image`, or `build.dockerfile` with an optional
+`build.context`, is supported; `name` and `customizations` are ignored, and any
+other key (`features`, `postCreateCommand`, `mounts`, …) is refused by name
+rather than silently skipped. Paths must stay inside the repository. The image
+must have a Linux `wingman` on `PATH` — the host binary is not mounted in. The
+run gets `[pilot.sandbox]`'s CPU, memory, pid and network limits, and exactly
+one credential: the selected provider's key as `WINGMAN_<PROVIDER>_API_KEY`,
+forwarded by name so the value never appears in argv. `~/.wingman` is not
+mounted, so the container has no config, trust records, MCP servers or
+`[verify]` gate of its own, and git inside it cannot see the repository (the
+host commits afterwards). No Docker on `PATH` is an error before anything is
+created; `wingman doctor` reports it. **Never run against a real Docker
+daemon** — the argv and devcontainer parsing are unit-tested only.
+
+**Remote hand-off.** `serve` forwards any subcommand clap knows, so `wingman
+--remote <url> bg start "…" --pr` runs on the server with no extra wiring; the
+server's permission ceiling arrives as `--mode` and a ceiling below `auto-edit`
+is refused. Use `bg logs <id>` without `--follow` over `--remote`: `/v1/exec`
+buffers until the command exits. Not validated live against a server, and on a
+Windows server the launcher may hold the request open for the run's duration
+(the handle-inheritance problem `board dispatch` hit with `pilot run -d`).
 
 Card ids accept any unique prefix of at least 4 characters. Projects register
 themselves the first time you run a `pilot` or `board` command in a repo. See

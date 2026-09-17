@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "Apache-2.0"
 repository.workspace = true
-description = "Headless-browser visual verification for wingman: capture a URL and diff screenshots against a baseline."
+description = "Headless-browser support for wingman: screenshot diffing for the verification gate, and a browser session the agent drives."
 
 [dependencies]
 thiserror = { workspace = true }

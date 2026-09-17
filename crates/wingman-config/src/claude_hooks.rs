@@ -39,7 +39,7 @@ const TOOL_NAMES: &[(&str, &str)] = &[
     ("Write", "write_file"),
     ("Edit", "edit_file"),
     ("MultiEdit", "apply_patch"),
-    ("NotebookEdit", "edit_file"),
+    ("NotebookEdit", "notebook_edit"),
     ("Glob", "glob"),
     ("Grep", "grep"),
     ("LS", "list_dir"),
