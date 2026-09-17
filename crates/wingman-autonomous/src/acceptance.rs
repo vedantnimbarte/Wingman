@@ -507,19 +507,13 @@ const OUTPUT_TAIL_BYTES: usize = 1024;
 
 fn run_shell(cmd: &str, cwd: &Path, timeout: Duration) -> AcceptanceResult {
     let label = format!("shell: {cmd}");
-    let (program, args) = if cfg!(windows) {
-        ("cmd", vec!["/C".to_string(), cmd.to_string()])
-    } else {
-        ("sh", vec!["-c".to_string(), cmd.to_string()])
-    };
 
     // Stable-Rust has no built-in process timeout. We use a thread +
     // channel pattern (`wait_with_output` doesn't honor a deadline) so
     // hung commands eventually surface as failures instead of pinning a
     // worker forever.
     let started = std::time::Instant::now();
-    let child = Command::new(program)
-        .args(&args)
+    let child = crate::child_process::shell_command(cmd)
         .current_dir(cwd)
         // Never the worker's stdin: that is the manager's IPC pipe, with a
         // thread blocked reading it. On Windows an MSYS tool (`test`, `[`)

@@ -20,6 +20,20 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+/// Claude subscription usage (fullest window) at which the run drops to one
+/// worker until that window resets. Past this, parallel workers would spend
+/// the rest of the window in minutes and stall the run on a hard rejection.
+pub const SUBSCRIPTION_THROTTLE_AT: f64 = 0.8;
+
+/// Seconds from now until `unix_secs`, capped to `u32`; `None` when unknown.
+pub fn secs_until(unix_secs: Option<u64>) -> Option<u32> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    unix_secs.map(|t| t.saturating_sub(now).min(u64::from(u32::MAX)) as u32)
+}
+
 /// How long a rate-limit hit keeps narrowing the cap after it arrives.
 const RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 

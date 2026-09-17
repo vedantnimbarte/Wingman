@@ -498,6 +498,9 @@ pub fn run_cycle(
             candidates.extend(found);
         }
     }
+    if cfg.sources.iter().any(|s| s == "pr_checks") {
+        candidates.extend(crate::pr_checks::fetch_candidates(runner, repo_root, cfg));
+    }
     if cfg.sources.iter().any(|s| s == "pr_reviews") {
         candidates.extend(crate::pr_reviews::fetch_pr_review_candidates(
             runner, repo_root, cfg,

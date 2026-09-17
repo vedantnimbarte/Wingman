@@ -298,6 +298,8 @@ export type RunState = {
   agents: Agent[]
   totals: { usd: number; tokens_in: number; tokens_out: number }
   pr_url: string | null
+  /** Claude subscription usage (fullest limit window), on Claude Code runs. */
+  subscription?: { utilization: number; resets_at?: number }
 }
 
 

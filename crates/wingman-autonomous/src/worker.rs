@@ -344,6 +344,21 @@ pub async fn run_worker(
                         })
                         .await;
                 }
+                WorkerLine::SubscriptionUsage {
+                    utilization,
+                    resets_at,
+                } => {
+                    let _ = store
+                        .lock()
+                        .await
+                        .append(Event::SubscriptionUsage {
+                            t: RunStore::now(),
+                            agent: agent_id.to_string(),
+                            utilization,
+                            resets_at,
+                        })
+                        .await;
+                }
                 WorkerLine::Unknown => {
                     tracing::debug!(target: "pilot::worker", "unrecognised worker line: {line}");
                 }
@@ -727,6 +742,11 @@ enum WorkerLine {
         status: u16,
         retry_after_secs: Option<u32>,
     },
+    /// A Claude Code worker's subscription usage: the fullest limit window.
+    SubscriptionUsage {
+        utilization: f64,
+        resets_at: Option<u64>,
+    },
     Unknown,
 }
 
@@ -860,6 +880,13 @@ fn parse_line(line: &str) -> WorkerLine {
                         acceptance,
                     }
                 }
+                "subscription_usage" => match v.get("utilization").and_then(|x| x.as_f64()) {
+                    Some(utilization) => WorkerLine::SubscriptionUsage {
+                        utilization,
+                        resets_at: v.get("resets_at").and_then(|x| x.as_u64()),
+                    },
+                    None => WorkerLine::Unknown,
+                },
                 "rate_limited" => WorkerLine::RateLimited {
                     status: v.get("status").and_then(|x| x.as_u64()).unwrap_or(429) as u16,
                     retry_after_secs: v
@@ -1018,7 +1045,9 @@ pub async fn drive_stdout_for_test(
             WorkerLine::TaskComplete { outcome: o, .. } => {
                 outcome = Some(o);
             }
-            WorkerLine::RateLimited { .. } | WorkerLine::Unknown => {}
+            WorkerLine::RateLimited { .. }
+            | WorkerLine::SubscriptionUsage { .. }
+            | WorkerLine::Unknown => {}
         }
     }
     let final_status = if outcome.is_some() {
@@ -1427,6 +1456,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_recognises_subscription_usage_and_state_keeps_the_latest() {
+        let line = r#"{"event":"subscription_usage","utilization":0.83,"resets_at":1789668000}"#;
+        let WorkerLine::SubscriptionUsage {
+            utilization,
+            resets_at,
+        } = parse_line(line)
+        else {
+            panic!("expected SubscriptionUsage");
+        };
+        assert_eq!((utilization, resets_at), (0.83, Some(1789668000)));
+        assert!(matches!(
+            parse_line(r#"{"event":"subscription_usage"}"#),
+            WorkerLine::Unknown
+        ));
+
+        let mut state = crate::model::RunState::new("r", "g", "b", "i");
+        crate::model::apply(
+            &mut state,
+            &Event::SubscriptionUsage {
+                t: RunStore::now(),
+                agent: "a1".into(),
+                utilization,
+                resets_at,
+            },
+        );
+        assert_eq!(state.subscription.map(|s| s.utilization), Some(0.83));
+    }
+
+    #[test]
     fn parse_line_handles_agent_event() {
         let line = r#"{"type":"text_delta","text":"hello"}"#;
         match parse_line(line) {
@@ -1444,6 +1502,7 @@ mod tests {
                 WorkerLine::WorkerStart { .. } => write!(f, "WorkerStart"),
                 WorkerLine::TaskComplete { .. } => write!(f, "TaskComplete"),
                 WorkerLine::RateLimited { .. } => write!(f, "RateLimited"),
+                WorkerLine::SubscriptionUsage { .. } => write!(f, "SubscriptionUsage"),
                 WorkerLine::Unknown => write!(f, "Unknown"),
             }
         }

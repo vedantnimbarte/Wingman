@@ -369,7 +369,24 @@ fn connected_provider_ids(active: &str) -> Vec<String> {
     if !active.is_empty() && !ids.iter().any(|i| i == active) {
         ids.push(active.to_string());
     }
+    // Claude Code has no `[providers]` section: it is "connected" when its CLI
+    // is installed.
+    let claude_code = wingman_core::claude_code::PROVIDER_ID;
+    if !ids.iter().any(|i| i == claude_code) && claude_on_path() {
+        ids.push(claude_code.to_string());
+    }
     ids
+}
+
+fn claude_on_path() -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        ["claude", "claude.exe", "claude.cmd"]
+            .iter()
+            .any(|f| dir.join(f).is_file())
+    })
 }
 
 /// Split a `/model` argument into `(provider, model)` using the same rule the

@@ -97,6 +97,20 @@ This is the recommended integration path from non-Rust code: you get Wingman's
 repo index + memory + LSP tools without linking Rust. See
 [FEATURES.md](FEATURES.md).
 
+It also exposes pilot, so another agent can hand Wingman a whole goal:
+
+- **`pilot_status`**: lists runs, or with `run_id` returns one run's state
+  (tasks, outcomes, spend, PR URL). Always offered.
+- **`pilot_run`**: starts `wingman pilot run -d` for a `goal` and returns the
+  run id. It is offered only under `--mode auto-edit` or `yolo`, because its
+  workers write code, and the run inherits that mode as its ceiling. Without
+  `"yes": true` the run waits at the plan gate for `wingman pilot approve`.
+
+```bash
+# Let Claude Code delegate goals to Wingman's orchestrator
+claude mcp add wingman -- wingman mcp-serve --mode auto-edit
+```
+
 ## Stability
 
 Pre-1.0: the Rust API may change between minor versions. The MCP surface follows

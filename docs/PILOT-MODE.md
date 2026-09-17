@@ -33,8 +33,9 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > `autopilot` is experimental but most of its edges are now wired. The
 > discovery daemon polls `github_issues`, `todos`, `ci_failures`,
 > `dependabot`, `coverage_gaps` (reads an existing `lcov.info`),
-> `intake`, and `pr_reviews` (review threads on pilot's own PRs — see
-> [Review rounds](#review-rounds-on-pilots-prs)). **Intake** is transport-agnostic: a Slack/email gateway writes
+> `intake`, `pr_reviews` (review threads on pilot's own PRs — see
+> [Review rounds](#review-rounds-on-pilots-prs)), and `pr_checks` (failed CI on
+> those PRs — see [Fixing failed CI](#fixing-failed-ci-on-pilots-prs)). **Intake** is transport-agnostic: a Slack/email gateway writes
 > `*.md` requests into `[pilot.daemon].intake_dir` and the
 > daemon ingests them with per-author trust — no in-process listener needed.
 > **Notification** delivery is wired via `[pilot.notifications.webhooks]`
@@ -157,6 +158,32 @@ Rounds stop at `max_review_rounds`, and together they share one
 A failed rework run still counts as a round, but it pushes nothing and
 replies nothing. `wingman pilot daemon --dry-run` lists the rounds it would
 start and does nothing else: no run, no push, no reply.
+
+### Fixing failed CI on pilot's PRs
+
+Add `pr_checks` to `sources` and the daemon fixes red CI on those same PRs:
+
+```toml
+[pilot.daemon]
+sources       = ["github_issues", "pr_reviews", "pr_checks"]
+auto_dispatch = true
+```
+
+It reads the PR head's check rollup (`gh pr view --json statusCheckRollup`)
+and waits until every check has finished. If any failed, it pulls the end of
+each failed GitHub Actions run's log (`gh run view --log-failed`) and starts
+a round exactly like a review round: a nested run on the PR head whose goal is
+the failing checks and their logs, a push to the same branch that is never
+forced (auto-merge is turned off first), and a `pr.review_round` event with no
+threads. The push re-runs CI. If it fails again on the new head, that is the
+next round.
+
+CI rounds and review rounds count against the same `max_review_rounds` and
+share the same `[pilot].max_usd` budget per PR. The rework prompt says to fix
+the cause and never skip or weaken a test or CI step, and it marks the logs as
+tool output, not instructions. Checks from outside GitHub Actions are named in
+the goal without a log. `trusted_authors` is not required for this source: the
+branch is pilot's and the logs are CI's own output.
 
 ## Status
 

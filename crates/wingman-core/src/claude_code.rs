@@ -74,9 +74,9 @@ pub struct ClaudeCode {
     /// Messages to send into a running turn (pilot pivot / clarify). Drained
     /// whenever Claude Code prints something.
     pub inbox: Option<Arc<Mutex<Vec<String>>>>,
-    /// Called when the subscription's rate limit rejects a request, with the
-    /// seconds until it resets when known.
-    pub on_rate_limit: Option<Arc<dyn Fn(Option<u64>) + Send + Sync>>,
+    /// Called with each rate-limit report: a rejection, or how full the
+    /// subscription's limit windows are.
+    pub on_rate_limit: Option<Arc<dyn Fn(RateLimit) + Send + Sync>>,
     session_id: Option<String>,
 }
 
@@ -175,8 +175,8 @@ impl ClaudeCode {
                     match item {
                         Item::Event(ev) => yield ev,
                         Item::Session(id) => self.session_id = Some(id),
-                        Item::RateLimited(secs) => {
-                            if let Some(cb) = &self.on_rate_limit { cb(secs); }
+                        Item::RateLimit(rl) => {
+                            if let Some(cb) = &self.on_rate_limit { cb(rl); }
                         }
                         Item::Result(r) => {
                             if let Some(id) = &r.session_id { self.session_id = Some(id.clone()); }
@@ -345,8 +345,31 @@ struct RunResult {
 enum Item {
     Event(AgentEvent),
     Session(String),
-    RateLimited(Option<u64>),
+    RateLimit(RateLimit),
     Result(RunResult),
+}
+
+/// Where the subscription's rate limits stand, as Claude Code reports before
+/// each request.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RateLimit {
+    /// This request was refused.
+    pub rejected: bool,
+    /// How full the fullest limit window is, `0.0..=1.0`, when reported.
+    pub utilization: Option<f64>,
+    /// When that window resets, as unix seconds.
+    pub resets_at: Option<u64>,
+}
+
+impl RateLimit {
+    /// Seconds from now until the window resets.
+    pub fn resets_in_secs(&self) -> Option<u64> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.resets_at.map(|t| t.saturating_sub(now))
+    }
 }
 
 /// Translate one stream-json line. Pure, so the mapping is testable without
@@ -417,17 +440,21 @@ fn translate(v: &Value) -> Vec<Item> {
         }
         "rate_limit_event" => {
             let info = &v["rate_limit_info"];
-            if s(info, "status") == "rejected" {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let secs = info
-                    .get("resetsAt")
-                    .and_then(Value::as_u64)
-                    .map(|t| t.saturating_sub(now));
-                out.push(Item::RateLimited(secs));
-            }
+            // The fullest window is the one that will stop the run first.
+            let fullest = info["unifiedWindows"]
+                .as_object()
+                .into_iter()
+                .flat_map(|w| w.values())
+                .filter_map(|w| Some((w.get("utilization")?.as_f64()?, w.get("resetsAt"))))
+                .max_by(|a, b| a.0.total_cmp(&b.0));
+            out.push(Item::RateLimit(RateLimit {
+                rejected: s(info, "status") == "rejected",
+                utilization: fullest.map(|(u, _)| u),
+                resets_at: fullest
+                    .and_then(|(_, r)| r)
+                    .or(info.get("resetsAt"))
+                    .and_then(Value::as_u64),
+            }));
         }
         "result" => {
             let u = &v["usage"];
@@ -707,15 +734,19 @@ mod tests {
             [Item::Result(r)] => assert_eq!(r.stop, AgentStop::MaxTurns),
             other => panic!("{other:?}"),
         }
-        assert!(items(
-            r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1}}"#
-        )
-        .is_empty());
+        assert!(matches!(
+            &items(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":7,"unifiedWindows":{"five_hour":{"utilization":0.04,"resetsAt":5},"seven_day":{"utilization":0.83,"resetsAt":9}}}}"#)[..],
+            [Item::RateLimit(RateLimit { rejected: false, utilization: Some(u), resets_at: Some(9) })] if *u == 0.83
+        ));
         assert!(matches!(
             &items(
                 r#"{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1}}"#
             )[..],
-            [Item::RateLimited(Some(0))]
+            [Item::RateLimit(RateLimit {
+                rejected: true,
+                utilization: None,
+                resets_at: Some(1)
+            })]
         ));
     }
 

@@ -24,6 +24,17 @@ use wingman_core::{
     ProviderCapabilities, ProviderEventStream, Result, Role, StopReason, StreamEvent, WingmanError,
 };
 
+/// Claude Code tools that can change the workspace. Any of them arms
+/// Wingman's `[verify]` gate for the turn, as `run_shell` / `edit_file` do.
+const MUTATING: &[&str] = &[
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Bash",
+    "PowerShell",
+];
+
 pub struct ClaudeCodeProvider {
     permission_mode: String,
     /// The CLI session the conversation lives in, and the history length it
@@ -97,6 +108,9 @@ impl Provider for ClaudeCodeProvider {
                     AgentEvent::TextDelta { text } => yield Ok(StreamEvent::TextDelta { text }),
                     AgentEvent::ThinkingDelta { text } => yield Ok(StreamEvent::ThinkingDelta { text }),
                     AgentEvent::ToolStart { name, input, .. } => {
+                        if MUTATING.contains(&name.as_str()) {
+                            yield Ok(StreamEvent::WorkspaceMutated);
+                        }
                         yield Ok(StreamEvent::TextDelta { text: format!("\n\n> {name} {}\n\n", brief(&input)) })
                     }
                     AgentEvent::Usage { usage } => yield Ok(StreamEvent::Usage { usage }),

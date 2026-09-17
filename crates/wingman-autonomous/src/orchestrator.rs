@@ -1025,6 +1025,20 @@ async fn host_signal_watchdog(
                         .unwrap_or_else(|e| e.into_inner())
                         .record(std::time::Instant::now(), retry_after_secs);
                 }
+                // A nearly spent subscription is a rate limit that has not
+                // happened yet: hold the cap at the floor until it resets.
+                Ok(Event::SubscriptionUsage { utilization, resets_at, .. })
+                    if utilization >= crate::concurrency::SUBSCRIPTION_THROTTLE_AT =>
+                {
+                    // No reset time: hold for five minutes, which the next
+                    // report (one per request) re-arms while usage stays high.
+                    let until_reset = crate::concurrency::secs_until(resets_at).or(Some(300));
+                    signals
+                        .rate_limits
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .record(std::time::Instant::now(), until_reset);
+                }
                 Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             },
@@ -1216,15 +1230,10 @@ async fn warm_worktree(
     if cmd.trim().is_empty() {
         return;
     }
-    let (shell, flag) = if cfg!(windows) {
-        ("cmd", "/C")
-    } else {
-        ("sh", "-c")
-    };
-    let mut sc = crate::child_process::SupervisedCommand::new(shell);
+    let mut sc = crate::child_process::SupervisedCommand::from_command(
+        crate::child_process::shell_command(&cmd).into(),
+    );
     sc.command_mut()
-        .arg(flag)
-        .arg(&cmd)
         .current_dir(&worktree)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -4481,6 +4490,69 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("expected ConcurrencyCap(1) under Retry-After, got {last:?}");
+    }
+
+    #[tokio::test]
+    async fn a_nearly_spent_subscription_holds_the_cap_at_one() {
+        let dir = tempdir().unwrap();
+        let store = RunStore::create(
+            dir.path().join(".wingman/autonomous/test-run"),
+            "test-run",
+            "g",
+            "abc",
+            "wingman/auto/test-run",
+        )
+        .await
+        .unwrap();
+        // A Claude Code worker that starts and reports a nearly spent plan.
+        let rate_limited: WorkerSpawner = Arc::new(|ctx: SpawnContext| {
+            Box::pin(async move {
+                {
+                    let mut store = ctx.store.lock().await;
+                    for ev in [
+                        Event::TaskStatus {
+                            t: RunStore::now(),
+                            id: ctx.task.id.clone(),
+                            status: TaskStatus::InProgress,
+                            outcome: None,
+                        },
+                        // No rejection yet: the plan window is 90% spent.
+                        Event::SubscriptionUsage {
+                            t: RunStore::now(),
+                            agent: ctx.agent_id.clone(),
+                            utilization: 0.9,
+                            resets_at: None,
+                        },
+                    ] {
+                        let _ = store.append(ev).await;
+                    }
+                }
+                futures::future::pending::<()>().await;
+                unreachable!("never resumed")
+            })
+        });
+        let (handle, join) = spawn(store, cfg(dir.path().to_path_buf()), rate_limited);
+        handle.add_task(dev_task("t1", vec![])).await.unwrap();
+        // Overlapping writes: until the hit is recorded, t2 is refused for the
+        // write conflict (checked after the cap) instead of being assigned.
+        let mut t2 = dev_task("t2", vec![]);
+        t2.writes = vec!["file-t1.rs".into()];
+        handle.add_task(t2).await.unwrap();
+        handle.assign_task("t1").await.unwrap();
+
+        // The watchdog records the hit asynchronously; wait for it to bite.
+        let mut last = None;
+        for _ in 0..200 {
+            match handle.assign_task("t2").await {
+                Err(OrchestratorError::ConcurrencyCap(1)) => {
+                    join.abort();
+                    return;
+                }
+                other => last = Some(other),
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("expected ConcurrencyCap(1) at 90% subscription usage, got {last:?}");
     }
 
     /// A one-commit git repo with a run store under it, and a config that

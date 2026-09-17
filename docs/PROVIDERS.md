@@ -96,23 +96,36 @@ third-party apps to offer Claude login, which is why there is no
 
 - **Setup:** install Claude Code and run `claude` once to sign in. Then use
   `--model claude-code/sonnet` (or `opus`, `haiku`, or a full model id). No
-  `[providers.claude-code]` section is needed. Needs a Claude Code version
-  that has `--permission-prompts`.
+  `[providers.claude-code]` section is needed, and `/model` lists it whenever
+  `claude` is on PATH. `wingman doctor` checks that the CLI is installed, new
+  enough (it needs `--permission-prompts`) and signed in.
 - **Pilot:** set `default_model = "claude-code/sonnet"` and
   `[pilot] worker_model = "claude-code/haiku"`. Workers (developer, designer,
   tester, reviewer, …) run Claude Code in their worktree with its own tools
   (`acceptEdits` plus Bash). The manager runs Claude Code with its built-in
-  tools switched off. Both reach Wingman's tools (`task_complete`,
-  `run_acceptance`, `checkpoint`, `assign_task`, …) through a loopback MCP
-  endpoint protected by a per-run token, so gates, audit and
-  `disabled_tools` still apply. Mid-run pivots and clarifications are sent
-  into the running session.
+  tools switched off. Both reach Wingman's tools through a loopback MCP
+  endpoint protected by a per-run token, so gates, audit and `disabled_tools`
+  still apply:
+  - the manager gets its orchestration tools (`assign_task`, …);
+  - workers get `task_complete`, `run_acceptance` and `checkpoint`, plus
+    Wingman's code intelligence: `find_symbol`, `who_calls`, `outline` and
+    the `lsp_*` read tools.
+
+  Mid-run pivots and clarifications are sent into the running session.
 - **Chat (`--print`, TUI, `serve`):** Claude Code runs its own tools, and
-  Wingman shows each call inline. Wingman's tools, verify gate and permission
-  prompts do not apply here. Claude Code's `permission_mode` does:
+  Wingman shows each call inline. Wingman's tools and permission prompts do
+  not apply; Claude Code's `permission_mode` does:
   `[providers.claude-code] permission_mode = "acceptEdits"` (default
-  `default`: anything that would prompt is denied). Requests without tools
-  (titles, the planner, the reviewer) run with Claude Code's tools off.
+  `default`: anything that would prompt is denied). Wingman's `[verify]` gate
+  still runs after a turn in which Claude Code edited files or ran a shell
+  command, and failures go back to it. Requests without tools (titles, the
+  planner, the reviewer) run with Claude Code's tools off.
+- **Subscription limits:** each worker reports how full the plan's fullest
+  rate-limit window is. `pilot watch` and the panel show it
+  (`plan 83% · resets 2h`). At 80% the orchestrator drops to one worker until
+  that window resets, and a rejected request is handled like any other rate
+  limit. Keep `max_concurrent_agents` low anyway: Pro / Max limits assume
+  individual use.
 - **Not supported:** container / VM sandboxes (the CLI and your sign-in live
   on the host), `[tools].shell_denylist` for Claude Code's own Bash, and
   per-token cost caps (subscription usage is counted as $0).
@@ -120,10 +133,6 @@ third-party apps to offer Claude login, which is why there is no
   - `WINGMAN_CLAUDE_BIN` points at a `claude` that isn't on PATH.
   - `ANTHROPIC_API_KEY` is removed from the CLI's environment, so the
     subscription is what gets used.
-- **Rate limits:** Pro / Max limits assume individual use. Parallel pilot
-  workers spend them quickly, so keep `max_concurrent_agents` low. When the
-  limit rejects a worker's request, the worker reports it like any other rate
-  limit.
 
 **Notes on the enterprise providers (Bedrock / Vertex / watsonx):**
 

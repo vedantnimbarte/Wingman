@@ -455,13 +455,23 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     Ok(exit)
 }
 
-/// Tools the Claude Code worker reaches over the MCP bridge. Claude Code's own
-/// tools do the reading, editing and shell work.
-const CLAUDE_CODE_CONTROL_TOOLS: &[&str] = &[
+/// Tools the Claude Code worker reaches over the MCP bridge: the pilot control
+/// tools, plus Wingman's code intelligence, which Claude Code has no
+/// equivalent of. Its own tools do the reading, editing and shell work.
+/// A name the registry did not register (no language server, no tree-sitter
+/// build) is simply not listed.
+const CLAUDE_CODE_BRIDGED_TOOLS: &[&str] = &[
     "task_complete",
     "run_acceptance",
     "checkpoint",
     "propose_tool",
+    "lsp_definition",
+    "lsp_references",
+    "lsp_hover",
+    "lsp_diagnostics",
+    "find_symbol",
+    "who_calls",
+    "outline",
 ];
 
 /// A pilot worker on the user's Claude Code subscription.
@@ -482,7 +492,10 @@ fn claude_code_worker(
          Edit/Write for `edit_file`/`write_file`, Bash for `run_shell`, Grep/Glob for \
          `grep`/`glob`. `task_complete`, `run_acceptance` and `checkpoint` are real tools \
          here, served as `mcp__wingman__task_complete`, `mcp__wingman__run_acceptance` and \
-         `mcp__wingman__checkpoint`."
+         `mcp__wingman__checkpoint`. For navigating code, prefer Wingman's symbol tools \
+         (`mcp__wingman__find_symbol`, `mcp__wingman__who_calls`, `mcp__wingman__outline`, \
+         `mcp__wingman__lsp_definition`, `mcp__wingman__lsp_references`) over grepping, and \
+         check `mcp__wingman__lsp_diagnostics` after edits."
     ));
     // The worktree is the worker's own branch, which is why the native worker
     // runs in auto-edit with a shell too.
@@ -495,23 +508,50 @@ fn claude_code_worker(
     cc.bridge = Some((
         registry,
         Some(
-            CLAUDE_CODE_CONTROL_TOOLS
+            CLAUDE_CODE_BRIDGED_TOOLS
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
         ),
     ));
     cc.inbox = Some(inbox);
-    cc.on_rate_limit = Some(Arc::new(|secs| {
-        let line = rate_limited_line(wingman_providers::RateLimitHit {
-            status: 429,
-            retry_after_secs: secs.map(|s| s as f64),
-        });
+    // Reported before every request; forwarded only when the fullest window
+    // moves by a point, so the run log is not one line per request.
+    let last_reported = std::sync::Mutex::new(None::<f64>);
+    cc.on_rate_limit = Some(Arc::new(move |rl| {
         let mut out = std::io::stdout();
-        writeln!(out, "{line}").ok();
+        if rl.rejected {
+            let line = rate_limited_line(wingman_providers::RateLimitHit {
+                status: 429,
+                retry_after_secs: rl.resets_in_secs().map(|s| s as f64),
+            });
+            writeln!(out, "{line}").ok();
+        }
+        if let Some(line) = subscription_usage_line(&last_reported, rl) {
+            writeln!(out, "{line}").ok();
+        }
         out.flush().ok();
     }));
     cc
+}
+
+/// The `subscription_usage` line for `rl`, or `None` when it carries no
+/// utilization or the last one sent is within a point of it.
+fn subscription_usage_line(
+    last: &std::sync::Mutex<Option<f64>>,
+    rl: wingman_core::claude_code::RateLimit,
+) -> Option<serde_json::Value> {
+    let u = rl.utilization?;
+    let mut last = last.lock().unwrap_or_else(|e| e.into_inner());
+    if last.is_some_and(|l| (l - u).abs() < 0.01) {
+        return None;
+    }
+    *last = Some(u);
+    Some(serde_json::json!({
+        "event": "subscription_usage",
+        "utilization": u,
+        "resets_at": rl.resets_at,
+    }))
 }
 
 /// The NDJSON line a rate-limit hit becomes on the worker's stdout, parsed by
@@ -716,6 +756,25 @@ mod tests {
             !reg.tool_names().iter().any(|n| n == "task_complete"),
             "an excluded control tool was registered anyway"
         );
+    }
+
+    #[test]
+    fn subscription_usage_is_forwarded_only_when_it_moves() {
+        let last = std::sync::Mutex::new(None);
+        let at = |u: Option<f64>| wingman_core::claude_code::RateLimit {
+            rejected: false,
+            utilization: u,
+            resets_at: Some(9),
+        };
+        assert_eq!(
+            subscription_usage_line(&last, at(Some(0.5))),
+            Some(
+                serde_json::json!({"event": "subscription_usage", "utilization": 0.5, "resets_at": 9})
+            )
+        );
+        assert_eq!(subscription_usage_line(&last, at(Some(0.505))), None);
+        assert!(subscription_usage_line(&last, at(Some(0.52))).is_some());
+        assert_eq!(subscription_usage_line(&last, at(None)), None);
     }
 
     #[test]

@@ -20,6 +20,10 @@ pub enum StreamEvent {
     /// Cumulative usage so far this turn. Providers may emit this multiple
     /// times (e.g. once at start with input tokens, once at end with output).
     Usage { usage: Usage },
+    /// The provider ran its own tools and they changed the workspace (a CLI
+    /// agent such as Claude Code editing files). Arms the verify gate the way
+    /// a mutating Wingman tool call does.
+    WorkspaceMutated,
     /// Terminal event. The agent inspects `reason` to decide whether to
     /// continue the loop (e.g. `ToolUse` means run tools and continue).
     Stop { reason: StopReason },

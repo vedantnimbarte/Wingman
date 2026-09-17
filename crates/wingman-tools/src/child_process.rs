@@ -22,6 +22,30 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::process::{Child, Command};
 
+/// `sh -c <command>`, or on Windows `cmd /S /C "<command>"` with the command
+/// passed through verbatim.
+///
+/// std quotes each argument for the C runtime, turning `"` into `\"`. cmd.exe
+/// does not read that escape, so a `cmd /C` built with `.arg(command)` mangled
+/// every command that quoted anything: `findstr /c:"a b" f` ran as
+/// `findstr /c:\"a` `b\"` (`FINDSTR: Cannot open b"`). `/S` makes cmd strip
+/// exactly the outer pair of quotes added here and keep the rest as written.
+pub fn shell_command(command: &str) -> std::process::Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/S", "/C"]).raw_arg(format!("\"{command}\""));
+        c
+    }
+    #[cfg(not(windows))]
+    {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(command);
+        c
+    }
+}
+
 /// Pids (== pgid on Unix) of every supervised child that is spawned and not
 /// yet dropped. Populated at spawn, cleared on `Supervisor::drop`. The CLI's
 /// signal handler drains this on Ctrl+C / SIGTERM so an interrupted run
@@ -455,6 +479,23 @@ mod tests {
 
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn shell_commands_keep_their_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "x a b y\n").unwrap();
+        let cmd = if cfg!(windows) {
+            r#"findstr /c:"a b" f.txt"#
+        } else {
+            r#"grep -q "a b" f.txt"#
+        };
+        let out = shell_command(cmd).current_dir(dir.path()).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{cmd}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     /// Smoke test: spawn a long-running OS command and tree-kill it. Uses
     /// `cmd /c ping` on Windows (always present) and `sleep` on Unix.

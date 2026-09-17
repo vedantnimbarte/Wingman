@@ -1067,19 +1067,10 @@ impl ShellTurnGate {
 /// Run `cmd` in `cwd` and render a compact [`GateReport`]. Shared by every
 /// shell-backed gate (compile check, affected tests).
 async fn run_check_cmd(cmd: &str, cwd: &std::path::Path) -> GateReport {
-    let output = if cfg!(windows) {
-        tokio::process::Command::new("cmd")
-            .args(["/C", cmd])
-            .current_dir(cwd)
-            .output()
-            .await
-    } else {
-        tokio::process::Command::new("sh")
-            .args(["-c", cmd])
-            .current_dir(cwd)
-            .output()
-            .await
-    };
+    let output = tokio::process::Command::from(wingman_tools::child_process::shell_command(cmd))
+        .current_dir(cwd)
+        .output()
+        .await;
     match output {
         Ok(o) => {
             let passed = o.status.success();
@@ -1233,20 +1224,11 @@ async fn narrow_to_tests(
 #[cfg(feature = "treesitter")]
 pub(crate) async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Option<Vec<String>> {
     let cmd = format!("cargo test{pkg_flags} -- --list");
-    let output = if cfg!(windows) {
-        tokio::process::Command::new("cmd")
-            .args(["/C", &cmd])
-            .current_dir(root)
-            .output()
-            .await
-    } else {
-        tokio::process::Command::new("sh")
-            .args(["-c", &cmd])
-            .current_dir(root)
-            .output()
-            .await
-    }
-    .ok()?;
+    let output = tokio::process::Command::from(wingman_tools::child_process::shell_command(&cmd))
+        .current_dir(root)
+        .output()
+        .await
+        .ok()?;
     if !output.status.success() {
         return None;
     }
