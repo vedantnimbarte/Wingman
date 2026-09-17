@@ -62,7 +62,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # Private file for the `gh api --input` body `wingman review --comment` posts.
 # Already the dev-dependency every crate tests with.
 tempfile = "3"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 
 # `setsid` for detaching a `-d` background run from the controlling terminal;
@@ -90,7 +90,8 @@ treesitter = [
     "wingman-learn/treesitter",
     "wingman-tui/treesitter",
 ]
-# Enables the headless-browser visual verification gate (needs a Chrome/
-# Chromium binary at runtime). Off by default so the standard build needs no
-# browser; the screenshot-diff logic is always compiled, only capture is gated.
-browser = ["wingman-browser/chrome"]
+# Enables the headless-browser visual verification gate and the agent's
+# `browser` tool (both need a Chrome/Chromium binary at runtime). Off by
+# default so the standard build needs no browser; the screenshot-diff logic is
+# always compiled, only capture and the tool are gated.
+browser = ["wingman-browser/chrome", "wingman-tools/browser"]

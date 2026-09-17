@@ -39,7 +39,7 @@ const TOOL_NAMES: &[(&str, &str)] = &[
     ("Write", "write_file"),
     ("Edit", "edit_file"),
     ("MultiEdit", "apply_patch"),
-    ("NotebookEdit", "edit_file"),
+    ("NotebookEdit", "notebook_edit"),
     ("Glob", "glob"),
     ("Grep", "grep"),
     ("LS", "list_dir"),
@@ -57,6 +57,9 @@ pub struct ImportReport {
     /// Matchers that could not be translated, kept verbatim. These very
     /// likely never fire, so the user needs to hear about them.
     pub untranslated: Vec<String>,
+    /// Events Wingman has no interception point for (`SessionStart`, …).
+    /// Skipped rather than fatal, but a plugin install should say so.
+    pub skipped_events: Vec<String>,
 }
 
 /// Translate one Claude Code `matcher` into Wingman tool-name patterns.
@@ -124,7 +127,10 @@ pub fn parse(json: &str, into: &mut HooksConfig) -> ImportReport {
             "PostToolUse" => (&mut into.post_tool_use, false),
             "UserPromptSubmit" => (&mut into.user_prompt_submit, true),
             "Stop" => (&mut into.stop, false),
-            _ => continue,
+            _ => {
+                report.skipped_events.push(event.clone());
+                continue;
+            }
         };
         let Some(groups) = groups.as_array() else {
             continue;

@@ -296,7 +296,9 @@ impl Default for AgentConfig {
                 "edit_file".into(),
                 "apply_patch".into(),
                 "edit_symbol".into(),
+                "notebook_edit".into(),
                 "run_shell".into(),
+                "notebook_run".into(),
                 "lsp_rename".into(),
                 "lsp_code_action".into(),
             ],
@@ -710,7 +712,12 @@ impl AgentLoop {
                         }
                         StreamEvent::Usage { usage } => {
                             if let Some(s) = &sink {
-                                s.record(crate::ContextFact::Usage { usage }).await;
+                                s.record(crate::ContextFact::Usage {
+                                    usage,
+                                    provider: provider.id().to_string(),
+                                    model: config.model.clone(),
+                                })
+                                .await;
                             }
                             yield AgentEvent::Usage { usage };
                         }

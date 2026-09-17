@@ -255,6 +255,11 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
               "body": { "task": "string? — omit to abort the whole run" } },
             { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/retry", "auth": true,
               "body": { "task": "string — required" } },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/tell", "auth": true,
+              "body": { "message": "string — required", "task": "string? — omit to address every active worker" } },
+            { "method": "POST", "path": "/v1/projects/{project}/pilot/runs/{run}/ask", "auth": true,
+              "body": { "message": "string — required", "task": "string?" },
+              "returns": "202 once recorded; the answer arrives as a worker_msg event on the run's stream" },
             { "method": "POST", "path": "/v1/projects/{project}/pilot/goals", "auth": true,
               "body": { "text": "string", "author": "string?" },
               "returns": "queues an intake file for the discovery daemon" },
@@ -598,6 +603,53 @@ mod tests {
         let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
         assert!(control.contains("retry_task"), "{control}");
         assert!(control.contains("t1"), "{control}");
+    }
+
+    #[tokio::test]
+    async fn ask_records_a_tell_that_wants_a_reply() {
+        let (_tmp, projects, run_dir) = seed_run("running", "in_progress");
+        let resp = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/ask",
+                "{\"message\":\"which file?\"}",
+            ),
+        )
+        .await;
+        assert!(resp.starts_with("HTTP/1.1 202"), "{resp}");
+        let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+        assert!(control.contains("which file?"), "{control}");
+        assert!(control.contains("\"reply\":true"), "{control}");
+    }
+
+    #[tokio::test]
+    async fn telling_a_finished_run_or_saying_nothing_is_refused() {
+        let (_tmp, projects, run_dir) = seed_run("done", "done");
+        let finished = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/tell",
+                "{\"message\":\"hello\"}",
+            ),
+        )
+        .await;
+        assert!(finished.starts_with("HTTP/1.1 409"), "{finished}");
+        assert!(!run_dir.join("control.jsonl").exists());
+
+        let (_tmp, projects, run_dir) = seed_run("running", "in_progress");
+        let blank = round_trip_for(
+            projects,
+            None,
+            &post(
+                "/v1/projects/repo/pilot/runs/2026-08-18-1042-abc123/tell",
+                "{\"message\":\"  \"}",
+            ),
+        )
+        .await;
+        assert!(blank.starts_with("HTTP/1.1 400"), "{blank}");
+        assert!(!run_dir.join("control.jsonl").exists());
     }
 
     #[tokio::test]

@@ -123,6 +123,16 @@ Wingman different; this is everything else it does.
   a project-level `.claude/settings.json` needs `wingman trust` just as
   `.wingman/config.toml` does. `wingman doctor` says when an importable file
   is present.
+- **Plugin bundles.** `wingman plugin install <dir | git-url[#ref]>` installs a
+  Claude Code–format plugin (`.claude-plugin/plugin.json`, `commands/`,
+  `skills/*/SKILL.md`, `hooks/hooks.json`, `.mcp.json`) to
+  `~/.wingman/plugins/<name>/` and prints what it contains and what in it runs
+  commands. Commands and skills load at once; hooks and MCP servers are inert
+  until `wingman plugin trust <name>`, which pins a hash of every file in the
+  plugin (scripts a hook calls included) and lapses on any change. Hooks reuse
+  the Claude Code matcher translation and report what doesn't translate;
+  `agents/` has no Wingman equivalent and is listed as skipped. See
+  [EXTENDING.md](EXTENDING.md#plugins) for what is and isn't supported.
 - **Background shell jobs.** `run_shell` blocks the turn and is capped at
   600s, which rules out dev servers, watch processes, and cold builds of a
   large workspace. `background: true` starts the command and returns a job id
@@ -135,6 +145,18 @@ Wingman different; this is everything else it does.
   denylist, sandbox, and credential scrub as a foreground one, and every job is
   killed with its whole process tree when the session ends — a forgotten dev
   server doesn't outlive the agent.
+- **Debugger tools (DAP).** Where the LSP tools ask the compiler, `debug_start`,
+  `debug_breakpoints`, `debug_continue`, `debug_state`, `debug_eval`, and
+  `debug_stop` ask the runtime: launch a program or test under whatever Debug
+  Adapter Protocol adapter is on `PATH` (`lldb-dap`/`codelldb` for Rust/C/C++,
+  debugpy for Python, `dlv dap` for Go), stop at a line, read the stack and the
+  top frame's locals, evaluate an expression, step. They need the same grant as
+  `run_shell`, start the adapter through its preparation (denylist, sandbox,
+  credential scrub), and kill the adapter and debuggee as one process tree on
+  stop or session end. No adapter installed is a note naming what to install;
+  `wingman doctor` lists what it found. Not validated live: tested against an
+  in-process fake adapter only — no real lldb-dap, debugpy, Delve, or CodeLLDB
+  was run. See [TOOLS.md](TOOLS.md#debugger--ask-the-runtime).
 - **Two-layer loop protection.** The tools layer nudges the model when it
   repeats a call with identical arguments (`[tools].repeat_thresholds`,
   advisory, never blocks). Above it, a rolling window
@@ -176,6 +198,12 @@ Wingman different; this is everything else it does.
   of hand-carrying a 43-character secret to it. Enrolment only — the paired
   device gets the same token and the same ceiling. See
   [HTTP-API.md](HTTP-API.md#pairing-a-device).
+- **Steering from a phone, by voice.** The panel's sign-in card takes a
+  pairing code, the conversation and a live run's tell/ask composer pin to the
+  bottom of a phone screen, and both get a mic button on the browser's own
+  speech recognition — it fills the field, you still press Send. Needs HTTPS or
+  localhost, so a plain-HTTP LAN address shows no mic. Not yet tried on a real
+  phone. See [WEB-UI.md](WEB-UI.md#from-a-phone-by-voice).
 - **Web tools.** Built-in `web_fetch` (URL → text) and `web_search`
   (DuckDuckGo HTML, no API key) tools pair for "look something up".
 - **Atomic multi-file patches.** The `apply_patch` tool applies a
@@ -244,7 +272,18 @@ Wingman different; this is everything else it does.
 - **Subagent tool.** The model can call `spawn_subagent` to run an
   isolated inner agent loop on a focused sub-task (depth-capped at 1).
 - **Notebook reads.** `read_file` on a `.ipynb` returns cells as fenced
-  code blocks + markdown, not raw JSON.
+  code blocks + markdown, not raw JSON, with each code cell's outputs
+  (streams, results, error lines; images named, not inlined).
+- **Notebook editing and execution.** `notebook_edit` replaces, inserts or
+  deletes one cell by index or (nbformat 4.5+) cell id, leaving the rest of
+  the JSON as Jupyter wrote it and clearing an edited code cell's outputs.
+  `notebook_run` executes the notebook with `jupyter nbconvert --execute
+  --inplace` and returns errors and tracebacks first, then bounded outputs.
+  Both go through the registry's write gate, `/undo` checkpoint and audit
+  log; `notebook_run` also needs the shell grant and spawns through
+  `run_shell`'s sandbox and credential scrub. `wingman doctor` says whether
+  jupyter is on PATH. Not validated live: no test runs a real kernel, and on
+  Windows notebook names with spaces are refused by `notebook_run`.
 - **Scheduled tasks.** `[[schedule]]` config entries fire from
   `wingman schedule` (call from cron / Task Scheduler).
 - **Memory packs.** `wingman memory export/import/diff` for sharing
@@ -340,6 +379,26 @@ Wingman different; this is everything else it does.
 - **Audit trail.** `[audit].enabled = true` appends a JSONL record (timestamp,
   tool, redacted input, error flag) for every tool call — a compliance trail
   for teams.
+- **OpenTelemetry export.** `[telemetry.otlp].endpoint` (or
+  `OTEL_EXPORTER_OTLP_ENDPOINT`) sends one span per user turn — provider,
+  model, task class, tokens in/out/cache, estimated USD, stop reason, gate
+  verdict — with a child span per tool call (name, duration, error flag), plus
+  delta counters for tokens, cost, tool calls and verified-done turns, over
+  OTLP/HTTP JSON. Prompts, replies, tool input and tool output are never sent.
+  Spans go through a bounded queue flushed in the background: when the
+  collector is slow or down they are dropped and counted
+  (`wingman.telemetry.dropped_spans`), never waited on, and a failed batch is
+  not retried. Exit gives the last batch two seconds. Refused under
+  `[privacy].local_only` unless the endpoint is loopback; a project config
+  cannot set it without `wingman trust`; `wingman attest` lists it as an egress
+  channel and `wingman doctor` checks the endpoint accepts a TCP connection.
+  Covers the TUI, `--print` and the commands built on it (`review`, `pr`,
+  `spec`, `tour`, `explain`, `schedule`) and pilot workers; `--batch`, subagent
+  turns and `wingman serve` do not record a session log and are not exported,
+  and every turn is labelled task class `default`. The payload shape is tested against the OTLP JSON spec but has
+  **not been run against a real collector**, and tool-span durations start
+  when the model asked for the call, so later calls in a sequential batch
+  include the wait for earlier ones.
 - **Benchmark harness.** `wingman bench` runs a suite of prompts and records
   time to first token, tokens per completed task, verified-done rate, and
   routing outcomes per served model — the same definitions as
@@ -350,6 +409,15 @@ Wingman different; this is everything else it does.
   and set `[verify.browser].url` to make the turn gate load a URL, screenshot
   it, and fail if it drifts from a baseline. Not in the default build, and it
   fails open — with no browser present the gate passes rather than blocking.
+- **Agent browser.** *(Opt-in build.)* The same `--features browser` build
+  gives the agent a `browser` tool: one headless Chrome tab, started on first
+  use and closed with the session, that it can navigate, click and type into,
+  screenshot (saved under `.wingman/browser/` — tool results can't carry
+  images, so the model gets a path), read console errors from, and run JS in.
+  Localhost dev servers are the target: under `[privacy].local_only` it opens
+  loopback URLs only. `wingman doctor` says whether a Chrome binary was found.
+  Unit-tested and compile-checked, but not yet run end to end against a real
+  Chrome. See [TOOLS.md](TOOLS.md#browser).
 - **Server-backed team memory.** Beyond the git-backed `memory sync`,
   `wingman memory push` / `pull` sync memories through a team HTTP endpoint
   (`[team]`), merging non-destructively.
@@ -364,6 +432,18 @@ Wingman different; this is everything else it does.
   `wingman doctor` reports which tiers are available. Unvalidated against a
   real Docker daemon or Firecracker host. See
   [PILOT-MODE.md](PILOT-MODE.md#sandbox-tiers).
+- **Hand-off background runs.** `wingman bg start "<prompt>"` gives one task
+  to a detached agent in its own worktree on `wingman/bg/<id>`, commits the
+  result there when the agent exits clean (gate not red), and with `--pr` opens
+  a PR; `bg list | logs <id> [--follow] | stop <id>` pick it back up after the
+  terminal is gone. The single-agent sibling of `pilot run -d`: no planner.
+  `--devcontainer` runs the agent in the repo's `devcontainer.json` image
+  (`image` or `build.dockerfile` only) under `[pilot.sandbox]`'s limits, with
+  only the provider key forwarded. Over `--remote` it runs on the server. The
+  host path has been run end to end once (to a failed run, with no provider
+  configured); a committing run, `--pr`, `stop` against a live agent, the
+  devcontainer path (never run against a real Docker daemon) and the remote
+  path are unvalidated. See [CLI.md](CLI.md).
 - **Tool synthesis.** A pilot worker that keeps needing a command the toolset
   lacks calls `propose_tool`; the proposal lands in `.wingman/tools/` as a
   custom command tool and every registry built after approval carries it, so

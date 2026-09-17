@@ -218,7 +218,38 @@ pub async fn open_pull_request(
 ) -> Result<PrOutcome, PrError> {
     let title = render_pr_title(state);
     let body = render_pr_body(state);
+    let outcome = open_pr(
+        runner,
+        repo_root,
+        base_branch,
+        integration_branch,
+        &title,
+        &body,
+        gh_path,
+    )?;
 
+    store
+        .append(Event::RunPr {
+            t: RunStore::now(),
+            url: outcome.url.clone(),
+        })
+        .await?;
+    store.append(Event::RunDone { t: RunStore::now() }).await?;
+    Ok(outcome)
+}
+
+/// Push `head` and open a PR against `base` with `gh`, or fall back to a push
+/// and a compare URL when `gh` is missing or unauthenticated. No run store:
+/// the half of [`open_pull_request`] that `wingman bg --pr` also uses.
+pub fn open_pr(
+    runner: &dyn CommandRunner,
+    repo_root: &Path,
+    base_branch: &str,
+    integration_branch: &str,
+    title: &str,
+    body: &str,
+    gh_path: Option<&str>,
+) -> Result<PrOutcome, PrError> {
     // Try `gh` first.
     let gh = gh_path.unwrap_or("gh");
     let gh_works = runner
@@ -226,7 +257,7 @@ pub async fn open_pull_request(
         .map(|o| o.success())
         .unwrap_or(false);
 
-    let outcome = if gh_works {
+    if gh_works {
         // Confirm auth before attempting create; auth failures mid-create
         // are messier to handle. Treat any non-zero exit as "not
         // authenticated" and fall through to the push path.
@@ -241,25 +272,16 @@ pub async fn open_pull_request(
                 repo_root,
                 base_branch,
                 integration_branch,
-                &title,
-                &body,
-            )?
+                title,
+                body,
+            )
         } else {
             tracing::info!(target: "pilot::pr", "gh present but not authenticated; falling back to push");
-            fallback_push(runner, repo_root, integration_branch, base_branch)?
+            fallback_push(runner, repo_root, integration_branch, base_branch)
         }
     } else {
-        fallback_push(runner, repo_root, integration_branch, base_branch)?
-    };
-
-    store
-        .append(Event::RunPr {
-            t: RunStore::now(),
-            url: outcome.url.clone(),
-        })
-        .await?;
-    store.append(Event::RunDone { t: RunStore::now() }).await?;
-    Ok(outcome)
+        fallback_push(runner, repo_root, integration_branch, base_branch)
+    }
 }
 
 fn create_via_gh(
