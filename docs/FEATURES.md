@@ -123,6 +123,16 @@ Wingman different; this is everything else it does.
   a project-level `.claude/settings.json` needs `wingman trust` just as
   `.wingman/config.toml` does. `wingman doctor` says when an importable file
   is present.
+- **Plugin bundles.** `wingman plugin install <dir | git-url[#ref]>` installs a
+  Claude Code–format plugin (`.claude-plugin/plugin.json`, `commands/`,
+  `skills/*/SKILL.md`, `hooks/hooks.json`, `.mcp.json`) to
+  `~/.wingman/plugins/<name>/` and prints what it contains and what in it runs
+  commands. Commands and skills load at once; hooks and MCP servers are inert
+  until `wingman plugin trust <name>`, which pins a hash of every file in the
+  plugin (scripts a hook calls included) and lapses on any change. Hooks reuse
+  the Claude Code matcher translation and report what doesn't translate;
+  `agents/` has no Wingman equivalent and is listed as skipped. See
+  [EXTENDING.md](EXTENDING.md#plugins) for what is and isn't supported.
 - **Background shell jobs.** `run_shell` blocks the turn and is capped at
   600s, which rules out dev servers, watch processes, and cold builds of a
   large workspace. `background: true` starts the command and returns a job id

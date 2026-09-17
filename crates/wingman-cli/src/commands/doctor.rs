@@ -361,6 +361,41 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         }
     }
 
+    if let Ok(global) = wingman_config::global_dir() {
+        let installed = wingman_config::plugins::installed(&global);
+        if !installed.is_empty() {
+            section("plugins");
+        }
+        for p in installed {
+            use wingman_config::plugins::{inspect, trust_state, TrustState};
+            let name = &p.manifest.name;
+            let contents = match inspect(&p.root, name) {
+                Ok(c) => c,
+                Err(e) => {
+                    emit(Status::Bad(format!("{name}: not loadable — {e}")));
+                    continue;
+                }
+            };
+            let summary = format!(
+                "{name} {} — {}, {} command(s), {} skill(s)",
+                p.manifest.version.as_deref().unwrap_or(""),
+                if p.enabled { "enabled" } else { "disabled" },
+                contents.commands.len(),
+                contents.skills.len()
+            );
+            // Untrusted is a warning, not a problem: inert is the safe state.
+            emit(match trust_state(&global, &p, &contents) {
+                TrustState::Untrusted if p.enabled => Status::Warn(format!(
+                    "{summary}; hooks/MCP untrusted and inert — `wingman plugin trust {name}`"
+                )),
+                TrustState::Lapsed if p.enabled => Status::Warn(format!(
+                    "{summary}; hooks/MCP trust lapsed (content changed) — `wingman plugin trust {name}`"
+                )),
+                _ => Status::Ok(summary),
+            });
+        }
+    }
+
     println!();
     if bad == 0 {
         println!("healthy — no blocking problems found.");

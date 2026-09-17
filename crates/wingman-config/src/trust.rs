@@ -75,17 +75,27 @@ pub fn load_store() -> TrustStore {
     let Ok(path) = trust_store_path() else {
         return TrustStore::default();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    load_store_at(&path)
+}
+
+/// [`load_store`] for a store file other than the default one — plugin trust
+/// keeps its own, keyed by plugin name rather than config path.
+pub(crate) fn load_store_at(path: &Path) -> TrustStore {
+    let Ok(text) = std::fs::read_to_string(path) else {
         return TrustStore::default();
     };
     toml::from_str(&text).unwrap_or_default()
 }
 
 fn save_store(store: &TrustStore) -> Result<(), ConfigError> {
-    let path = trust_store_path()?;
-    crate::ensure_global_dir()?;
+    save_store_at(&trust_store_path()?, store)
+}
+
+/// `write_private` creates the parent directory, so this needs no
+/// `ensure_global_dir` of its own.
+pub(crate) fn save_store_at(path: &Path, store: &TrustStore) -> Result<(), ConfigError> {
     let text = toml::to_string_pretty(store)?;
-    crate::write_private(&path, &text)
+    crate::write_private(path, &text)
 }
 
 /// Is `config_path`'s *current content* trusted?

@@ -79,7 +79,28 @@ pub fn load_all(project_root: &Path) -> Vec<Skill> {
         }
     }
 
+    if let Ok(global) = wingman_config::global_dir() {
+        for s in plugin_skills(&global) {
+            // Last in line: a plugin fills gaps, never replaces a skill you
+            // wrote or one your project ships.
+            by_name.entry(s.name.clone()).or_insert(s);
+        }
+    }
+
     by_name.into_values().collect()
+}
+
+/// `skills/<name>/SKILL.md` from every enabled plugin under `global`, with
+/// `${CLAUDE_PLUGIN_ROOT}` resolved so a skill can point at its own files.
+fn plugin_skills(global: &Path) -> Vec<Skill> {
+    let mut out = Vec::new();
+    for (dir, root) in wingman_config::plugins::skill_dirs(global) {
+        for mut s in load_portable_dir(&dir) {
+            s.body = wingman_config::plugins::substitute(&s.body, &root);
+            out.push(s);
+        }
+    }
+    out
 }
 
 /// Directories that may hold portable `<name>/SKILL.md` bundles, project-local
@@ -523,6 +544,38 @@ mod portable_tests {
         assert!(load_portable_dir(&root.join("skills")).is_empty());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn enabled_plugin_skills_are_discovered_with_the_root_resolved() {
+        let global = std::env::temp_dir().join(format!("wm-plugin-skills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&global);
+        let root = global.join("plugins").join("demo");
+        std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+        std::fs::write(
+            root.join(".claude-plugin").join("plugin.json"),
+            r#"{"name":"demo"}"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("skills").join("tidy")).unwrap();
+        std::fs::write(
+            root.join("skills").join("tidy").join("SKILL.md"),
+            "---\ndescription: Tidy\n---\nRead ${CLAUDE_PLUGIN_ROOT}/style.md\n",
+        )
+        .unwrap();
+
+        let found = plugin_skills(&global);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "tidy");
+        assert!(
+            found[0].body.contains(&*root.to_string_lossy()),
+            "{}",
+            found[0].body
+        );
+
+        std::fs::write(root.join(wingman_config::plugins::DISABLED_MARKER), "").unwrap();
+        assert!(plugin_skills(&global).is_empty());
+        let _ = std::fs::remove_dir_all(&global);
     }
 
     #[test]

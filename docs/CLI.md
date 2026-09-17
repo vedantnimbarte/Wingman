@@ -65,6 +65,11 @@ wingman [OPTIONS] [COMMAND]
 | `skill extract`      | Mine recent session JSONLs for repeated tool-call sequences and write proposed skill drafts under `~/.wingman/skills/proposed/`. `--min N` (default 2), `--force` to overwrite. |
 | `skill import <path>` | Import portable `SKILL.md` skills (a file, its dir, or a dir of them). `--project`, `--force`. |
 | `skill export <name> <dir>` | Export a wingman skill as a portable `<dir>/<name>/SKILL.md` bundle. |
+| `plugin install <dir\|git-url[#ref]>` | Install a Claude Code–format plugin to `~/.wingman/plugins/<name>/` (reinstalling replaces it) and print its commands, skills, skipped parts, and every hook and MCP server it would run. `#ref` is a branch or tag. Refused if it contains a symlink, an unusable name, or a command named like a built-in. See [EXTENDING.md](EXTENDING.md#plugins). |
+| `plugin list`        | Installed plugins: version, enabled/disabled, and whether their hooks/MCP are trusted, untrusted, or lapsed. |
+| `plugin trust <name>` | Let a plugin's hooks and MCP servers run, pinned to a hash of the whole plugin. Any change lapses it. |
+| `plugin enable\|disable <name>` | Turn a plugin's commands, skills, hooks, and MCP servers on or off without removing it. |
+| `plugin remove <name>` | Delete the plugin and its trust record. |
 | `review-multi`       | Run a code-review prompt across multiple `provider/model` reviewers in parallel and merge findings by file:line. `--models a,b,c`. |
 | `diff <file>` / `diff --patch <p>` | Interactive hunk-by-hunk accept/reject reviewer that writes the merged result back to the working tree. |
 | `bg start "<prompt>"` | Hand one task to a background agent and get the shell back. Creates a worktree on a fresh `wingman/bg/<id>` branch off HEAD, runs `--print --json --mode auto-edit` there detached, and commits the result on the branch when the agent exits 0 (a red verification gate exits 2 and leaves the changes uncommitted in the worktree). Your checkout is never touched. `--pr` opens a PR against `[pilot.pr].base_branch` once committed (`gh`, else push + compare URL). `--devcontainer` runs the agent in `.devcontainer/devcontainer.json`'s image with the worktree mounted — see below. Refuses a `--mode` below `auto-edit`. |

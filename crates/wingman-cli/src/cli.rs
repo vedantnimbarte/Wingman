@@ -371,6 +371,14 @@ pub enum Command {
         #[command(subcommand)]
         action: SkillAction,
     },
+    /// Claude Code–format plugin bundles: commands, skills, hooks, and MCP
+    /// servers in one install. Commands and skills load at once; hooks and MCP
+    /// servers stay inert until `wingman plugin trust <name>`.
+    #[command(display_order = 25)]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
     /// Multi-model code review: run review against several models in
     /// parallel and merge findings.
     #[command(display_order = 44)]
@@ -981,6 +989,24 @@ pub enum SkillAction {
 }
 
 #[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// Install from a local directory or a git URL (`url#ref` for a branch or
+    /// tag) into ~/.wingman/plugins/<name>/. Reinstalling replaces it.
+    Install { source: String },
+    /// List installed plugins with their enabled and trust state.
+    List,
+    /// Delete an installed plugin and its trust record.
+    Remove { name: String },
+    /// Re-enable a disabled plugin.
+    Enable { name: String },
+    /// Stop loading a plugin's commands, skills, hooks, and MCP servers.
+    Disable { name: String },
+    /// Let a plugin's hooks and MCP servers run, pinned to its current
+    /// content. Any change to the plugin lapses it.
+    Trust { name: String },
+}
+
+#[derive(Subcommand, Debug)]
 pub enum WorktreeAction {
     /// Create a worktree under <project>/.wingman/worktrees/<branch>.
     Create { branch: String },
@@ -1451,6 +1477,7 @@ pub async fn run() -> Result<ExitCode> {
             } => commands::skill::import(path, project, force).await,
             SkillAction::Export { name, out_dir } => commands::skill::export(name, out_dir).await,
         },
+        Some(Command::Plugin { action }) => commands::plugin::run(action),
         Some(Command::ReviewMulti { pr, local, models }) => {
             commands::review_multi::run(pr, local, models).await
         }
@@ -2041,6 +2068,11 @@ pub(crate) fn load_config() -> Result<Config> {
         None
     };
     let mut cfg = Config::load(Some(&global), project_file.as_deref())?;
+    // Trusted plugins' hooks and MCP servers. Here rather than in
+    // `Config::load`, which `/mcp add` uses to rewrite the global file.
+    if let Some(dir) = global.parent() {
+        wingman_config::plugins::apply(&mut cfg, dir);
+    }
     // CLI beats config and env, per the documented layering. Clap already
     // restricted this to the four valid levels.
     if let Some(r) = REASONING_OVERRIDE.get() {

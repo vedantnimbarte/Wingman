@@ -13,6 +13,7 @@
 pub mod claude_hooks;
 pub mod inbox;
 mod paths;
+pub mod plugins;
 pub mod secrets;
 pub mod trust;
 
