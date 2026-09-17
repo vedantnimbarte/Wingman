@@ -826,15 +826,7 @@ pub async fn run_hook(command: &str, timeout_secs: u64, env: &[(&str, String)]) 
         .collect();
 
     let fut = tokio::task::spawn_blocking(move || {
-        let mut cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", &command]);
-            c
-        } else {
-            let mut c = std::process::Command::new("sh");
-            c.args(["-c", &command]);
-            c
-        };
+        let mut cmd = crate::child_process::shell_command(&command);
         for (k, v) in env {
             cmd.env(k, v);
         }
