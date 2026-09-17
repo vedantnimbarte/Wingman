@@ -42,6 +42,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Best for: Understanding how Wingman learns from sessions, persists across projects, and builds institutional knowledge.
   - Read this if: You're using memory features, skill extraction, or cross-project recall.
 
+- **[GITHUB-ACTION.md](GITHUB-ACTION.md)** — The composite GitHub Action: PR review, `@wingman` PR/issue triggers, inputs, required permissions, and its security model.
 - **[HTTP-API.md](HTTP-API.md)** — The `wingman serve` HTTP/SSE API: one daemon over an allowlist of repos, bearer auth, a permission ceiling requests cannot raise, SSE streams, and `--remote` client mode.
   - Best for: driving Wingman from another machine, a phone, CI, or your own app.
   - Read this if: you want pilot runs steerable from anywhere, or a scriptable surface over the CLI.
@@ -265,6 +266,7 @@ docs/
 ├── TREE-SITTER.md           (language parsing integration)
 ├── LEARNING-LOOP.md         (memories, skills, session recall)
 ├── TOOLS.md                 (complete tool reference)
+├── GITHUB-ACTION.md         (the composite GitHub Action)
 ├── HTTP-API.md              (the `wingman serve` API surface)
 ├── HTTP-API-PLAN.md         (its build order and design record)
 ├── NOTIFIER.md              (the desktop notification popup)
