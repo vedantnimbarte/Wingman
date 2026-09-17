@@ -5139,7 +5139,7 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "wingman-autonomous"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5164,7 +5164,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-board"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "rand 0.10.2",
@@ -5181,7 +5181,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-browser"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "headless_chrome",
  "image",
@@ -5190,7 +5190,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5237,7 +5237,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-config"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "directories",
  "keyring",
@@ -5253,7 +5253,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5272,7 +5272,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-learn"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5293,7 +5293,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-lsp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5304,7 +5304,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -5321,7 +5321,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-providers"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -5340,7 +5340,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-rag"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5363,7 +5363,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-session"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5380,7 +5380,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-skills"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -5389,7 +5389,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-tools"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -5420,7 +5420,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-ts"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -5438,7 +5438,7 @@ dependencies = [
 
 [[package]]
 name = "wingman-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
