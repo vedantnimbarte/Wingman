@@ -2858,6 +2858,26 @@ button.card-title:hover {
   white-space: nowrap;
 }
 
+/* Dictation. Listening is the live hue plus a ring, so the state does not
+   rest on colour alone; `aria-pressed` carries it to a screen reader. */
+.mic.is-listening {
+  color: var(--asserted);
+  border-color: var(--asserted);
+  background: var(--asserted-wash);
+  box-shadow: 0 0 0 2px var(--asserted-edge);
+}
+
+.mic-problem {
+  order: 5;
+  flex-basis: 100%;
+  font-size: var(--t-xs);
+}
+
+/* The run's steering box sits after the log, so it needs its own gap. */
+.steer {
+  margin-top: var(--s-5);
+}
+
 .fold {
   align-self: center;
   margin-bottom: var(--s-3);
@@ -3187,6 +3207,31 @@ button.card-title:hover {
 
   .composer-model {
     flex: 1 1 6rem;
+  }
+
+  /* Steering from a phone: the composer rides the bottom edge, clear of the
+     home indicator, and every control in it is a thumb-sized target. */
+  .composer {
+    bottom: 0;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Below 16px, iOS Safari zooms the whole page when the field takes focus. */
+  .composer textarea,
+  .signin .input {
+    font-size: 1rem;
+  }
+
+  .composer-tools .button,
+  .composer-tools .select,
+  .composer-model,
+  .signin .button,
+  .signin .input {
+    min-height: 2.75rem;
+  }
+
+  .composer-tools .button-icon {
+    width: 2.75rem;
   }
 
   /* The copy button would sit on top of the first line of a narrow block. */

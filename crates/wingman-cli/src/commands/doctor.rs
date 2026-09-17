@@ -60,6 +60,15 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
     section("tooling");
     emit(bin_status("git", &["--version"]));
     emit(bin_status("gh", &["--version"]));
+    // Optional: only `notebook_run` needs it, so missing is a warning.
+    emit(match bin_status("jupyter", &["nbconvert", "--version"]) {
+        Status::Ok(v) => Status::Ok(format!("{v} (nbconvert) — notebook_run available")),
+        _ => Status::Warn(
+            "jupyter nbconvert: not found on PATH — notebook_run needs it \
+             (`pip install nbconvert ipykernel`)"
+                .into(),
+        ),
+    });
 
     // 1b. Shell containment.
     section("shell sandbox");
@@ -130,6 +139,22 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
                 "vm — unavailable ({why}); pilot refuses vm-tier tasks"
             )),
         });
+        // `bg start --devcontainer` runs through the same Docker probe.
+        let devcontainer = paths.root.join(".devcontainer").join("devcontainer.json");
+        if devcontainer.exists() {
+            emit(
+                match (avail.docker, super::bg::devcontainer_spec(&paths.root)) {
+                    (true, Ok(spec)) => Status::Ok(format!(
+                        "bg --devcontainer — {spec} (unvalidated against a real daemon)"
+                    )),
+                    (false, Ok(_)) => Status::Warn(
+                        "bg --devcontainer — no Docker daemon reachable; it will refuse to start"
+                            .into(),
+                    ),
+                    (_, Err(e)) => Status::Warn(format!("bg --devcontainer — {e:#}")),
+                },
+            );
+        }
     }
 
     // 2. Providers + credentials.
@@ -229,6 +254,27 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         )),
     }
 
+    // 4b. OTLP export. A TCP probe only: it says a collector is listening,
+    // not that it accepts OTLP/HTTP JSON or these headers.
+    section("telemetry (OTLP)");
+    match wingman_session::otlp::settings(&cfg, |k| std::env::var(k).ok()) {
+        Ok(None) => emit(Status::Ok("not configured — nothing is exported".into())),
+        Err(e) => emit(Status::Bad(format!("refused, export is off: {e}"))),
+        Ok(Some(s)) => {
+            let shown = wingman_session::otlp::display_endpoint(&s.endpoint);
+            let hostport = reqwest::Url::parse(&s.endpoint)
+                .ok()
+                .and_then(|u| Some(format!("{}:{}", u.host_str()?, u.port_or_known_default()?)));
+            if hostport.as_deref().is_some_and(tcp_reachable) {
+                emit(Status::Ok(format!("exporting to {shown} (reachable)")));
+            } else {
+                emit(Status::Warn(format!(
+                    "exporting to {shown}, but it is not reachable — spans will be dropped"
+                )));
+            }
+        }
+    }
+
     // 5. Language servers on PATH.
     section("language servers (LSP)");
     let mut any_lsp = false;
@@ -262,6 +308,34 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
         ));
     }
 
+    // 6. Debug adapters on PATH, for the debug_* tools.
+    section("debug adapters (DAP)");
+    for lang in wingman_tools::dap::DebugLang::ALL {
+        match wingman_tools::dap::Adapter::detect(lang) {
+            Some(adapter) => emit(Status::Ok(format!("{}: {}", lang.label(), adapter.program))),
+            None => emit(Status::Warn(format!(
+                "{}: none on PATH (install {})",
+                lang.label(),
+                lang.install_hint()
+            ))),
+        }
+    }
+
+    // 7. Headless browser (verify gate + the `browser` tool).
+    section("browser");
+    if cfg!(feature = "browser") {
+        match wingman_browser::find_chrome() {
+            Ok(path) => emit(Status::Ok(format!("Chrome/Chromium: {}", path.display()))),
+            Err(e) => emit(Status::Warn(format!(
+                "no Chrome/Chromium found ({e}) — the `browser` tool and [verify.browser] gate will not run; set CHROME to its path"
+            ))),
+        }
+    } else {
+        emit(Status::Warn(
+            "built without the `browser` feature — no `browser` tool or visual verification".into(),
+        ));
+    }
+
     // Claude Code hooks are never imported silently, so the only way to
     // discover the option is to be told it applies to you.
     if !cfg.hooks.import_claude_code {
@@ -284,6 +358,41 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
                  here instead of rewriting them (a project file also needs `wingman trust`)",
                 found.join(", ")
             )));
+        }
+    }
+
+    if let Ok(global) = wingman_config::global_dir() {
+        let installed = wingman_config::plugins::installed(&global);
+        if !installed.is_empty() {
+            section("plugins");
+        }
+        for p in installed {
+            use wingman_config::plugins::{inspect, trust_state, TrustState};
+            let name = &p.manifest.name;
+            let contents = match inspect(&p.root, name) {
+                Ok(c) => c,
+                Err(e) => {
+                    emit(Status::Bad(format!("{name}: not loadable — {e}")));
+                    continue;
+                }
+            };
+            let summary = format!(
+                "{name} {} — {}, {} command(s), {} skill(s)",
+                p.manifest.version.as_deref().unwrap_or(""),
+                if p.enabled { "enabled" } else { "disabled" },
+                contents.commands.len(),
+                contents.skills.len()
+            );
+            // Untrusted is a warning, not a problem: inert is the safe state.
+            emit(match trust_state(&global, &p, &contents) {
+                TrustState::Untrusted if p.enabled => Status::Warn(format!(
+                    "{summary}; hooks/MCP untrusted and inert — `wingman plugin trust {name}`"
+                )),
+                TrustState::Lapsed if p.enabled => Status::Warn(format!(
+                    "{summary}; hooks/MCP trust lapsed (content changed) — `wingman plugin trust {name}`"
+                )),
+                _ => Status::Ok(summary),
+            });
         }
     }
 

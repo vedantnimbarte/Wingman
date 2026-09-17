@@ -16,6 +16,7 @@ wingman-skills = { workspace = true }
 wingman-session = { workspace = true }
 wingman-lsp = { workspace = true }
 wingman-ts = { workspace = true, optional = true }
+wingman-browser = { workspace = true, optional = true }
 # Text extraction only: a spec or design doc handed over as a PDF is ordinary
 # coding context, and the alternative is the model being told "refusing to
 # read binary file".
@@ -27,7 +28,7 @@ wingman-ts = { workspace = true, optional = true }
 # >= 0.42, where the recursion is bounded.
 pdf-extract = { version = "0.12", optional = true }
 
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 futures = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
@@ -61,6 +62,10 @@ treesitter = ["dep:wingman-ts", "wingman-ts/treesitter"]
 # it needs no C toolchain — gated only so a build that will never be handed a
 # PDF need not carry the parser.
 pdf = ["dep:pdf-extract"]
+# The agent's `browser` tool driving a real headless Chrome. Without it the
+# tool still compiles (its URL policy and argument checks are tested in every
+# build) but is never registered. Needs a Chrome/Chromium binary at runtime.
+browser = ["dep:wingman-browser", "wingman-browser/chrome"]
 
 
 [dev-dependencies]

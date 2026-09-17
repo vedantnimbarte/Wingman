@@ -132,6 +132,10 @@ jobs:
         run: |
           sh -n scripts/install.sh
           DRY_RUN=1 sh scripts/install.sh
+      - name: GitHub Action scripts
+        run: |
+          shellcheck scripts/action.sh scripts/action-selftest.sh
+          bash scripts/action-selftest.sh
 
   # Advisory scan, and a REQUIRED check (see the aggregate below): a new
   # RUSTSEC advisory fails the build. Everything we knowingly tolerate is

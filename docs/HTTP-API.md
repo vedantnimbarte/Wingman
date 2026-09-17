@@ -234,6 +234,8 @@ run's process.
 | `POST` | `/v1/projects/{p}/pilot/runs/{run}/veto` | — | Reject the pending plan. |
 | `POST` | `/v1/projects/{p}/pilot/runs/{run}/abort` | `{"task":"id"}` optional | Abort the run, or one task. |
 | `POST` | `/v1/projects/{p}/pilot/runs/{run}/retry` | `{"task":"id"}` | Re-queue a failed or blocked task. |
+| `POST` | `/v1/projects/{p}/pilot/runs/{run}/tell` | `{"message":"…","task":"id"}` (`task` optional) | `pilot tell`: inject a message into the next turn of the worker holding `task`, or of every active worker. `409` on a finished run, `400` for a blank message. |
+| `POST` | `/v1/projects/{p}/pilot/runs/{run}/ask` | same as `tell` | `pilot ask`: the same delivery, asking for a reply. Returns `202` as soon as the question is recorded — it does **not** wait for the answer, which arrives as a `task.tool` event whose `tool` is `worker_msg:{"msg":"answer",…}` on the run's `stream`/`events`. |
 | `POST` | `/v1/projects/{p}/pilot/goals` | `{"text":"…","author":"…"}` | Write an intake file for the discovery daemon. A body-claimed author never earns trust over the API — trust comes from `[pilot.daemon].trusted_authors` as the daemon matches it, not from a request asserting an identity. |
 
 ### Board

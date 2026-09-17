@@ -16,6 +16,7 @@ import { Markdown } from './markdown'
 import { navigate } from './router'
 import { message } from './state'
 import { Empty, Failed, Icon, Loading, Note, PageHead } from './ui'
+import { MicButton } from './voice'
 
 /**
  * Sessions — transcripts, and holding a conversation with the agent.
@@ -237,6 +238,9 @@ const MODES = ['read-only', 'plan', 'auto-edit'] as const
 
 const MODE_KEY = 'wingman.turn.mode'
 const MODEL_KEY = 'wingman.turn.model'
+const SPEAK_KEY = 'wingman.turn.speak'
+
+const speakable = () => 'speechSynthesis' in window
 
 /** How many transcript records render before the "show earlier" fold. */
 const WINDOW = 150
@@ -252,6 +256,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const [mode, setMode] = useState(() => window.localStorage.getItem(MODE_KEY) ?? '')
   const [model, setModel] = useState(() => window.localStorage.getItem(MODEL_KEY) ?? '')
   const [timeline, setTimeline] = useState(false)
+  const [speak, setSpeak] = useState(() => window.localStorage.getItem(SPEAK_KEY) === '1')
   const abort = useRef<AbortController | null>(null)
   const foot = useRef<HTMLDivElement | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
@@ -308,14 +313,23 @@ function Conversation({ project, id }: { project: string; id: string }) {
     setPinned(true)
     abort.current = new AbortController()
 
+    // The reply is the text after the last tool call; anything before it was
+    // the agent narrating its way there.
+    let reply = ''
     try {
       await api.turn(
         project,
         target,
         { prompt: text, mode: mode || undefined, model: model.trim() || undefined },
-        (e) => apply(e, setTurn, setVerification),
+        (e) => {
+          if (e.type === 'tool_start') reply = ''
+          else if (e.type === 'text_delta') reply += e.text
+          apply(e, setTurn, setVerification)
+        },
         abort.current.signal,
       )
+      if (speak && speakable() && reply.trim())
+        window.speechSynthesis.speak(new SpeechSynthesisUtterance(reply))
       // The transcript on disk is authoritative: re-reading it is what puts
       // this turn into the same shape as every earlier one, rather than
       // keeping a separately-assembled copy in memory.
@@ -496,6 +510,28 @@ function Conversation({ project, id }: { project: string; id: string }) {
           />
 
           <span className="composer-hint">Enter sends · Shift+Enter for a newline · {project}</span>
+
+          {speakable() && (
+            <button
+              type="button"
+              className="button button-quiet button-sm"
+              aria-pressed={speak}
+              title="Read the final reply aloud when a turn finishes"
+              onClick={() => {
+                const next = !speak
+                setSpeak(next)
+                if (next) window.localStorage.setItem(SPEAK_KEY, '1')
+                else {
+                  window.localStorage.removeItem(SPEAK_KEY)
+                  window.speechSynthesis.cancel()
+                }
+              }}
+            >
+              Read aloud
+            </button>
+          )}
+
+          <MicButton value={prompt} onChange={setPrompt} disabled={streaming} />
 
           {streaming && (
             <button
