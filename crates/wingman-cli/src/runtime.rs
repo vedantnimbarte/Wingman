@@ -527,7 +527,7 @@ fn resolve_api_key(from_config: Option<&str>, env_name: &str) -> Result<String> 
 ///   - `keyring:<provider_id>`  — look up the OS keyring (Phase B)
 ///   - non-empty, non-placeholder string — use directly (legacy)
 ///   - `${ENV_VAR}` placeholder, empty, or missing — return None
-fn check_config_value(from_config: Option<&str>) -> Option<String> {
+pub(crate) fn check_config_value(from_config: Option<&str>) -> Option<String> {
     let s = from_config?;
     let trimmed = s.trim();
     if trimmed.is_empty() || looks_like_placeholder(trimmed) {
@@ -708,6 +708,13 @@ pub(crate) fn base_registry(
         reg.unregister("web_fetch");
         reg.unregister("web_search");
     }
+    // Not removed under local_only: localhost dev servers are its main use,
+    // so the tool enforces loopback-only itself (and launches Chrome behind a
+    // dead proxy). `register_arc` still honours disabled_tools / presets.
+    #[cfg(feature = "browser")]
+    reg.register_arc(Arc::new(wingman_tools::builtin::Browser::new(
+        cfg.privacy.local_only,
+    )));
     reg
 }
 

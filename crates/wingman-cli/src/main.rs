@@ -66,7 +66,13 @@ fn run_on_main_thread() -> ExitCode {
         }
     };
 
-    match runtime.block_on(cli::run()) {
+    let result = runtime.block_on(cli::run());
+    // Session end: give queued OTLP spans a short, bounded chance to leave.
+    // A no-op when export is off.
+    runtime.block_on(wingman_session::otlp::shutdown(
+        std::time::Duration::from_secs(2),
+    ));
+    match result {
         Ok(code) => code,
         Err(e) => {
             eprintln!("wingman: {e:#}");

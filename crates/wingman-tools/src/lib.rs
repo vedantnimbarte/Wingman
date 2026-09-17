@@ -8,6 +8,7 @@
 
 pub mod child_process;
 mod ctx;
+pub mod dap;
 pub mod filesystem;
 pub mod jobs;
 mod registry;

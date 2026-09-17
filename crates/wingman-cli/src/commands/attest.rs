@@ -8,6 +8,28 @@ use anyhow::Result;
 use std::process::ExitCode;
 use wingman_config::Config;
 
+/// OTLP export is an egress channel even to a local collector: this command
+/// cannot vouch for where the collector forwards, same as a local MCP binary.
+/// Environment overrides count, since that is how many teams switch it on.
+fn otlp_line(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> (bool, String) {
+    match wingman_session::otlp::settings(cfg, env) {
+        Ok(None) => (
+            true,
+            "no OTLP export configured ([telemetry.otlp] / WINGMAN_OTLP_ENDPOINT / \
+             OTEL_EXPORTER_OTLP_ENDPOINT)"
+                .into(),
+        ),
+        Ok(Some(s)) => (
+            false,
+            format!(
+                "OTLP export sends turn metadata (model, tokens, cost, tool names) to {}",
+                wingman_session::otlp::display_endpoint(&s.endpoint)
+            ),
+        ),
+        Err(e) => (false, format!("OTLP export is configured but refused: {e}")),
+    }
+}
+
 pub async fn run(cfg: Config) -> Result<ExitCode> {
     println!("wingman attestation — local-only / air-gapped posture\n");
 
@@ -127,6 +149,9 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
         "no [team].endpoint configured (memory push/pull would leave the machine)",
     );
 
+    let (pass, msg) = otlp_line(&cfg, |k| std::env::var(k).ok());
+    line(pass, &msg);
+
     // run_shell is the honest caveat: it is available in edit modes and can
     // reach the network however the OS allows. Say so rather than implying a
     // guarantee the tool cannot make.
@@ -175,5 +200,28 @@ pub async fn run(cfg: Config) -> Result<ExitCode> {
     } else {
         println!("local_only is on but the checks above found a gap — fix the ✗ lines.");
         Ok(ExitCode::from(1))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn otlp_export_is_listed_as_an_egress_channel() {
+        let none = |_: &str| None;
+        assert!(otlp_line(&Config::default(), none).0);
+
+        let mut cfg = Config::default();
+        cfg.telemetry.otlp.endpoint = Some("https://u:pw@otel.example.com:4318".into());
+        let (pass, msg) = otlp_line(&cfg, none);
+        assert!(!pass);
+        assert!(msg.contains("otel.example.com"), "{msg}");
+        assert!(!msg.contains("pw@"), "credentials printed: {msg}");
+
+        // Switched on through the environment alone still counts.
+        let env =
+            |k: &str| (k == "OTEL_EXPORTER_OTLP_ENDPOINT").then(|| "http://localhost:4318".into());
+        assert!(!otlp_line(&Config::default(), env).0);
     }
 }

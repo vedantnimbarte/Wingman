@@ -18,6 +18,9 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+# OTLP/HTTP JSON export (`otlp`). Same version/features as the other crates,
+# so no new crate enters the build graph.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 
 [dev-dependencies]
 tempfile = "3"

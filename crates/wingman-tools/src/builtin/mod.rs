@@ -6,7 +6,9 @@
 
 mod apply_patch;
 mod ask_user;
+mod browser;
 mod command_tool;
+mod debug_tools;
 mod edit_file;
 mod forget_memory;
 mod glob_tool;
@@ -45,7 +47,11 @@ mod who_calls;
 
 pub use apply_patch::ApplyPatch;
 pub use ask_user::AskUser;
+pub use browser::Browser;
 pub use command_tool::CommandTool;
+pub use debug_tools::{
+    DebugBreakpoints, DebugContinue, DebugEval, DebugStart, DebugState, DebugStop,
+};
 pub use edit_file::EditFile;
 pub use forget_memory::ForgetMemory;
 pub use glob_tool::Glob;

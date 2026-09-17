@@ -289,7 +289,7 @@ pub fn live_pid(dir: &Path) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(pid: u32) -> bool {
     use nix::errno::Errno;
     use nix::sys::signal::kill;
     use nix::unistd::Pid;
@@ -306,7 +306,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::{
         CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
     };

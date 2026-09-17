@@ -10,6 +10,14 @@
 //! The verification gate loads a URL, screenshots it, and fails if it differs
 //! from a committed baseline by more than a threshold — proving a UI change
 //! renders, a receipt no terminal agent offers.
+//!
+//! [`Session`] (feature `chrome`) is the long-lived counterpart the agent's
+//! `browser` tool drives across calls.
+
+mod session;
+#[cfg(feature = "chrome")]
+pub use session::Session;
+pub use session::{find_chrome, ConsoleBuffer, MAX_CONSOLE_LINES};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {

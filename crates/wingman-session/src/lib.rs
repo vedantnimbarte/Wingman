@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 pub mod export;
+pub mod otlp;
 pub mod store;
 
 pub use store::{FileSessionStore, MemorySessionStore, SessionStore};
@@ -342,7 +343,7 @@ impl SessionLog {
                 })
                 .await
             }
-            ContextFact::Usage { usage } => {
+            ContextFact::Usage { usage, .. } => {
                 self.write(SessionRecord::UsageDelta { ts, usage: *usage })
                     .await
             }
@@ -851,6 +852,8 @@ pub struct SessionLogSink {
     log: tokio::sync::Mutex<SessionLog>,
     /// Cached so callers can name the file without taking the write lock.
     path: PathBuf,
+    /// Turn/tool span state for OTLP export. Idle unless `otlp::init` ran.
+    telemetry: std::sync::Mutex<otlp::Tracker>,
 }
 
 impl SessionLogSink {
@@ -858,6 +861,7 @@ impl SessionLogSink {
         Self {
             path: log.path().to_path_buf(),
             log: tokio::sync::Mutex::new(log),
+            telemetry: Default::default(),
         }
     }
 
@@ -870,6 +874,9 @@ impl SessionLogSink {
 #[async_trait::async_trait]
 impl wingman_core::ContextSink for SessionLogSink {
     async fn record(&self, fact: ContextFact) {
+        // Telemetry rides the same facts the log records: never blocks (a
+        // full queue drops), and does nothing when no exporter is running.
+        otlp::observe(&self.telemetry, &fact);
         // Best-effort: a session that cannot write its log must still answer
         // the user. The failure is worth knowing about, so it is logged once
         // per occurrence rather than silently dropped.
