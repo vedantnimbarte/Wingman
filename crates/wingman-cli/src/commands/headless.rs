@@ -26,6 +26,7 @@ pub struct HeadlessOptions {
 }
 
 pub async fn run(cfg: Config, opts: HeadlessOptions) -> Result<ExitCode> {
+    crate::cli::start_telemetry(&cfg);
     let mode = opts.mode_override.unwrap_or(cfg.permission_mode);
     let cwd = std::env::current_dir()?;
     let paths = ProjectPaths::discover(&cwd);

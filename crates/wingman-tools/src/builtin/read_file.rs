@@ -1,3 +1,4 @@
+use super::notebook::render_notebook;
 use crate::{Capability, Tool, ToolCtx};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -175,98 +176,6 @@ fn extract_pdf_text(_bytes: &[u8]) -> Result<String, String> {
 fn looks_binary(bytes: &[u8]) -> bool {
     let head = &bytes[..bytes.len().min(8192)];
     head.contains(&0)
-}
-
-/// Render a Jupyter `.ipynb` JSON document into a flat, model-friendly
-/// markdown layout: code cells become fenced code blocks (language taken
-/// from `metadata.language_info.name` or `language` per cell, fallback
-/// `text`), markdown cells become their raw markdown source, and stream
-/// outputs become a `> stdout:` block. Returns `None` on parse failure so
-/// the caller can fall back to the raw JSON.
-fn render_notebook(text: &str) -> Option<String> {
-    let nb: serde_json::Value = serde_json::from_str(text).ok()?;
-    let lang_global = nb
-        .get("metadata")
-        .and_then(|m| m.get("language_info"))
-        .and_then(|l| l.get("name"))
-        .and_then(|n| n.as_str())
-        .unwrap_or("python")
-        .to_string();
-    let cells = nb.get("cells")?.as_array()?;
-    let mut out = String::new();
-    for (i, cell) in cells.iter().enumerate() {
-        let kind = cell.get("cell_type").and_then(|v| v.as_str()).unwrap_or("");
-        let source = match cell.get("source") {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(serde_json::Value::Array(a)) => a
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(""),
-            _ => String::new(),
-        };
-        match kind {
-            "markdown" => {
-                out.push_str(&format!("<!-- cell {i}: markdown -->\n"));
-                out.push_str(&source);
-                if !source.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push('\n');
-            }
-            "code" => {
-                let lang = cell
-                    .get("metadata")
-                    .and_then(|m| m.get("language"))
-                    .and_then(|l| l.as_str())
-                    .unwrap_or(&lang_global);
-                out.push_str(&format!("<!-- cell {i}: code -->\n"));
-                out.push_str("```");
-                out.push_str(lang);
-                out.push('\n');
-                out.push_str(&source);
-                if !source.ends_with('\n') {
-                    out.push('\n');
-                }
-                out.push_str("```\n");
-                // Stream outputs (stdout/stderr only — skip rich displays).
-                if let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
-                    let mut stream_text = String::new();
-                    for o in outputs {
-                        if o.get("output_type").and_then(|v| v.as_str()) == Some("stream") {
-                            if let Some(t) = o.get("text") {
-                                match t {
-                                    serde_json::Value::String(s) => stream_text.push_str(s),
-                                    serde_json::Value::Array(a) => {
-                                        for line in a.iter().filter_map(|v| v.as_str()) {
-                                            stream_text.push_str(line);
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    if !stream_text.is_empty() {
-                        out.push_str("> stdout:\n");
-                        for line in stream_text.lines() {
-                            out.push_str("> ");
-                            out.push_str(line);
-                            out.push('\n');
-                        }
-                    }
-                }
-                out.push('\n');
-            }
-            "raw" => {
-                out.push_str(&format!("<!-- cell {i}: raw -->\n"));
-                out.push_str(&source);
-                out.push_str("\n\n");
-            }
-            _ => {}
-        }
-    }
-    Some(out)
 }
 
 #[cfg(test)]

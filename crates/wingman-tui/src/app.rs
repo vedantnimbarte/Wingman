@@ -340,7 +340,9 @@ fn parse_slash(line: &str) -> Cmd {
             // prompt template; `$ARGS` (literal) is substituted with `arg`.
             if let Some(name) = head.strip_prefix('/') {
                 if let Some(template) = load_user_command(name) {
-                    let expanded = template.replace("$ARGS", arg);
+                    // `$ARGUMENTS` is Claude Code's spelling (plugin commands);
+                    // replaced first because `$ARGS` is a prefix of it.
+                    let expanded = template.replace("$ARGUMENTS", arg).replace("$ARGS", arg);
                     return Cmd::Submit(expanded);
                 }
             }
@@ -431,7 +433,23 @@ fn apply_mode(ui: &mut UiState, raw: &str, mode_setter: &ModeSetter) {
     }
 }
 
+/// Whether `/<name>` is a built-in, which a plugin command may not shadow.
+///
+/// Asks [`parse_slash`] itself rather than keeping a second list of names
+/// that would drift from the match arms: given an argument, every built-in
+/// parses to its own variant and anything else falls through to `Submit`.
+pub fn is_builtin_command(name: &str) -> bool {
+    !matches!(parse_slash(&format!("/{name} x")), Cmd::Submit(_))
+}
+
 fn load_user_command(name: &str) -> Option<String> {
+    // `<plugin>:<cmd>` is never joined onto a path here (`:` is an NTFS
+    // stream separator); the plugin lookup validates both halves itself.
+    if name.contains(':') {
+        return wingman_config::global_dir()
+            .ok()
+            .and_then(|g| wingman_config::plugins::find_command(&g, name));
+    }
     if !name
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
@@ -455,6 +473,8 @@ fn load_user_command(name: &str) -> Option<String> {
         if let Ok(text) = std::fs::read_to_string(&p) {
             return Some(text);
         }
+        // Installed plugins last: your own commands shadow a plugin's.
+        return wingman_config::plugins::find_command(&global, name);
     }
     None
 }

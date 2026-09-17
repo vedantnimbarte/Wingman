@@ -331,7 +331,8 @@ export type WingmanNotification = {
   free_text?: boolean
 }
 
-export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry'
+/** `tell` and `ask` carry a `message`; `ask`'s answer arrives on the run's stream. */
+export type ControlAction = 'approve' | 'veto' | 'abort' | 'retry' | 'tell' | 'ask'
 
 /**
  * One line of a run's `tasks.jsonl`.
@@ -727,6 +728,22 @@ export const api = {
       body: JSON.stringify({ token }),
     }),
 
+  /**
+   * Pair this browser with a code from `wingman serve --pair`.
+   *
+   * The redeemed token goes straight into `signIn` and is dropped: it lives
+   * in this function's scope for one request, is never logged, and ends up
+   * where a typed-in token does — the `HttpOnly` cookie.
+   */
+  pair: async (code: string): Promise<{ auth_required: boolean }> => {
+    const { token } = await request<{ token: string }>('/v1/pair/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code.trim() }),
+    })
+    return api.signIn(token)
+  },
+
   signOut: () => request<void>('/v1/ui/session', { method: 'DELETE' }),
 
   /**
@@ -948,7 +965,12 @@ export const api = {
    * running process, which is why a control call can return before the run has
    * acted on it.
    */
-  control: (project: string, runId: string, action: ControlAction, body: { task?: string } = {}) =>
+  control: (
+    project: string,
+    runId: string,
+    action: ControlAction,
+    body: { task?: string; message?: string } = {},
+  ) =>
     request<unknown>(
       `/v1/projects/${encodeURIComponent(project)}/pilot/runs/${encodeURIComponent(runId)}/${action}`,
       {

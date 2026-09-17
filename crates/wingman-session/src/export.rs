@@ -331,8 +331,9 @@ fn changes(name: &str, input: &serde_json::Value, output: &str) -> Vec<(String, 
             .map(str::to_string)
     };
     match name {
-        // The result is a unified diff of the whole file.
-        "edit_file" | "edit_symbol" => path()
+        // The result is a unified diff (of the whole file; of the cell source
+        // for `notebook_edit`).
+        "edit_file" | "edit_symbol" | "notebook_edit" => path()
             .map(|p| {
                 let (mut added, mut removed) = (0, 0);
                 for (i, line) in output.lines().enumerate() {

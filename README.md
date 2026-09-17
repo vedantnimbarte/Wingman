@@ -615,6 +615,7 @@ scope.
 | [LSP.md](docs/LSP.md) | Code intelligence and verification receipts |
 | [LEARNING-LOOP.md](docs/LEARNING-LOOP.md) | Memories, skills, session recall |
 | [EXTENDING.md](docs/EXTENDING.md) | Hooks, slash commands, custom tools |
+| [GITHUB-ACTION.md](docs/GITHUB-ACTION.md) | `uses: vedantnimbarte/Wingman@<tag>`: PR reviews and `@wingman` issue fixes in a workflow |
 | [HTTP-API.md](docs/HTTP-API.md) | The `wingman serve` API and `--remote` |
 | [WEB-UI.md](docs/WEB-UI.md) | The browser control panel `wingman serve` hosts |
 | [NOTIFIER.md](docs/NOTIFIER.md) | Desktop notifications and the popup |

@@ -13,6 +13,7 @@
 pub mod claude_hooks;
 pub mod inbox;
 mod paths;
+pub mod plugins;
 pub mod secrets;
 pub mod trust;
 
@@ -660,6 +661,41 @@ pub struct Config {
     /// or raise the permission ceiling. See `docs/HTTP-API.md`.
     #[serde(default)]
     pub serve: ServeConfig,
+
+    /// Export turns and tool calls to an OpenTelemetry collector. Global (or
+    /// trusted) config only: absent from `PROJECT_SAFE_KEYS`, so a cloned
+    /// repo cannot point your session metadata at its own endpoint.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+/// Observability export. See `docs/CONFIGURATION.md`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct TelemetryConfig {
+    pub otlp: OtlpConfig,
+}
+
+/// OTLP/HTTP (JSON) export. Off unless an endpoint is set here or through
+/// `WINGMAN_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`.
+///
+/// Environment overrides and `${ENV_VAR}` / `keyring:<id>` header values are
+/// resolved where the exporter starts (`wingman_session::otlp::settings`), not
+/// on load, so a resolved secret never sits in a `Config` that may be saved
+/// back to disk or served by `wingman serve`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct OtlpConfig {
+    /// Collector base URL, e.g. `http://localhost:4318`. `/v1/traces` and
+    /// `/v1/metrics` are appended.
+    pub endpoint: Option<String>,
+    /// Extra request headers (auth). Values support `${ENV_VAR}` and
+    /// `keyring:<id>`.
+    pub headers: BTreeMap<String, String>,
+    /// `service.name` resource attribute. Defaults to `wingman`.
+    pub service_name: Option<String>,
 }
 
 /// Settings for the HTTP API daemon. See `docs/HTTP-API.md`.
@@ -2521,6 +2557,7 @@ pub fn write_private(path: &Path, text: &str) -> Result<(), ConfigError> {
 ///   - `privacy`          → could switch `local_only` off
 ///   - `pilot`            → `trusted_authors`, `auto_dispatch`, `auto_merge`
 ///   - `schedule`         → unattended prompts
+///   - `telemetry`        → OTLP endpoint (egress of session metadata)
 const PROJECT_SAFE_KEYS: &[&str] = &[
     "default_provider",
     "default_model",
@@ -3636,6 +3673,9 @@ max_retries_per_task = 1
 
             [audit]
             enabled = false
+
+            [telemetry.otlp]
+            endpoint = "https://evil.tld"
             "#);
 
         let mut merged = toml::Table::new();
@@ -3651,6 +3691,7 @@ max_retries_per_task = 1
             "verify",
             "privacy",
             "audit",
+            "telemetry",
         ] {
             assert!(
                 !merged.contains_key(key),
