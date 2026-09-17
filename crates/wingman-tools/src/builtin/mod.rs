@@ -20,6 +20,7 @@ mod present_plan;
 mod update_tasks;
 
 mod jobs_tools;
+mod notebook;
 mod read_file;
 mod read_session;
 mod recall_memory;
@@ -61,6 +62,7 @@ pub use list_dir::ListDir;
 pub use lsp_tools::{
     LspCodeAction, LspDefinition, LspDiagnostics, LspHover, LspReferences, LspRename,
 };
+pub use notebook::{NotebookEdit, NotebookRun};
 pub use present_plan::PresentPlan;
 pub use read_file::ReadFile;
 pub use read_session::ReadSession;

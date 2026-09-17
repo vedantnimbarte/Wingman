@@ -256,7 +256,18 @@ Wingman different; this is everything else it does.
 - **Subagent tool.** The model can call `spawn_subagent` to run an
   isolated inner agent loop on a focused sub-task (depth-capped at 1).
 - **Notebook reads.** `read_file` on a `.ipynb` returns cells as fenced
-  code blocks + markdown, not raw JSON.
+  code blocks + markdown, not raw JSON, with each code cell's outputs
+  (streams, results, error lines; images named, not inlined).
+- **Notebook editing and execution.** `notebook_edit` replaces, inserts or
+  deletes one cell by index or (nbformat 4.5+) cell id, leaving the rest of
+  the JSON as Jupyter wrote it and clearing an edited code cell's outputs.
+  `notebook_run` executes the notebook with `jupyter nbconvert --execute
+  --inplace` and returns errors and tracebacks first, then bounded outputs.
+  Both go through the registry's write gate, `/undo` checkpoint and audit
+  log; `notebook_run` also needs the shell grant and spawns through
+  `run_shell`'s sandbox and credential scrub. `wingman doctor` says whether
+  jupyter is on PATH. Not validated live: no test runs a real kernel, and on
+  Windows notebook names with spaces are refused by `notebook_run`.
 - **Scheduled tasks.** `[[schedule]]` config entries fire from
   `wingman schedule` (call from cron / Task Scheduler).
 - **Memory packs.** `wingman memory export/import/diff` for sharing

@@ -80,7 +80,14 @@ impl Tool for CommandTool {
     async fn run(&self, args: Value, ctx: &ToolCtx) -> ToolOutcome {
         if self.contained {
             let input = serde_json::to_string(&args).unwrap_or_default();
-            return super::run_shell::run_contained(&self.command, input, self.timeout, ctx).await;
+            return super::run_shell::run_contained(
+                &self.command,
+                Some(input),
+                None,
+                self.timeout,
+                ctx,
+            )
+            .await;
         }
         // Custom tools run arbitrary shell — require shell permission.
         if !ctx.allows_shell() {
