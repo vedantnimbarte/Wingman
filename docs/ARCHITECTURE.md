@@ -164,6 +164,7 @@ Two containments hold regardless of mode:
 | Anthropic        | `AnthropicProvider`    | Reference: native tool use, explicit caching.    |
 | OpenAI           | `OpenAiCompatProvider` | Variant: `OpenAi`.                                |
 | ChatGPT (OAuth)  | `ChatGptProvider`      | Browser OAuth via `/login`; OS keychain storage. |
+| Claude Code      | `ClaudeCodeProvider`   | Runs the user's `claude` CLI (`wingman_core::claude_code`); pilot manager/workers drive it directly. |
 | OpenRouter       | `OpenAiCompatProvider` | Variant: `OpenRouter`. Aggregator model.          |
 | LiteLLM          | `OpenAiCompatProvider` | Variant: `LiteLLM`. Gateway.                      |
 | LM Studio        | `OpenAiCompatProvider` | Variant: `LmStudio`. Local OpenAI shim.           |

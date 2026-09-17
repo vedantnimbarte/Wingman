@@ -1407,7 +1407,11 @@ impl Config {
             return None;
         }
         match spec.split_once('/') {
-            Some((prefix, rest)) if self.providers.contains_key(prefix) && !rest.is_empty() => {
+            // `claude-code` needs no section: the CLI holds the credentials.
+            Some((prefix, rest))
+                if (self.providers.contains_key(prefix) || prefix == "claude-code")
+                    && !rest.is_empty() =>
+            {
                 Some((prefix.to_string(), rest.to_string()))
             }
             Some((prefix, rest)) => match &self.default_provider {

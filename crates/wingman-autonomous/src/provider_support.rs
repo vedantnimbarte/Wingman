@@ -51,6 +51,8 @@ impl fmt::Display for ProviderSupport {
 pub fn classify(provider_id: &str) -> ProviderSupport {
     match provider_id.to_ascii_lowercase().as_str() {
         "anthropic" => ProviderSupport::Native,
+        // The manager and workers keep Wingman's tools over an MCP bridge.
+        "claude-code" => ProviderSupport::Native,
         "gemini" => ProviderSupport::Native,
         "openai" => ProviderSupport::Compat,
         "chatgpt" => ProviderSupport::Compat,

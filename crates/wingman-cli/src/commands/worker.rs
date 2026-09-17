@@ -201,7 +201,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
 
     let agent_cfg = AgentConfig {
         model: selection.model.clone(),
-        system: Some(system),
+        system: Some(system.clone()),
         tool_output_budget: ToolOutputBudget::new(cfg.effective_tool_output_max_lines()),
         compactor: Compactor {
             trigger_tokens: cfg.tokens.compact_at_tokens,
@@ -219,7 +219,7 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
         })),
         ..Default::default()
     };
-    let mut agent = AgentLoop::new(provider, registry, agent_cfg);
+    let mut agent = AgentLoop::new(provider, registry.clone(), agent_cfg);
 
     // Open the worker's own transcript.
     //
@@ -371,7 +371,16 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     writeln!(stdout, "{start}").ok();
     stdout.flush().ok();
 
-    let mut stream = agent.run(user_prompt);
+    // On a Claude Code model the CLI runs the task instead of the agent loop.
+    // Everything around it (IPC, transcript, NDJSON to the supervisor) is the
+    // same, because both yield `AgentEvent`s.
+    let mut claude_code;
+    let mut stream = if selection.provider_id == wingman_core::claude_code::PROVIDER_ID {
+        claude_code = claude_code_worker(&cfg, &selection.model, registry, ipc_injections, system);
+        claude_code.run(user_prompt)
+    } else {
+        agent.run(user_prompt)
+    };
     // Accumulates the assistant text of the message that answers an operator
     // question; flushed as a `WorkerMessage::Answer` when that message ends.
     let mut answer_buf = String::new();
@@ -444,6 +453,65 @@ pub async fn run(cfg: Config, opts: WorkerOptions) -> Result<ExitCode> {
     }
 
     Ok(exit)
+}
+
+/// Tools the Claude Code worker reaches over the MCP bridge. Claude Code's own
+/// tools do the reading, editing and shell work.
+const CLAUDE_CODE_CONTROL_TOOLS: &[&str] = &[
+    "task_complete",
+    "run_acceptance",
+    "checkpoint",
+    "propose_tool",
+];
+
+/// A pilot worker on the user's Claude Code subscription.
+fn claude_code_worker(
+    cfg: &Config,
+    model: &str,
+    registry: Arc<wingman_tools::ToolRegistry>,
+    inbox: Arc<std::sync::Mutex<Vec<String>>>,
+    system: String,
+) -> wingman_core::claude_code::ClaudeCode {
+    let mut cc = wingman_core::claude_code::ClaudeCode::new(
+        model,
+        std::env::current_dir().unwrap_or_default(),
+    );
+    cc.append_system = Some(format!(
+        "{system}\n\n# Tools in this session\n\n\
+         Where these instructions name Wingman tools, use your own: Read for `read_file`, \
+         Edit/Write for `edit_file`/`write_file`, Bash for `run_shell`, Grep/Glob for \
+         `grep`/`glob`. `task_complete`, `run_acceptance` and `checkpoint` are real tools \
+         here, served as `mcp__wingman__task_complete`, `mcp__wingman__run_acceptance` and \
+         `mcp__wingman__checkpoint`."
+    ));
+    // The worktree is the worker's own branch, which is why the native worker
+    // runs in auto-edit with a shell too.
+    cc.permission_mode = "acceptEdits".into();
+    cc.allowed_tools = vec!["Bash".into(), "PowerShell".into()];
+    if !cfg.tools.allow_network {
+        cc.disallowed_tools = vec!["WebFetch".into(), "WebSearch".into()];
+    }
+    cc.max_turns = Some(cfg.pilot.worker_max_turns);
+    cc.bridge = Some((
+        registry,
+        Some(
+            CLAUDE_CODE_CONTROL_TOOLS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
+    ));
+    cc.inbox = Some(inbox);
+    cc.on_rate_limit = Some(Arc::new(|secs| {
+        let line = rate_limited_line(wingman_providers::RateLimitHit {
+            status: 429,
+            retry_after_secs: secs.map(|s| s as f64),
+        });
+        let mut out = std::io::stdout();
+        writeln!(out, "{line}").ok();
+        out.flush().ok();
+    }));
+    cc
 }
 
 /// The NDJSON line a rate-limit hit becomes on the worker's stdout, parsed by

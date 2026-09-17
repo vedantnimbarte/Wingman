@@ -31,6 +31,11 @@ const EDIT_TOOLS: &[&str] = &[
     "create_file",
     "str_replace",
     "multi_edit",
+    // Claude Code workers.
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
 ];
 
 /// One observed tool call in a worker's turn sequence.

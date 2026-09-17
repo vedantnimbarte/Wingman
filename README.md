@@ -49,7 +49,10 @@ exits non-zero. Bounded correction, not loop-until-green.
 
 **3. No provider lock-in — and it will price the alternative for you.**
 One `Message` contract over Anthropic, OpenAI, ChatGPT (OAuth), Gemini,
-OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama. That contract covers
+OpenRouter, LiteLLM, LM Studio, vLLM, and Ollama — or no API key at all:
+`--model claude-code/sonnet` runs your own signed-in Claude Code CLI on your
+Claude subscription, pilot manager and workers included
+([details](docs/PROVIDERS.md)). That contract covers
 reasoning too: one `--reasoning off|low|medium|high` maps onto Anthropic's
 thinking budget, OpenAI's `reasoning_effort`, and Gemini's `thinkingConfig`,
 so switching provider doesn't mean relearning a parameter — and `wingman
@@ -124,6 +127,25 @@ wingman                         # interactive TUI in the current project
 
 Local providers (Ollama, LM Studio, vLLM) need no key — point `base_url` at
 the running instance.
+
+**No API key? Use your Claude subscription.** Install
+[Claude Code](https://claude.com/claude-code) and run `claude` once to sign in.
+Wingman then runs that CLI for you, and never sees your Claude credentials:
+
+```bash
+wingman --model claude-code/sonnet                  # TUI on your subscription
+wingman --model claude-code/haiku --print "summarise src/"
+
+# Pilot: manager and workers all on Claude Code
+wingman pilot run "add a --version flag" --model claude-code/sonnet
+```
+
+To make it the default, put `default_model = "claude-code/sonnet"` in
+`~/.wingman/config.toml`. To use a cheaper model for workers, also set
+`worker_model = "claude-code/haiku"` under `[pilot]`. In chat, Claude Code
+uses its own tools and permission mode
+(`[providers.claude-code] permission_mode = "acceptEdits"` lets it edit).
+Limits and details are in [docs/PROVIDERS.md](docs/PROVIDERS.md).
 
 ```bash
 # Headless one-shot

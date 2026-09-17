@@ -9,6 +9,7 @@
 
 pub mod anthropic;
 pub mod chatgpt;
+pub mod claude_code;
 pub mod cohere;
 pub mod gemini;
 pub mod openai_compat;
@@ -18,6 +19,7 @@ pub mod watsonx;
 
 pub use anthropic::AnthropicProvider;
 pub use chatgpt::ChatGptProvider;
+pub use claude_code::ClaudeCodeProvider;
 pub use cohere::CohereProvider;
 pub use gemini::GeminiProvider;
 pub use openai_compat::{OpenAiCompatProvider, Variant as OpenAiVariant};

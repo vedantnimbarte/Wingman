@@ -10,6 +10,7 @@ against each provider you have configured and writes a pass/fail matrix (see
 | Anthropic          | `anthropic` | `ANTHROPIC_API_KEY`      | (native adapter)                                  |
 | Google Gemini      | `gemini`    | `GOOGLE_API_KEY`         | (native adapter)                                  |
 | ChatGPT (OAuth)    | `chatgpt`   | OAuth via `/login`       | (token in OS keychain)                            |
+| Claude Code (subscription) | `claude-code` | (none — sign in to `claude`) | (runs your local `claude` CLI; see below) |
 | OpenAI             | `openai`    | `OPENAI_API_KEY`         | `https://api.openai.com/v1`                       |
 | OpenRouter         | `openrouter`| `OPENROUTER_API_KEY`     | `https://openrouter.ai/api/v1`                    |
 | LiteLLM            | `litellm`   | `LITELLM_API_KEY`        | `http://localhost:4000/v1`                        |
@@ -85,6 +86,44 @@ All non-Anthropic / non-Gemini / non-ChatGPT / non-Cohere entries share the
 `OpenAiCompatProvider` adapter (`crates/wingman-providers/src/openai_compat.rs`).
 Add a new hosted OpenAI-shape clone by extending its `Variant` enum and the
 mapper functions in `runtime.rs` + `login.rs`.
+
+**Claude Code (`claude-code`).** Use a Claude Pro / Max subscription instead
+of an API key. Wingman runs the Claude Code CLI you installed and signed in to
+yourself (`claude -p --output-format stream-json`). It never reads, stores or
+forwards Claude credentials. Anthropic's terms allow that and do not allow
+third-party apps to offer Claude login, which is why there is no
+`wingman login claude-code`.
+
+- **Setup:** install Claude Code and run `claude` once to sign in. Then use
+  `--model claude-code/sonnet` (or `opus`, `haiku`, or a full model id). No
+  `[providers.claude-code]` section is needed. Needs a Claude Code version
+  that has `--permission-prompts`.
+- **Pilot:** set `default_model = "claude-code/sonnet"` and
+  `[pilot] worker_model = "claude-code/haiku"`. Workers (developer, designer,
+  tester, reviewer, …) run Claude Code in their worktree with its own tools
+  (`acceptEdits` plus Bash). The manager runs Claude Code with its built-in
+  tools switched off. Both reach Wingman's tools (`task_complete`,
+  `run_acceptance`, `checkpoint`, `assign_task`, …) through a loopback MCP
+  endpoint protected by a per-run token, so gates, audit and
+  `disabled_tools` still apply. Mid-run pivots and clarifications are sent
+  into the running session.
+- **Chat (`--print`, TUI, `serve`):** Claude Code runs its own tools, and
+  Wingman shows each call inline. Wingman's tools, verify gate and permission
+  prompts do not apply here. Claude Code's `permission_mode` does:
+  `[providers.claude-code] permission_mode = "acceptEdits"` (default
+  `default`: anything that would prompt is denied). Requests without tools
+  (titles, the planner, the reviewer) run with Claude Code's tools off.
+- **Not supported:** container / VM sandboxes (the CLI and your sign-in live
+  on the host), `[tools].shell_denylist` for Claude Code's own Bash, and
+  per-token cost caps (subscription usage is counted as $0).
+- **Other knobs:**
+  - `WINGMAN_CLAUDE_BIN` points at a `claude` that isn't on PATH.
+  - `ANTHROPIC_API_KEY` is removed from the CLI's environment, so the
+    subscription is what gets used.
+- **Rate limits:** Pro / Max limits assume individual use. Parallel pilot
+  workers spend them quickly, so keep `max_concurrent_agents` low. When the
+  limit rejects a worker's request, the worker reports it like any other rate
+  limit.
 
 **Notes on the enterprise providers (Bedrock / Vertex / watsonx):**
 

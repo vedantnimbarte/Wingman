@@ -10,7 +10,7 @@ description = "Core types and agent loop for wingman (Provider trait, Message, T
 [dependencies]
 wingman-config = { workspace = true }
 
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
 async-trait = { workspace = true }
 async-stream = "0.3"
 futures = { workspace = true }

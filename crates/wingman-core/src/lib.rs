@@ -7,6 +7,7 @@
 
 pub mod agent;
 pub mod checkpoint;
+pub mod claude_code;
 pub mod context_log;
 pub mod error;
 pub mod loopguard;

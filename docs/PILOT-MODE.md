@@ -536,6 +536,7 @@ used, but quality depends on the local model's tool-use training.
 | Gemini       | `native`        | `functionCall` shape; first-class.                                     |
 | OpenAI       | `openai-compat` | `tool_calls` shape; works on gpt-4o, gpt-4.1.                          |
 | ChatGPT      | `openai-compat` | OAuth-backed; same shape as OpenAI.                                    |
+| Claude Code  | `native`        | Your Claude subscription via the local `claude` CLI; Wingman tools over MCP. See [PROVIDERS.md](PROVIDERS.md). |
 | OpenRouter   | `openai-compat` | Aggregator — pass `provider/model` as model id.                        |
 | LiteLLM      | `openai-compat` | Self-hosted gateway; works for any backend that LiteLLM speaks to.     |
 | Groq         | `openai-compat` | Fast Llama/Mixtral hosting; native `tool_calls`.                       |

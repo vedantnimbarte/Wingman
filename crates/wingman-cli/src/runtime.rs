@@ -159,6 +159,17 @@ pub fn build_provider(cfg: &Config, provider_id: &str) -> Result<Arc<dyn Provide
              use a local provider (ollama / lmstudio / vllm / …) or set a localhost base_url"
         ));
     }
+    // Needs no key and no config section: the user signs in to Claude Code
+    // itself. `[providers.claude-code] permission_mode` is optional.
+    if provider_id == wingman_core::claude_code::PROVIDER_ID {
+        let mode = cfg
+            .providers
+            .get(provider_id)
+            .and_then(|pc| pc.extra.get("permission_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+        return Ok(Arc::new(wingman_providers::ClaudeCodeProvider::new(mode)));
+    }
     let pc = cfg
         .providers
         .get(provider_id)
