@@ -159,7 +159,11 @@ pub async fn run(cfg: Config, fix: bool, lint: bool, json: bool) -> Result<ExitC
 
     // 2. Providers + credentials.
     section("providers");
-    if cfg.providers.is_empty() {
+    let claude_code = uses_claude_code(&cfg);
+    if claude_code {
+        emit(claude_code_status());
+    }
+    if cfg.providers.is_empty() && !claude_code {
         // Blocking, not advisory: with no provider the agent cannot run at
         // all, so reporting "healthy" here was actively misleading.
         emit(Status::Bad(
@@ -496,6 +500,60 @@ fn bin_status(bin: &str, args: &[&str]) -> Status {
         }
         _ => Status::Bad(format!("{bin}: not found on PATH")),
     }
+}
+
+/// Whether any configured model runs on Claude Code. It needs no
+/// `[providers]` section, so the section list alone cannot tell.
+fn uses_claude_code(cfg: &Config) -> bool {
+    let id = wingman_core::claude_code::PROVIDER_ID;
+    cfg.default_provider.as_deref() == Some(id)
+        || cfg.providers.contains_key(id)
+        || [
+            cfg.default_model.as_deref(),
+            cfg.pilot.default_model.as_deref(),
+            cfg.pilot.worker_model.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|m| m.starts_with("claude-code/"))
+}
+
+/// Installed, new enough, and signed in — the three ways a Claude Code run
+/// fails before doing anything.
+fn claude_code_status() -> Status {
+    let bin = std::env::var("WINGMAN_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
+    let run = |args: &[&str]| {
+        Command::new(&bin)
+            .args(args)
+            .output()
+            .or_else(|_| Command::new(format!("{bin}.cmd")).args(args).output())
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let Some(version) = run(&["--version"]) else {
+        return Status::Bad(format!(
+            "claude-code: `{bin}` not found — install Claude Code, or set WINGMAN_CLAUDE_BIN"
+        ));
+    };
+    let version = version.lines().next().unwrap_or("").trim().to_string();
+    if !run(&["--help"]).is_some_and(|h| h.contains("--permission-prompts")) {
+        return Status::Bad(format!(
+            "claude-code: {version} is too old (no --permission-prompts) — run `claude update`"
+        ));
+    }
+    let auth: serde_json::Value = run(&["auth", "status"])
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    if auth["loggedIn"].as_bool() != Some(true) {
+        return Status::Bad(format!(
+            "claude-code: {version}, not signed in — run `claude` once to log in"
+        ));
+    }
+    Status::Ok(format!(
+        "claude-code: {version}, signed in ({})",
+        auth["authMethod"].as_str().unwrap_or("unknown method")
+    ))
 }
 
 /// Env var name that holds a provider's key (best-effort for common ones).

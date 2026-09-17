@@ -102,17 +102,53 @@ pub fn build_manager_registry(
     Arc::new(reg)
 }
 
-/// Build the manager [`AgentLoop`].
+/// The manager's brain: Wingman's agent loop, or the user's Claude Code CLI
+/// when the manager model is `claude-code/…`. Both yield `AgentEvent`s and
+/// call the same orchestration tools.
+pub enum Manager {
+    Loop(AgentLoop),
+    ClaudeCode(wingman_core::claude_code::ClaudeCode),
+}
+
+impl Manager {
+    pub fn run(&mut self, prompt: String) -> futures::stream::BoxStream<'_, AgentEvent> {
+        match self {
+            Self::Loop(a) => a.run(prompt),
+            Self::ClaudeCode(c) => c.run(prompt),
+        }
+    }
+}
+
+/// Build the manager.
 pub fn build_manager(
     provider: Arc<dyn Provider>,
     model: String,
     registry: Arc<ToolRegistry>,
     extra_system: Option<String>,
-) -> AgentLoop {
+) -> Manager {
     let mut system = load_manager_prompt();
     if let Some(extra) = extra_system {
         system.push_str("\n\n");
         system.push_str(&extra);
+    }
+    if provider.id() == wingman_core::claude_code::PROVIDER_ID {
+        let mut cc = wingman_core::claude_code::ClaudeCode::new(
+            model,
+            std::env::current_dir().unwrap_or_default(),
+        );
+        system.push_str(
+            "\n\n# Tools in this session\n\nYour tools are served as `mcp__wingman__<name>`: \
+             `mcp__wingman__assign_task` is `assign_task`, and so on.",
+        );
+        cc.append_system = Some(system);
+        // No built-in tools: every read and every decision goes through the
+        // registry, exactly as for the native manager.
+        cc.tools = Some(String::new());
+        cc.bridge = Some((registry, None));
+        cc.max_turns = Some(32);
+        // Ticks continue one conversation, as the agent loop's history does.
+        cc.resume = true;
+        return Manager::ClaudeCode(cc);
     }
     let cfg = AgentConfig {
         model,
@@ -135,7 +171,7 @@ pub fn build_manager(
         ),
         ..Default::default()
     };
-    AgentLoop::new(provider, registry, cfg)
+    Manager::Loop(AgentLoop::new(provider, registry, cfg))
 }
 
 /// Render the current run state into a status block the manager can read at
@@ -184,7 +220,7 @@ pub fn render_state_block(state: &RunState) -> String {
 /// as it can. With `max_turns = 32` and the orchestrator processing
 /// commands serially, a 3-task plan typically resolves in ~3 ticks.
 pub async fn run_tick(
-    agent: &mut AgentLoop,
+    agent: &mut Manager,
     prompt: String,
     usage: &mut Usage,
 ) -> Result<AgentStop, ManagerError> {
@@ -223,7 +259,7 @@ const IDLE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
 /// Returns the manager loop's accumulated token [`Usage`] so the caller can
 /// attribute it in the run's per-phase token accounting.
 pub async fn drive_to_completion(
-    agent: &mut AgentLoop,
+    agent: &mut Manager,
     handle: &OrchestratorHandle,
     max_ticks: usize,
 ) -> Result<Usage, ManagerError> {

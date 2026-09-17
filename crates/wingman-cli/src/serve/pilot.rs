@@ -76,28 +76,10 @@ async fn load_or_404(
 
 /// `GET /v1/projects/{p}/pilot/runs`
 pub async fn list_runs(project: &Project, sock: &mut TcpStream) -> std::io::Result<()> {
-    let runs = match dashboard::list_runs(&project.root) {
-        Ok(r) => r,
-        Err(e) => return http::write_err(sock, 500, &format!("listing runs: {e}")).await,
-    };
-    // `RunSummary` is not `Serialize` (it is a TUI picker type), so the wire
-    // shape is built here — which is the right place for it anyway: this is
-    // the API contract, and it should not move because a TUI field was
-    // renamed.
-    let list: Vec<Value> = runs
-        .iter()
-        .map(|r| {
-            json!({
-                "run_id": r.run_id,
-                "goal": r.goal,
-                "status": r.status,
-                "done": r.done,
-                "total": r.total,
-                "terminal": r.is_terminal(),
-            })
-        })
-        .collect();
-    http::write_json(sock, 200, &json!({ "runs": list })).await
+    match runs_json(&project.root) {
+        Ok(body) => http::write_json(sock, 200, &body).await,
+        Err(e) => http::write_err(sock, 500, &e).await,
+    }
 }
 
 /// `GET /v1/projects/{p}/pilot/runs/{run}`
@@ -490,17 +472,30 @@ pub async fn start_run(
     if body.goal.trim().is_empty() {
         return http::write_err(sock, 400, "a run needs a non-empty \"goal\"").await;
     }
+    match spawn_detached_run(&project.root, &body, state.ceiling).await {
+        Ok(run_id) => {
+            http::write_json(sock, 202, &json!({ "run_id": run_id, "detached": true })).await
+        }
+        Err(error) => http::write_json(sock, 500, &error).await,
+    }
+}
 
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => return http::write_err(sock, 500, &format!("resolving executable: {e}")).await,
-    };
+/// Start `wingman pilot run -d` for `body` in `root` and return the run id it
+/// printed, or an error body. Shared by `POST …/pilot/runs` and
+/// `wingman mcp-serve`'s `pilot_run` tool.
+pub(crate) async fn spawn_detached_run(
+    root: &Path,
+    body: &StartBody,
+    ceiling: wingman_config::PermissionMode,
+) -> Result<String, Value> {
+    let exe = std::env::current_exe()
+        .map_err(|e| json!({ "error": format!("resolving executable: {e}") }))?;
     let mut cmd = tokio::process::Command::new(exe);
     cmd.arg("pilot")
         .arg("run")
         .arg("-d")
         .arg(&body.goal)
-        .current_dir(&project.root)
+        .current_dir(root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -521,32 +516,50 @@ pub async fn start_run(
     }
     // The run inherits the server's ceiling, so a request cannot get a fleet
     // of workers with more authority than the API itself grants.
-    cmd.env("WINGMAN_PERMISSION_MODE", state.ceiling.to_string());
+    cmd.env("WINGMAN_PERMISSION_MODE", ceiling.to_string());
 
-    let output = match cmd.output().await {
-        Ok(o) => o,
-        Err(e) => return http::write_err(sock, 500, &format!("spawning pilot: {e}")).await,
-    };
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| json!({ "error": format!("spawning pilot: {e}") }))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    parse_run_id(&stdout).ok_or_else(|| {
+        json!({
+            "error": "pilot did not report a run id",
+            "stdout": stdout,
+            "stderr": stderr,
+        })
+    })
+}
 
-    match parse_run_id(&stdout) {
-        Some(run_id) => {
-            http::write_json(sock, 202, &json!({ "run_id": run_id, "detached": true })).await
-        }
-        None => {
-            http::write_json(
-                sock,
-                500,
-                &json!({
-                    "error": "pilot did not report a run id",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }),
-            )
-            .await
-        }
+/// The run list as the API returns it. `RunSummary` is not `Serialize` (it is
+/// a TUI picker type), so the wire shape is built here — the API contract,
+/// which should not move because a TUI field was renamed.
+pub(crate) fn runs_json(root: &Path) -> Result<Value, String> {
+    let runs = dashboard::list_runs(root).map_err(|e| format!("listing runs: {e}"))?;
+    let list: Vec<Value> = runs
+        .iter()
+        .map(|r| {
+            json!({
+                "run_id": r.run_id,
+                "goal": r.goal,
+                "status": r.status,
+                "done": r.done,
+                "total": r.total,
+                "terminal": r.is_terminal(),
+            })
+        })
+        .collect();
+    Ok(json!({ "runs": list }))
+}
+
+/// One run's state, or `None` for a malformed or unknown id.
+pub(crate) fn run_state(root: &Path, run_id: &str) -> Option<RunState> {
+    if !valid_run_id(run_id) {
+        return None;
     }
+    dashboard::load_state(&root.join(".wingman").join("autonomous").join(run_id)).ok()
 }
 
 /// Pull the run id out of `[pilot] run <id> detached (pid …)`.

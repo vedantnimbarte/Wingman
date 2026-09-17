@@ -427,6 +427,17 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
           <span className="muted">Spend</span>
           <span className="figure">{money(run.totals.usd)}</span>
         </div>
+        {run.subscription && (
+          <div className="row">
+            <span className="muted">Plan limit</span>
+            <span className="figure">
+              {Math.round(run.subscription.utilization * 100)}% used
+              {run.subscription.resets_at &&
+                ` · resets ${new Date(run.subscription.resets_at * 1000).toLocaleString()}`}
+              {run.subscription.utilization >= 0.8 && ' · throttled to one worker'}
+            </span>
+          </div>
+        )}
         <div className="row">
           <span className="muted">Tokens</span>
           <span className="figure">

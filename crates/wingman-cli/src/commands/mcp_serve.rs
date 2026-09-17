@@ -68,7 +68,7 @@ pub async fn run(cfg: Config, mode: PermissionMode) -> Result<ExitCode> {
         let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
 
-        let response = match handle(method, &params, &registry, &paths).await {
+        let response = match handle(method, &params, &registry, &paths, mode).await {
             HandleResult::Reply(result) => id.map(|id| {
                 json!({
                     "jsonrpc": "2.0", "id": id, "result": result
@@ -103,6 +103,7 @@ async fn handle(
     params: &Value,
     registry: &wingman_tools::ToolRegistry,
     paths: &ProjectPaths,
+    mode: PermissionMode,
 ) -> HandleResult {
     match method {
         "initialize" => {
@@ -124,7 +125,7 @@ async fn handle(
         "notifications/initialized" | "initialized" => HandleResult::NoReply,
         "ping" => HandleResult::Reply(json!({})),
         "tools/list" => {
-            let tools: Vec<Value> = registry
+            let mut tools: Vec<Value> = registry
                 .specs()
                 .into_iter()
                 .map(|s| {
@@ -135,6 +136,7 @@ async fn handle(
                     })
                 })
                 .collect();
+            tools.extend(pilot_tools(mode));
             HandleResult::Reply(json!({ "tools": tools }))
         }
         "tools/call" => {
@@ -143,6 +145,9 @@ async fn handle(
                 None => return HandleResult::Error(-32602, "missing tool name".into()),
             };
             let arguments = params.get("arguments").cloned().unwrap_or(json!({}));
+            if let Some(reply) = call_pilot_tool(&name, &arguments, paths, mode).await {
+                return HandleResult::Reply(reply);
+            }
             let outcome = registry.dispatch(&name, arguments).await;
             HandleResult::Reply(json!({
                 "content": [ { "type": "text", "text": outcome.content } ],
@@ -189,4 +194,135 @@ fn read_memory_resource(paths: &ProjectPaths, uri: &str) -> Option<String> {
     let slug = uri.strip_prefix("wingman-memory:///")?;
     let store = wingman_learn::memory::MemoryStore::new(paths.root.clone());
     store.find(slug).map(|m| m.body)
+}
+
+/// Pilot as tools, so another agent (Claude Code, Cursor) can hand Wingman a
+/// whole goal and follow it. `pilot_status` is a read; `pilot_run` starts
+/// workers that write, so it is only offered when `--mode` allows writes, and
+/// the run inherits that mode as its ceiling (as `wingman serve` does).
+fn pilot_tools(mode: PermissionMode) -> Vec<Value> {
+    let mut tools = vec![json!({
+        "name": "pilot_status",
+        "description": "List Wingman pilot runs in this project, or with `run_id` return one run's \
+            full state: status, tasks with outcomes, agents, spend and PR URL.",
+        "inputSchema": {"type": "object", "properties": {
+            "run_id": {"type": "string", "description": "Run to inspect; omit to list runs."}
+        }},
+    })];
+    if writes_allowed(mode) {
+        tools.push(json!({
+            "name": "pilot_run",
+            "description": "Start a Wingman pilot run in the background: plan the goal into tasks, \
+                run worker agents in isolated git worktrees, merge and open a PR. Returns the run \
+                id at once; follow it with `pilot_status`. Without `yes` the run waits at the plan \
+                gate for `wingman pilot approve`.",
+            "inputSchema": {"type": "object", "required": ["goal"], "properties": {
+                "goal": {"type": "string"},
+                "yes": {"type": "boolean", "description": "Approve the plan automatically."},
+                "plan_only": {"type": "boolean"},
+                "model": {"type": "string", "description": "provider/model, e.g. claude-code/sonnet"},
+                "max_usd": {"type": "number"}
+            }},
+        }));
+    }
+    tools
+}
+
+fn writes_allowed(mode: PermissionMode) -> bool {
+    matches!(mode, PermissionMode::AutoEdit | PermissionMode::Yolo)
+}
+
+/// Handle a pilot tool call, or `None` when `name` is not one.
+async fn call_pilot_tool(
+    name: &str,
+    args: &Value,
+    paths: &ProjectPaths,
+    mode: PermissionMode,
+) -> Option<Value> {
+    let text = |t: String, is_error: bool| json!({ "content": [ { "type": "text", "text": t } ], "isError": is_error });
+    Some(match name {
+        "pilot_status" => match args.get("run_id").and_then(Value::as_str) {
+            Some(id) => match crate::serve::pilot::run_state(&paths.root, id) {
+                Some(state) => text(
+                    serde_json::to_string_pretty(&state).unwrap_or_default(),
+                    false,
+                ),
+                None => text(format!("no pilot run `{id}` in this project"), true),
+            },
+            None => match crate::serve::pilot::runs_json(&paths.root) {
+                Ok(v) => text(v.to_string(), false),
+                Err(e) => text(e, true),
+            },
+        },
+        "pilot_run" if !writes_allowed(mode) => text(
+            "pilot_run needs `wingman mcp-serve --mode auto-edit` (workers write code)".into(),
+            true,
+        ),
+        "pilot_run" => {
+            let body: crate::serve::pilot::StartBody = match serde_json::from_value(args.clone()) {
+                Ok(b) => b,
+                Err(e) => return Some(text(format!("bad arguments: {e}"), true)),
+            };
+            if body.goal.trim().is_empty() {
+                return Some(text("a run needs a non-empty `goal`".into(), true));
+            }
+            match crate::serve::pilot::spawn_detached_run(&paths.root, &body, mode).await {
+                Ok(run_id) => text(
+                    format!("started pilot run {run_id}; follow it with pilot_status"),
+                    false,
+                ),
+                Err(e) => text(e.to_string(), true),
+            }
+        }
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pilot_run_is_only_offered_when_writes_are() {
+        let names = |m| {
+            pilot_tools(m)
+                .iter()
+                .map(|t| t["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(PermissionMode::ReadOnly), ["pilot_status"]);
+        assert_eq!(
+            names(PermissionMode::AutoEdit),
+            ["pilot_status", "pilot_run"]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_refuses_pilot_run_and_status_reads_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ProjectPaths::discover(dir.path());
+        let refused = call_pilot_tool(
+            "pilot_run",
+            &json!({"goal": "x"}),
+            &paths,
+            PermissionMode::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert_eq!(refused["isError"], true);
+        let missing = call_pilot_tool(
+            "pilot_status",
+            &json!({"run_id": "../etc"}),
+            &paths,
+            PermissionMode::ReadOnly,
+        )
+        .await
+        .unwrap();
+        assert_eq!(missing["isError"], true);
+        assert!(
+            call_pilot_tool("read_file", &json!({}), &paths, PermissionMode::ReadOnly)
+                .await
+                .is_none()
+        );
+    }
 }

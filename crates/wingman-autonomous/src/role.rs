@@ -73,14 +73,26 @@ fn role_lessons_appendix(role: &Role) -> Option<String> {
     crate::learning::render_lessons_appendix(&body)
 }
 
-/// Resolve the planner system prompt.
+/// Resolve the planner system prompt, with the shell acceptance commands run
+/// under on this machine appended — a user override included, because the
+/// prompt cannot know it and a planner that assumes `sh` writes checks
+/// (`[ … ]`, `grep -q`) that can never pass under `cmd`.
 pub fn load_planner_prompt() -> String {
-    if let Some(path) = user_prompt_path("manager-planner") {
-        if let Ok(body) = fs::read_to_string(&path) {
-            return body;
-        }
+    let body = user_prompt_path("manager-planner")
+        .and_then(|path| fs::read_to_string(path).ok())
+        .unwrap_or_else(|| PLANNER_DEFAULT.to_string());
+    format!("{body}\n\n{}", shell_note())
+}
+
+fn shell_note() -> &'static str {
+    if cfg!(windows) {
+        "## Shell for `shell` acceptance checks\n\nThis machine runs them as `cmd /C <cmd>` \
+         on Windows. Write commands cmd understands (`cargo test`, `npm test`, \
+         `findstr /r \"pattern\" file`); no `sh` syntax such as `[ … ]`, `$(…)`, `test`, or \
+         `grep -q`. Prefer a `grep` check for \"file contains X\"."
+    } else {
+        "## Shell for `shell` acceptance checks\n\nThis machine runs them as `sh -c <cmd>`."
     }
-    PLANNER_DEFAULT.to_string()
 }
 
 /// Resolve the manager system prompt (in-process agent loop).
@@ -115,6 +127,13 @@ fn builtin_default(role: &Role) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_planner_is_told_which_shell_runs_its_checks() {
+        let p = load_planner_prompt();
+        let shell = if cfg!(windows) { "cmd /C" } else { "sh -c" };
+        assert!(p.contains(shell), "{p}");
+    }
 
     #[test]
     fn defaults_are_non_empty() {

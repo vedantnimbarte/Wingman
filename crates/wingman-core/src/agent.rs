@@ -721,6 +721,7 @@ impl AgentLoop {
                             }
                             yield AgentEvent::Usage { usage };
                         }
+                        StreamEvent::WorkspaceMutated => mutated = true,
                         StreamEvent::Stop { reason } => {
                             stop_reason = reason;
                         }
@@ -1373,6 +1374,25 @@ mod tests {
                 reason: AgentStop::EndTurn
             })
         ));
+    }
+
+    /// A provider that ran its own tools (Claude Code) has no tool calls for
+    /// the loop to see; its `WorkspaceMutated` signal must arm the gate anyway.
+    #[tokio::test]
+    async fn a_provider_side_edit_arms_the_gate() {
+        let gate = Arc::new(CountingGate {
+            fail_first: 0,
+            calls: AtomicUsize::new(0),
+        });
+        let mut response = end_turn_response("edited it myself");
+        response.insert(0, StreamEvent::WorkspaceMutated);
+        let mut agent = agent_with_gate(vec![response], gate.clone());
+        let events = collect_events(&mut agent).await;
+
+        assert_eq!(gate.calls.load(Ordering::SeqCst), 1);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::Verification { passed: true, .. })));
     }
 
     #[tokio::test]

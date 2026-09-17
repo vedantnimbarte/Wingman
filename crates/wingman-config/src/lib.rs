@@ -969,7 +969,10 @@ impl Default for Hook {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(default, deny_unknown_fields)]
+// No `deny_unknown_fields`: `extra` below takes every other key, and with the
+// two combined serde rejected all of them, so documented extras such as
+// `[providers.watsonx] project_id` could never be set from a file.
+#[serde(default)]
 pub struct ProviderConfig {
     /// API key. Resolved against env at load time if it looks like `${ENV_VAR}`.
     pub api_key: Option<String>,
@@ -1443,7 +1446,11 @@ impl Config {
             return None;
         }
         match spec.split_once('/') {
-            Some((prefix, rest)) if self.providers.contains_key(prefix) && !rest.is_empty() => {
+            // `claude-code` needs no section: the CLI holds the credentials.
+            Some((prefix, rest))
+                if (self.providers.contains_key(prefix) || prefix == "claude-code")
+                    && !rest.is_empty() =>
+            {
                 Some((prefix.to_string(), rest.to_string()))
             }
             Some((prefix, rest)) => match &self.default_provider {
@@ -3095,7 +3102,8 @@ pub struct PilotDaemonConfig {
     /// off; `wingman pilot feedback` still polls on demand.
     #[serde(default = "default_feedback_poll_secs")]
     pub feedback_poll_secs: u64,
-    /// `pr_reviews` source — the most rework rounds the daemon runs on one of
+    /// `pr_reviews` / `pr_checks` sources — the most rework rounds (review and
+    /// CI together) the daemon runs on one of
     /// pilot's own PRs. Each round addresses the trusted reviewers' open
     /// threads, pushes to the PR branch and replies; a reviewer who keeps
     /// asking for more past this cap is answered by a human. Rounds also share
@@ -3137,7 +3145,7 @@ impl Default for PilotDaemonConfig {
             auto_dispatch: false,
             max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
-            // coverage_gaps, intake, ask, pr_reviews. The default advertises only
+            // coverage_gaps, intake, ask, pr_reviews, pr_checks. The default advertises only
             // `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
@@ -3564,6 +3572,21 @@ mod tests {
         // And a config that says nothing about it still gets the cap.
         let bare: PilotDaemonConfig = toml::from_str("").expect("parses");
         assert_eq!(bare.max_auto_dispatch_per_cycle, 1);
+    }
+
+    #[test]
+    fn provider_sections_keep_their_extras() {
+        let pc: ProviderConfig = toml::from_str(
+            r#"
+            model = "sonnet"
+            permission_mode = "acceptEdits"
+            project_id = "p1"
+            "#,
+        )
+        .expect("extras parse");
+        assert_eq!(pc.model.as_deref(), Some("sonnet"));
+        assert_eq!(pc.extra["permission_mode"].as_str(), Some("acceptEdits"));
+        assert_eq!(pc.extra["project_id"].as_str(), Some("p1"));
     }
 
     /// The `pr_reviews` source pushes to PRs with nobody watching, so it is

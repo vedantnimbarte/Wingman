@@ -265,6 +265,9 @@ fn catalog(connected: &[String]) -> Vec<ModelChoice> {
                 "claude-haiku-4-5-20251001",
             ],
         ),
+        // Your Claude subscription, through the local `claude` CLI. Aliases,
+        // so they track whatever Claude Code currently maps them to.
+        ("claude-code", &["sonnet", "opus", "haiku"]),
         ("openai", &["gpt-4.1", "gpt-4o", "gpt-4o-mini", "o4-mini"]),
         (
             "openrouter",

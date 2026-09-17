@@ -25,7 +25,7 @@ mod child;
 mod http;
 mod notifications;
 pub mod pairing;
-mod pilot;
+pub(crate) mod pilot;
 pub mod projects;
 mod push;
 mod routes;

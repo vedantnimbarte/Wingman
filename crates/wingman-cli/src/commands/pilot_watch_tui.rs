@@ -1023,13 +1023,30 @@ fn render_meters(f: &mut Frame, area: Rect, h: &HeaderInfo, spend: &[u64]) {
     // Sparkline of cumulative spend. `max` pins the top so the curve doesn't
     // rescale every tick; an empty history just draws a flat baseline.
     let max = spend.iter().copied().max().unwrap_or(1).max(1);
-    let title = format!("spend ${:.2}", h.usd);
+    let title = match &h.subscription {
+        // Subscription runs cost $0 per token; the plan window is the budget.
+        Some(s) => format!("spend ${:.2} · {}", h.usd, subscription_label(s)),
+        None => format!("spend ${:.2}", h.usd),
+    };
     let spark = Sparkline::default()
         .block(bordered(&title))
         .max(max)
         .style(Style::default().fg(Color::Cyan))
         .data(spend);
     f.render_widget(spark, cols[1]);
+}
+
+/// `plan 83% · resets 2h`, with a throttle note once the orchestrator has
+/// dropped to one worker for it.
+fn subscription_label(s: &wingman_autonomous::model::SubscriptionUsage) -> String {
+    let mut out = format!("plan {:.0}%", s.utilization * 100.0);
+    if let Some(secs) = wingman_autonomous::concurrency::secs_until(s.resets_at) {
+        out.push_str(&format!(" · resets {}", fmt_dur(i64::from(secs))));
+    }
+    if s.utilization >= wingman_autonomous::concurrency::SUBSCRIPTION_THROTTLE_AT {
+        out.push_str(" · throttled");
+    }
+    out
 }
 
 /// The gauge's inline label: `3/16 · 19% · ETA 12m · $0.08/min`. ETA and rate
@@ -1714,6 +1731,7 @@ mod tests {
                 elapsed_secs: Some(10),
                 branch: "b".into(),
                 base_short: "abc".into(),
+                subscription: None,
             },
             tasks: vec![],
             agents: vec![],
@@ -1911,6 +1929,7 @@ mod tests {
             elapsed_secs: elapsed,
             branch: "b".into(),
             base_short: "abc".into(),
+            subscription: None,
         }
     }
 

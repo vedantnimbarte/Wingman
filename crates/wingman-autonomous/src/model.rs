@@ -339,6 +339,20 @@ pub struct RunState {
     /// first, one per incident (see [`crate::escalation::EscalationTrigger::duplicates`]).
     #[serde(default)]
     pub escalations: Vec<crate::escalation::EscalationTrigger>,
+    /// Latest Claude subscription usage a worker reported, when the run uses
+    /// Claude Code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription: Option<SubscriptionUsage>,
+}
+
+/// How full the Claude subscription's fullest rate-limit window is.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionUsage {
+    /// `0.0..=1.0`.
+    pub utilization: f64,
+    /// When that window resets, as unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<u64>,
 }
 
 impl RunState {
@@ -359,6 +373,7 @@ impl RunState {
             totals: Totals::default(),
             pr_url: None,
             escalations: Vec::new(),
+            subscription: None,
         }
     }
 
@@ -527,6 +542,19 @@ pub enum Event {
         retry_after_secs: Option<u32>,
     },
 
+    /// A Claude Code worker's subscription usage: how full the fullest limit
+    /// window is. Projected as the run's latest reading; the orchestrator
+    /// throttles to one worker once it is high.
+    #[serde(rename = "agent.subscription")]
+    SubscriptionUsage {
+        t: String,
+        agent: String,
+        utilization: f64,
+        /// When that window resets, as unix seconds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resets_at: Option<u64>,
+    },
+
     /// Run-level status transition.
     #[serde(rename = "run.status")]
     RunStatusEv { t: String, status: RunStatus },
@@ -635,6 +663,7 @@ impl Event {
             | Event::AgentStatus { t, .. }
             | Event::AgentUsd { t, .. }
             | Event::AgentRateLimited { t, .. }
+            | Event::SubscriptionUsage { t, .. }
             | Event::RunStatusEv { t, .. }
             | Event::RunMergeStart { t, .. }
             | Event::RunMergeTask { t, .. }
@@ -803,6 +832,16 @@ pub fn apply(state: &mut RunState, event: &Event) {
         Event::TaskAttempt { .. } => {}
         // Read live by the orchestrator's concurrency cap, not projected.
         Event::AgentRateLimited { .. } => {}
+        Event::SubscriptionUsage {
+            utilization,
+            resets_at,
+            ..
+        } => {
+            state.subscription = Some(SubscriptionUsage {
+                utilization: *utilization,
+                resets_at: *resets_at,
+            });
+        }
         Event::TaskCommit { id, sha, .. } => {
             if let Some(t) = state.task_mut(id) {
                 t.commits.push(sha.clone());

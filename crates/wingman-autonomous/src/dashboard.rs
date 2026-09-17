@@ -132,6 +132,8 @@ pub struct HeaderInfo {
     pub elapsed_secs: Option<i64>,
     pub branch: String,
     pub base_short: String,
+    /// Claude subscription usage, when the run is on Claude Code.
+    pub subscription: Option<crate::model::SubscriptionUsage>,
 }
 
 /// Structured dashboard snapshot. This is the source of truth both the
@@ -290,6 +292,7 @@ pub fn build_model(
         elapsed_secs,
         branch: state.integration_branch.clone(),
         base_short: short_sha(&state.base_commit),
+        subscription: state.subscription,
     };
 
     // id → friendly display name, so every place an agent id would appear
@@ -537,6 +540,20 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
         Event::AgentRateLimited { agent, status, .. } => (
             Warn,
             format!("{short_ts}  agent.rate_limit {} HTTP {status}", nm(agent)),
+        ),
+        Event::SubscriptionUsage {
+            agent, utilization, ..
+        } => (
+            if *utilization >= crate::concurrency::SUBSCRIPTION_THROTTLE_AT {
+                Warn
+            } else {
+                Info
+            },
+            format!(
+                "{short_ts}  agent.subscription {} {:.0}% of plan limit",
+                nm(agent),
+                utilization * 100.0
+            ),
         ),
         Event::RunStatusEv { status, .. } => {
             let sev = match status {
