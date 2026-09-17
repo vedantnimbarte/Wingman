@@ -284,6 +284,28 @@ Wingman different; this is everything else it does.
   the symbols edited this turn, found through the server's references (else a
   tree-sitter name match in test code), and falls back to the changed crates
   when a change can't be tied to a symbol; the receipt says which.
+- **Changed-line coverage and mutation spot-checks.** *(Opt-in.)* Two gate
+  stages that ask whether the tests actually exercise the change, run after
+  every other stage is green. `[verify].coverage = "auto"` runs the project's
+  coverage tool, parses the lcov or Go coverprofile, and intersects it with the
+  lines this turn changed: `✓ 12/14 changed lines covered` plus the uncovered
+  `file:line` ranges. Report-only unless `min_changed_line_coverage` is set; a
+  tool not on `PATH` skips the stage with a note. `[verify].mutation` flips
+  simple operators (`==`/`!=`, `<`/`>=`, `&&`/`||`, `+`/`-`, `true`/`false`) on
+  changed Rust and Go lines — skipping comments and strings via tree-sitter —
+  runs that file's crate or package tests, and restores the file:
+  `✓ mutants 4/5 killed` with survivors listed; `fail_on_survivor` makes them
+  fail. The original is written to `.wingman/mutation-backup` before the file
+  is touched, restored by a guard on every exit (error, timeout, panic), and a
+  leftover from a killed session is restored at the next start — unless the
+  file was edited since, in which case both are left for you. **Not validated
+  live:** the parsers and restore paths are unit-tested, but none of
+  `cargo llvm-cov`, `pytest --cov`, `c8`, `nyc` or `go test -coverprofile` has
+  been run through the gate, and the mutation stage has not run against a real
+  project. Mutation is textual (a spaced trait bound `A + B` is a candidate,
+  and dies at compile time), covers Rust and Go only, and a timeout kills the
+  shell but not a `cargo test` running under it. There is no overall gate time
+  budget; `mutation.timeout_secs` bounds that stage alone.
 - **Git-backed team memory.** `wingman memory sync [<git-ref>]` reconciles the
   team-shared `<project>/.wingman/memory/` — rebuilds the `MEMORY.md` index from
   the files on disk (resolving the "two teammates both added a memory" merge

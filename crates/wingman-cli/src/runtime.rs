@@ -1055,9 +1055,13 @@ impl ShellTurnGate {
 
 /// Run `cmd` in `cwd` and render a compact [`GateReport`]. Shared by every
 /// shell-backed gate (compile check, affected tests).
-async fn run_check_cmd(cmd: &str, cwd: &std::path::Path) -> GateReport {
+pub(crate) async fn run_check_cmd(cmd: &str, cwd: &std::path::Path) -> GateReport {
     let output = tokio::process::Command::from(wingman_tools::child_process::shell_command(cmd))
         .current_dir(cwd)
+        // A caller that times the check out drops this future; take the
+        // shell down with it. ponytail: the shell only, not its process
+        // tree — a timed-out `cargo test` under it runs to completion.
+        .kill_on_drop(true)
         .output()
         .await;
     match output {
@@ -1234,7 +1238,6 @@ pub(crate) async fn list_tests(root: &std::path::Path, pkg_flags: &str) -> Optio
 /// (staged or not), from `git diff HEAD --unified=0` hunk headers. Untracked
 /// and deleted files have no entry. Empty on non-git repos and before the
 /// first commit.
-#[cfg(feature = "treesitter")]
 pub(crate) fn changed_lines_by_file(
     root: &std::path::Path,
 ) -> std::collections::HashMap<String, std::collections::BTreeSet<u32>> {
@@ -1510,7 +1513,7 @@ pub(crate) fn changed_paths(root: &std::path::Path) -> Vec<String> {
 /// changed `.rs` file (see [`changed_paths`]) up to its nearest `Cargo.toml`
 /// and reads the package name. Empty on non-git repos or when nothing Rust
 /// changed.
-fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
+pub(crate) fn changed_rust_crates(root: &std::path::Path) -> Vec<String> {
     let mut crates: Vec<String> = Vec::new();
     for path in changed_paths(root) {
         if !path.ends_with(".rs") {
@@ -1679,6 +1682,10 @@ pub fn detect_turn_gate_cmd(root: &std::path::Path) -> Option<String> {
 /// Resolve `[verify].turn_gate` ("auto" / "off" / explicit command) into a
 /// gate instance, or `None` when gating is off or undetectable.
 pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn TurnGate>> {
+    // A mutant left on disk by a killed session is put back before anything
+    // else reads the tree, whether or not mutation is still enabled.
+    #[cfg(feature = "treesitter")]
+    crate::mutation::recover_at_start(root);
     let cmd = match cfg.verify.turn_gate.trim() {
         "off" | "" => return None,
         "auto" => detect_turn_gate_cmd(root)?,
@@ -1711,6 +1718,22 @@ pub fn build_turn_gate(cfg: &Config, root: &std::path::Path) -> Option<Arc<dyn T
         gates.push(Arc::new(BrowserGate {
             root: root.to_path_buf(),
             cfg: cfg.verify.browser.clone(),
+        }));
+    }
+    // Last: both re-run tests, so they only earn their cost once everything
+    // above is green.
+    if cfg.verify.coverage.trim() != "off" && !cfg.verify.coverage.trim().is_empty() {
+        gates.push(Arc::new(crate::coverage::CoverageGate {
+            root: root.to_path_buf(),
+            cmd: cfg.verify.coverage.trim().to_string(),
+            min: cfg.verify.min_changed_line_coverage,
+        }));
+    }
+    #[cfg(feature = "treesitter")]
+    if cfg.verify.mutation.enabled {
+        gates.push(Arc::new(crate::mutation::MutationGate {
+            root: root.to_path_buf(),
+            cfg: cfg.verify.mutation.clone(),
         }));
     }
 

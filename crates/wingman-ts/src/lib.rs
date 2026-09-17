@@ -23,8 +23,8 @@ pub use symbol::{Symbol, SymbolKind};
 
 #[cfg(feature = "treesitter")]
 pub use parse::{
-    enclosing_symbol, extract_symbols, imports, outline, replace_function_body, semantic_chunks,
-    ParserPool, SemanticChunk, TreeCache,
+    enclosing_symbol, extract_symbols, imports, literal_spans, outline, replace_function_body,
+    semantic_chunks, ParserPool, SemanticChunk, TreeCache,
 };
 
 // Inert fallbacks when the `treesitter` feature is off. Keeps call sites

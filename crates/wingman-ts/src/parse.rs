@@ -731,6 +731,39 @@ fn rust_use_paths(src: &str, node: Node, prefix: &str, out: &mut Vec<String>) {
     }
 }
 
+// ─── Comment / string spans ─────────────────────────────────────────────
+
+/// Byte ranges of every comment and string/char literal in `src`, in source
+/// order, so a caller rewriting code textually can leave prose and literals
+/// alone. Empty when the parse fails. ponytail: matched by node-kind name
+/// (`*comment*`, `*string*`, `char_literal`, `rune_literal`), so a JS template
+/// string's `${code}` counts as literal too.
+pub fn literal_spans(lang: Language, src: &str) -> Vec<(usize, usize)> {
+    let Some((_parser, tree)) = parse(lang, src) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        let kind = node.kind();
+        let literal = kind.contains("comment")
+            || kind.contains("string")
+            || kind == "char_literal"
+            || kind == "rune_literal";
+        if literal {
+            out.push((node.start_byte(), node.end_byte()));
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        while !cursor.goto_next_sibling() {
+            if !cursor.goto_parent() {
+                return out;
+            }
+        }
+    }
+}
+
 // ─── Enclosing symbol ───────────────────────────────────────────────────
 
 /// Return the innermost named symbol that contains `line` (1-based).
@@ -1614,5 +1647,15 @@ func (s *S) B() {}
             t.root_node().named_child_count()
         });
         assert_eq!(n1, n2);
+    }
+
+    #[test]
+    fn literal_spans_cover_comments_and_strings_only() {
+        let src = "fn f() -> bool { let s = \"a == b\"; // x == y\n a == b }";
+        let spans: Vec<&str> = literal_spans(Language::Rust, src)
+            .into_iter()
+            .map(|(s, e)| &src[s..e])
+            .collect();
+        assert_eq!(spans, ["\"a == b\"", "// x == y"]);
     }
 }
