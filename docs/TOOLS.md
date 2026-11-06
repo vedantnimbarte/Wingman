@@ -1087,6 +1087,9 @@ open a PR.
 - Gated as write + shell, because its workers edit files and run commands.
 - Registered in chat sessions (TUI, `--print`, `serve`), never in pilot
   workers, so a worker cannot start runs of its own.
+- You do not have to poll. In the TUI and the web panel's chat, a line appears
+  when any run in the project finishes, waits on plan approval, or dies, and
+  the agent receives those lines with your next message.
 
 ### `pilot_status`
 

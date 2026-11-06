@@ -14,7 +14,8 @@ import {
 import { classify } from './Changes'
 import { Markdown } from './markdown'
 import { navigate } from './router'
-import { message } from './state'
+import { runUpdate, splitRunUpdates, withRunUpdates, type RunUpdate } from './runUpdates'
+import { message, useEvents } from './state'
 import { Failed, Icon, Loading, Note } from './ui'
 import { MicButton } from './voice'
 
@@ -243,6 +244,28 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const foot = useRef<HTMLDivElement | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
 
+  // Background run updates since this chat opened: shown as they arrive, and
+  // handed to the agent with the next message.
+  const { recent, tick } = useEvents()
+  const [runUpdates, setRunUpdates] = useState<RunUpdate[]>([])
+  const pendingUpdates = useRef<string[]>([])
+  const seenTick = useRef(tick)
+  useEffect(() => {
+    const fresh = Math.min(tick - seenTick.current, recent.length)
+    seenTick.current = tick
+    if (fresh <= 0) return
+    const updates = recent
+      .slice(0, fresh)
+      .reverse()
+      .map((e) => runUpdate(e, project))
+      .filter((u): u is RunUpdate => u !== null)
+    if (updates.length === 0) return
+    setRunUpdates((prev) => [...prev, ...updates])
+    pendingUpdates.current.push(...updates.map((u) => u.text))
+    // `recent` is read on the tick that announced it; depending on it too would
+    // re-run this for the same events.
+  }, [tick, project])
+
   const load = useCallback(async () => {
     if (isNew) return
     try {
@@ -289,6 +312,8 @@ function Conversation({ project, id }: { project: string; id: string }) {
       }
     }
 
+    const updates = pendingUpdates.current
+    pendingUpdates.current = []
     setPrompt('')
     setVerification(null)
     setTurn({ state: 'streaming', text: '', thinking: '', tools: [] })
@@ -302,7 +327,11 @@ function Conversation({ project, id }: { project: string; id: string }) {
       await api.turn(
         project,
         target,
-        { prompt: text, mode: mode || undefined, model: model.trim() || undefined },
+        {
+          prompt: withRunUpdates(updates, text),
+          mode: mode || undefined,
+          model: model.trim() || undefined,
+        },
         (e) => {
           if (e.type === 'tool_start') reply = ''
           else if (e.type === 'text_delta') reply += e.text
@@ -317,8 +346,12 @@ function Conversation({ project, id }: { project: string; id: string }) {
       // keeping a separately-assembled copy in memory.
       if (isNew) navigate(`/sessions/${target}`)
       else await load()
+      // Now in the transcript, inside the message that carried them.
+      setRunUpdates([])
       setTurn({ state: 'idle' })
     } catch (e) {
+      // Not delivered: keep them for the next attempt.
+      pendingUpdates.current = [...updates, ...pendingUpdates.current]
       const detail =
         e instanceof ApiError && e.status === 409
           ? 'This session already has a turn running. Wait for it to finish — a second turn would replay a transcript the first is still writing.'
@@ -404,6 +437,12 @@ function Conversation({ project, id }: { project: string; id: string }) {
 
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         <Transcript records={records} />
+
+        {runUpdates.map((u, i) => (
+          <Note key={i} tone={u.tone}>
+            Pilot: {u.text}
+          </Note>
+        ))}
 
         {streaming && (
           <div className="msg msg-assistant" aria-live="polite" aria-busy="true">
@@ -955,15 +994,24 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
         </p>
       )
 
-    case 'user':
+    case 'user': {
+      const { updates, prompt } = splitRunUpdates(record.text)
       return (
-        <div className="msg msg-user">
-          <span className="msg-who">
-            You <span className="faint">{clock(record.ts)}</span>
-          </span>
-          <p className="msg-text">{record.text}</p>
-        </div>
+        <>
+          {updates.map((u, i) => (
+            <p key={i} className="msg-start faint">
+              Pilot: {u}
+            </p>
+          ))}
+          <div className="msg msg-user">
+            <span className="msg-who">
+              You <span className="faint">{clock(record.ts)}</span>
+            </span>
+            <p className="msg-text">{prompt}</p>
+          </div>
+        </>
       )
+    }
 
     case 'assistant':
       return (

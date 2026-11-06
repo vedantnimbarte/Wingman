@@ -2040,6 +2040,7 @@ pub async fn run() -> Result<ExitCode> {
                 plan_approver,
                 recall_runner,
                 session_indexer,
+                run_notices: Some(crate::serve::push::watch_project(project.root.clone())),
             };
             wingman_tui::init_theme(&cfg.tui);
             wingman_tui::run(agent, ctx).await?;

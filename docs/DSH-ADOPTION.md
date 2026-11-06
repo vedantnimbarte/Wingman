@@ -714,8 +714,13 @@ What landed:
 
 **Not doing:** brain-in-the-cloud with a daemon on each machine (BYOM). Wingman
 is local-first, and the essay itself lists the attack surface as unsolved.
-Completion events pushed into a live chat are also not done: `pilot_status`
-covers that need until the TUI has a place to show them.
+Completion events in chat landed afterwards. The TUI and the web panel's chat
+show a line when any run in the project finishes, waits on a plan approval, or
+dies (`run.died`, from a `pid` each run now records). The agent gets those lines
+with the next message, framed as status data rather than as the user, because a
+goal can come from an issue title. Nothing starts a turn on its own. Building it
+turned up a panel bug: `/v1/events` sends named SSE events, and the panel only
+listened with `onmessage`, so it had never seen a run transition.
 
 ---
 

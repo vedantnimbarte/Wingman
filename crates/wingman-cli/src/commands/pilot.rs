@@ -373,6 +373,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let mut store = RunStore::create(&run_path, &run_id, &goal, &base_commit, &integration)
         .await
         .context("opening run store")?;
+    record_pid(&run_path);
 
     // `info` routes to `suppress` by default, so this needs both
     // `desktop_inbox = true` and `info = "desktop"` — opt-in twice, which is
@@ -1275,6 +1276,16 @@ fn resolve_base_commit(repo_root: &std::path::Path, base: Option<&str>) -> Resul
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Write this process's pid to `<run_dir>/pid`, so a watcher can tell a run
+/// that is still working from one whose process died before it reached a
+/// final status (`serve::push`'s `run.died`). Best-effort: without it a dead
+/// run just goes unreported, as before.
+fn record_pid(run_path: &std::path::Path) {
+    if let Err(e) = std::fs::write(run_path.join("pid"), std::process::id().to_string()) {
+        tracing::debug!("could not record pid for {}: {e}", run_path.display());
+    }
+}
+
 /// Re-exec the current binary as a detached background process for `-d`.
 ///
 /// The child re-runs the same `pilot run` invocation (minus `-d`) with its
@@ -1612,6 +1623,7 @@ pub async fn resume(
         ));
     }
 
+    record_pid(&run_path);
     let mut store = wingman_autonomous::RunStore::load(&run_path)
         .await
         .with_context(|| format!("loading run {run_id}"))?;

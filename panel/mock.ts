@@ -604,7 +604,28 @@ async function handle(req: Req, res: Res): Promise<void> {
   if (p[0] === 'events') {
     const send = sse(res)
     const timer = setInterval(() => send({ project: 'wingman', run_id: runs[0].run_id, status: 'running' }), 20_000)
-    return res.on('close', () => clearInterval(timer))
+    // One finished run shortly after connecting, so the chat's run updates
+    // (shown inline, handed to the agent with the next message) have something to show.
+    const finished = setTimeout(
+      () =>
+        send(
+          {
+            project: 'wingman',
+            run_id: runs[0].run_id,
+            goal: runs[0].goal,
+            status: 'done',
+            pr_url: 'https://github.com/vedantnimbarte/Wingman/pull/301',
+            failed_tasks: [],
+            text: `Run finished: "${runs[0].goal}" (${runs[0].run_id}) — PR https://github.com/vedantnimbarte/Wingman/pull/301`,
+          },
+          'run.finished',
+        ),
+      4_000,
+    )
+    return res.on('close', () => {
+      clearInterval(timer)
+      clearTimeout(finished)
+    })
   }
   if (p[0] === 'projects' && p[2] === 'pilot' && p[5] === 'stream') {
     const r = runs.find((x) => x.run_id === p[4])

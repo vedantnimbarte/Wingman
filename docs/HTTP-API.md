@@ -190,7 +190,7 @@ that root and are rejected if they escape it.
 | `GET` | `/v1/health` | `{"ok":true,"version":"0.1.0","uptime_secs":n}`. Unauthenticated. |
 | `GET` | `/v1/schema` | Route table: paths, params, backing subcommand. |
 | `GET` | `/v1/projects` | Allowlisted projects: `id`, `root`, git branch, whether `indexd` is live, index age. |
-| `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`). Same detector outbound push uses, so the stream and a webhook cannot disagree. |
+| `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`, `run.died`). Each is a named SSE event (`event: run.finished`), so listen by name: `onmessage` alone sees none of them. Payloads carry a ready-made `text`; `run.finished` adds `pr_url` and `failed_tasks`. Same detector outbound push uses, so the stream and a webhook cannot disagree. |
 
 ### Notifications
 
@@ -427,6 +427,12 @@ a phone never has to poll:
 unchanged. Delivery is best-effort with one retry; a dead endpoint logs and never
 blocks a run. A daemon that has just started primes quietly — it records the
 runs it finds without announcing last week's results.
+
+`run.died` fires once for a run whose process is gone while its status never
+reached `done`/`failed`/`aborted`: crashed, killed, rejected at the plan gate,
+or a plan-only run with nothing left to do. It needs the `pid` file a run
+writes into its directory, so runs started before that existed are never
+reported.
 
 Subscribable events are the run transitions above. Turn-level events
 (`verify.failed` and friends) are not pushed: a turn already streams its events

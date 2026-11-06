@@ -27,7 +27,7 @@ mod notifications;
 pub mod pairing;
 pub(crate) mod pilot;
 pub mod projects;
-mod push;
+pub(crate) mod push;
 mod routes;
 mod sessions;
 mod table;
