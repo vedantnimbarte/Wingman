@@ -133,8 +133,11 @@ ask_user_desktop_timeout_secs = 0
 # Restrict the session to a named tool preset (or pass `--preset`). Every
 # tool's schema is billed on every request, so a session that only reads code
 # pays for write_file and run_shell on every turn. Built-ins: "review"
-# (read/search/navigate/recall, no writes) and "minimal" (find, change,
-# check). Empty = every registered tool. Compare with `wingman context`.
+# (read/search/navigate/recall, no writes), "minimal" (find, change,
+# check) and "router" (read, recall and delegate: every change goes to a
+# background pilot run via pilot_run, so the chat never blocks on work and
+# cannot skip delegation). Empty = every registered tool. Compare with
+# `wingman context`.
 preset = ""
 
 

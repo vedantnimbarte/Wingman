@@ -44,6 +44,68 @@ pub enum WorkerError {
     Timeout(Duration),
     #[error("sandbox: {0}")]
     Sandbox(String),
+    #[error("{0}")]
+    Stalled(String),
+}
+
+/// Tools that change the worktree. A worker calling none of these for a long
+/// stretch is reading in circles. `run_shell` is left out on purpose:
+/// re-running the same failing test is the commonest way to spin.
+const WRITE_TOOLS: &[&str] = &[
+    "write_file",
+    "edit_file",
+    "apply_patch",
+    "edit_symbol",
+    "notebook_edit",
+    "lsp_rename",
+    "lsp_code_action",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+enum Watch {
+    Fine,
+    Nudge,
+    Kill,
+}
+
+/// Progress watchdog for a worker that is alive but going nowhere, which
+/// uptime checks and `task_timeout_secs` only catch far too late. After
+/// `limit` tool calls without touching a file the worker gets a nudge; after
+/// twice that it is killed and the retry ladder takes over. Reviewers never
+/// write, so they are exempt.
+// ponytail: counts tool calls, not meaning. An LLM judge of "is this still
+// on task" is the upgrade if call-count proves too blunt.
+struct ProgressWatch {
+    limit: u32,
+    since_write: u32,
+}
+
+impl ProgressWatch {
+    fn new(limit: u32, role: &Role) -> Self {
+        let limit = if *role == Role::Reviewer { 0 } else { limit };
+        Self {
+            limit,
+            since_write: 0,
+        }
+    }
+
+    fn on_tool(&mut self, name: &str) -> Watch {
+        if self.limit == 0 {
+            return Watch::Fine;
+        }
+        if WRITE_TOOLS.contains(&name) {
+            self.since_write = 0;
+            return Watch::Fine;
+        }
+        self.since_write += 1;
+        if self.since_write >= self.limit.saturating_mul(2) {
+            Watch::Kill
+        } else if self.since_write == self.limit {
+            Watch::Nudge
+        } else {
+            Watch::Fine
+        }
+    }
 }
 
 /// Spec for one worker launch. All paths absolute; relative paths confuse
@@ -89,6 +151,8 @@ pub struct WorkerSpec {
     /// tool synthesis off. Ignored for a sandboxed worker, which runs against
     /// a copy with no `.wingman/` and no trust store to write to.
     pub tool_synthesis: Option<crate::approval::ApprovalTier>,
+    /// `[pilot].stall_tool_calls`: progress watchdog threshold. 0 = off.
+    pub stall_tool_calls: u32,
 }
 
 /// Live handle returned by [`spawn_worker`]. Owns the supervised child and
@@ -220,12 +284,19 @@ pub async fn run_worker(
     // E10 — drain the manager→worker command channel into the child's stdin
     // as newline-delimited IPC commands. When there's no channel, drop the
     // stdin handle so the child reads EOF and its own stdin reader exits.
+    // The progress watchdog's nudges ride the same pipe.
+    let (nudge_tx, mut nudge_rx) = tokio::sync::mpsc::channel::<crate::ipc::ManagerCommand>(1);
     if let Some(stdin) = child.stdin.take() {
         if let Some(mut cmd_rx) = spec.cmd_rx.take() {
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt;
                 let mut stdin = stdin;
-                while let Some(cmd) = cmd_rx.recv().await {
+                loop {
+                    let cmd = tokio::select! {
+                        Some(c) = cmd_rx.recv() => c,
+                        Some(c) = nudge_rx.recv() => c,
+                        else => break,
+                    };
                     let line = format!("{}\n", crate::ipc::encode_command(&cmd));
                     if stdin.write_all(line.as_bytes()).await.is_err() {
                         break;
@@ -253,6 +324,7 @@ pub async fn run_worker(
     }
 
     let parse_loop = async {
+        let mut watch = ProgressWatch::new(spec.stall_tool_calls, &spec.role);
         let mut outcome: Option<TaskOutcome> = None;
         let mut acceptance: Vec<crate::acceptance::AcceptanceResult> = Vec::new();
         // Why the worker's agent loop stopped. It is already on the wire as
@@ -290,6 +362,32 @@ pub async fn run_worker(
                 WorkerLine::AgentEvent(ev) => {
                     if let wingman_core::AgentEvent::Stop { reason } = &ev {
                         stop = Some(*reason);
+                    }
+                    if let wingman_core::AgentEvent::ToolStart { name, .. } = &ev {
+                        let n = spec.stall_tool_calls;
+                        match watch.on_tool(name) {
+                            Watch::Fine => {}
+                            // Best-effort: with no IPC channel the nudge is
+                            // dropped and the kill threshold still holds.
+                            Watch::Nudge => {
+                                let _ = nudge_tx.try_send(crate::ipc::ManagerCommand::Note {
+                                    text: format!(
+                                        "Watchdog: {n} tool calls without changing a file. \
+                                         Make the change now, or call task_complete with \
+                                         what is blocking you. At {} you will be stopped.",
+                                        n * 2
+                                    ),
+                                    reply: false,
+                                });
+                            }
+                            Watch::Kill => {
+                                return Err(WorkerError::Stalled(format!(
+                                    "progress watchdog: {} tool calls without changing a file \
+                                     ([pilot].stall_tool_calls = {n}); stopped as stuck",
+                                    n * 2
+                                )));
+                            }
+                        }
                     }
                     let mut guard = store.lock().await;
                     forward_agent_event(
@@ -376,6 +474,14 @@ pub async fn run_worker(
 
     let (outcome, acceptance, stop) = match timeout(spec.timeout, parse_loop).await {
         Ok(Ok(r)) => r,
+        Ok(Err(WorkerError::Stalled(why))) => {
+            supervisor
+                .terminate(Duration::from_secs(2).min(spec.timeout))
+                .await
+                .ok();
+            record_failure(store, &spec, agent_id, why.clone()).await;
+            return Err(WorkerError::Stalled(why));
+        }
         Ok(Err(e)) => {
             // The stream died mid-run. Say so in the run log: this used to
             // return without recording anything, leaving the task stuck at
@@ -1143,6 +1249,27 @@ fn write_task_file(task: &Task, worktree: &Path) -> Result<PathBuf, WorkerError>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn progress_watch_nudges_then_kills_and_resets_on_a_write() {
+        use super::{ProgressWatch, Watch};
+        let mut w = ProgressWatch::new(3, &super::Role::Developer);
+        assert_eq!(w.on_tool("read_file"), Watch::Fine);
+        assert_eq!(w.on_tool("grep"), Watch::Fine);
+        assert_eq!(w.on_tool("run_shell"), Watch::Nudge);
+        assert_eq!(w.on_tool("edit_file"), Watch::Fine, "a write resets");
+        for _ in 0..5 {
+            assert_ne!(w.on_tool("read_file"), Watch::Kill);
+        }
+        assert_eq!(w.on_tool("read_file"), Watch::Kill);
+
+        let mut off = ProgressWatch::new(0, &super::Role::Developer);
+        let mut reviewer = ProgressWatch::new(3, &super::Role::Reviewer);
+        for _ in 0..50 {
+            assert_eq!(off.on_tool("grep"), Watch::Fine);
+            assert_eq!(reviewer.on_tool("grep"), Watch::Fine);
+        }
+    }
+
     use super::*;
     use crate::model::Role;
 
@@ -1164,6 +1291,7 @@ mod tests {
             checkpoint_hygiene: false,
             sandbox: None,
             tool_synthesis: None,
+            stall_tool_calls: 0,
         };
         let strings = |args: Vec<std::ffi::OsString>| {
             args.iter()
@@ -1534,6 +1662,7 @@ mod tests {
             checkpoint_hygiene: false,
             sandbox: None,
             tool_synthesis: None,
+            stall_tool_calls: 0,
         };
         record_failure(&store, &spec, "agent-0001", "worker exceeded 1800s".into()).await;
 

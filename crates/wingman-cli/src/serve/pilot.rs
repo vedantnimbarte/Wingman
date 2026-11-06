@@ -47,7 +47,7 @@ fn run_dir(project: &Project, run_id: &str) -> PathBuf {
 
 /// Reject a run id that could climb out of the runs directory. Ids are minted
 /// as `YYYY-MM-DD-HHMM-<rand6>`, so this costs nothing legitimate.
-fn valid_run_id(id: &str) -> bool {
+pub(crate) fn valid_run_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id

@@ -688,6 +688,37 @@ linking. [0001](decisions/0001-no-plugin-architecture.md) records why.
 
 ---
 
+# Part 4 — The Super-agent design (November 2026)
+
+DSH's later essay, "Exploring Super-agent Design", proposes one always-on
+agent: a Router that talks and dispatches but cannot execute, isolated
+Workers, event-driven triggers, context treated as a cache, non-blocking
+tools, and a progress Watchdog. Its most useful result is from an ablation.
+A single session told to delegate still decided some jobs were "small" and
+did them itself. Delegation became reliable only once the coordinator could
+not do the work.
+
+Pilot already had most of the Worker half: an orchestrator with
+management-only tools, isolated worktrees, triggers from issues/CI/PRs, PR
+follow-ups routed to the run that owns the PR, spill, and background jobs.
+What landed:
+
+| Idea | What shipped |
+|---|---|
+| Delegation by structure | The `router` tool preset: chat can read, recall and call `pilot_run`/`pilot_status`/`pilot_tell`, and nothing else. `spawn_subagent` is left out on purpose, since a subagent's registry can write. |
+| Parallel workers from chat | `spawn_subagent` takes `read_only`; read-only subagents in one batch run concurrently. |
+| Watchdog for progress, not uptime | `[pilot].stall_tool_calls`: nudge after N tool calls without an edit, stop at 2N and hand to the retry ladder. |
+| Cheap code first, model second | `[pilot.daemon].policy`: a prose policy judged by one short model call, only for what the code rules leave undecided. It can narrow; it cannot widen trust. |
+| Acting ahead | `[pilot.daemon].speculative`: try trusted propose-band work silently; PR only on a full pass, never auto-merged. |
+| Chain of Recall | `trace_ref`: from any id to the runs that mention it and their neighbours; daemon runs are linked to their source. |
+
+**Not doing:** brain-in-the-cloud with a daemon on each machine (BYOM). Wingman
+is local-first, and the essay itself lists the attack surface as unsolved.
+Completion events pushed into a live chat are also not done: `pilot_status`
+covers that need until the TUI has a place to show them.
+
+---
+
 # What the review turned up that was not on the list
 
 The most valuable output was not the adopted features. Reading Wingman closely

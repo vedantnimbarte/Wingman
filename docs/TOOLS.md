@@ -1036,7 +1036,76 @@ Fetch the full JSONL transcript of a session.
 - Used after `recall_session` returns relevant session ID.
 - Enables "pattern replay" from past work.
 
+### `trace_ref`
+
+Chain of Recall over pilot runs: find every run that mentions an id and list
+that run's linked ids, so old work can be rebuilt one hop at a time.
+
+**Signature:**
+```json
+{
+  "tool": "trace_ref",
+  "args": { "id": "github_issue#12" }
+}
+```
+
+**Returns:**
+```
+run 20261101-aaaa [done]
+  goal: fix login
+  started by: github_issue#12
+  pr: https://github.com/o/r/pull/7
+  task t1 [done] patch auth session=sess-42 commits=abcdef1234
+```
+
+**Notes:**
+- Accepts a run id, task id, worker session id, commit sha, PR url or number,
+  or a daemon source such as `github_issue#12`. Matching is by substring.
+- Expands the 5 newest matching runs and names the rest.
+- Hop again with any id it prints; `read_session` opens a session id.
+- Read-only, so it runs in parallel with other reads.
+
 ## Pilot Mode
+
+### `pilot_run`
+
+Hand a goal to a background pilot run from a chat session. Returns the run id
+at once, so the conversation carries on while workers plan, edit, merge and
+open a PR.
+
+**Signature:**
+```json
+{
+  "tool": "pilot_run",
+  "args": { "goal": "Add rate limiting to the login endpoint", "yes": true }
+}
+```
+
+**Notes:**
+- Without `yes`, the run waits at the plan gate for `wingman pilot approve`.
+- The run inherits the session's permission mode as its ceiling.
+- Gated as write + shell, because its workers edit files and run commands.
+- Registered in chat sessions (TUI, `--print`, `serve`), never in pilot
+  workers, so a worker cannot start runs of its own.
+
+### `pilot_status`
+
+List the project's pilot runs, or with `run_id`, one run's full state: status,
+tasks with outcomes, agents, spend and PR URL.
+
+```json
+{ "tool": "pilot_status", "args": { "run_id": "20261106-ab12" } }
+```
+
+### `pilot_tell`
+
+Pass a follow-up to a live run's workers without restarting it. This is the
+same channel as `wingman pilot tell`. With `task`, only that task's worker
+hears it.
+
+```json
+{ "tool": "pilot_tell", "args": { "run_id": "20261106-ab12", "message": "Use the v2 client" } }
+```
 
 ### `task_complete`
 
@@ -1132,6 +1201,9 @@ faster model while the parent session keeps the strongest one. An explicit
 - Uses same config, tools, permissions as parent.
 - Depth limited to 1 (no nested subagents).
 - Useful for divide-and-conquer on complex tasks.
+- `read_only: true` gives the subagent no write, shell or MCP tools. Several
+  read-only subagents in one batch run concurrently; any other subagent runs
+  alone.
 
 ## Summary Table
 
@@ -1183,6 +1255,10 @@ faster model while the parent session keeps the strongest one. An explicit
 | `invoke_skill`      | Y    | —     | —     | always     | Load skill + track usage       |
 | `recall_session`    | Y    | —     | —     | always     | Cross-project session search   |
 | `read_session`      | Y    | —     | —     | always     | Fetch full session JSONL       |
+| `trace_ref`         | Y    | —     | —     | always     | Hop between linked run ids     |
+| `pilot_run`         | —    | Y     | Y     | mode       | Start a background pilot run   |
+| `pilot_status`      | Y    | —     | —     | always     | Inspect pilot runs             |
+| `pilot_tell`        | —    | Y     | —     | mode       | Steer a live pilot run         |
 | `spawn_subagent`    | —    | —     | —     | inherited  | Inner agent (depth=1)          |
 | `run_plan`          | —    | —     | —     | per-step   | Chain dependent calls (opt-in) |
 
