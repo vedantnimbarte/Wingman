@@ -9,6 +9,7 @@ import { Config } from './Config'
 import { ago, Sessions } from './Sessions'
 import { Insights } from './Insights'
 import { Output } from './output'
+import { Picker } from './Picker'
 import { InboxButton, NotificationCard, NotificationsProvider, useInbox } from './Notifications'
 import {
   EventsProvider,
@@ -477,8 +478,8 @@ function ProjectPicker({
       ? 'Add one in Settings'
       : ''
 
-  return (
-    <div className="workspace" title={selected?.root}>
+  const card = (
+    <>
       <span className="workspace-icon" aria-hidden="true">
         {name.slice(0, 1)}
       </span>
@@ -490,25 +491,47 @@ function ProjectPicker({
           </span>
         )}
       </span>
-      {projects && projects.length > 1 && (
+    </>
+  )
+
+  if (!projects || projects.length < 2)
+    return (
+      <div className="workspace" title={selected?.root}>
+        {card}
+      </div>
+    )
+
+  return (
+    <Picker
+      label="Repository"
+      value={selected?.id ?? ''}
+      onChange={onChoose}
+      className="workspace"
+      title={selected?.root}
+      options={projects.map((p) => ({
+        value: p.id,
+        label: p.id,
+        description: p.root,
+        detail: (
+          <span className="picker-meta">
+            <span
+              className={`lamp ${p.indexd_running ? 'is-proven' : ''}`}
+              title={p.indexd_running ? 'Code search is running' : 'Code search is off'}
+            />
+            {p.branch ?? 'detached'}
+          </span>
+        ),
+      }))}
+      trigger={() => (
         <>
+          {card}
           <span className="workspace-chevron" aria-hidden="true">
             <Icon name="updown" size={14} />
           </span>
-          <select
-            aria-label="Repository"
-            value={selected?.id ?? ''}
-            onChange={(e) => onChoose(e.target.value)}
-          >
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.id}
-              </option>
-            ))}
-          </select>
+          <span className="sr-only">Repository: {name}. Change repository</span>
         </>
       )}
-    </div>
+    />
   )
 }
 

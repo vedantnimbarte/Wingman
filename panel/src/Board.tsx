@@ -11,6 +11,7 @@ import {
 } from './api'
 import { navigate } from './router'
 import { message, useEvents } from './state'
+import { Picker } from './Picker'
 import { runClass, runGlyph, runLabel } from './Runs'
 import { Empty, Failed, Icon, Loading, Note, PageHead, Pill } from './ui'
 
@@ -85,6 +86,8 @@ export function Board({ project }: { project: string | null }) {
   const live = data.projects.filter((p) => !p.missing)
   const target = known && !known.missing ? known : (live[0] ?? null)
   const labels = [...new Set(scoped.flatMap((c) => c.labels))].sort()
+  const counts = new Map<string, number>()
+  for (const c of scoped) for (const l of c.labels) counts.set(l, (counts.get(l) ?? 0) + 1)
 
   return (
     <div className="view view-wide">
@@ -119,6 +122,7 @@ export function Board({ project }: { project: string | null }) {
       <Filters
         filter={filter}
         labels={labels}
+        counts={counts}
         shown={cards.length}
         of={scoped.length}
         onChange={setFilter}
@@ -241,12 +245,15 @@ export function apply(cards: Card[], f: Filter): Card[] {
 function Filters({
   filter,
   labels,
+  counts,
   shown,
   of,
   onChange,
 }: {
   filter: Filter
   labels: string[]
+  /** Cards carrying each label, before any filter. */
+  counts: Map<string, number>
   shown: number
   of: number
   onChange: (f: Filter) => void
@@ -287,19 +294,15 @@ function Filters({
       </button>
 
       {labels.length > 0 && (
-        <select
-          className="select"
-          aria-label="Label"
+        <Picker
+          label="Label"
           value={filter.label ?? ''}
-          onChange={(e) => onChange({ ...filter, label: e.target.value || null })}
-        >
-          <option value="">All labels</option>
-          {labels.map((l) => (
-            <option key={l} value={l}>
-              {l}
-            </option>
-          ))}
-        </select>
+          onChange={(v) => onChange({ ...filter, label: v || null })}
+          options={[
+            { value: '', label: 'All labels', detail: of },
+            ...labels.map((l) => ({ value: l, label: l, detail: counts.get(l) ?? 0 })),
+          ]}
+        />
       )}
 
       {shown !== of && (
@@ -911,14 +914,13 @@ function AddCard({
     <form className="add-card" onSubmit={submit}>
       <div className="add-row">
         <label>
-          <span className="eyebrow">Project</span>
-          <select className="select" value={project} onChange={(e) => setProject(e.target.value)}>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
+          <span className="eyebrow">Repository</span>
+          <Picker
+            label="Repository"
+            value={project}
+            onChange={setProject}
+            options={projects.map((p) => ({ value: p.id, label: p.name, description: p.root }))}
+          />
         </label>
         <label className="add-grow">
           <span className="eyebrow">Title</span>

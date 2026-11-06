@@ -4,6 +4,7 @@ import { api, type ConfigSchema, type SchemaNode } from './api'
 import { at, fieldsOf, optionsFor, resolve, toPatch, type Field } from './schema'
 import { message } from './state'
 import { Failed, Loading, Note, PageHead } from './ui'
+import { Picker } from './Picker'
 
 const REDACTED = '<redacted>'
 
@@ -412,28 +413,28 @@ function Input({
       // config it is editing.
       const options = optionsFor(field.choices, value)
       return (
-        <select
+        <Picker
           id={id}
-          className="select"
+          label={humanize(field.path[field.path.length - 1] ?? 'Value')}
           disabled={readOnly}
           value={typeof value === 'string' ? value : ''}
-          onChange={(e) => onChange(e.target.value)}
-        >
-          {field.nullable && <option value="">— unset —</option>}
-          {options.map((c) => (
-            <option
-              key={c.value}
-              value={c.value}
-              title={
-                c.listed
-                  ? c.description
-                  : 'Set in your config, and accepted by the parser, but not one of the documented values.'
-              }
-            >
-              {c.listed ? c.value : `${c.value} · not a listed value`}
-            </option>
-          ))}
-        </select>
+          onChange={onChange}
+          placeholder="Not set"
+          options={[
+            ...(field.nullable
+              ? [{ value: '', label: 'Not set', description: 'Use the built-in default.' }]
+              : []),
+            ...options.map((c) => ({
+              value: c.value,
+              label: c.value,
+              muted: !c.listed,
+              description: c.listed
+                ? c.description
+                : 'Set in your config and accepted, but not one of the documented values.',
+              detail: c.listed ? undefined : 'not listed',
+            })),
+          ]}
+        />
       )
     }
 

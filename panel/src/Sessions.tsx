@@ -13,6 +13,7 @@ import {
 } from './api'
 import { classify } from './Changes'
 import { Markdown } from './markdown'
+import { Picker } from './Picker'
 import { navigate } from './router'
 import { runUpdate, splitRunUpdates, withRunUpdates, type RunUpdate } from './runUpdates'
 import { message, useEvents } from './state'
@@ -521,25 +522,29 @@ function Conversation({ project, id }: { project: string; id: string }) {
           }}
         />
         <div className="composer-tools">
-          <select
-            className="select"
-            aria-label="Permission mode for this turn"
-            title="The server clamps this to its ceiling — a turn can ask for less, never more."
+          <Picker
+            label="Permissions"
+            title="What Wingman may do this message. It can ask for less than the server allows, never more."
             value={mode}
             disabled={streaming}
-            onChange={(e) => {
-              setMode(e.target.value)
-              if (e.target.value) window.localStorage.setItem(MODE_KEY, e.target.value)
+            onChange={(v) => {
+              setMode(v)
+              if (v) window.localStorage.setItem(MODE_KEY, v)
               else window.localStorage.removeItem(MODE_KEY)
             }}
-          >
-            <option value="">Default permissions</option>
-            {MODES.map((m) => (
-              <option key={m} value={m}>
-                {MODE_LABELS[m]}
-              </option>
-            ))}
-          </select>
+            options={[
+              {
+                value: '',
+                label: 'Default permissions',
+                description: 'Whatever this Wingman server allows.',
+              },
+              ...MODES.map((m) => ({
+                value: m,
+                label: MODE_LABELS[m],
+                description: MODE_HELP[m],
+              })),
+            ]}
+          />
 
           <input
             className="input composer-model"
@@ -648,6 +653,12 @@ const IDEAS = [
   'Find a failing test and fix it',
   'Summarise what changed on this branch',
 ]
+
+const MODE_HELP: Record<(typeof MODES)[number], string> = {
+  'read-only': 'Reads and answers. Changes no files.',
+  plan: 'Proposes a plan and waits for you before editing.',
+  'auto-edit': 'Edits files without asking first.',
+}
 
 const MODE_LABELS: Record<(typeof MODES)[number], string> = {
   'read-only': 'Read only',

@@ -556,17 +556,20 @@ code {
 
 /* The native select sits over the whole card, invisible, so the menu is the
    platform's own — keyboard, screen reader and phone picker for free. */
-.workspace select {
-  position: absolute;
-  inset: 0;
+/* With more than one repository the card is the switcher's trigger. */
+button.workspace {
   width: 100%;
-  opacity: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
+  transition: border-color var(--fast) var(--ease), box-shadow var(--fast) var(--ease);
 }
 
-.workspace:has(select:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+button.workspace:hover,
+button.workspace[aria-expanded='true'] {
+  border-color: var(--rule-strong);
+  box-shadow: var(--shadow-2);
 }
 
 .workspace-chevron {
@@ -4784,6 +4787,221 @@ button.card-title:hover {
   .session-delete {
     opacity: 1;
   }
+}
+
+/* ── Picker: the popover that replaces <select> ──────────────────────────── */
+
+.picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.picker-trigger[aria-expanded='true'] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.picker-value.is-placeholder {
+  color: var(--faint);
+}
+
+.picker-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 55;
+  pointer-events: none;
+}
+
+.picker-pop {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  width: max-content;
+  max-width: min(26rem, calc(100vw - 16px));
+  padding: var(--s-1);
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  overflow: hidden;
+  pointer-events: auto;
+  animation: picker-in 120ms var(--ease);
+}
+
+@keyframes picker-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+}
+
+.picker-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-1);
+  padding: 0 var(--s-3);
+  border-bottom: 1px solid var(--rule);
+  color: var(--faint);
+}
+
+.picker-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 2.5rem;
+  border: 0;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: var(--t-base);
+}
+
+.picker-search input:focus-visible {
+  outline: none;
+}
+
+.picker-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.picker-list:focus-visible {
+  outline: none;
+}
+
+.picker-option {
+  display: grid;
+  grid-template-columns: 1rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3) var(--s-2) var(--s-2);
+  border-radius: var(--r-1);
+  cursor: pointer;
+}
+
+.picker-option.is-active {
+  background: var(--raised);
+}
+
+.picker-option[aria-selected='true'] .picker-label {
+  color: var(--accent);
+  font-weight: var(--w-bold);
+}
+
+.picker-check {
+  display: grid;
+  place-items: center;
+  color: var(--accent);
+}
+
+.picker-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.picker-label {
+  font-size: var(--t-base);
+  overflow-wrap: anywhere;
+}
+
+.picker-desc {
+  margin-top: 1px;
+  color: var(--faint);
+  font-size: var(--t-xs);
+  overflow-wrap: anywhere;
+}
+
+.picker-option.is-muted .picker-label {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.picker-detail {
+  flex: none;
+  justify-self: end;
+  color: var(--faint);
+  font-size: var(--t-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.picker-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-family: var(--mono);
+}
+
+.picker-meta .lamp {
+  width: 0.4rem;
+  height: 0.4rem;
+}
+
+.picker-empty {
+  padding: var(--s-3);
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+/* On a phone: a bottom sheet over a dimmed page, rows big enough for a thumb. */
+.picker-layer.is-sheet {
+  pointer-events: auto;
+}
+
+.picker-backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--ink) 32%, transparent);
+  animation: fade var(--fast) var(--ease);
+}
+
+.is-sheet .picker-pop {
+  position: absolute;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: auto;
+  max-width: none;
+  max-height: 75vh;
+  padding: var(--s-2) var(--s-2) calc(var(--s-3) + env(safe-area-inset-bottom));
+  border: 0;
+  border-radius: var(--r-3) var(--r-3) 0 0;
+  animation: picker-sheet 220ms var(--ease);
+}
+
+@keyframes picker-sheet {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+.picker-sheet-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--s-1) var(--s-2) var(--s-2) var(--s-3);
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  font-size: var(--t-md);
+}
+
+.is-sheet .picker-option {
+  min-height: 3rem;
+  padding: var(--s-3);
+}
+
+.is-sheet .picker-search input {
+  font-size: 1rem;
 }
 
 /* ── Notifications ─────────────────────────────────────────────────────────
