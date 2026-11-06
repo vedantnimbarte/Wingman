@@ -2777,7 +2777,6 @@ button.card-title:hover {
 .chat {
   display: flex;
   flex-direction: column;
-  max-width: 56rem;
 }
 
 .transcript {
