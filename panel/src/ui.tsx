@@ -59,6 +59,32 @@ const PATHS = {
 
 export type IconName = keyof typeof PATHS
 
+/**
+ * The Wingman mark: the two chevrons from `assets/logo.svg`, same paths and
+ * stroke, drawn in `currentColor` so it takes the panel's theme rather than
+ * the README's fixed purples. The viewBox squares the mark's bounds. The
+ * favicon in `index.html` repeats these paths, since it cannot import this.
+ */
+export function Logo({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="-4 -6 60 60"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M0 34 26 2 52 34" />
+      <path d="M11 46 26 26 41 46" opacity="0.55" />
+    </svg>
+  )
+}
+
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   return (
     <svg

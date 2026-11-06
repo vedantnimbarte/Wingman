@@ -17,7 +17,7 @@ import { Picker } from './Picker'
 import { navigate } from './router'
 import { runUpdate, splitRunUpdates, withRunUpdates, type RunUpdate } from './runUpdates'
 import { message, useEvents } from './state'
-import { Failed, Icon, Loading, Note } from './ui'
+import { Failed, Icon, Loading, Logo, Note } from './ui'
 import { MicButton } from './voice'
 
 /**
@@ -412,9 +412,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
         {hero && (
           <div className="hero">
             <span className="hero-mark" aria-hidden="true">
-              <svg width="22" height="22" viewBox="0 0 20 20" fill="currentColor">
-                <path d="M10 2.5 17.5 17 10 13.2 2.5 17Z" />
-              </svg>
+              <Logo size={24} />
             </span>
             <h1>What should Wingman do?</h1>
             <p>

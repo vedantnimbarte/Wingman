@@ -19,7 +19,7 @@ import {
   useSession,
 } from './state'
 import { nextTheme, useTheme, type Theme } from './theme'
-import { Failed, Icon, Loading, Note, PageHead, Pill, type IconName } from './ui'
+import { Failed, Icon, Loading, Logo, Note, PageHead, Pill, type IconName } from './ui'
 
 const SECTIONS = [
   { path: '/', label: 'Overview', icon: 'overview', key: 'o', group: 'Workspace' },
@@ -67,13 +67,11 @@ export function App() {
   }
 }
 
-/** The wing. One mark, used on the rail and on the sign-in card. */
+/** The Wingman logo, used on the rail and on the sign-in card. */
 function Mark() {
   return (
     <span className="brand-mark" aria-hidden="true">
-      <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
-        <path d="M10 2.5 17.5 17 10 13.2 2.5 17Z" />
-      </svg>
+      <Logo size={15} />
     </span>
   )
 }

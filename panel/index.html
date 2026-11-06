@@ -8,26 +8,26 @@
     <meta name="description" content="Wingman's control panel: the board, live pilot runs, sessions, config and cost." />
 
     <!--
-      The favicon is the wing mark inlined as a data URI rather than a fourth
+      The favicon is the Wingman logo (the chevrons from assets/logo.svg) inlined as a data URI rather than a fourth
       file. `crates/wingman-cli/build.rs` embeds exactly three assets by name —
       index.html, app.js, app.css — so a real .ico or .svg would mean a new
       embed, a new MIME arm in serve::ui, and a fourth thing to keep in step,
-      for one 200-byte path. `currentColor` is no use in a favicon, so the two
+      for two short paths. `currentColor` is no use in a favicon, so the two
       themes are two links and the browser picks with `media`.
     -->
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='%2314161b' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -6 60 60' fill='none' stroke='%2314161b' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M0 34 26 2 52 34'/%3E%3Cpath d='M11 46 26 26 41 46' opacity='.55'/%3E%3C/svg%3E"
       media="(prefers-color-scheme: light)"
     />
     <link
       rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='%23e9ecf2' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -6 60 60' fill='none' stroke='%23e9ecf2' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M0 34 26 2 52 34'/%3E%3Cpath d='M11 46 26 26 41 46' opacity='.55'/%3E%3C/svg%3E"
       media="(prefers-color-scheme: dark)"
     />
     <link
       rel="apple-touch-icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Crect width='20' height='20' fill='%23fbfbfc'/%3E%3Cpath fill='%2314161b' d='M10 2.5 17.5 17 10 13.2 2.5 17Z'/%3E%3C/svg%3E"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='-14 -16 80 80' fill='none' stroke='%2314161b' stroke-width='7' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='-14' y='-16' width='80' height='80' fill='%23fbfbfc' stroke='none'/%3E%3Cpath d='M0 34 26 2 52 34'/%3E%3Cpath d='M11 46 26 26 41 46' opacity='.55'/%3E%3C/svg%3E"
     />
 
     <!-- Paints the phone's browser chrome to match `--paper`, so the panel
