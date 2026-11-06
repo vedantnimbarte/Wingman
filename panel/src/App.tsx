@@ -71,7 +71,7 @@ export function App() {
 function Mark() {
   return (
     <span className="brand-mark" aria-hidden="true">
-      <Logo size={15} />
+      <Logo size={24} />
     </span>
   )
 }

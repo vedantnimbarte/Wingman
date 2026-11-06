@@ -506,9 +506,8 @@ code {
   place-items: center;
   width: 1.75rem;
   height: 1.75rem;
-  border-radius: 9px;
-  background: var(--accent);
-  color: var(--accent-ink);
+  /* The logo stands on its own, no tile: accent ink reads on either theme. */
+  color: var(--accent);
 }
 
 /* The repo switcher, styled as the rail's first instrument. */
@@ -4597,10 +4596,7 @@ button.card-title:hover {
   width: 3.5rem;
   height: 3.5rem;
   margin-bottom: var(--s-2);
-  border-radius: 18px;
-  background: var(--accent);
-  color: var(--accent-ink);
-  box-shadow: 0 12px 30px -10px color-mix(in srgb, var(--accent) 60%, transparent);
+  color: var(--accent);
 }
 
 .hero h1 {

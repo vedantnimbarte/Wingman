@@ -412,7 +412,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
         {hero && (
           <div className="hero">
             <span className="hero-mark" aria-hidden="true">
-              <Logo size={24} />
+              <Logo size={48} />
             </span>
             <h1>What should Wingman do?</h1>
             <p>
