@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useUnsavedWarning } from './a11y'
 import { api, type ConfigSchema, type SchemaNode } from './api'
+import { Providers } from './Providers'
+import { navigate } from './router'
 import { at, fieldsOf, optionsFor, resolve, toPatch, type Field } from './schema'
 import { message } from './state'
-import { Failed, Loading, Note, PageHead } from './ui'
+import { Failed, Icon, Loading, Note, type IconName } from './ui'
 import { Picker } from './Picker'
+import './settings.css'
 
 const REDACTED = '<redacted>'
 
@@ -14,17 +17,229 @@ const GENERAL = 'general'
 /**
  * Settings.
  *
- * Every form on this screen is generated from `GET /v1/config/schema`, which
- * is derived from the `wingman-config` structs themselves. A field added to a
- * Rust struct shows up here with its `///` comment as help text and nobody
- * edits this file — which is the whole reason the schema route exists rather
- * than 28 hand-written forms that drift.
+ * A sidebar of pages. Models & providers is its own screen; the rest are
+ * curated groups of the settings people actually change, each still generated
+ * from `GET /v1/config/schema` — a page names the *paths* it shows, and the
+ * label, help text, control and default all come from the `wingman-config`
+ * structs. A path the schema does not have is skipped, so a page cannot drift
+ * into showing a field that no longer exists.
+ *
+ * Advanced is the complete generated form, section by section, so nothing in
+ * the config is unreachable from here.
  *
  * The panel does **no validation of its own**. `PATCH /v1/config` round-trips
  * the result through the real config parser and returns its error, so there is
  * one validator and it is the one that actually has to load the file.
  */
-export function Config() {
+
+type Group = {
+  title: string
+  about: string
+  /** Full config paths. A trailing `*` takes every field under that table. */
+  paths: Spec[]
+}
+
+type Page = {
+  id: string
+  label: string
+  icon: IconName
+  intro?: string
+  groups?: Group[]
+}
+
+/** `path`, or a path with the plain label and one-line help a newcomer needs.
+ *  The schema's own description stays reachable under "Details". */
+type Spec = string | { path: string; label: string; help: string }
+
+const f = (path: string, label: string, help: string): Spec => ({ path, label, help })
+
+const PAGES: Page[] = [
+  { id: 'providers', label: 'Models & providers', icon: 'spark' },
+  {
+    id: 'general',
+    label: 'General',
+    icon: 'config',
+    intro: 'How Wingman works for you by default, and how much it may spend.',
+    groups: [
+      {
+        title: 'How Wingman works',
+        about: 'What it may do without asking, and how much it thinks before answering.',
+        paths: [
+          f('permission_mode', 'What it may do without asking', 'Read only never changes anything. Plan proposes changes first. Auto-edit edits files on its own. Yolo also runs any command — use it only in a sandbox.'),
+          f('reasoning', 'Thinking effort', 'How much the model thinks before answering. Higher is slower and costs more; off is fastest.'),
+        ],
+      },
+      {
+        title: 'Spending limits',
+        about: 'Guard rails on what a chat or a run may cost.',
+        paths: [
+          f('tokens.max_usd_per_session', 'Warn when a chat costs more than (USD)', 'You get one warning when a chat passes this. Leave empty for no warning.'),
+          f('pilot.max_usd', 'Stop a run that costs more than (USD)', 'A run halts before it spends more than this.'),
+        ],
+      },
+      {
+        title: 'Privacy',
+        about: 'What may leave this machine.',
+        paths: [
+          f('privacy.local_only', 'Keep everything on this machine', 'Only providers that run locally are allowed; anything that would call a cloud service is refused.'),
+          f('tools.redact_output_secrets', 'Hide secrets from the model', 'API keys, tokens and private keys found in command output are blanked out before the model sees them.'),
+        ],
+      },
+      {
+        title: 'Terminal app',
+        about: 'How `wingman` looks in your terminal.',
+        paths: [
+          f('tui.theme', 'Colour theme', 'Default, light, or mono for terminals without colour.'),
+          f('tui.show_token_usage', 'Show token usage', 'Show how many tokens each reply used.'),
+        ],
+      },
+    ],
+  },
+  {
+    id: 'tools',
+    label: 'Tools & safety',
+    icon: 'tasks',
+    intro: 'What Wingman can run on your machine, and the guard rails around it.',
+    groups: [
+      {
+        title: 'Safety',
+        about: 'Where commands run, and whether they can reach the internet.',
+        paths: [
+          f('tools.shell_sandbox', 'Run commands in a sandbox', 'Auto uses the OS sandbox when one is available. Required refuses to run commands without it. Off never uses it.'),
+          f('tools.allow_network', 'Allow web look-ups while planning', 'Lets Wingman fetch and search the web in read-only and plan modes too. Off by default so nothing can be sent out unnoticed.'),
+          f('tools.shell_denylist', 'Never run these commands', 'Patterns that are always refused, even in yolo mode. One per line, e.g. sudo.'),
+        ],
+      },
+      {
+        title: 'Available tools',
+        about: 'Every tool adds a little to the cost of each message, so turn off the ones you never use.',
+        paths: [
+          f('tools.preset', 'Tool set', 'Limit Wingman to a named set of tools, such as review or minimal. Empty means every tool.'),
+          f('tools.disabled_tools', 'Turned-off tools', 'Tools Wingman will not use. One per line.'),
+        ],
+      },
+      {
+        title: 'Limits',
+        about: 'How long a tool may run and how much of its output Wingman reads.',
+        paths: [
+          f('tools.tool_timeout_secs', 'Tool time limit (seconds)', 'A single tool call that runs longer than this is stopped.'),
+          f('tokens.tool_output_max_lines', 'Lines of output to read', 'Longer output is cut to its start and end before the model reads it.'),
+          f('tokens.compact_at_tokens', 'Summarise a long chat after (tokens)', 'Older messages are summarised once a chat grows past this, so it fits in the model’s memory.'),
+          f('tokens.prompt_cache', 'Use prompt caching', 'Reuse repeated context at a lower price on providers that support it.'),
+        ],
+      },
+    ],
+  },
+  {
+    id: 'autopilot',
+    label: 'Autopilot',
+    icon: 'runs',
+    intro: 'How runs plan and carry out work on their own.',
+    groups: [
+      {
+        title: 'Models',
+        about: 'Which models plan, do and review the work. Empty means your default model. Write them as provider/model.',
+        paths: [
+          f('pilot.default_model', 'Planning model', 'Plans the work and reviews it.'),
+          f('pilot.worker_model', 'Worker model', 'Does each task. Often a cheaper model.'),
+          f('pilot.reviewer_model', 'Reviewer model', 'Checks each finished task. Point it at a stronger model for tougher review.'),
+          f('pilot.tier', 'How hands-off', 'Assist asks you at every step. Copilot is the everyday default. Autopilot also discovers work and reviews itself.'),
+        ],
+      },
+      {
+        title: 'Limits',
+        about: 'A run stops when it reaches any of these.',
+        paths: [
+          f('pilot.max_usd', 'Spending limit (USD)', 'A run halts before it spends more than this.'),
+          f('pilot.max_concurrent_agents', 'Agents at once', 'How many tasks may be worked on at the same time.'),
+          f('pilot.max_retries_per_task', 'Retries per task', 'How many times a failing task is retried, with a stronger model or split up, before it is marked blocked.'),
+          f('pilot.task_timeout_secs', 'Time limit per task (seconds)', 'A task that runs longer than this is stopped.'),
+        ],
+      },
+      {
+        title: 'Approval',
+        about: 'A plan starts without waiting for you only when it is small, cheap and touches only allowed files. Everything else waits.',
+        paths: [
+          f('pilot.approval.auto_approve_max_tasks', 'Start on its own up to (tasks)', 'Plans with more tasks than this wait for you.'),
+          f('pilot.approval.auto_approve_usd', 'Start on its own up to (USD)', 'Plans estimated to cost more than this wait for you.'),
+          f('pilot.approval.auto_approve_globs', 'Files it may change without asking', 'File patterns, one per line. A plan that writes anywhere else waits for you.'),
+          f('pilot.approval.dangerous_paths', 'Always ask before touching', 'File patterns, one per line. Plans that touch these always wait for your approval.'),
+          f('pilot.approval.notify_only_window_secs', 'Time to stop a medium-risk plan (seconds)', 'Medium-risk plans tell you and start after this long unless you stop them.'),
+        ],
+      },
+    ],
+  },
+  {
+    id: 'advanced',
+    label: 'Advanced',
+    icon: 'filter',
+    intro: 'Every setting Wingman has, section by section.',
+  },
+]
+
+export function Config({ page }: { page?: string | null }) {
+  const current = PAGES.find((p) => p.id === page) ?? PAGES[0]
+
+  return (
+    <div className="view settings">
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="Settings pages">
+          <span className="settings-nav-title">Settings</span>
+          {PAGES.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              className="nav-item"
+              aria-current={p.id === current.id ? 'page' : undefined}
+              onClick={() => navigate(`/config/${p.id}`)}
+            >
+              <Icon name={p.icon} />
+              <span className="nav-label">{p.label}</span>
+            </button>
+          ))}
+        </nav>
+
+        <div className="settings-page">
+          {current.id === 'providers' ? <Providers /> : <FieldSettings key={current.id} page={current} />}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+type Resolved = { field: Field; full: string[]; label?: string; help?: string }
+
+/** The fields a page's group names, resolved against the schema. Missing paths are skipped. */
+function groupFields(
+  group: Group,
+  props: Record<string, SchemaNode>,
+  defs: Record<string, SchemaNode>,
+): Resolved[] {
+  const out: Resolved[] = []
+  for (const spec of group.paths) {
+    const path = typeof spec === 'string' ? spec : spec.path
+    const plain = typeof spec === 'string' ? {} : { label: spec.label, help: spec.help }
+    const parts = path.split('.')
+    const wild = parts[parts.length - 1] === '*'
+    const want = wild ? parts.slice(0, -1) : parts
+    const [head, ...rest] = want
+    if (!props[head]) continue
+    const fields =
+      rest.length === 0 && !wild
+        ? fieldsOf({ type: 'object', properties: { [head]: props[head] } }, defs)
+        : fieldsOf(props[head], defs)
+    for (const f of fields) {
+      const full = rest.length === 0 && !wild ? f.path : [head, ...f.path]
+      const match = wild
+        ? full.slice(0, want.length).join('.') === want.join('.')
+        : full.join('.') === want.join('.')
+      if (match) out.push({ field: f, full, ...plain })
+    }
+  }
+  return out
+}
+
+function FieldSettings({ page }: { page: Page }) {
   const [meta, setMeta] = useState<ConfigSchema | null>(null)
   const [current, setCurrent] = useState<Record<string, unknown> | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -36,9 +251,9 @@ export function Config() {
   const [query, setQuery] = useState('')
   const [preview, setPreview] = useState(false)
 
-  // Twenty-one sections and a floating save bar meant twelve pending edits
-  // could leave with the tab and take no notice. The panel routes in-page, so
-  // this covers the half the browser gives a hook for and nothing more.
+  // A floating save bar meant pending edits could leave with the tab and take
+  // no notice. The panel routes in-page, so this covers the half the browser
+  // gives a hook for and nothing more.
   useUnsavedWarning(edits.size > 0)
 
   const load = useCallback(async () => {
@@ -57,10 +272,8 @@ export function Config() {
   }, [load])
 
   // `Config` mixes tables with a handful of bare top-level keys
-  // (`default_model`, `default_provider`). Listing those as sections of their
-  // own would give each a page with one control, and — because they have no
-  // `properties` — drop them into the JSON escape hatch. They are collected
-  // into a synthetic first section instead.
+  // (`default_model`, `default_provider`). They are collected into a
+  // synthetic first section rather than each getting a page of one control.
   const { general, sections } = useMemo(() => {
     const props = meta?.schema.properties ?? {}
     const defs = meta?.schema.definitions ?? {}
@@ -74,32 +287,28 @@ export function Config() {
     return { general, sections }
   }, [meta])
 
-  const all = general.length ? [GENERAL, ...sections] : sections
-  const active = section ?? all[0] ?? null
-
   if (error)
     return (
-      <div className="view">
-        <Failed
-          title="Could not load settings"
-          detail={error}
-          action={{ label: 'Try again', onClick: () => void load() }}
-        />
-      </div>
+      <Failed
+        title="Couldn't load settings"
+        detail={error}
+        action={{ label: 'Try again', onClick: () => void load() }}
+      />
     )
-  if (!meta || !current || !active) return <Loading what="settings" />
+  if (!meta || !current) return <Loading what="settings" />
 
   const defs = meta.schema.definitions ?? {}
   const props = meta.schema.properties ?? {}
-  const isGeneral = active === GENERAL
-  const readOnly = meta.readonly_sections.includes(active)
 
-  // The synthetic section is assembled from the bare top-level keys; a real
-  // one is read straight off the schema.
-  const resolved = isGeneral ? {} : resolve(props[active], defs)
-  const fields = isGeneral
-    ? fieldsOf({ type: 'object', properties: Object.fromEntries(general.map((k) => [k, props[k]])) }, defs)
-    : fieldsOf(props[active], defs)
+  function value(full: string[]) {
+    const k = full.join('.')
+    return edits.has(k) ? edits.get(k) : at(current, full)
+  }
+
+  function edit(full: string[], v: unknown) {
+    setSaved(false)
+    setEdits((prev) => new Map(prev).set(full.join('.'), v))
+  }
 
   async function save() {
     setSaving(true)
@@ -117,46 +326,55 @@ export function Config() {
     }
   }
 
-  /**
-   * A field's path in the config document.
-   *
-   * The synthetic `general` section is not a table, so its fields are already
-   * at the top level and must not be prefixed — prefixing would patch a
-   * `[general]` table that no config has.
-   */
-  function keyOf(f: Field): string[] {
-    return isGeneral ? f.path : [active, ...f.path]
-  }
+  const rows = (list: Resolved[], readOnly = false) => (
+    <div className="rows">
+      {list.map(({ field, full, label, help }) => (
+        <FieldRow
+          key={full.join('.')}
+          field={{ ...field, path: full }}
+          label={label}
+          help={help}
+          value={value(full)}
+          fallback={at(meta.defaults, full)}
+          dirty={edits.has(full.join('.'))}
+          readOnly={readOnly}
+          onChange={(v) => edit(full, v)}
+        />
+      ))}
+    </div>
+  )
 
-  function edit(path: string[], value: unknown) {
-    setSaved(false)
-    setEdits((prev) => {
-      const next = new Map(prev)
-      next.set((isGeneral ? path : [active, ...path]).join('.'), value)
-      return next
+  let body: React.ReactNode
+  if (page.groups) {
+    body = page.groups.map((g) => {
+      const list = groupFields(g, props, defs)
+      if (list.length === 0) return null
+      return (
+        <section key={g.title} className="settings-card" aria-label={g.title}>
+          <header>
+            <h2>{g.title}</h2>
+            <p>{g.about}</p>
+          </header>
+          {rows(list)}
+        </section>
+      )
     })
-  }
+  } else {
+    const all = general.length ? [GENERAL, ...sections] : sections
+    const active = section && all.includes(section) ? section : all[0]
+    const isGeneral = active === GENERAL
+    const readOnly = meta.readonly_sections.includes(active)
+    const resolved = isGeneral ? {} : resolve(props[active], defs)
+    const fields = isGeneral
+      ? fieldsOf({ type: 'object', properties: Object.fromEntries(general.map((k) => [k, props[k]])) }, defs)
+      : fieldsOf(props[active], defs)
+    const shown = all.filter((s) => humanize(s).toLowerCase().includes(query.trim().toLowerCase()))
 
-  return (
-    <div className="view">
-      <PageHead
-        title="Settings"
-        intro={
-          <>
-            How Wingman behaves on this machine. Changes are saved to{' '}
-            <code>{meta.writes_to}</code> and apply to every repository; a repository's own{' '}
-            <code>.wingman/config.toml</code> is never touched.
-          </>
-        }
-      />
-
+    body = (
       <div className="config-body">
         <nav className="config-nav" aria-label="Config sections">
-          {/* Twenty-one sections in a list with no way to narrow it. ⌘K
-              deliberately does not reach config fields — it never acts on
-              something you cannot see — so the filter belongs here, next to
-              what it filters. */}
           <label className="filter-search config-find">
+            <Icon name="search" size={14} />
             <input
               className="input"
               type="search"
@@ -166,29 +384,29 @@ export function Config() {
               onChange={(e) => setQuery(e.target.value)}
             />
           </label>
-          {all
-            .filter((s) => s.toLowerCase().includes(query.trim().toLowerCase()))
-            .map((s) => (
-              <button
-                key={s}
-                type="button"
-                className="nav-item"
-                aria-current={s === active ? 'page' : undefined}
-                onClick={() => setSection(s)}
-              >
-                <span className="nav-label">{humanize(s)}</span>
-                {meta.readonly_sections.includes(s) && (
-                  <span className="count" title="Edit this section in the file directly">
-                    locked
-                  </span>
-                )}
-              </button>
-            ))}
+          {shown.map((s) => (
+            <button
+              key={s}
+              type="button"
+              className="nav-item"
+              aria-current={s === active ? 'page' : undefined}
+              onClick={() => setSection(s)}
+            >
+              <span className="nav-label">{humanize(s)}</span>
+              {meta.readonly_sections.includes(s) && (
+                <span className="count" title="Edit this section in the file directly">
+                  locked
+                </span>
+              )}
+            </button>
+          ))}
         </nav>
 
-        <section className="config-fields">
-          <h2 className="section-head">{humanize(active)}</h2>
-          {resolved.description && <p className="section-intro">{resolved.description}</p>}
+        <section className="settings-card config-fields" aria-label={humanize(active)}>
+          <header>
+            <h2>{humanize(active)}</h2>
+            {resolved.description && <p>{resolved.description}</p>}
+          </header>
 
           {readOnly && (
             <Note tone="is-asserted">
@@ -199,98 +417,89 @@ export function Config() {
 
           {fields.length === 0 ? (
             <FreeForm
-              // Keyed on the section. Without it React reuses the instance
-              // between two form-less sections, and `useState` keeps the text
-              // it was seeded with — so switching from `[hooks]` to `[mcp]`
-              // left you editing one section's JSON under the other's
-              // heading, and saving wrote it there.
+              // Keyed on the section, or React reuses the instance and its
+              // seeded text between two form-less sections.
               key={active}
               value={at(current, [active])}
               node={resolved}
               readOnly={readOnly}
-              onChange={(v) => edit([], v)}
+              onChange={(v) => edit([active], v)}
             />
           ) : (
-            <div className="rows">
-              {fields.map((f) => (
-                <FieldRow
-                  key={f.path.join('.')}
-                  field={f}
-                  value={
-                    edits.has(keyOf(f).join('.'))
-                      ? edits.get(keyOf(f).join('.'))
-                      : at(current, keyOf(f))
-                  }
-                  fallback={at(meta.defaults, keyOf(f))}
-                  dirty={edits.has(keyOf(f).join('.'))}
-                  readOnly={readOnly}
-                  onChange={(v) => edit(f.path, v)}
-                />
-              ))}
-            </div>
+            rows(
+              fields.map((f) => ({ field: f, full: isGeneral ? f.path : [active, ...f.path] })),
+              readOnly,
+            )
           )}
         </section>
       </div>
+    )
+  }
 
-      <div className="config-save">
-        <span className="config-save-spacer">
-          {saved && <span className="is-proven dot figure">Saved</span>}
-          {saveError && (
-            <span className="is-failed dot figure" role="alert">
-              {saveError}
-            </span>
-          )}
-          {!saved && !saveError && edits.size > 0 && (
-            <span className="faint figure">
-              {edits.size} field{edits.size === 1 ? '' : 's'} edited
-            </span>
-          )}
-        </span>
-        {edits.size > 0 && (
-          <button
-            type="button"
-            className="button button-quiet"
-            aria-expanded={preview}
-            onClick={() => setPreview((p) => !p)}
-            title="Exactly what a save would send"
-          >
-            {preview ? 'Hide' : 'Preview'}
-          </button>
-        )}
-        {edits.size > 0 && (
-          <button type="button" className="button button-quiet" onClick={() => setEdits(new Map())}>
-            Discard
-          </button>
-        )}
-        <button
-          type="button"
-          className="button button-primary"
-          disabled={saving || edits.size === 0}
-          onClick={() => void save()}
-        >
-          {saving
-            ? 'Saving…'
-            : edits.size === 0
-              ? 'No changes'
-              : `Save ${edits.size} change${edits.size === 1 ? '' : 's'}`}
-        </button>
-      </div>
+  return (
+    <>
+      <header className="settings-head">
+        <h1>{page.label}</h1>
+        <p>
+          {page.intro} Saved to <code>{meta.writes_to}</code> and applied to every repository.
+        </p>
+      </header>
 
-      {/* The patch itself, before it is sent. `PATCH` deep-merges and the file
-          is edited as a TOML document, so a save is a one-line diff — but
-          which line is not obvious from a form with a hundred inputs, and the
-          only way to check used to be to save and read the file. */}
-      {preview && edits.size > 0 && (
-        <>
-          <h3 className="section-head">This save sends</h3>
-          <p className="section-intro">
-            Merged into <code className="figure">{meta.writes_to}</code>. Keys not listed here are
-            not touched.
-          </p>
-          <pre className="report figure">{JSON.stringify(toPatch(edits), null, 2)}</pre>
-        </>
+      {body}
+
+      {/* Shown only while there is something to save, so the page is not
+          permanently topped by a disabled button. */}
+      {(edits.size > 0 || saved || saveError) && (
+        <div className="config-save">
+          <span className="config-save-spacer">
+            {saved && <span className="is-proven dot figure">Saved. New chats and runs use the new settings.</span>}
+            {saveError && (
+              <span className="is-failed dot figure" role="alert">
+                {saveError}
+              </span>
+            )}
+            {!saved && !saveError && edits.size > 0 && (
+              <span className="faint figure">
+                {edits.size} unsaved change{edits.size === 1 ? '' : 's'}
+              </span>
+            )}
+          </span>
+          {edits.size > 0 && (
+            <button
+              type="button"
+              className="button button-quiet"
+              aria-expanded={preview}
+              onClick={() => setPreview((p) => !p)}
+              title="Exactly what a save would send"
+            >
+              {preview ? 'Hide changes' : 'Review changes'}
+            </button>
+          )}
+          {edits.size > 0 && (
+            <button type="button" className="button button-quiet" onClick={() => setEdits(new Map())}>
+              Discard
+            </button>
+          )}
+          {edits.size > 0 && (
+            <button type="button" className="button button-primary" disabled={saving} onClick={() => void save()}>
+              {saving ? 'Saving…' : `Save ${edits.size} change${edits.size === 1 ? '' : 's'}`}
+            </button>
+          )}
+        </div>
       )}
-    </div>
+
+      {preview && edits.size > 0 && (
+        <section className="settings-card">
+          <header>
+            <h2>This save sends</h2>
+            <p>
+              Merged into <code>{meta.writes_to}</code>. Settings not listed here are not touched.
+            </p>
+          </header>
+          <pre className="report figure">{JSON.stringify(toPatch(edits), null, 2)}</pre>
+        </section>
+      )}
+    </>
   )
 }
 
@@ -298,6 +507,8 @@ export function Config() {
 
 function FieldRow({
   field,
+  label,
+  help,
   value,
   fallback,
   dirty,
@@ -305,6 +516,8 @@ function FieldRow({
   onChange,
 }: {
   field: Field
+  label?: string
+  help?: string
   value: unknown
   fallback: unknown
   dirty: boolean
@@ -322,12 +535,15 @@ function FieldRow({
     <div className="row config-row">
       <label htmlFor={id} className="config-label">
         <span className={dirty ? 'config-dirty' : undefined}>
-          {humanize(field.path[field.path.length - 1] ?? '')}
+          {label ?? humanize(field.path[field.path.length - 1] ?? '')}
         </span>
-        <span className="config-key">{field.path.join('.')}</span>
-        {field.description && <span className="config-help">{field.description}</span>}
-        {fallback !== undefined && !isRedacted && (
-          <span className="config-default figure muted">default {stringify(fallback)}</span>
+        {help ? (
+          <span className="config-help">{help}</span>
+        ) : (
+          field.description && <span className="config-help">{field.description}</span>
+        )}
+        {shownDefault(fallback) && !isRedacted && (
+          <span className="config-default">Default: {shownDefault(fallback)}</span>
         )}
       </label>
 
@@ -338,8 +554,24 @@ function FieldRow({
           <Input id={id} field={field} value={value} readOnly={readOnly} onChange={onChange} />
         )}
       </span>
+
+      {/* The raw key and the developer documentation, for anyone editing the
+          file by hand — out of the way of everyone else. */}
+      <details className="config-more">
+        <summary>Details</summary>
+        <span className="config-key">{field.path.join('.')}</span>
+        {help && field.description && <span className="config-help">{field.description}</span>}
+      </details>
     </div>
   )
+}
+
+/** A default worth showing, as words — nothing for an empty one. */
+function shownDefault(v: unknown): string {
+  if (v === undefined || v === null || v === '') return ''
+  if (Array.isArray(v)) return v.length ? v.join(', ') : ''
+  if (typeof v === 'boolean') return v ? 'On' : 'Off'
+  return stringify(v)
 }
 
 function Redacted({

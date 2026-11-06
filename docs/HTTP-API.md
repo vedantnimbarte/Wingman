@@ -210,6 +210,31 @@ has to know the `ControlCommand` vocabulary. The response says which happened:
 `{"answered":"…","via":"reply"|"control"}`. A card naming a directory that is
 not a pilot run is refused with `409`.
 
+### Providers
+
+The browser twin of `wingman login` / `wingman logout`, built from the same
+parts: the provider table is the login wizard's, the live test is the same
+probe, and a key lands in the OS keyring with only a `keyring:<id>` marker in
+the global `config.toml`. A key saved here works from the terminal and vice
+versa. Config edits keep the file's comments and formatting, and are
+round-tripped through the config parser before they are written.
+
+**Keys are write-only.** No route returns a key. A read says where a credential
+comes from — `keychain`, `env` (with the variable's name), `config` (plain text
+in the file), `keychain-missing`, `none`, or `not-needed` — never what it is.
+
+| Method | Path | Body | Effect |
+|---|---|---|---|
+| `GET` | `/v1/providers` | — | `{default_provider, default_model, providers:[…]}` — every provider with `kind` (`api-key`, `local`, `oauth`, `cli`), `connected`, `ready`, `credential`, `model`, `base_url`, `is_default`. |
+| `POST` | `/v1/providers/{id}/test` | `{"api_key"?, "model"?, "base_url"?}` | Call the provider with these settings and save nothing. `422` with the provider's error when the call fails. A missing key falls back to the stored one. |
+| `PUT` | `/v1/providers/{id}` | as above, plus `"make_default": bool`, `"skip_test": bool` | Test (unless `skip_test`), store a new key in the OS keyring — or in the config file when no keyring is available, which the response reports as `stored_in` — and record the model and address. |
+| `POST` | `/v1/providers/{id}/default` | `{"model"?}` | Make this the default provider. |
+| `DELETE` | `/v1/providers/{id}` | — | Remove the keyring entry and `[providers.{id}]`. `409` for the current default: choose another default first. |
+
+Browser sign-in providers (ChatGPT) answer `PUT`/`test` with `409` and the
+`wingman login` command to run: their flow opens a browser on the machine
+running Wingman, which a remote panel cannot drive.
+
 ### Pilot — read
 
 | Method | Path | Returns |

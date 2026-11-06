@@ -1,0 +1,594 @@
+[
+ {
+  "id": "claude-code",
+  "label": "Claude Code (subscription)",
+  "kind": "cli",
+  "env_var": null,
+  "default_model": "claude-opus-4-7",
+  "default_base_url": null
+ },
+ {
+  "id": "anthropic",
+  "label": "Anthropic (Claude)",
+  "kind": "api-key",
+  "env_var": "ANTHROPIC_API_KEY",
+  "default_model": "claude-opus-4-7",
+  "default_base_url": null
+ },
+ {
+  "id": "openai",
+  "label": "OpenAI (API key)",
+  "kind": "api-key",
+  "env_var": "OPENAI_API_KEY",
+  "default_model": "gpt-4.1",
+  "default_base_url": null
+ },
+ {
+  "id": "chatgpt",
+  "label": "ChatGPT (subscription)",
+  "kind": "oauth",
+  "env_var": "CHATGPT_ACCESS_TOKEN",
+  "default_model": "gpt-4o",
+  "default_base_url": null
+ },
+ {
+  "id": "openrouter",
+  "label": "OpenRouter",
+  "kind": "api-key",
+  "env_var": "OPENROUTER_API_KEY",
+  "default_model": "anthropic/claude-opus-4-7",
+  "default_base_url": null
+ },
+ {
+  "id": "gemini",
+  "label": "Google Gemini",
+  "kind": "api-key",
+  "env_var": "GOOGLE_API_KEY",
+  "default_model": "gemini-2.5-pro",
+  "default_base_url": null
+ },
+ {
+  "id": "litellm",
+  "label": "LiteLLM proxy",
+  "kind": "api-key",
+  "env_var": "LITELLM_API_KEY",
+  "default_model": "anthropic/claude-opus-4-7",
+  "default_base_url": "http://localhost:4000/v1"
+ },
+ {
+  "id": "lmstudio",
+  "label": "LM Studio (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:1234/v1"
+ },
+ {
+  "id": "vllm",
+  "label": "vLLM (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:8000/v1"
+ },
+ {
+  "id": "ollama",
+  "label": "Ollama (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "llama3.1:8b",
+  "default_base_url": "http://localhost:11434/v1"
+ },
+ {
+  "id": "groq",
+  "label": "Groq",
+  "kind": "api-key",
+  "env_var": "GROQ_API_KEY",
+  "default_model": "llama-3.3-70b-versatile",
+  "default_base_url": null
+ },
+ {
+  "id": "together",
+  "label": "Together AI",
+  "kind": "api-key",
+  "env_var": "TOGETHER_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+  "default_base_url": null
+ },
+ {
+  "id": "fireworks",
+  "label": "Fireworks AI",
+  "kind": "api-key",
+  "env_var": "FIREWORKS_API_KEY",
+  "default_model": "accounts/fireworks/models/llama-v3p1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "deepinfra",
+  "label": "DeepInfra",
+  "kind": "api-key",
+  "env_var": "DEEPINFRA_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "perplexity",
+  "label": "Perplexity (Sonar)",
+  "kind": "api-key",
+  "env_var": "PERPLEXITY_API_KEY",
+  "default_model": "sonar-pro",
+  "default_base_url": null
+ },
+ {
+  "id": "xai",
+  "label": "xAI (Grok)",
+  "kind": "api-key",
+  "env_var": "XAI_API_KEY",
+  "default_model": "grok-2-latest",
+  "default_base_url": null
+ },
+ {
+  "id": "deepseek",
+  "label": "DeepSeek",
+  "kind": "api-key",
+  "env_var": "DEEPSEEK_API_KEY",
+  "default_model": "deepseek-chat",
+  "default_base_url": null
+ },
+ {
+  "id": "mistral",
+  "label": "Mistral La Plateforme",
+  "kind": "api-key",
+  "env_var": "MISTRAL_API_KEY",
+  "default_model": "mistral-large-latest",
+  "default_base_url": null
+ },
+ {
+  "id": "cerebras",
+  "label": "Cerebras",
+  "kind": "api-key",
+  "env_var": "CEREBRAS_API_KEY",
+  "default_model": "llama3.1-70b",
+  "default_base_url": null
+ },
+ {
+  "id": "sambanova",
+  "label": "SambaNova",
+  "kind": "api-key",
+  "env_var": "SAMBANOVA_API_KEY",
+  "default_model": "Meta-Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "azure",
+  "label": "Azure OpenAI",
+  "kind": "api-key",
+  "env_var": "AZURE_OPENAI_API_KEY",
+  "default_model": "gpt-4o",
+  "default_base_url": "https://YOUR-RESOURCE.openai.azure.com/openai/deployments/YOUR-DEPLOYMENT"
+ },
+ {
+  "id": "github",
+  "label": "GitHub Models",
+  "kind": "api-key",
+  "env_var": "GITHUB_TOKEN",
+  "default_model": "gpt-4o",
+  "default_base_url": null
+ },
+ {
+  "id": "llamacpp",
+  "label": "llama.cpp server (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:8080/v1"
+ },
+ {
+  "id": "tgi",
+  "label": "HuggingFace TGI (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:3000/v1"
+ },
+ {
+  "id": "anyscale",
+  "label": "Anyscale Endpoints",
+  "kind": "api-key",
+  "env_var": "ANYSCALE_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "lepton",
+  "label": "Lepton AI",
+  "kind": "api-key",
+  "env_var": "LEPTON_API_KEY",
+  "default_model": "llama3-1-70b",
+  "default_base_url": null
+ },
+ {
+  "id": "replicate",
+  "label": "Replicate (OpenAI proxy)",
+  "kind": "api-key",
+  "env_var": "REPLICATE_API_TOKEN",
+  "default_model": "meta/meta-llama-3.1-405b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "novita",
+  "label": "Novita AI",
+  "kind": "api-key",
+  "env_var": "NOVITA_API_KEY",
+  "default_model": "meta-llama/llama-3.1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "hyperbolic",
+  "label": "Hyperbolic",
+  "kind": "api-key",
+  "env_var": "HYPERBOLIC_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "lambda",
+  "label": "Lambda Inference",
+  "kind": "api-key",
+  "env_var": "LAMBDA_API_KEY",
+  "default_model": "llama3.1-70b-instruct-fp8",
+  "default_base_url": null
+ },
+ {
+  "id": "nebius",
+  "label": "Nebius AI Studio",
+  "kind": "api-key",
+  "env_var": "NEBIUS_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-70B-Instruct-fast",
+  "default_base_url": null
+ },
+ {
+  "id": "hf",
+  "label": "HuggingFace Inference",
+  "kind": "api-key",
+  "env_var": "HF_TOKEN",
+  "default_model": "meta-llama/Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "glhf",
+  "label": "GLHF.chat",
+  "kind": "api-key",
+  "env_var": "GLHF_API_KEY",
+  "default_model": "hf:meta-llama/Llama-3.1-70B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "featherless",
+  "label": "Featherless",
+  "kind": "api-key",
+  "env_var": "FEATHERLESS_API_KEY",
+  "default_model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "octoai",
+  "label": "OctoAI",
+  "kind": "api-key",
+  "env_var": "OCTOAI_API_KEY",
+  "default_model": "meta-llama-3.1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "nvidia",
+  "label": "NVIDIA NIM",
+  "kind": "api-key",
+  "env_var": "NVIDIA_API_KEY",
+  "default_model": "meta/llama-3.1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "avian",
+  "label": "Avian",
+  "kind": "api-key",
+  "env_var": "AVIAN_API_KEY",
+  "default_model": "Meta-Llama-3.1-405B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "kluster",
+  "label": "Kluster.ai",
+  "kind": "api-key",
+  "env_var": "KLUSTER_API_KEY",
+  "default_model": "klusterai/Meta-Llama-3.1-405B-Instruct-Turbo",
+  "default_base_url": null
+ },
+ {
+  "id": "inferencenet",
+  "label": "Inference.net",
+  "kind": "api-key",
+  "env_var": "INFERENCE_NET_API_KEY",
+  "default_model": "meta-llama/llama-3.1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "snowflake",
+  "label": "Snowflake Cortex",
+  "kind": "api-key",
+  "env_var": "SNOWFLAKE_API_KEY",
+  "default_model": "llama3.1-70b",
+  "default_base_url": "https://YOUR-ACCOUNT.snowflakecomputing.com/api/v2/cortex/inference/v1"
+ },
+ {
+  "id": "databricks",
+  "label": "Databricks Foundation",
+  "kind": "api-key",
+  "env_var": "DATABRICKS_TOKEN",
+  "default_model": "databricks-meta-llama-3-1-70b-instruct",
+  "default_base_url": "https://YOUR-WORKSPACE.cloud.databricks.com/serving-endpoints/v1"
+ },
+ {
+  "id": "writer",
+  "label": "Writer Palmyra",
+  "kind": "api-key",
+  "env_var": "WRITER_API_KEY",
+  "default_model": "palmyra-x5",
+  "default_base_url": null
+ },
+ {
+  "id": "cohere",
+  "label": "Cohere (Command R/A)",
+  "kind": "api-key",
+  "env_var": "COHERE_API_KEY",
+  "default_model": "command-r-plus",
+  "default_base_url": null
+ },
+ {
+  "id": "qwen",
+  "label": "Alibaba Qwen (DashScope)",
+  "kind": "api-key",
+  "env_var": "DASHSCOPE_API_KEY",
+  "default_model": "qwen-max",
+  "default_base_url": null
+ },
+ {
+  "id": "zhipu",
+  "label": "Zhipu GLM",
+  "kind": "api-key",
+  "env_var": "ZHIPU_API_KEY",
+  "default_model": "glm-4-plus",
+  "default_base_url": null
+ },
+ {
+  "id": "moonshot",
+  "label": "Moonshot Kimi",
+  "kind": "api-key",
+  "env_var": "MOONSHOT_API_KEY",
+  "default_model": "moonshot-v1-128k",
+  "default_base_url": null
+ },
+ {
+  "id": "minimax",
+  "label": "MiniMax",
+  "kind": "api-key",
+  "env_var": "MINIMAX_API_KEY",
+  "default_model": "abab6.5s-chat",
+  "default_base_url": null
+ },
+ {
+  "id": "yi",
+  "label": "Yi (01.AI)",
+  "kind": "api-key",
+  "env_var": "YI_API_KEY",
+  "default_model": "yi-large",
+  "default_base_url": null
+ },
+ {
+  "id": "baichuan",
+  "label": "Baichuan",
+  "kind": "api-key",
+  "env_var": "BAICHUAN_API_KEY",
+  "default_model": "Baichuan4-Turbo",
+  "default_base_url": null
+ },
+ {
+  "id": "hunyuan",
+  "label": "Tencent Hunyuan",
+  "kind": "api-key",
+  "env_var": "HUNYUAN_API_KEY",
+  "default_model": "hunyuan-pro",
+  "default_base_url": null
+ },
+ {
+  "id": "doubao",
+  "label": "ByteDance Doubao (Ark)",
+  "kind": "api-key",
+  "env_var": "ARK_API_KEY",
+  "default_model": "doubao-pro-32k",
+  "default_base_url": null
+ },
+ {
+  "id": "siliconflow",
+  "label": "SiliconFlow",
+  "kind": "api-key",
+  "env_var": "SILICONFLOW_API_KEY",
+  "default_model": "Qwen/Qwen2.5-72B-Instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "cloudflare",
+  "label": "Cloudflare Workers AI",
+  "kind": "api-key",
+  "env_var": "CLOUDFLARE_API_TOKEN",
+  "default_model": "@cf/meta/llama-3.1-70b-instruct",
+  "default_base_url": "https://api.cloudflare.com/client/v4/accounts/YOUR-ACCOUNT-ID/ai/v1"
+ },
+ {
+  "id": "vercel",
+  "label": "Vercel AI Gateway",
+  "kind": "api-key",
+  "env_var": "VERCEL_AI_GATEWAY_KEY",
+  "default_model": "openai/gpt-4o",
+  "default_base_url": null
+ },
+ {
+  "id": "aimlapi",
+  "label": "AIMLAPI",
+  "kind": "api-key",
+  "env_var": "AIMLAPI_KEY",
+  "default_model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+  "default_base_url": null
+ },
+ {
+  "id": "openpipe",
+  "label": "OpenPipe",
+  "kind": "api-key",
+  "env_var": "OPENPIPE_API_KEY",
+  "default_model": "openpipe:meta-llama-3.1-70b",
+  "default_base_url": null
+ },
+ {
+  "id": "targon",
+  "label": "Targon (Bittensor)",
+  "kind": "api-key",
+  "env_var": "TARGON_API_KEY",
+  "default_model": "NousResearch/Hermes-3-Llama-3.1-70B",
+  "default_base_url": null
+ },
+ {
+  "id": "pollinations",
+  "label": "Pollinations (free)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "openai",
+  "default_base_url": null
+ },
+ {
+  "id": "ai21",
+  "label": "AI21 Jamba",
+  "kind": "api-key",
+  "env_var": "AI21_API_KEY",
+  "default_model": "jamba-1.5-large",
+  "default_base_url": null
+ },
+ {
+  "id": "zai",
+  "label": "Z.ai (GLM coding)",
+  "kind": "api-key",
+  "env_var": "ZAI_API_KEY",
+  "default_model": "glm-4-plus",
+  "default_base_url": null
+ },
+ {
+  "id": "friendli",
+  "label": "Friendli AI",
+  "kind": "api-key",
+  "env_var": "FRIENDLI_TOKEN",
+  "default_model": "meta-llama-3.1-70b-instruct",
+  "default_base_url": null
+ },
+ {
+  "id": "mancer",
+  "label": "Mancer",
+  "kind": "api-key",
+  "env_var": "MANCER_API_KEY",
+  "default_model": "weaver",
+  "default_base_url": null
+ },
+ {
+  "id": "reka",
+  "label": "Reka",
+  "kind": "api-key",
+  "env_var": "REKA_API_KEY",
+  "default_model": "reka-core",
+  "default_base_url": null
+ },
+ {
+  "id": "mlx",
+  "label": "mlx-lm-server (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:8080/v1"
+ },
+ {
+  "id": "localai",
+  "label": "LocalAI (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:8080/v1"
+ },
+ {
+  "id": "aphrodite",
+  "label": "Aphrodite Engine (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:2242/v1"
+ },
+ {
+  "id": "mistralrs",
+  "label": "Mistral.rs server (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:1234/v1"
+ },
+ {
+  "id": "gpt4all",
+  "label": "GPT4All (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:4891/v1"
+ },
+ {
+  "id": "jan",
+  "label": "Jan / Cortex (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:1337/v1"
+ },
+ {
+  "id": "koboldcpp",
+  "label": "KoboldCpp (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:5001/v1"
+ },
+ {
+  "id": "oobabooga",
+  "label": "Oobabooga (local)",
+  "kind": "local",
+  "env_var": null,
+  "default_model": "local-model",
+  "default_base_url": "http://localhost:5000/v1"
+ },
+ {
+  "id": "bedrock",
+  "label": "AWS Bedrock (API key)",
+  "kind": "api-key",
+  "env_var": "AWS_BEARER_TOKEN_BEDROCK",
+  "default_model": "us.anthropic.claude-3-5-sonnet-20241022-v2:0",
+  "default_base_url": "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1"
+ },
+ {
+  "id": "vertex",
+  "label": "GCP Vertex AI (access token)",
+  "kind": "api-key",
+  "env_var": "GOOGLE_VERTEX_TOKEN",
+  "default_model": "google/gemini-1.5-pro-002",
+  "default_base_url": "https://us-central1-aiplatform.googleapis.com/v1/projects/YOUR-PROJECT/locations/us-central1/endpoints/openapi"
+ },
+ {
+  "id": "watsonx",
+  "label": "IBM watsonx.ai",
+  "kind": "api-key",
+  "env_var": "WATSONX_API_KEY",
+  "default_model": "ibm/granite-3-8b-instruct",
+  "default_base_url": "https://us-south.ml.cloud.ibm.com"
+ }
+]

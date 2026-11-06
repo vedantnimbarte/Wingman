@@ -16,6 +16,7 @@ import type {
   Agent,
   BoardData,
   Card,
+  CredentialSource,
   ColumnId,
   RunState,
   RunStatus,
@@ -23,7 +24,9 @@ import type {
   Task,
   TaskStatus,
   WingmanNotification,
-} from './src/api'
+} from '../src/api'
+import schemaFixture from './config-schema.json'
+import providerFixture from './providers.json'
 
 /* ── Time ─────────────────────────────────────────────────────────────── */
 
@@ -464,54 +467,109 @@ const SCHEMA = {
 
 /* ── Config ───────────────────────────────────────────────────────────── */
 
-let config: Record<string, unknown> = {
-  default_provider: 'claude-code',
-  default_model: 'claude-opus-5-5',
-  permission_mode: 'ask',
+// The real schema and provider table, captured from `wingman serve`
+// (`GET /v1/config/schema`, `GET /v1/providers`), so the settings screen is
+// built and tested against what the daemon actually returns.
+const CONFIG_SCHEMA = schemaFixture as unknown as { defaults: Record<string, unknown> }
+const PROVIDER_SPECS = providerFixture as {
+  id: string
+  label: string
+  kind: 'api-key' | 'local' | 'oauth' | 'cli'
+  env_var: string | null
+  default_model: string
+  default_base_url: string | null
+}[]
+
+/** What `[providers.*]` holds in the mock: where each key comes from, never the key. */
+type ProviderRow = { model: string | null; base_url: string | null; credential: CredentialSource }
+const providerState = new Map<string, ProviderRow>([
+  ['anthropic', { model: 'claude-opus-5-5', base_url: null, credential: { kind: 'keychain' } }],
+  ['openai', { model: 'gpt-5', base_url: null, credential: { kind: 'env', var: 'OPENAI_API_KEY' } }],
+  ['openrouter', { model: 'anthropic/claude-sonnet-5-5', base_url: null, credential: { kind: 'config' } }],
+  ['deepseek', { model: null, base_url: null, credential: { kind: 'keychain-missing' } }],
+  ['ollama', { model: 'qwen3-coder:30b', base_url: 'http://127.0.0.1:11434/v1', credential: { kind: 'not-needed' } }],
+])
+let defaultProvider: string | null = 'anthropic'
+
+let config: Record<string, unknown> = merge(CONFIG_SCHEMA.defaults, {
+  default_provider: 'anthropic',
+  default_model: 'anthropic/claude-opus-5-5',
+  permission_mode: 'plan',
   reasoning: 'medium',
-  providers: { anthropic: { api_key: '<redacted>', base_url: null }, ollama: { base_url: 'http://127.0.0.1:11434' } },
-  tui: { theme: 'auto', vim_mode: false, show_thinking: true },
-  tokens: { max_output: 16_000, compact_at: 0.8 },
-  logging: { level: 'info', file: '~/.wingman/logs/wingman.log' },
-  tools: { allow: ['read_file', 'grep', 'bash:cargo *'], deny: ['bash:rm -rf *'] },
-  pilot: { max_parallel: 3, budget_usd: 10, notifications: { escalation: 'desktop', decision: 'desktop', progress: 'panel', info: 'none' } },
-  serve: { addr: '127.0.0.1:8787', token: '<redacted>' },
+  tokens: { max_usd_per_session: 5 },
+  tools: { disabled_tools: ['web_fetch'], allow_network: false },
+  pilot: { max_usd: 10, max_concurrent_agents: 3 },
+})
+
+function providerList() {
+  return {
+    default_provider: defaultProvider,
+    default_model: defaultProvider ? `${defaultProvider}/${providerState.get(defaultProvider)?.model ?? ''}` : null,
+    providers: PROVIDER_SPECS.map((spec) => {
+      const row = providerState.get(spec.id)
+      const credential: CredentialSource =
+        row?.credential ?? (spec.kind === 'local' || spec.kind === 'cli' ? { kind: 'not-needed' } : { kind: 'none' })
+      return {
+        ...spec,
+        connected: Boolean(row) || defaultProvider === spec.id,
+        ready: credential.kind !== 'none' && credential.kind !== 'keychain-missing',
+        credential,
+        model: row?.model ?? null,
+        base_url: row?.base_url ?? null,
+        is_default: defaultProvider === spec.id,
+      }
+    }),
+  }
 }
 
-const str = (description: string, extra: object = {}) => ({ type: 'string', description, ...extra })
-const CONFIG_SCHEMA = {
-  schema: {
-    type: 'object',
-    properties: {
-      default_provider: str('Provider used when a command does not name one.', { enum: ['anthropic', 'claude-code', 'ollama', 'openai'] }),
-      default_model: str('Model used when a command does not name one.'),
-      permission_mode: str('What a tool call needs before it runs.', { enum: ['ask', 'auto', 'plan', 'yolo'] }),
-      reasoning: str('How hard the model thinks by default.', { enum: ['low', 'medium', 'high'] }),
-      providers: { type: 'object', description: 'Credentials and endpoints per provider.', additionalProperties: { $ref: '#/definitions/Provider' } },
-      tui: { type: 'object', description: 'Terminal UI.', properties: {
-        theme: str('Colour theme.', { enum: ['auto', 'light', 'dark'] }),
-        vim_mode: { type: 'boolean', description: 'Vim keybindings in the composer.' },
-        show_thinking: { type: 'boolean', description: 'Render thinking blocks inline instead of collapsed.' },
-      } },
-      tokens: { type: 'object', description: 'Token budgets.', properties: {
-        max_output: { type: 'integer', description: 'Hard cap on output tokens per turn.' },
-        compact_at: { type: 'number', description: 'Fraction of the context window at which the transcript is compacted. A long description to check wrapping: compaction summarises older turns into one message, keeps every tool result that a later turn referenced, and never drops the system prompt.' },
-      } },
-      logging: { type: 'object', description: 'Where logs go.', properties: { level: str('Minimum level.', { enum: ['trace', 'debug', 'info', 'warn', 'error'] }), file: str('Log file path.') } },
-      tools: { type: 'object', description: 'Tool permissions.', properties: { allow: { type: 'array', items: { type: 'string' }, description: 'Patterns that never ask.' }, deny: { type: 'array', items: { type: 'string' }, description: 'Patterns that are always refused.' } } },
-      pilot: { type: 'object', description: 'Autonomous runs.', properties: {
-        max_parallel: { type: 'integer', description: 'Agents at once.' },
-        budget_usd: { type: 'number', description: 'Abort a run that would spend more.' },
-        notifications: { type: 'object', description: 'Where each severity is delivered.', additionalProperties: str('desktop | panel | webhook | none') },
-      } },
-      serve: { type: 'object', description: 'The HTTP daemon.', properties: { addr: str('Listen address.'), token: str('Bearer token.') } },
-    },
-    definitions: { Provider: { type: 'object', properties: { api_key: str('API key.'), base_url: { type: ['string', 'null'], description: 'Override the endpoint.' } } } },
-  },
-  defaults: { permission_mode: 'ask', reasoning: 'medium', tui: { theme: 'auto', vim_mode: false, show_thinking: false }, tokens: { max_output: 8_000, compact_at: 0.85 } },
-  redacted_keys: ['providers.*.api_key', 'serve.token'],
-  readonly_sections: ['serve'],
-  writes_to: '~/.wingman/config.toml',
+/** Route `/v1/providers…`. A key that starts with `bad` fails the test; local servers on :1234 are "down". */
+async function providerRoute(method: string, id: string | undefined, action: string | undefined, req: Req, res: Res) {
+  if (!id) return json(res, 200, providerList())
+  const spec = PROVIDER_SPECS.find((p) => p.id === id)
+  if (!spec) return json(res, 404, { error: `unknown provider '${id}'` })
+  const row = providerState.get(id)
+
+  if (method === 'DELETE') {
+    if (defaultProvider === id) return json(res, 409, { error: `${spec.label} is your default provider. Choose another default first.` })
+    providerState.delete(id)
+    return json(res, 200, { disconnected: id, keyring_error: null })
+  }
+
+  const b = await body(req)
+  const model = String(b.model ?? '') || row?.model || spec.default_model
+
+  if (action === 'default') {
+    defaultProvider = id
+    providerState.set(id, { model, base_url: row?.base_url ?? null, credential: row?.credential ?? { kind: spec.kind === 'api-key' ? 'none' : 'not-needed' } })
+    return json(res, 200, { default: id, model })
+  }
+
+  if (spec.kind === 'oauth')
+    return json(res, 409, { error: `${spec.label} signs in through a browser on the machine running Wingman. Run \`wingman login ${id}\` there.` })
+  const key = typeof b.api_key === 'string' ? b.api_key.trim() : ''
+  const hasKey = row && ['keychain', 'env', 'config'].includes(row.credential.kind)
+  if (spec.kind === 'api-key' && !key && !hasKey) return json(res, 400, { error: `${spec.label} needs an API key.` })
+  const baseUrl = (typeof b.base_url === 'string' && b.base_url.trim()) || row?.base_url || spec.default_base_url
+
+  const failure =
+    key.startsWith('bad') ? `${spec.label} rejected the key (401 Unauthorized)`
+    : spec.kind === 'local' && (baseUrl ?? '').includes(':1234') ? `nothing is listening at ${baseUrl}`
+    : null
+
+  if (action === 'test') {
+    await sleep(700)
+    return failure ? json(res, 422, { error: `The test failed: ${failure}` }) : json(res, 200, { ok: true, model })
+  }
+
+  // PUT: test unless asked not to, then "store" the key.
+  if (!b.skip_test) {
+    await sleep(700)
+    if (failure) return json(res, 422, { error: `The test failed, so nothing was saved: ${failure}` })
+  }
+  const credential: CredentialSource = key ? { kind: 'keychain' } : row?.credential ?? { kind: spec.kind === 'api-key' ? 'none' : 'not-needed' }
+  providerState.set(id, { model, base_url: spec.kind === 'api-key' && baseUrl === spec.default_base_url ? null : baseUrl ?? null, credential })
+  if (b.make_default) defaultProvider = id
+  return json(res, 200, { connected: id, model, stored_in: key ? 'keychain' : 'unchanged', is_default: Boolean(b.make_default), tested: !b.skip_test })
 }
 
 function merge(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
@@ -656,6 +714,7 @@ async function handle(req: Req, res: Res): Promise<void> {
     }
     return json(res, 200, config)
   }
+  if (p[0] === 'providers') return providerRoute(method, p[1], p[2], req, res)
   if (p[0] === 'ui' || p[0] === 'pair') return json(res, 200, { auth_required: false, token: 'mock' })
 
   if (p[0] === 'notifications') {

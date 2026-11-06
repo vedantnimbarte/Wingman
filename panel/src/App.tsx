@@ -5,7 +5,7 @@ import { Board, money, scope } from './Board'
 import { Changes } from './Changes'
 import { navigate, segments, useRoute } from './router'
 import { runClass, runGlyph, runLabel, Runs } from './Runs'
-import { Config } from './Config'
+import { Config, humanize } from './Config'
 import { ago, Sessions } from './Sessions'
 import { Insights } from './Insights'
 import { Output } from './output'
@@ -334,8 +334,8 @@ function Shell({ health }: { health: Health }) {
                 <span className="crumb-sep" aria-hidden="true">
                   /
                 </span>
-                <span className="truncate mono" aria-current="page">
-                  {nested}
+                <span className={`truncate${current === '/config' ? '' : ' mono'}`} aria-current="page">
+                  {current === '/config' ? humanize(nested) : nested}
                 </span>
               </>
             ) : (
@@ -865,7 +865,7 @@ function Section({
     case '/changes':
       return <Changes project={project?.id ?? null} />
     case '/config':
-      return <Config />
+      return <Config page={rest[0] ?? null} />
     case '/insights':
       return <Insights project={project?.id ?? null} />
     default:
