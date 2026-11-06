@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { areaPath, coverage, cumulative, decadeBounds, linePath, logFraction } from './charts'
+import {
+  arcs,
+  areaPath,
+  change,
+  coverage,
+  cumulative,
+  decadeBounds,
+  linePath,
+  logFraction,
+  niceCeil,
+} from './charts'
 
 describe('decadeBounds', () => {
   it('rounds a real repricing spread out to whole decades', () => {
@@ -110,5 +120,33 @@ describe('paths', () => {
   it('returns nothing for nothing', () => {
     expect(areaPath([], 10, 10)).toBe('')
     expect(linePath([], 10, 10)).toBe('')
+  })
+})
+
+describe('niceCeil', () => {
+  it('rounds a ceiling up to 1, 2, 2.5 or 5 of a decade', () => {
+    expect(niceCeil(17.76)).toBe(20)
+    expect(niceCeil(2.3)).toBe(2.5)
+    expect(niceCeil(41)).toBe(50)
+    expect(niceCeil(100)).toBe(100)
+    expect(niceCeil(0)).toBe(1)
+  })
+})
+
+describe('change', () => {
+  it('is a fraction of the previous value, and null with nothing to compare', () => {
+    expect(change(12, 10)).toBeCloseTo(0.2)
+    expect(change(5, 10)).toBeCloseTo(-0.5)
+    expect(change(5, 0)).toBeNull()
+  })
+})
+
+describe('arcs', () => {
+  it('tiles the ring with no gap and no overlap', () => {
+    expect(arcs([1, 1, 2])).toEqual([
+      [0, 0.25],
+      [0.25, 0.5],
+      [0.5, 1],
+    ])
   })
 })

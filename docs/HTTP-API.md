@@ -190,7 +190,7 @@ that root and are rejected if they escape it.
 | `GET` | `/v1/health` | `{"ok":true,"version":"0.1.0","uptime_secs":n}`. Unauthenticated. |
 | `GET` | `/v1/schema` | Route table: paths, params, backing subcommand. |
 | `GET` | `/v1/projects` | Allowlisted projects: `id`, `root`, git branch, whether `indexd` is live, index age. |
-| `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`). Same detector outbound push uses, so the stream and a webhook cannot disagree. |
+| `GET` | `/v1/events` | SSE firehose of run transitions across every project (`run.started`, `run.awaiting_approval`, `run.finished`, `run.died`). Each is a named SSE event (`event: run.finished`), so listen by name: `onmessage` alone sees none of them. Payloads carry a ready-made `text`; `run.finished` adds `pr_url` and `failed_tasks`. Same detector outbound push uses, so the stream and a webhook cannot disagree. |
 
 ### Notifications
 
@@ -210,6 +210,31 @@ has to know the `ControlCommand` vocabulary. The response says which happened:
 `{"answered":"…","via":"reply"|"control"}`. A card naming a directory that is
 not a pilot run is refused with `409`.
 
+### Providers
+
+The browser twin of `wingman login` / `wingman logout`, built from the same
+parts: the provider table is the login wizard's, the live test is the same
+probe, and a key lands in the OS keyring with only a `keyring:<id>` marker in
+the global `config.toml`. A key saved here works from the terminal and vice
+versa. Config edits keep the file's comments and formatting, and are
+round-tripped through the config parser before they are written.
+
+**Keys are write-only.** No route returns a key. A read says where a credential
+comes from — `keychain`, `env` (with the variable's name), `config` (plain text
+in the file), `keychain-missing`, `none`, or `not-needed` — never what it is.
+
+| Method | Path | Body | Effect |
+|---|---|---|---|
+| `GET` | `/v1/providers` | — | `{default_provider, default_model, providers:[…]}` — every provider with `kind` (`api-key`, `local`, `oauth`, `cli`), `connected`, `ready`, `credential`, `model`, `base_url`, `is_default`. |
+| `POST` | `/v1/providers/{id}/test` | `{"api_key"?, "model"?, "base_url"?}` | Call the provider with these settings and save nothing. `422` with the provider's error when the call fails. A missing key falls back to the stored one. |
+| `PUT` | `/v1/providers/{id}` | as above, plus `"make_default": bool`, `"skip_test": bool` | Test (unless `skip_test`), store a new key in the OS keyring — or in the config file when no keyring is available, which the response reports as `stored_in` — and record the model and address. |
+| `POST` | `/v1/providers/{id}/default` | `{"model"?}` | Make this the default provider. |
+| `DELETE` | `/v1/providers/{id}` | — | Remove the keyring entry and `[providers.{id}]`. `409` for the current default: choose another default first. |
+
+Browser sign-in providers (ChatGPT) answer `PUT`/`test` with `409` and the
+`wingman login` command to run: their flow opens a browser on the machine
+running Wingman, which a remote panel cannot drive.
+
 ### Pilot — read
 
 | Method | Path | Returns |
@@ -217,7 +242,7 @@ not a pilot run is refused with `409`.
 | `GET` | `/v1/projects/{p}/pilot/runs` | `RunSummary[]` — `run_id`, `goal`, `status`, `done`/`total`, `terminal`. Newest first. No cost or timestamps: `RunSummary` does not carry them — read one run for `totals`. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}` | Full `RunState` snapshot. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/events?tail=n` | Last `n` events from `tasks.jsonl`. |
-| `GET` | `/v1/projects/{p}/pilot/runs/{run}/stream` | SSE: events as they are appended. |
+| `GET` | `/v1/projects/{p}/pilot/runs/{run}/stream` | SSE: events as they are appended, each an unnamed `message` whose JSON says what it is in `ev`. Closes with a named `end` event (`{status}`) once the run is over. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/log?tail=n` | The orchestrator's own stdout as `{text, total_lines, shown_lines}` (`tail` defaults to 500, max 5000). `events` is what the run *did*; this is what it *said* — the plan it costed, why it asked for approval or did not, and what it exited on. A run that failed while planning emitted no events worth reading and one line here that explains it. Both counts are returned so a client can say "the last 500 of 2,341 lines" rather than presenting a tail as the whole log. Colour is left in: it is the file as written, and stripping ANSI is the reader's job. |
 | `GET` | `/v1/projects/{p}/pilot/runs/{run}/dashboard` | The ASCII dashboard `pilot watch` renders, as text — cheapest possible phone view. |
 
@@ -427,6 +452,12 @@ a phone never has to poll:
 unchanged. Delivery is best-effort with one retry; a dead endpoint logs and never
 blocks a run. A daemon that has just started primes quietly — it records the
 runs it finds without announcing last week's results.
+
+`run.died` fires once for a run whose process is gone while its status never
+reached `done`/`failed`/`aborted`: crashed, killed, rejected at the plan gate,
+or a plan-only run with nothing left to do. It needs the `pid` file a run
+writes into its directory, so runs started before that existed are never
+reported.
 
 Subscribable events are the run transitions above. Turn-level events
 (`verify.failed` and friends) are not pushed: a turn already streams its events

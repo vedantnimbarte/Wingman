@@ -14,8 +14,8 @@ use super::http::{self, Request};
 use super::pairing;
 use super::projects::Project;
 use super::{
-    admin, auth, board, notifications, pilot, projects, push, sessions, table, timeline, ui,
-    ServeState,
+    admin, auth, board, notifications, pilot, projects, providers, push, sessions, table, timeline,
+    ui, ServeState,
 };
 
 /// Handle one connection start to finish.
@@ -86,6 +86,17 @@ async fn dispatch(
         ("GET", ["v1", "notifications"]) => notifications::list(sock).await,
         ("POST", ["v1", "notifications", id, "reply"]) => notifications::reply(id, req, sock).await,
         ("PATCH", ["v1", "config"]) => admin::patch_config(req, sock).await,
+
+        // Model providers: connect, test and disconnect from the panel. The
+        // browser twin of `wingman login` / `wingman logout`; keys are
+        // write-only and land in the OS keyring.
+        ("GET", ["v1", "providers"]) => providers::list(sock).await,
+        ("POST", ["v1", "providers", id, "test"]) => providers::test(id, req, sock).await,
+        ("POST", ["v1", "providers", id, "default"]) => {
+            providers::make_default(id, req, sock).await
+        }
+        ("PUT", ["v1", "providers", id]) => providers::connect(id, req, sock).await,
+        ("DELETE", ["v1", "providers", id]) => providers::disconnect(id, sock).await,
 
         // The board is global — one store spanning every project — so it sits
         // beside `/v1/config` rather than under `/v1/projects/{p}`.
@@ -271,6 +282,7 @@ fn schema(state: &Arc<ServeState>) -> serde_json::Value {
         routes.extend(timeline::schema());
         routes.extend(table::schema());
         routes.extend(admin::schema());
+        routes.extend(providers::schema());
     }
     doc
 }

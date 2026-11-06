@@ -669,6 +669,7 @@ pub async fn build_registry_with_learn(
             ));
         }
         reg.register(wingman_tools::builtin::ReadSession::new(paths.root.clone()));
+        reg.register(wingman_tools::builtin::TraceRef::new(paths.root.clone()));
     }
     apply_tool_removals(&mut reg, cfg);
     // MCP servers are connected later via [`McpRegistry::seed`] so the
@@ -792,6 +793,25 @@ pub(crate) fn register_deferred_access(registry: &Arc<ToolRegistry>, cfg: &Confi
         patterns = ?cfg.tools.defer,
         "deferring tool schemas behind tool_search/tool_call"
     );
+}
+
+/// Leave only tools that cannot change anything: no WRITE, no SHELL, and no
+/// MCP tools (their capabilities are self-declared by a remote server, so
+/// they are not trusted to be pure). This is what makes a read-only
+/// subagent safe to run alongside its siblings.
+pub(crate) fn strip_to_read_only(reg: &ToolRegistry) {
+    use wingman_tools::Capability;
+    let mutating = AgentConfig::default().mutating_tools;
+    for name in reg.tool_names() {
+        let cap = reg.capability_of(&name).unwrap_or(Capability::WRITE);
+        if cap.contains(Capability::WRITE)
+            || cap.contains(Capability::SHELL)
+            || name.starts_with("mcp__")
+            || mutating.contains(&name)
+        {
+            reg.unregister(&name);
+        }
+    }
 }
 
 /// Honor `[tools].preset` and `[tools].disabled_tools`.
@@ -1838,6 +1858,14 @@ pub async fn build_agent_registry_learn(
 
     let registry = Arc::new(build_registry_with_learn(cfg, mode, learn.clone()).await?);
 
+    // The chat session's front door to background work (Router/Worker).
+    // The registry's latched preset drops these, and `spawn_subagent`, under
+    // presets that do not keep them. That is what makes `router` hold: a
+    // subagent's inner registry can write.
+    for tool in crate::pilot_tools::all() {
+        registry.register_arc(tool);
+    }
+
     // Register the `spawn_subagent` tool against this registry. The runner
     // closure builds a fresh inner agent on each call — crucially WITHOUT
     // `spawn_subagent` registered on it, so recursion is bounded to depth 1.
@@ -1893,6 +1921,9 @@ pub async fn build_agent_registry_learn(
                         inner_reg = inner_reg.with_semantic_search(idx);
                     }
                     apply_tool_removals(&mut inner_reg, &cfg);
+                    if spec.read_only {
+                        strip_to_read_only(&inner_reg);
+                    }
                     let inner_reg = Arc::new(inner_reg);
                     let agent_cfg = AgentConfig {
                         model: sel.model.clone(),

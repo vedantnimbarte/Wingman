@@ -57,9 +57,10 @@ jobs:
           # No x86_64-apple-darwin: GitHub is winding down Intel `macos-13`
           # runners, so those jobs starve in the queue (the "24h hang").
           # Apple Silicon covers the current Mac fleet; Intel-Mac users
-          # `cargo install` from source (install.sh tells them so).
+          # `cargo install` from source (install.sh tells them so). macos-15:
+          # GitHub retired the macos-14 image.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -119,7 +120,7 @@ jobs:
           # Apple silicon only, for the same reason as the CLI matrix: the
           # Intel runners starve in the queue.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-24.04
     steps:

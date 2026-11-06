@@ -11,6 +11,7 @@
     "noFallthroughCasesInSwitch": true,
     "noEmit": true,
     "isolatedModules": true,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "types": []
   },

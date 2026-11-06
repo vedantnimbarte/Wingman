@@ -47,7 +47,7 @@ fn run_dir(project: &Project, run_id: &str) -> PathBuf {
 
 /// Reject a run id that could climb out of the runs directory. Ids are minted
 /// as `YYYY-MM-DD-HHMM-<rand6>`, so this costs nothing legitimate.
-fn valid_run_id(id: &str) -> bool {
+pub(crate) fn valid_run_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -192,8 +192,8 @@ pub async fn get_log(
 /// `GET /v1/projects/{p}/pilot/runs/{run}/stream?tail=n`
 ///
 /// Replays the last `tail` events, then streams new ones as they are
-/// appended, and closes with an `end` event once the run reaches a terminal
-/// status. Tailing by byte offset (rather than re-reading and diffing) means
+/// appended (each a plain `message` whose JSON carries its type in `ev`), and
+/// closes with a named `end` event once the run reaches a terminal status. Tailing by byte offset (rather than re-reading and diffing) means
 /// a long run does not get more expensive to watch as its log grows.
 pub async fn stream(
     project: &Project,
@@ -218,12 +218,12 @@ pub async fn stream(
             let Some(event) = serde_json::from_str::<Value>(&line).ok() else {
                 continue; // a partially-flushed line; it will be complete next poll
             };
-            let kind = event
-                .get("ev")
-                .and_then(Value::as_str)
-                .unwrap_or("event")
-                .to_string();
-            sse.send(&kind, &event).await?;
+            // Sent as the default `message` type, not named after `ev`: the
+            // payload already says what it is, and a browser `EventSource`
+            // only delivers named events to a listener for that exact name,
+            // with no catch-all. Naming them after an open-ended set meant the
+            // panel's run log never received one.
+            sse.send("message", &event).await?;
             last_write = Instant::now();
         }
 

@@ -116,6 +116,9 @@ const EventsContext = createContext<EventsValue>({ link: 'connecting', recent: [
 
 const KEEP = 50
 
+/** Every event `GET /v1/events` sends (`serve::push::poll`). */
+const RUN_EVENTS = ['run.started', 'run.finished', 'run.awaiting_approval', 'run.died'] as const
+
 /* ── Desktop notifications ────────────────────────────────────────────────
  *
  * The opt-in only. What is worth interrupting someone for is decided in
@@ -168,13 +171,17 @@ export function EventsProvider({ children }: { children: React.ReactNode }) {
     // EventSource reconnects on its own; this reports the gap rather than
     // trying to manage it.
     src.onerror = () => setLink('down')
-    src.onmessage = (m: MessageEvent<string>) => {
+    const on = (m: MessageEvent<string>) => {
       const e = parse(m)
       // The functional update keeps `recent` out of this effect's dependencies,
       // so the stream is not torn down and rebuilt on every event.
       setRecent((prev) => [e, ...prev].slice(0, KEEP))
       setTick((n) => n + 1)
     }
+    // `wingman serve` names every event (`event: run.finished`), and
+    // `onmessage` only ever sees unnamed ones, so each name is listened for.
+    src.onmessage = on
+    for (const name of RUN_EVENTS) src.addEventListener(name, on as EventListener)
 
     return () => src.close()
   }, [])
