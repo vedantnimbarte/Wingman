@@ -32,7 +32,7 @@ pub struct Cli {
     )]
     pub reasoning: Option<String>,
 
-    /// Restrict this session to a named tool preset: `review` | `minimal`, or
+    /// Restrict this session to a named tool preset: `review` | `minimal` | `router`, or
     /// any name under `[tools.presets]`. Tools outside it are not registered,
     /// so their schemas are not billed — check the saving with
     /// `wingman --preset review context`.
