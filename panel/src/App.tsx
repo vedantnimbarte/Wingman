@@ -1,38 +1,41 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useDialog, useHotkey, useLeader } from './a11y'
-import { api, type BoardData, type Health, type Project } from './api'
+import { api, type BoardData, type Card, type Health, type Project, type RunStatus } from './api'
 import { Board, money, scope } from './Board'
 import { Changes } from './Changes'
 import { navigate, segments, useRoute } from './router'
-import { Runs } from './Runs'
+import { runClass, runGlyph, runLabel, Runs } from './Runs'
 import { Config } from './Config'
 import { ago, Sessions } from './Sessions'
 import { Insights } from './Insights'
 import { Output } from './output'
-import { Notifications } from './Notifications'
+import { InboxButton, NotificationCard, NotificationsProvider, useInbox } from './Notifications'
 import {
   EventsProvider,
   message,
-  notificationsAvailable,
-  notificationsOn,
-  toggleNotifications,
   useEvents,
   useProjects,
   useSession,
 } from './state'
 import { nextTheme, useTheme, type Theme } from './theme'
-import { Empty, Failed, Icon, Loading, Note, PageHead, Pill, type IconName } from './ui'
+import { Failed, Icon, Loading, Note, PageHead, Pill, type IconName } from './ui'
 
 const SECTIONS = [
-  { path: '/', label: 'Overview', icon: 'overview', key: 'o' },
-  { path: '/board', label: 'Board', icon: 'board', key: 'b' },
-  { path: '/runs', label: 'Runs', icon: 'runs', key: 'r' },
-  { path: '/sessions', label: 'Sessions', icon: 'sessions', key: 's' },
-  { path: '/changes', label: 'Changes', icon: 'changes', key: 'd' },
-  { path: '/insights', label: 'Insights', icon: 'insights', key: 'i' },
-] as const satisfies readonly { path: string; label: string; icon: IconName; key: string }[]
+  { path: '/', label: 'Overview', icon: 'overview', key: 'o', group: 'Workspace' },
+  { path: '/board', label: 'Board', icon: 'board', key: 'b', group: 'Workspace' },
+  { path: '/runs', label: 'Runs', icon: 'runs', key: 'r', group: 'Workspace' },
+  { path: '/sessions', label: 'Sessions', icon: 'sessions', key: 's', group: 'Workspace' },
+  { path: '/changes', label: 'Changes', icon: 'changes', key: 'd', group: 'Review' },
+  { path: '/insights', label: 'Insights', icon: 'insights', key: 'i', group: 'Review' },
+] as const satisfies readonly {
+  path: string
+  label: string
+  icon: IconName
+  key: string
+  group: string
+}[]
 
-const SETTINGS = { path: '/config', label: 'Config', icon: 'config', key: 'c' } as const
+const SETTINGS = { path: '/config', label: 'Settings', icon: 'config', key: 'c' } as const
 
 export function App() {
   const { session, probe } = useSession()
@@ -44,8 +47,8 @@ export function App() {
       return (
         <div className="view">
           <Failed
-            title="No answer from the daemon"
-            detail={session.detail}
+            title="Wingman isn't answering"
+            detail={`${session.detail} Start it with \`wingman serve\`, then reconnect.`}
             action={{ label: 'Reconnect', onClick: () => void probe() }}
           />
         </div>
@@ -55,11 +58,9 @@ export function App() {
     case 'ready':
       return (
         <EventsProvider>
-          <Shell health={session.health} />
-          {/* An overlay, not part of the shell layout — it is fixed to the
-              corner and must sit above every view. Inside the provider
-              because a run transition usually means a new card. */}
-          <Notifications />
+          <NotificationsProvider>
+            <Shell health={session.health} />
+          </NotificationsProvider>
         </EventsProvider>
       )
   }
@@ -69,7 +70,7 @@ export function App() {
 function Mark() {
   return (
     <span className="brand-mark" aria-hidden="true">
-      <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+      <svg width="15" height="15" viewBox="0 0 20 20" fill="currentColor">
         <path d="M10 2.5 17.5 17 10 13.2 2.5 17Z" />
       </svg>
     </span>
@@ -106,15 +107,15 @@ function SignIn({ onDone }: { onDone: () => void }) {
       <form onSubmit={submit}>
         <div className="signin-brand">
           <Mark />
-          wingman
+          Wingman
         </div>
-        <h1>Sign in to the panel</h1>
+        <h1>Sign in</h1>
         <p className="signin-sub">
-          This daemon requires a token. It is stored in a cookie this page cannot read.
+          This Wingman is protected. Enter its access token, or a pairing code from your terminal.
         </p>
 
         <div>
-          <label htmlFor="token">{pairing ? 'Pairing code' : 'API token'}</label>
+          <label htmlFor="token">{pairing ? 'Pairing code' : 'Access token'}</label>
           <input
             id="token"
             className="input"
@@ -151,19 +152,19 @@ function SignIn({ onDone }: { onDone: () => void }) {
             setError(null)
           }}
         >
-          {pairing ? 'Use the API token instead' : 'Have a pairing code?'}
+          {pairing ? 'Use an access token instead' : 'I have a pairing code'}
         </button>
 
         <p className="signin-foot">
           {pairing ? (
             <>
-              Start the daemon with <code className="figure">wingman serve --pair</code> and enter
-              the code it prints. It works once, for 10 minutes.
+              Run <code>wingman serve --pair</code> and type the code it prints. A code works once
+              and expires after 10 minutes.
             </>
           ) : (
             <>
-              Generate one with <code className="figure">wingman serve --init-token</code>. It is
-              printed exactly once.
+              Create a token with <code>wingman serve --init-token</code>. It is shown only once,
+              so copy it somewhere safe.
             </>
           )}
         </p>
@@ -178,13 +179,14 @@ function Shell({ health }: { health: Health }) {
   const path = useRoute()
   const { projects, error } = useProjects(true)
   const { theme, setTheme } = useTheme()
-  const { link } = useEvents()
+  const { link, tick } = useEvents()
   const [palette, setPalette] = useState(false)
   const [keys, setKeys] = useState(false)
   const [tight, setTight] = useState(() => window.localStorage.getItem('wingman.rail') === 'tight')
   const [selected, setSelected] = useState<string | null>(
     () => window.localStorage.getItem('wingman.project') ?? null,
   )
+  const [board, setBoard] = useState<BoardData | null>(null)
 
   const choose = useCallback((id: string) => {
     setSelected(id)
@@ -209,6 +211,19 @@ function Shell({ health }: { health: Health }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // The nav's counts come from the board, refetched on the event counter like
+  // every other screen. A failure leaves the nav without counts, nothing more.
+  useEffect(() => {
+    let alive = true
+    api
+      .board()
+      .then((b) => alive && setBoard(b))
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [tick])
+
   // `g` then a section letter, and `/` for the palette. Both are what a
   // terminal-native reader tries before reaching for the mouse, and both are
   // suppressed while typing — see `a11y.typing`.
@@ -230,14 +245,29 @@ function Shell({ health }: { health: Health }) {
   const active = projects?.find((p) => p.id === selected) ?? projects?.[0] ?? null
   const current = `/${segments(path)[0] ?? ''}`
   const section = [...SECTIONS, SETTINGS].find((s) => s.path === current)
+  const nested = segments(path)[1]
 
   // Three tabs open on three runs all said "Wingman". The section, the repo,
   // and — for a nested route — the id, because that is what tells two run tabs
   // apart in a tab strip that shows twelve characters.
   useEffect(() => {
-    const rest = segments(path)[1]
-    document.title = [rest, section?.label, active?.id, 'Wingman'].filter(Boolean).join(' · ')
-  }, [path, section, active])
+    document.title = [nested, section?.label, active?.id, 'Wingman'].filter(Boolean).join(' · ')
+  }, [nested, section, active])
+
+  const mine = board ? scope(board, active?.id ?? null) : []
+  const badges: Record<string, { count?: number; lamp?: string }> = {
+    '/board': { count: mine.filter((c) => c.column !== 'done').length || undefined },
+    '/runs': (() => {
+      const live = mine.filter((c) => c.rollup && LIVE.has(c.rollup.status))
+      const waiting = live.some((c) => c.rollup?.status === 'awaiting_approval')
+      return {
+        count: live.length || undefined,
+        lamp: waiting ? 'is-asserted' : live.length ? 'is-proven' : undefined,
+      }
+    })(),
+  }
+
+  const groups = [...new Set(SECTIONS.map((s) => s.group))]
 
   return (
     <div className={`shell${tight ? ' shell-tight' : ''}`}>
@@ -247,82 +277,115 @@ function Shell({ health }: { health: Health }) {
         Skip to content
       </a>
 
-      <div className="shell-brand">
-        <Mark />
-        {!tight && 'wingman'}
-      </div>
-
-      <header className="shell-header">
-        <button type="button" className="omni" onClick={() => setPalette(true)}>
-          <Icon name="search" size={14} />
-          <span className="omni-label">Search sections, runs, cards and sessions</span>
-          <kbd className="kbd">⌘K</kbd>
-        </button>
-
-        <div className="header-end">
-          <ProjectPicker
-            projects={projects}
-            error={error}
-            selected={active?.id ?? null}
-            onChoose={choose}
-          />
-          <LinkState />
-          <NotifyToggle />
-          <ThemeToggle theme={theme} onChange={setTheme} />
+      <aside className="rail">
+        <div className="rail-brand">
+          <Mark />
+          {!tight && 'Wingman'}
+          <button
+            type="button"
+            className="button button-quiet button-sm button-icon rail-toggle"
+            onClick={() => collapse(!tight)}
+            title={tight ? 'Expand the sidebar' : 'Collapse the sidebar'}
+            aria-label={tight ? 'Expand the sidebar' : 'Collapse the sidebar'}
+          >
+            <Icon name={tight ? 'expand' : 'collapse'} size={14} />
+          </button>
         </div>
-      </header>
 
-      <nav className="shell-nav" aria-label="Sections">
-        {SECTIONS.map((s) => (
-          <NavItem key={s.path} item={s} current={current} tight={tight} />
-        ))}
+        <ProjectPicker
+          projects={projects}
+          error={error}
+          selected={active}
+          onChoose={choose}
+        />
+
+        <nav className="rail-nav" aria-label="Sections">
+          {groups.map((g) => (
+            <div key={g} className="rail-nav">
+              <span className="rail-group">{g}</span>
+              {SECTIONS.filter((s) => s.group === g).map((s) => (
+                <NavItem
+                  key={s.path}
+                  item={s}
+                  current={current}
+                  tight={tight}
+                  badge={badges[s.path]}
+                />
+              ))}
+            </div>
+          ))}
+        </nav>
 
         <span className="nav-spacer" />
 
-        <div className="nav-foot">
+        <div className="rail-foot">
           <NavItem item={SETTINGS} current={current} tight={tight} />
-          <button
-            type="button"
-            className="nav-item"
-            onClick={() => collapse(!tight)}
-            title={tight ? 'Expand the sidebar' : 'Collapse the sidebar'}
-          >
-            <Icon name={tight ? 'expand' : 'collapse'} />
-            <span className="nav-label">Collapse</span>
-          </button>
+          <LinkState version={health.version} />
         </div>
-      </nav>
+      </aside>
 
-      <main className="shell-main" id="main" tabIndex={-1}>
-        {/* The stream is the only thing every screen depends on and the only
-            thing that can fail without any screen saying so. A pill in the
-            header reports it; this says what it means for what is on screen. */}
-        {link === 'down' && (
-          <div className="banner" role="status">
-            <span className="dot is-failed" aria-hidden="true" />
-            <span>
-              The event stream dropped. Everything below is as it was when the connection went —
-              the browser is retrying.
-            </span>
-            <button
-              type="button"
-              className="button button-sm"
-              onClick={() => window.location.reload()}
-            >
-              Reload
+      <div className="canvas">
+        <header className="topbar">
+          <nav className="crumbs truncate" aria-label="Breadcrumb">
+            {nested ? (
+              <>
+                <button type="button" onClick={() => navigate(current)}>
+                  {section?.label ?? 'Wingman'}
+                </button>
+                <span className="crumb-sep" aria-hidden="true">
+                  /
+                </span>
+                <span className="truncate mono" aria-current="page">
+                  {nested}
+                </span>
+              </>
+            ) : (
+              <span aria-current="page">{section?.label ?? 'Not found'}</span>
+            )}
+          </nav>
+
+          <div className="header-end">
+            <button type="button" className="omni" onClick={() => setPalette(true)}>
+              <Icon name="search" size={14} />
+              <span className="omni-label">Search or jump to…</span>
+              <kbd className="kbd">⌘K</kbd>
             </button>
+            <InboxButton />
+            <ThemeToggle theme={theme} onChange={setTheme} />
           </div>
-        )}
+        </header>
 
-        {/* One polite region for the whole app: route changes are silent
-            otherwise, because nothing about a client-side navigation is a page
-            load as far as a screen reader is concerned. */}
-        <p className="sr-only" aria-live="polite">
-          {section ? `${section.label}${active ? `, ${active.id}` : ''}` : 'Page not found'}
-        </p>
+        <main className="shell-main" id="main" tabIndex={-1}>
+          {/* The stream is the only thing every screen depends on and the only
+              thing that can fail without any screen saying so. The rail reports
+              it; this says what it means for what is on screen. */}
+          {link === 'down' && (
+            <div className="banner" role="status">
+              <span className="dot is-failed" aria-hidden="true" />
+              <span>
+                Lost the live connection to Wingman. What you see may be out of date — your
+                browser is reconnecting.
+              </span>
+              <button
+                type="button"
+                className="button button-sm"
+                onClick={() => window.location.reload()}
+              >
+                Reload
+              </button>
+            </div>
+          )}
 
-        <Section path={path} health={health} project={active} />
-      </main>
+          {/* One polite region for the whole app: route changes are silent
+              otherwise, because nothing about a client-side navigation is a
+              page load as far as a screen reader is concerned. */}
+          <p className="sr-only" aria-live="polite">
+            {section ? `${section.label}${active ? `, ${active.id}` : ''}` : 'Page not found'}
+          </p>
+
+          <Section path={path} health={health} project={active} board={board} />
+        </main>
+      </div>
 
       {palette && (
         <Palette
@@ -341,14 +404,19 @@ function Shell({ health }: { health: Health }) {
   )
 }
 
+/** Run states that are still going — or waiting on someone. */
+const LIVE = new Set(['planning', 'awaiting_approval', 'running', 'merging'])
+
 function NavItem({
   item,
   current,
   tight,
+  badge,
 }: {
   item: { path: string; label: string; icon: IconName }
   current: string
   tight: boolean
+  badge?: { count?: number; lamp?: string }
 }) {
   return (
     <button
@@ -362,53 +430,33 @@ function NavItem({
     >
       <Icon name={item.icon} />
       <span className="nav-label">{item.label}</span>
+      {badge?.lamp && <span className={`lamp nav-badge-lamp ${badge.lamp}`} aria-hidden="true" />}
+      {badge?.count !== undefined && (
+        <span className="count" aria-label={`${badge.count} open`}>
+          {badge.count}
+        </span>
+      )}
     </button>
   )
 }
 
 function ThemeToggle({ theme, onChange }: { theme: Theme; onChange: (t: Theme) => void }) {
   const next = nextTheme(theme)
+  const label = `Appearance: ${theme === 'system' ? 'match system' : theme}. Switch to ${next === 'system' ? 'match system' : next}.`
   return (
     <button
       type="button"
       className="button button-quiet button-icon"
       onClick={() => onChange(next)}
-      title={`Theme: ${theme}. Switch to ${next}.`}
-      aria-label={`Theme: ${theme}. Switch to ${next}.`}
+      title={label}
+      aria-label={label}
     >
-      <Icon name={theme === 'dark' ? 'moon' : 'sun'} />
+      <Icon name={theme === 'dark' ? 'moon' : theme === 'light' ? 'sun' : 'system'} />
     </button>
   )
 }
 
-/**
- * Desktop notifications for a run that has stopped and is waiting.
- *
- * Hidden entirely where the browser has already refused permission — a control
- * whose only outcome is "no" is worse than no control.
- */
-function NotifyToggle() {
-  const [on, setOn] = useState(notificationsOn)
-  if (!notificationsAvailable() && !on) return null
-
-  return (
-    <button
-      type="button"
-      className="button button-quiet button-icon"
-      aria-pressed={on}
-      onClick={() => void toggleNotifications().then(setOn)}
-      title={
-        on
-          ? 'Notifications on: a run waiting for approval will interrupt you. Click to stop.'
-          : 'Notify me when a run stops for plan approval or fails'
-      }
-      aria-label={on ? 'Turn notifications off' : 'Turn notifications on'}
-    >
-      <Icon name={on ? 'bell' : 'bell-off'} />
-    </button>
-  )
-}
-
+/** The repo every per-repo screen reads, as the rail's first instrument. */
 function ProjectPicker({
   projects,
   error,
@@ -417,51 +465,70 @@ function ProjectPicker({
 }: {
   projects: Project[] | null
   error: string | null
-  selected: string | null
+  selected: Project | null
   onChoose: (id: string) => void
 }) {
-  if (error) return <span className="is-failed dot figure">{error}</span>
-  if (!projects) return <span className="faint figure">loading projects…</span>
-  if (projects.length === 0) {
-    return (
-      <span className="faint figure" title="Add one under [[serve.projects]] in the global config">
-        no projects
-      </span>
-    )
-  }
+  if (error) return <p className="is-failed dot figure">{error}</p>
+
+  const name = selected?.id ?? (projects ? 'No repositories' : 'Loading…')
+  const sub = selected
+    ? (selected.branch ?? 'detached HEAD')
+    : projects
+      ? 'Add one in Settings'
+      : ''
 
   return (
-    <select
-      className="select"
-      aria-label="Project"
-      value={selected ?? ''}
-      onChange={(e) => onChoose(e.target.value)}
-    >
-      {projects.map((p) => (
-        <option key={p.id} value={p.id}>
-          {p.id}
-        </option>
-      ))}
-    </select>
+    <div className="workspace" title={selected?.root}>
+      <span className="workspace-icon" aria-hidden="true">
+        {name.slice(0, 1)}
+      </span>
+      <span className="workspace-text">
+        <span className="workspace-name truncate">{name}</span>
+        {sub && (
+          <span className="workspace-sub truncate">
+            {selected ? <Icon name="branch" size={11} /> : null} {sub}
+          </span>
+        )}
+      </span>
+      {projects && projects.length > 1 && (
+        <>
+          <span className="workspace-chevron" aria-hidden="true">
+            <Icon name="updown" size={14} />
+          </span>
+          <select
+            aria-label="Repository"
+            value={selected?.id ?? ''}
+            onChange={(e) => onChoose(e.target.value)}
+          >
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.id}
+              </option>
+            ))}
+          </select>
+        </>
+      )}
+    </div>
   )
 }
 
-/** Live-stream state. The one place the shell reports on itself. */
-function LinkState() {
+/** Live-connection state. The one place the shell reports on itself. */
+function LinkState({ version }: { version: string }) {
   const { link } = useEvents()
-  const [cls, glyph, text] =
+  const [cls, text] =
     link === 'live'
-      ? ['is-proven', '●', 'live']
+      ? ['is-proven', 'Connected']
       : link === 'connecting'
-        ? ['is-asserted', '◐', 'connecting']
-        : ['is-failed', '✕', 'reconnecting']
+        ? ['is-asserted', 'Connecting…']
+        : ['is-failed', 'Reconnecting…']
 
   return (
-    <span title="Event stream from /v1/events">
-      <Pill status={cls} glyph={glyph}>
-        {text}
-      </Pill>
-    </span>
+    <div className="rail-status" title={`Live updates: ${text.toLowerCase()} · Wingman ${version}`}>
+      <span className={`lamp ${cls}`} aria-hidden="true" />
+      <span className="rail-status-text">
+        {text} <span className="faint">· v{version}</span>
+      </span>
+    </div>
   )
 }
 
@@ -749,10 +816,12 @@ function Section({
   path,
   health,
   project,
+  board,
 }: {
   path: string
   health: Health
   project: Project | null
+  board: BoardData | null
 }) {
   // Matched on the first segment so nested routes like `/runs/{id}` reach
   // their section rather than falling through to "No such page".
@@ -760,7 +829,7 @@ function Section({
 
   switch (`/${head ?? ''}`) {
     case '/':
-      return <Overview health={health} project={project} />
+      return <Overview health={health} project={project} board={board} />
     case '/board':
       // The board's project ids come from its own registry, which is global.
       // They coincide with `serve`'s allowlist ids in the common case because
@@ -782,8 +851,8 @@ function Section({
       return (
         <div className="view">
           <Failed
-            title="No such page"
-            detail={path}
+            title="There's no page here"
+            detail={`Nothing lives at ${path}.`}
             action={{ label: 'Go to Overview', onClick: () => navigate('/') }}
           />
         </div>
@@ -793,142 +862,347 @@ function Section({
 
 /* ── Overview ──────────────────────────────────────────────────────────── */
 
-function Overview({ health, project }: { health: Health; project: Project | null }) {
-  const { link, tick } = useEvents()
-  const [board, setBoard] = useState<BoardData | null>(null)
+/** Live runs first, then whatever needs a person, then the finished ones. */
+const RUN_ORDER: Record<RunStatus, number> = {
+  awaiting_approval: 0,
+  running: 1,
+  merging: 2,
+  planning: 3,
+  failed: 4,
+  aborted: 5,
+  done: 6,
+}
 
-  // The board is what makes this a landing page rather than a health check.
-  // It is furniture, though — a failure here leaves the tiles reading "—"
-  // rather than replacing the page with an error about a screen you are not on.
-  //
-  // Refetched on the event counter for the same reason every other screen is:
-  // a landing page that was true when the tab opened and has been wrong ever
-  // since is worse than one that says it is loading.
-  useEffect(() => {
-    let alive = true
-    api
-      .board()
-      .then((b) => alive && setBoard(b))
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [tick])
+function Overview({
+  health,
+  project,
+  board,
+}: {
+  health: Health
+  project: Project | null
+  board: BoardData | null
+}) {
+  const { link } = useEvents()
+  const { cards: inbox, busy, answer } = useInbox()
 
-  // `scope` is the board's own resolution, shared rather than reimplemented.
-  // Filtering on `project.id` directly was wrong in exactly the way Board.tsx
-  // documents: `[[serve.projects]].id` and the registry slug are different
-  // namespaces, so when they differ this page confidently reported no cards
-  // and no spend — a false zero on the first screen anyone sees.
+  // `scope` is the board's own resolution, shared rather than reimplemented:
+  // `[[serve.projects]].id` and the registry slug are different namespaces, so
+  // filtering on `project.id` directly reported a false zero whenever they
+  // differed. The board itself is the shell's copy, refetched on every event.
   const mine = board ? scope(board, project?.id ?? null) : []
   const open = mine.filter((c) => c.column !== 'done')
   const spend = mine.reduce((sum, c) => sum + (c.rollup?.usd ?? 0), 0)
-  const running = mine.filter((c) => c.rollup?.status === 'running').length
+  const withRun = mine
+    .filter((c): c is Card & { rollup: NonNullable<Card['rollup']> } => c.rollup !== null)
+    .sort((a, b) => RUN_ORDER[a.rollup.status] - RUN_ORDER[b.rollup.status])
+  const live = withRun.filter((c) => LIVE.has(c.rollup.status))
+  const waiting = live.filter((c) => c.rollup.status === 'awaiting_approval')
+  const working = live.flatMap((c) =>
+    c.rollup.subrows.filter((s) => s.status === 'in_progress').map((s) => ({ s, c })),
+  )
+  const liveDone = live.reduce((n, c) => n + c.rollup.done, 0)
+  const liveTotal = live.reduce((n, c) => n + c.rollup.total, 0)
+  const liveSpend = live.reduce((n, c) => n + c.rollup.usd, 0)
+  const needsYou = inbox.length
+
+  const runsLine = live.length
+    ? `${live.length} run${live.length === 1 ? ' is' : 's are'} in progress`
+    : 'Nothing is running'
+  const needsLine = needsYou
+    ? ` and ${needsYou} item${needsYou === 1 ? ' is' : 's are'} waiting on you`
+    : ''
+  const summary = !project
+    ? 'Pick a repository in the sidebar to see what Wingman is doing in it.'
+    : !board
+      ? 'Reading the board…'
+      : `${runsLine}${needsLine}. ${money(spend)} spent so far.`
 
   return (
     <div className="view">
       <PageHead
-        eyebrow="Overview"
-        title={project ? project.id : 'Wingman'}
-        intro={
-          project
-            ? 'What this repo has running, what it has spent, and whether the daemon behind it is answering.'
-            : 'No project is selected. Add one under [[serve.projects]] in the global config, then pick it in the header.'
-        }
+        title={project ? project.id : 'Welcome to Wingman'}
+        intro={summary}
         actions={
           <>
-            <button type="button" className="button" onClick={() => navigate('/runs')}>
-              View runs
+            <button type="button" className="button" onClick={() => navigate('/sessions')}>
+              <Icon name="sessions" size={15} />
+              New chat
             </button>
             <button
               type="button"
               className="button button-primary"
               onClick={() => navigate('/board')}
             >
-              Open board
+              <Icon name="plus" size={15} />
+              Add a card
             </button>
           </>
         }
       />
 
+      <section className="deck" aria-label="Now running">
+        <div className="deck-main">
+          <span className={`deck-badge${working.length ? ' is-live' : ''}`}>
+            <span className={`lamp ${working.length ? 'is-asserted' : ''}`} aria-hidden="true" />
+            {working.length ? 'Live' : 'Idle'}
+          </span>
+          <h2>
+            {working.length
+              ? `${working.length} agent${working.length === 1 ? ' is' : 's are'} working on ${live.length} run${live.length === 1 ? '' : 's'}`
+              : waiting.length
+                ? `${waiting.length} plan${waiting.length === 1 ? ' is' : 's are'} waiting for your approval`
+                : 'No agents are working right now'}
+          </h2>
+          {working.length > 0 ? (
+            <ul className="deck-agents">
+              {working.slice(0, 3).map(({ s, c }) => (
+                <li key={`${c.id}-${s.task_id}`}>
+                  <button
+                    type="button"
+                    onClick={() => c.run_id && navigate(`/runs/${c.run_id}`)}
+                  >
+                    <span className="deck-callsign">{s.agent_name ?? s.role}</span>
+                    <span className="deck-task truncate">{s.title}</span>
+                    {s.current_tool && (
+                      <span className="deck-tool truncate mono">{s.current_tool}</span>
+                    )}
+                  </button>
+                </li>
+              ))}
+              {working.length > 3 && (
+                <li className="deck-more">and {working.length - 3} more</li>
+              )}
+            </ul>
+          ) : (
+            <p className="deck-empty">
+              {waiting.length
+                ? 'Review the plan and approve it to let the agents start.'
+                : 'Add a card to the board and press Start — the agents that pick it up appear here as they work.'}
+            </p>
+          )}
+        </div>
+        <dl className="deck-stats">
+          <div>
+            <dt>Tasks done</dt>
+            <dd>
+              {liveDone}
+              <span>/{liveTotal}</span>
+            </dd>
+            <div className="deck-meter" aria-hidden="true">
+              <span style={{ width: `${liveTotal ? (liveDone / liveTotal) * 100 : 0}%` }} />
+            </div>
+          </div>
+          <div>
+            <dt>Waiting on you</dt>
+            <dd>{needsYou}</dd>
+          </div>
+          <div>
+            <dt>Spent on live runs</dt>
+            <dd>{money(liveSpend)}</dd>
+          </div>
+        </dl>
+      </section>
+
       <div className="tiles">
-        <div className="tile">
-          <span className="eyebrow">Open cards</span>
-          <span className="tile-value">{board ? open.length : '—'}</span>
-          <span className="tile-note">
-            {board ? `${mine.length} in total` : 'reading the board…'}
-          </span>
-        </div>
-        <div className="tile">
-          <span className="eyebrow">Spend</span>
-          <span className="tile-value">{board ? money(spend) : '—'}</span>
-          <span className="tile-note">across every run filed to a card</span>
-        </div>
-        <div className="tile">
-          <span className="eyebrow">Running now</span>
-          <span className="tile-value">{board ? running : '—'}</span>
-          <span className="tile-note">
-            {running === 1 ? '1 card has a live run' : 'cards with a live run'}
-          </span>
-        </div>
-        <div className="tile">
-          <span className="eyebrow">Semantic index</span>
-          <span className="tile-value">{project?.indexd_running ? 'On' : 'Off'}</span>
-          {/* Whether indexd is *running* is not the question anyone has. How
-              old the index is, is: a live daemon over a week-old index answers
-              questions about code that no longer exists. */}
-          <span className="tile-note">{indexNote(project)}</span>
-        </div>
+        <Tile
+          icon="board"
+          label="Open cards"
+          value={board ? String(open.length) : '—'}
+          note={board ? `${mine.length - open.length} of ${mine.length} finished` : 'Reading the board…'}
+          fill={mine.length ? (mine.length - open.length) / mine.length : 0}
+        />
+        <Tile
+          icon="runs"
+          label="Runs in progress"
+          value={board ? String(live.length) : '—'}
+          note={
+            waiting.length
+              ? `${waiting.length} waiting for approval`
+              : `${withRun.length} run${withRun.length === 1 ? '' : 's'} in total`
+          }
+        />
+        <Tile
+          icon="coin"
+          label="Spend"
+          value={board ? money(spend) : '—'}
+          note="Across every run on the board"
+        />
+        <Tile
+          icon="index"
+          label="Code search"
+          value={indexValue(project)}
+          note={indexNote(project)}
+          tone={indexTone(project)}
+        />
       </div>
 
-      <h2 className="section-head">Daemon</h2>
-      <div className="rows">
-        <Row label="Status">
-          <Pill status="is-proven" glyph="●">
-            reachable
-          </Pill>
-        </Row>
-        <Row label="Version">
-          <span className="figure">{health.version}</span>
-        </Row>
-        <Row label="Uptime">
-          <span className="figure">{formatUptime(health.uptime_secs)}</span>
-        </Row>
-        <Row label="Authentication" wrap>
-          <span className="figure">
-            {health.auth_required ? 'token, in an HttpOnly cookie' : 'off (loopback)'}
-          </span>
-        </Row>
-        <Row label="Event stream">
-          <span className="figure">{link}</span>
-        </Row>
+      <div className="overview-grid">
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Needs you</h2>
+              <p className="panel-sub">Approvals, questions from agents and failures</p>
+            </div>
+            {needsYou > 0 && <span className="count">{needsYou}</span>}
+          </div>
+          {inbox.length === 0 ? (
+            <p className="panel-empty">Nothing needs you right now.</p>
+          ) : (
+            <div className="attention">
+              {inbox.slice(0, 4).map((n) => (
+                <NotificationCard key={n.id} n={n} busy={busy === n.id} onAnswer={answer} />
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="panel">
+          <div className="panel-head">
+            <div>
+              <h2>Runs</h2>
+              <p className="panel-sub">Work Wingman has planned and carried out</p>
+            </div>
+            <button type="button" className="button button-sm" onClick={() => navigate('/runs')}>
+              View all
+            </button>
+          </div>
+          {withRun.length === 0 ? (
+            <p className="panel-empty">
+              No runs yet. Press Start on a board card to begin one.
+            </p>
+          ) : (
+            <ul className="run-mini">
+              {withRun.slice(0, 6).map((c) => (
+                <li key={c.id}>
+                  <button
+                    type="button"
+                    onClick={() => c.run_id && navigate(`/runs/${c.run_id}`)}
+                  >
+                    <span className="run-mini-title truncate">{c.title}</span>
+                    <Pill status={runClass(c.rollup.status)} glyph={runGlyph(c.rollup.status)}>
+                      {runLabel(c.rollup.status)}
+                    </Pill>
+                    <span className="run-mini-meta">
+                      {c.rollup.total ? `${c.rollup.done}/${c.rollup.total} tasks` : 'No plan yet'}
+                      <span>{money(c.rollup.usd)}</span>
+                    </span>
+                    <span className={`meter ${runClass(c.rollup.status)}`} aria-hidden="true">
+                      <span
+                        style={
+                          {
+                            '--fill': `${c.rollup.total ? (c.rollup.done / c.rollup.total) * 100 : 0}%`,
+                          } as React.CSSProperties
+                        }
+                      />
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
       </div>
 
-      {project ? (
-        <>
-          <h2 className="section-head">Repository</h2>
+      <div className="overview-grid">
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Wingman</h2>
+            <Pill status="is-proven" glyph="●">
+              Running
+            </Pill>
+          </div>
           <div className="rows">
-            <Row label="Branch" wrap>
-              <span className="figure">{project.branch ?? '—'}</span>
+            <Row label="Version">
+              <span className="figure">{health.version}</span>
             </Row>
-            <Row label="Root" wrap>
-              <span className="figure">{project.root}</span>
+            <Row label="Up for">
+              <span className="figure">{formatUptime(health.uptime_secs)}</span>
+            </Row>
+            <Row label="Sign-in">
+              <span className="figure">
+                {health.auth_required ? 'Token required' : 'Not required on this machine'}
+              </span>
+            </Row>
+            <Row label="Live updates">
+              <span className="figure">
+                {link === 'live' ? 'Connected' : link === 'connecting' ? 'Connecting…' : 'Reconnecting…'}
+              </span>
             </Row>
           </div>
+        </section>
 
-          <Maintenance project={project.id} />
-        </>
-      ) : (
-        <>
-          <h2 className="section-head">Repository</h2>
-          <Empty title="No repository is in scope">
-            Every screen except Config and the board is per-repo. Add one under{' '}
-            <code>[[serve.projects]]</code> in the global config and restart the daemon.
-          </Empty>
-        </>
+        <section className="panel">
+          <div className="panel-head">
+            <h2>Repository</h2>
+          </div>
+          {project ? (
+            <div className="rows">
+              <Row label="Branch" wrap>
+                <span className="figure mono">{project.branch ?? 'Detached HEAD'}</span>
+              </Row>
+              <Row label="Location" wrap>
+                <span className="figure mono">{project.root}</span>
+              </Row>
+            </div>
+          ) : (
+            <p className="panel-empty">
+              No repository is set up yet. Add one under <code>[[serve.projects]]</code> in your
+              Wingman config, then restart <code>wingman serve</code>.
+            </p>
+          )}
+        </section>
+      </div>
+
+      {project && <Maintenance project={project.id} />}
+    </div>
+  )
+}
+
+function Tile({
+  icon,
+  label,
+  value,
+  note,
+  fill,
+  tone,
+}: {
+  icon: IconName
+  label: string
+  value: string
+  note: string
+  fill?: number
+  tone?: string
+}) {
+  return (
+    <div className="tile">
+      <span className="tile-top">
+        {label}
+        <span className="tile-icon" aria-hidden="true">
+          <Icon name={icon} size={15} />
+        </span>
+      </span>
+      <span className={`tile-value${tone ? ` ${tone}` : ''}`}>{value}</span>
+      <span className="tile-note">{note}</span>
+      {fill !== undefined && (
+        <span className="meter" aria-hidden="true">
+          <span style={{ '--fill': `${Math.round(fill * 100)}%` } as React.CSSProperties} />
+        </span>
       )}
     </div>
   )
+}
+
+function indexValue(project: Project | null): string {
+  if (!project) return '—'
+  if (project.index_age_secs == null) return 'Not built'
+  if (!project.indexd_running) return 'Paused'
+  return project.index_age_secs > 86_400 ? 'Stale' : 'Up to date'
+}
+
+function indexTone(project: Project | null): string | undefined {
+  if (!project || project.index_age_secs == null) return 'muted'
+  if (!project.indexd_running || project.index_age_secs > 86_400) return 'is-asserted'
+  return undefined
 }
 
 /**
@@ -939,12 +1213,12 @@ function Overview({ health, project }: { health: Health; project: Project | null
  * renders as "210h 54m 57s". Nobody counts in hours past the second day.
  */
 function indexNote(project: Project | null): string {
-  if (!project) return 'no project selected'
-  if (project.index_age_secs == null) return 'this repo has never been indexed'
+  if (!project) return 'No repository selected'
+  if (project.index_age_secs == null) return 'Rebuild it below to enable code search'
   // `ago` works from a Unix timestamp; an age is the same thing measured from
   // now, so it is turned back into one rather than growing a second formatter.
   const age = ago(Math.floor(Date.now() / 1000) - project.index_age_secs)
-  return project.indexd_running ? `serving; indexed ${age}` : `not running; indexed ${age}`
+  return project.indexd_running ? `Updated ${age}` : `Not watching for changes · built ${age}`
 }
 
 /* ── Maintenance ───────────────────────────────────────────────────────── */
@@ -963,26 +1237,51 @@ function indexNote(project: Project | null): string {
  * that silently reverted the last edit would be the most dangerous control in
  * the panel.
  */
-const ACTIONS: { tail: string; label: string; about: string; confirm?: string }[] = [
+const ACTIONS: {
+  tail: string
+  label: string
+  about: string
+  icon: IconName
+  confirm?: string
+}[] = [
   {
     tail: 'checkpoints',
-    label: 'Checkpoint',
-    about: 'stash the working tree as a recoverable point',
+    label: 'Save a checkpoint',
+    about: 'Snapshot the working tree so you can restore it later.',
+    icon: 'check',
   },
   {
     tail: 'rewind',
-    label: 'Rewind timeline',
-    about: 'print the mutating edits that could be reverted — reverts nothing',
+    label: 'Show restore points',
+    about: 'List the edits that could be undone. Changes nothing.',
+    icon: 'undo',
   },
-  { tail: 'index/reindex', label: 'Reindex', about: 'rebuild the semantic index' },
-  { tail: 'memory/sync', label: 'Sync memory', about: 'rebuild MEMORY.md from the memory files' },
+  {
+    tail: 'index/reindex',
+    label: 'Rebuild code search',
+    about: 'Re-read the repository so semantic search is current.',
+    icon: 'index',
+  },
+  {
+    tail: 'memory/sync',
+    label: 'Refresh memory',
+    about: 'Rebuild MEMORY.md from the memory notes.',
+    icon: 'file',
+  },
   {
     tail: 'trust',
-    label: 'Trust this config',
-    about: "accept the repo's .wingman/config.toml as it stands",
-    confirm: "Trust this repo's config as it currently stands?",
+    label: 'Trust repo settings',
+    about: "Allow the hooks and tools in this repo's .wingman/config.toml to run.",
+    icon: 'check',
+    confirm:
+      "Trust this repository's .wingman/config.toml as it is now? Its hooks and tools will be allowed to run.",
   },
-  { tail: 'schedule/run', label: 'Run schedule', about: 'run any scheduled prompts now due' },
+  {
+    tail: 'schedule/run',
+    label: 'Run scheduled prompts',
+    about: 'Run any scheduled prompts that are due now.',
+    icon: 'clock',
+  },
 ]
 
 function Maintenance({ project }: { project: string }) {
@@ -1005,18 +1304,25 @@ function Maintenance({ project }: { project: string }) {
   }
 
   return (
-    <>
-      <h2 className="section-head">Maintenance</h2>
-      <p className="section-intro">
-        The same subcommands a terminal runs, in this repo. Each prints what it did — nothing here
-        is applied optimistically.
-      </p>
-      <div className="rows">
+    <section className="panel maintenance">
+      <div className="panel-head">
+        <div>
+          <h2>Maintenance</h2>
+          <p className="panel-sub">
+            The same commands you would run in a terminal, for this repository. Each one reports
+            what it did.
+          </p>
+        </div>
+      </div>
+      <div className="tool-grid">
         {ACTIONS.map((a) => (
-          <div key={a.tail} className="row">
-            <span className="task-meta-block">
-              <span>{a.label}</span>
-              <span className="muted">{a.about}</span>
+          <div key={a.tail} className="tool-card">
+            <span className="tile-icon" aria-hidden="true">
+              <Icon name={a.icon} size={15} />
+            </span>
+            <span className="tool-text">
+              <span className="tool-name">{a.label}</span>
+              <span className="tool-about">{a.about}</span>
             </span>
             <button
               type="button"
@@ -1036,12 +1342,14 @@ function Maintenance({ project }: { project: string }) {
         </Note>
       )}
       {result && (
-        <>
-          <h3 className="section-head figure">{result.tail}</h3>
+        <div className="tool-result">
+          <h3 className="figure">
+            {ACTIONS.find((a) => a.tail === result.tail)?.label ?? result.tail}
+          </h3>
           <Output value={result.value} />
-        </>
+        </div>
       )}
-    </>
+    </section>
   )
 }
 

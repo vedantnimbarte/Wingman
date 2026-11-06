@@ -11,6 +11,7 @@ import {
 } from './api'
 import { navigate } from './router'
 import { message, useEvents } from './state'
+import { runClass, runGlyph, runLabel } from './Runs'
 import { Empty, Failed, Icon, Loading, Note, PageHead, Pill } from './ui'
 
 /**
@@ -88,20 +89,19 @@ export function Board({ project }: { project: string | null }) {
   return (
     <div className="view view-wide">
       <PageHead
-        eyebrow="Board"
-        title={cards.length === 1 ? '1 card' : `${cards.length} cards`}
+        title="Board"
         intro={
           known
-            ? `Cards filed against ${known.name}. A card is durable — it outlives the runs that execute it.`
-            : 'Every card the registry knows about. Pick a project in the header to scope this to one repo.'
+            ? `Each card is a goal for ${known.name}. Start one and Wingman plans the work, runs it, and moves the card along as it goes.`
+            : 'Every card Wingman knows about, across all repositories. Pick one in the sidebar to focus on it.'
         }
         actions={
           <>
             {/* The ledger's top rung sums what is *shown*, not what exists —
                 a filtered board whose total still counted hidden cards would
                 be the one number on the screen that cannot be checked. */}
-            <span className="figure muted" title="Spend across every card shown">
-              {money(total(cards))}
+            <span className="board-total" title="Spend across every card shown">
+              {cards.length} {cards.length === 1 ? 'card' : 'cards'} · {money(total(cards))}
             </span>
             <button
               type="button"
@@ -109,6 +109,7 @@ export function Board({ project }: { project: string | null }) {
               onClick={() => setAdding(true)}
               disabled={!target}
             >
+              <Icon name="plus" size={15} />
               Add card
             </button>
           </>
@@ -155,8 +156,9 @@ export function Board({ project }: { project: string | null }) {
             return (
               <section key={col.id} className="column" aria-label={col.title}>
                 <header className="column-head">
-                  <span className="eyebrow">{col.title}</span>
-                  <span className="column-count">{inCol.length}</span>
+                  <span className={`lamp ${columnLamp(col.id)}`} aria-hidden="true" />
+                  <span className="column-title">{col.title}</span>
+                  <span className="count">{inCol.length}</span>
                   {/* The column's rung on the ledger: the cards below sum to
                       this, and it sums into the figure in the page head. */}
                   <span className="figure muted column-usd">{money(total(inCol))}</span>
@@ -256,12 +258,33 @@ function Filters({
         <input
           className="input"
           type="search"
-          placeholder="Filter cards"
+          placeholder="Search cards"
           aria-label="Filter cards by title, goal or label"
           value={filter.q}
           onChange={(e) => onChange({ ...filter, q: e.target.value })}
         />
       </label>
+
+      <button
+        type="button"
+        className="chip"
+        aria-pressed={filter.live}
+        onClick={() => onChange({ ...filter, live: !filter.live })}
+      >
+        Running now
+      </button>
+
+      {/* Archived cards come from the server, not from a client-side flag:
+          `board()` returns live cards only, so hiding them here would have
+          meant they were never fetched and the toggle would do nothing. */}
+      <button
+        type="button"
+        className="chip"
+        aria-pressed={filter.archived}
+        onClick={() => onChange({ ...filter, archived: !filter.archived })}
+      >
+        Show archived
+      </button>
 
       {labels.length > 0 && (
         <select
@@ -270,7 +293,7 @@ function Filters({
           value={filter.label ?? ''}
           onChange={(e) => onChange({ ...filter, label: e.target.value || null })}
         >
-          <option value="">every label</option>
+          <option value="">All labels</option>
           {labels.map((l) => (
             <option key={l} value={l}>
               {l}
@@ -279,49 +302,42 @@ function Filters({
         </select>
       )}
 
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={filter.live}
-          onChange={(e) => onChange({ ...filter, live: e.target.checked })}
-        />
-        running only
-      </label>
-
-      {/* Archived cards come from the server, not from a client-side flag:
-          `board()` returns live cards only, so hiding them here would have
-          meant they were never fetched and the toggle would do nothing. */}
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={filter.archived}
-          onChange={(e) => onChange({ ...filter, archived: e.target.checked })}
-        />
-        include archived
-      </label>
-
       {shown !== of && (
         <span className="faint figure">
-          {shown} of {of}
+          Showing {shown} of {of}
         </span>
       )}
     </div>
   )
 }
 
+/** A column's lamp: the status its cards share, or none for the backlog. */
+function columnLamp(id: string): string {
+  switch (id) {
+    case 'planned':
+    case 'in-progress':
+    case 'review':
+      return 'is-asserted'
+    case 'done':
+      return 'is-proven'
+    default:
+      return ''
+  }
+}
+
 /** An empty column means something different in each column. */
 function emptyColumn(id: string): string {
   switch (id) {
     case 'backlog':
-      return 'Nothing filed'
+      return 'Ideas and goals you have not started yet'
     case 'planned':
-      return 'Nothing planned'
+      return 'Cards being planned or waiting for your approval'
     case 'in-progress':
-      return 'Nothing running'
+      return 'Cards whose agents are working'
     case 'review':
-      return 'Nothing waiting on you'
+      return 'Finished work being merged'
     case 'done':
-      return 'Nothing finished yet'
+      return 'Completed and stopped cards'
     default:
       return 'Nothing here'
   }
@@ -330,16 +346,17 @@ function emptyColumn(id: string): string {
 function NoCards({ hasProject, onAdd }: { hasProject: boolean; onAdd: () => void }) {
   if (!hasProject) {
     return (
-      <Empty title="No registered project still exists on disk">
-        Add a repo under <code>[[serve.projects]]</code> in the global config and restart the
-        daemon, or clear the stale ones with <code>wingman board projects --forget</code>.
+      <Empty title="None of Wingman's repositories exist on disk anymore">
+        Add a repository under <code>[[serve.projects]]</code> in your Wingman config and restart{' '}
+        <code>wingman serve</code>. To clear the old ones, run{' '}
+        <code>wingman board projects --forget</code>.
       </Empty>
     )
   }
   return (
-    <Empty title="No cards yet" action={{ label: 'Add the first card', onClick: onAdd }}>
-      A card is a goal you author; it outlives the runs that execute it. You can also file one from
-      a terminal with <code>wingman board add "…"</code>.
+    <Empty title="Your board is empty" action={{ label: 'Add your first card', onClick: onAdd }}>
+      A card is a goal you want done, like “Add dark mode to settings”. Start it and Wingman plans
+      the work and carries it out. From a terminal: <code>wingman board add "…"</code>.
     </Empty>
   )
 }
@@ -382,72 +399,76 @@ function CardTile({
     }
   }
 
+  const status = card.rollup?.status ?? null
+  const pct = card.rollup && card.rollup.total ? (card.rollup.done / card.rollup.total) * 100 : 0
+
   return (
     <article
       className={`card${card.project_missing ? ' card-missing' : ''}${card.archived ? ' card-archived' : ''}`}
     >
       <div className="card-top">
-        {rows.length > 0 ? (
-          <button
-            type="button"
-            className="card-toggle"
-            aria-expanded={expanded}
-            onClick={onToggle}
-            title={expanded ? 'Collapse tasks' : `Show ${rows.length} tasks`}
-          >
-            {expanded ? '▾' : '▸'}
-          </button>
+        {status ? (
+          <Pill status={runClass(status)} glyph={runGlyph(status)}>
+            {runLabel(status)}
+          </Pill>
         ) : (
-          <span className="card-toggle" aria-hidden="true" />
+          <span className="pill">{card.archived ? 'Archived' : 'Not started'}</span>
         )}
-        {/* The title opens the card. Everything durable about it — the goal
-            pilot is actually given, the notes, every run it has ever spawned —
-            was on the wire from the first release and had nowhere to be read. */}
-        <button type="button" className="card-title" onClick={onOpen}>
-          {card.title}
-        </button>
-        <span className="figure muted card-short">{card.short}</span>
+        <span className="card-short">{card.short}</span>
       </div>
 
-      <div className="card-meta">
-        <span className="muted">{card.project_name}</span>
-        {card.rollup && (
-          <span className="figure muted">
-            {card.rollup.done}/{card.rollup.total}
-          </span>
-        )}
-        <span className="figure card-usd">{card.rollup ? money(card.rollup.usd) : ''}</span>
-      </div>
-
-      {/* Progress as a bar rather than a second copy of "3/7". The fill is
-          muted, not green: how far along a card is is not a verdict on it. */}
-      {card.rollup && card.rollup.total > 0 && (
-        <span
-          className="meter"
-          role="img"
-          aria-label={`${card.rollup.done} of ${card.rollup.total} tasks done`}
-        >
-          <span
-            className="meter-fill"
-            style={{ width: `${(card.rollup.done / card.rollup.total) * 100}%` }}
-          />
-        </span>
-      )}
+      {/* The title opens the card. Everything durable about it — the goal
+          pilot is actually given, the notes, every run it has ever spawned —
+          was on the wire from the first release and had nowhere to be read. */}
+      <button type="button" className="card-title" onClick={onOpen}>
+        {card.title}
+      </button>
 
       {extraBadges.length > 0 && (
         <div className="badges">
           {extraBadges.map((b) => (
-            <span key={`${b.kind}:${b.text}`} className={`badge figure ${badgeClass(b.kind)}`}>
+            <span key={`${b.kind}:${b.text}`} className={`badge ${badgeClass(b.kind)}`}>
               {b.text}
             </span>
           ))}
         </div>
       )}
 
+      {card.rollup && card.rollup.total > 0 && (
+        <div className="card-progress">
+          <div className="card-progress-text">
+            <span>
+              {card.rollup.done} of {card.rollup.total} tasks
+            </span>
+            <span className="card-usd">{money(card.rollup.usd)}</span>
+          </div>
+          <span
+            className={`meter ${runClass(card.rollup.status)}`}
+            role="img"
+            aria-label={`${card.rollup.done} of ${card.rollup.total} tasks done`}
+          >
+            <span style={{ width: `${pct}%` }} />
+          </span>
+        </div>
+      )}
+
       {card.project_missing && (
         <p className="is-failed dot figure card-note">
-          project directory is missing — relocate it with <code>wingman board projects</code>
+          This repository's folder is missing. Point Wingman at its new location with{' '}
+          <code>wingman board projects</code>.
         </p>
+      )}
+
+      {rows.length > 0 && (
+        <button
+          type="button"
+          className="card-toggle"
+          aria-expanded={expanded}
+          onClick={onToggle}
+        >
+          <Icon name={expanded ? 'collapse' : 'expand'} size={13} />
+          {expanded ? 'Hide tasks' : `Show ${rows.length} tasks`}
+        </button>
       )}
 
       {expanded &&
@@ -457,10 +478,10 @@ function CardTile({
               {glyph(r.status)}
             </span>
             <span className="subrow-title">{r.title}</span>
-            <span className="muted subrow-agent">{r.agent_name ?? r.role}</span>
+            <span className="subrow-agent">{r.agent_name ?? r.role}</span>
             {r.blocked_by.length > 0 && (
-              <span className="figure is-failed" title="Held by the scheduler">
-                dep {r.blocked_by.join(' ')}
+              <span className="figure is-failed" title="Waiting for these tasks to finish first">
+                after {r.blocked_by.join(', ')}
               </span>
             )}
             <span className="figure subrow-usd">{money(r.usd)}</span>
@@ -468,25 +489,36 @@ function CardTile({
         ))}
 
       <div className="card-tools">
-        <button
-          type="button"
-          className="button button-sm"
-          disabled={busy !== null || card.project_missing || card.archived}
-          onClick={() =>
-            void act('dispatch', () => api.dispatchCard(card.id, { again: Boolean(card.run_id) }))
-          }
-          title={card.run_id ? 'Start another run for this card' : 'Start a pilot run for this card'}
-        >
-          {busy === 'dispatch' ? 'Dispatching…' : card.run_id ? 'Run again' : 'Dispatch'}
-        </button>
-        {card.run_id && (
+        {card.run_id ? (
           <button
             type="button"
-            className="button button-quiet button-sm"
+            className="button button-sm card-primary"
             onClick={() => navigate(`/runs/${card.run_id}`)}
             title="Open the run this card is executing"
           >
             Open run
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="button button-sm button-primary card-primary"
+            disabled={busy !== null || card.project_missing || card.archived}
+            onClick={() => void act('dispatch', () => api.dispatchCard(card.id, { again: false }))}
+            title="Plan this card and start working on it"
+          >
+            <Icon name="play" size={12} />
+            {busy === 'dispatch' ? 'Starting…' : 'Start'}
+          </button>
+        )}
+        {card.run_id && (
+          <button
+            type="button"
+            className="button button-quiet button-sm"
+            disabled={busy !== null || card.project_missing || card.archived}
+            onClick={() => void act('dispatch', () => api.dispatchCard(card.id, { again: true }))}
+            title="Start a fresh run for this card"
+          >
+            {busy === 'dispatch' ? 'Starting…' : 'Run again'}
           </button>
         )}
         <button

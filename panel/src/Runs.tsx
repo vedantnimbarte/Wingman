@@ -51,6 +51,7 @@ function RunList({ project }: { project: string }) {
   const [runs, setRuns] = useState<RunSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [starting, setStarting] = useState(false)
+  const [view, setView] = useState<RunView>('all')
   const { tick } = useEvents()
 
   const load = useCallback(async () => {
@@ -77,7 +78,7 @@ function RunList({ project }: { project: string }) {
     return (
       <div className="view">
         <Failed
-          title="Could not list runs"
+          title="Couldn't load runs"
           detail={error}
           action={{ label: 'Try again', onClick: () => void load() }}
         />
@@ -85,31 +86,34 @@ function RunList({ project }: { project: string }) {
     )
   if (!runs) return <Loading what="runs" />
 
+  const shown = runs.filter((r) => matchesView(r, view))
+  const counts = {
+    all: runs.length,
+    active: runs.filter((r) => matchesView(r, 'active')).length,
+    approval: runs.filter((r) => matchesView(r, 'approval')).length,
+    finished: runs.filter((r) => matchesView(r, 'finished')).length,
+  }
+
   return (
     <div className="view">
       <PageHead
-        eyebrow="Runs"
-        title={runs.length === 1 ? '1 run' : `${runs.length} runs`}
+        title="Runs"
         intro={
           <>
-            Every pilot run in this repo, newest first. Runs are read from{' '}
-            <code>.wingman/autonomous/</code> on disk, so one started from a terminal shows up here
-            and one started here shows up in <code>wingman pilot watch</code>.
+            A run is Wingman working through a goal: it plans tasks, hands them to agents, and
+            checks the result. Runs started from a terminal with <code>wingman pilot</code> show up
+            here too.
           </>
         }
         actions={
-          <>
-            <button type="button" className="button" onClick={() => navigate('/board')}>
-              Go to the board
-            </button>
-            <button
-              type="button"
-              className="button button-primary"
-              onClick={() => setStarting(true)}
-            >
-              New run
-            </button>
-          </>
+          <button
+            type="button"
+            className="button button-primary"
+            onClick={() => setStarting(true)}
+          >
+            <Icon name="plus" size={15} />
+            New run
+          </button>
         }
       />
 
@@ -124,36 +128,87 @@ function RunList({ project }: { project: string }) {
       {runs.length === 0 ? (
         <Empty
           title="No runs yet"
-          action={{ label: 'Start one', onClick: () => setStarting(true) }}
+          action={{ label: 'Start a run', onClick: () => setStarting(true) }}
         >
-          A run starts from a goal here, by dispatching a card from the board, or from a terminal
-          with <code>wingman pilot run "&hellip;"</code>.
+          Describe a goal and Wingman plans it, asks for your approval, then does the work. You can
+          also start one by pressing Start on a board card.
         </Empty>
       ) : (
-        <div className="rows">
-          {runs.map((r) => (
-            <button
-              key={r.run_id}
-              type="button"
-              className="row row-link run-row"
-              onClick={() => navigate(`/runs/${r.run_id}`)}
-            >
-              <span className="run-goal">
-                <span className="truncate">{r.goal}</span>
-                <span className="figure faint identifier">{r.run_id}</span>
-              </span>
-              <span className="figure run-progress">
-                {r.done}/{r.total}
-              </span>
-              <Pill status={runClass(r.status)} glyph={runGlyph(r.status)}>
-                {r.status.replace('_', ' ')}
-              </Pill>
-            </button>
-          ))}
-        </div>
+        <>
+          <div className="filters" role="toolbar" aria-label="Show runs">
+            {VIEWS.map((v) => (
+              <button
+                key={v.id}
+                type="button"
+                className="chip"
+                aria-pressed={view === v.id}
+                onClick={() => setView(v.id)}
+              >
+                {v.label}
+                <span className="chip-count">{counts[v.id]}</span>
+              </button>
+            ))}
+          </div>
+
+          {shown.length === 0 ? (
+            <p className="panel-empty">No runs match this view.</p>
+          ) : (
+            <div className="run-cards">
+              {shown.map((r) => (
+                <button
+                  key={r.run_id}
+                  type="button"
+                  className={`run-card${r.status === 'awaiting_approval' ? ' needs-you' : ''}`}
+                  onClick={() => navigate(`/runs/${r.run_id}`)}
+                >
+                  <span className="run-card-top">
+                    <Pill status={runClass(r.status)} glyph={runGlyph(r.status)}>
+                      {runLabel(r.status)}
+                    </Pill>
+                    <span className="run-card-id mono truncate">{r.run_id}</span>
+                  </span>
+                  <span className="run-card-goal">{r.goal}</span>
+                  <span className="run-card-progress">
+                    <span>
+                      {r.total ? `${r.done} of ${r.total} tasks done` : 'Planning the tasks…'}
+                    </span>
+                    <span className={`meter ${runClass(r.status)}`} aria-hidden="true">
+                      <span style={{ width: `${r.total ? (r.done / r.total) * 100 : 0}%` }} />
+                    </span>
+                  </span>
+                  <span className="run-card-cta">
+                    {r.status === 'awaiting_approval' ? 'Review the plan' : 'View details'}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
       )}
     </div>
   )
+}
+
+type RunView = 'all' | 'active' | 'approval' | 'finished'
+
+const VIEWS: { id: RunView; label: string }[] = [
+  { id: 'all', label: 'All' },
+  { id: 'active', label: 'In progress' },
+  { id: 'approval', label: 'Needs approval' },
+  { id: 'finished', label: 'Finished' },
+]
+
+function matchesView(r: RunSummary, view: RunView): boolean {
+  switch (view) {
+    case 'active':
+      return !r.terminal && r.status !== 'awaiting_approval'
+    case 'approval':
+      return r.status === 'awaiting_approval'
+    case 'finished':
+      return r.terminal
+    default:
+      return true
+  }
 }
 
 /**
@@ -205,7 +260,7 @@ function StartRun({
   return (
     <form className="add-card" onSubmit={submit}>
       <label>
-        <span className="eyebrow">Goal — the prompt pilot plans against</span>
+        <span className="field-label">What should Wingman do?</span>
         <textarea
           className="input config-area"
           rows={3}
@@ -218,12 +273,12 @@ function StartRun({
 
       <div className="add-row">
         <label className="add-grow">
-          <span className="eyebrow">Model (optional)</span>
+          <span className="field-label">Model (optional)</span>
           <input
             className="input"
             value={model}
             onChange={(e) => setModel(e.target.value)}
-            placeholder="whatever the config says"
+            placeholder="Uses your default model"
             spellCheck={false}
           />
         </label>
@@ -236,7 +291,7 @@ function StartRun({
             checked={planOnly}
             onChange={(e) => setPlanOnly(e.target.checked)}
           />
-          plan only — stop after planning, execute nothing
+          Only make a plan — don't start any work
         </label>
         <label className="check">
           <input
@@ -245,14 +300,14 @@ function StartRun({
             onChange={(e) => setYes(e.target.checked)}
             disabled={planOnly}
           />
-          skip the approval gate
+          Start without asking me to approve the plan
         </label>
       </div>
 
       {yes && !planOnly && (
         <Note tone="is-asserted">
-          This run will plan and then start executing without asking. It spends real money against
-          your key.
+          Wingman will plan and start working right away, without asking you first. This spends
+          real money on your API key.
         </Note>
       )}
 
@@ -288,6 +343,7 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
   const [actionError, setActionError] = useState<string | null>(null)
   const [sent, setSent] = useState<string | null>(null)
   const [log, setLog] = useState<RunLogEvent[]>([])
+  const [tab, setTab] = useState<RunTab>('plan')
 
   const load = useCallback(async () => {
     try {
@@ -378,7 +434,7 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
     return (
       <div className="view">
         <Failed
-          title="Could not load the run"
+          title="Couldn't load this run"
           detail={error}
           action={{ label: 'Back to runs', onClick: () => navigate('/runs') }}
         />
@@ -390,193 +446,267 @@ function RunDetail({ project, runId }: { project: string; runId: string }) {
   const terminal = run.status === 'done' || run.status === 'failed' || run.status === 'aborted'
   const irreversible = run.tasks.filter((t) => isIrreversible(t))
 
+  const done = run.tasks.filter((t) => t.status === 'done').length
+  const tabs: { id: RunTab; label: string; count?: number }[] = [
+    { id: 'plan', label: 'Plan', count: run.tasks.length },
+    { id: 'agents', label: 'Agents', count: run.agents.length },
+    { id: 'activity', label: 'Activity', count: log.length || undefined },
+    { id: 'log', label: 'Output' },
+  ]
+
   return (
-    <div className="view">
+    <div className="view run-view">
       <button type="button" className="button button-quiet back" onClick={() => navigate('/runs')}>
         <Icon name="collapse" size={14} />
-        Runs
+        All runs
       </button>
 
-      {/* The run id is an identifier someone will copy into a CLI command, so
-          it is not put through the eyebrow's uppercase transform — a
-          transformed id reads as real and pastes as wrong. */}
       <PageHead
-        eyebrow={
-          <>
-            <span className="figure identifier">{run.run_id}</span> ·{' '}
-            {live ? 'live' : terminal ? 'finished' : 'not streaming'}
-          </>
-        }
         title={run.goal}
+        intro={
+          <span className="run-meta">
+            <span className={`lamp ${live ? 'is-asserted' : terminal ? runClass(run.status) : ''}`} aria-hidden="true" />
+            {live ? 'Updating live' : terminal ? 'Finished' : 'Not updating'}
+            <span className="run-meta-id mono" title="Run id — use it with wingman pilot">
+              {run.run_id}
+            </span>
+          </span>
+        }
       />
 
-      <div className="rows run-summary">
-        <div className="row">
-          <span className="muted">Status</span>
-          <Pill status={runClass(run.status)} glyph={runGlyph(run.status)}>
-            {run.status.replace('_', ' ')}
-          </Pill>
+      <dl className="context-strip">
+        <div>
+          <dt>Status</dt>
+          <dd>
+            <Pill status={runClass(run.status)} glyph={runGlyph(run.status)}>
+              {runLabel(run.status)}
+            </Pill>
+          </dd>
         </div>
-        <div className="row">
-          <span className="muted">Tasks</span>
-          <span className="figure">
-            {run.tasks.filter((t) => t.status === 'done').length}/{run.tasks.length} done
-          </span>
+        <div>
+          <dt>Progress</dt>
+          <dd>
+            {done} of {run.tasks.length} tasks
+            <span className={`meter ${runClass(run.status)}`} aria-hidden="true">
+              <span style={{ width: `${run.tasks.length ? (done / run.tasks.length) * 100 : 0}%` }} />
+            </span>
+          </dd>
         </div>
-        <div className="row">
-          <span className="muted">Spend</span>
-          <span className="figure">{money(run.totals.usd)}</span>
+        <div>
+          <dt>Spent</dt>
+          <dd>{money(run.totals.usd)}</dd>
+        </div>
+        <div>
+          <dt>Branch</dt>
+          <dd className="mono truncate" title={run.integration_branch}>
+            {run.integration_branch}
+          </dd>
         </div>
         {run.subscription && (
-          <div className="row">
-            <span className="muted">Plan limit</span>
-            <span className="figure">
-              {Math.round(run.subscription.utilization * 100)}% used
-              {run.subscription.resets_at &&
-                ` · resets ${new Date(run.subscription.resets_at * 1000).toLocaleString()}`}
-              {run.subscription.utilization >= 0.8 && ' · throttled to one worker'}
-            </span>
+          <div>
+            <dt>Plan usage</dt>
+            <dd>
+              {Math.round(run.subscription.utilization * 100)}%
+              <span className={`meter ${run.subscription.utilization >= 0.8 ? 'is-asserted' : ''}`} aria-hidden="true">
+                <span style={{ width: `${Math.round(run.subscription.utilization * 100)}%` }} />
+              </span>
+            </dd>
           </div>
         )}
-        <div className="row">
-          <span className="muted">Tokens</span>
-          <span className="figure">
-            {run.totals.tokens_in.toLocaleString()} in · {run.totals.tokens_out.toLocaleString()} out
-          </span>
-        </div>
-        <div className="row">
-          <span className="muted">Branch</span>
-          <span className="figure">{run.integration_branch}</span>
-        </div>
-        <div className="row row-wrap">
-          <span className="muted">Base commit</span>
-          <span className="figure identifier">{run.base_commit || '—'}</span>
-        </div>
-        {run.pr_url && (
-          <div className="row">
-            <span className="muted">Pull request</span>
-            <span className="figure">{run.pr_url}</span>
+      </dl>
+
+      <div className="run-layout">
+        <div className="run-main">
+          <div className="tabs" role="tablist" aria-label="Run sections">
+            {tabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                id={`run-tab-${t.id}`}
+                aria-selected={tab === t.id}
+                aria-controls={`run-panel-${t.id}`}
+                className="tab"
+                onClick={() => setTab(t.id)}
+              >
+                {t.label}
+                {t.count !== undefined && <span className="count">{t.count}</span>}
+              </button>
+            ))}
           </div>
-        )}
-      </div>
 
-      {gated && (
-        <section className="gate">
-          <h2 className="is-asserted dot">This run is waiting for you</h2>
-          <p>
-            Pilot planned {run.tasks.length} {run.tasks.length === 1 ? 'task' : 'tasks'} and will not
-            start until the plan is approved. Read it below, then decide.
-          </p>
+          <div
+            role="tabpanel"
+            id={`run-panel-${tab}`}
+            aria-labelledby={`run-tab-${tab}`}
+            className="run-panel"
+          >
+            {tab === 'plan' &&
+              (run.tasks.length === 0 ? (
+                <p className="panel-empty">
+                  Wingman is still planning. The tasks appear here as soon as the plan is ready.
+                </p>
+              ) : (
+                <>
+                  <p className="section-intro">
+                    Indented tasks wait for the one above them. Tasks that touch different files run
+                    at the same time.
+                  </p>
+                  <div className="rows">
+                    {ordered(run.tasks).map(({ task, depth }) => (
+                      <TaskRow
+                        key={task.id}
+                        task={task}
+                        depth={depth}
+                        agent={run.agents.find((a) => a.id === task.agent) ?? null}
+                        terminal={terminal}
+                        busy={busy}
+                        onControl={control}
+                      />
+                    ))}
+                  </div>
+                </>
+              ))}
+            {tab === 'agents' &&
+              (run.agents.length > 0 ? (
+                <Workers project={project} agents={run.agents} />
+              ) : (
+                <p className="panel-empty">No agents have started on this run yet.</p>
+              ))}
+            {tab === 'activity' && <RunLog events={log} live={live} />}
+            {tab === 'log' && <PilotLogView project={project} runId={run.run_id} />}
+          </div>
+        </div>
 
-          {/* The one fact the gate was missing. Pilot classifies every task's
-              reversibility and says why; approving a plan without seeing which
-              parts cannot be undone is approving the wrong thing carefully. */}
-          {irreversible.length > 0 && (
-            <div className="gate-warn">
-              <p className="is-failed dot">
-                {irreversible.length === 1
-                  ? '1 task is not cleanly reversible:'
-                  : `${irreversible.length} tasks are not cleanly reversible:`}
+        <aside className="run-aside">
+          {gated && (
+            <section className="gate">
+              <h2>Your approval is needed</h2>
+              <p>
+                Wingman planned {run.tasks.length} {run.tasks.length === 1 ? 'task' : 'tasks'}.
+                Nothing starts until you approve. Read the plan, then decide.
               </p>
-              <ul className="md-list">
-                {irreversible.map((t) => (
-                  <li key={t.id}>
-                    <span className="figure muted">{t.id}</span> {t.title}
-                    <span className="muted">
-                      {' — '}
-                      {t.reversibility_reason ?? t.reversibility}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
+
+              {/* The one fact the gate was missing. Pilot classifies every
+                  task's reversibility and says why; approving a plan without
+                  seeing which parts cannot be undone is approving the wrong
+                  thing carefully. */}
+              {irreversible.length > 0 && (
+                <div className="gate-warn">
+                  <p className="is-failed dot">
+                    {irreversible.length === 1
+                      ? "1 task can't be cleanly undone:"
+                      : `${irreversible.length} tasks can't be cleanly undone:`}
+                  </p>
+                  <ul className="md-list">
+                    {irreversible.map((t) => (
+                      <li key={t.id}>
+                        {t.title}
+                        <span className="muted">
+                          {' — '}
+                          {t.reversibility_reason ?? t.reversibility}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={busy !== null}
+                  onClick={() => void control('approve')}
+                >
+                  {busy === 'approve' ? 'Approving…' : 'Approve and start'}
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy !== null}
+                  onClick={() => void control('veto')}
+                >
+                  Reject plan
+                </button>
+              </div>
+            </section>
           )}
 
-          <div className="actions">
+          {actionError && (
+            <Note tone="is-failed" role="alert">
+              {actionError}
+            </Note>
+          )}
+
+          {sent && !actionError && (
+            <Note tone="is-asserted">
+              Sent. The run picks it up on its next check.
+              {sent === 'ask' && ' The reply appears under Activity.'}
+            </Note>
+          )}
+
+          {!terminal && !gated && (
+            <Steer
+              busy={busy !== null}
+              onSend={(action, text) => control(action, { message: text })}
+            />
+          )}
+
+          <section className="panel run-facts">
+            <h2>Details</h2>
+            <div className="rows">
+              <div className="row">
+                <span className="muted">Tokens</span>
+                <span className="figure">
+                  {compact(run.totals.tokens_in)} in · {compact(run.totals.tokens_out)} out
+                </span>
+              </div>
+              <div className="row row-wrap">
+                <span className="muted">Started from</span>
+                <span className="figure mono" title={run.base_commit}>
+                  {run.base_commit ? run.base_commit.slice(0, 10) : '—'}
+                </span>
+              </div>
+              {run.pr_url && (
+                <div className="row row-wrap">
+                  <span className="muted">Pull request</span>
+                  <a className="figure" href={run.pr_url} target="_blank" rel="noreferrer">
+                    {run.pr_url.replace(/^https?:\/\/(www\.)?github\.com\//, '')}
+                  </a>
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* At the bottom of the side column, away from the title. Stopping is
+              the one irreversible thing this screen does, and a destructive
+              control next to the title is one the hand finds before the eye
+              has read what it would stop. */}
+          {!terminal && (
             <button
               type="button"
-              className="button button-primary"
+              className="button button-quiet run-abort"
               disabled={busy !== null}
-              onClick={() => void control('approve')}
+              onClick={() => {
+                if (window.confirm('Stop this run? Agents stop after their current step.'))
+                  void control('abort')
+              }}
             >
-              {busy === 'approve' ? 'Approving…' : 'Approve plan'}
+              {busy === 'abort' ? 'Stopping…' : 'Stop this run'}
             </button>
-            <button
-              type="button"
-              className="button button-quiet"
-              disabled={busy !== null}
-              onClick={() => void control('veto')}
-            >
-              Reject plan
-            </button>
-          </div>
-        </section>
-      )}
-
-      {actionError && (
-        <Note tone="is-failed" role="alert">
-          {actionError}
-        </Note>
-      )}
-
-      {sent && !actionError && (
-        <Note tone="is-asserted">
-          Sent <code>{sent}</code> — the run applies it on its next check.
-          {sent === 'ask' && ' The answer shows up under Activity.'}
-        </Note>
-      )}
-
-      <h2 className="section-head">Plan</h2>
-      <p className="section-intro">
-        Indented by dependency depth. A task runs when every task it names has finished and no other
-        running task claims a file it declared it would write.
-      </p>
-      <div className="rows">
-        {ordered(run.tasks).map(({ task, depth }) => (
-          <TaskRow
-            key={task.id}
-            task={task}
-            depth={depth}
-            agent={run.agents.find((a) => a.id === task.agent) ?? null}
-            terminal={terminal}
-            busy={busy}
-            onControl={control}
-          />
-        ))}
+          )}
+        </aside>
       </div>
-
-      {/* Below the plan, not up in the page head. Aborting is the one
-          irreversible thing this screen does, and it reads the plan it is
-          ending — a destructive control sitting next to the title is one the
-          hand finds before the eye has read what it would stop. */}
-      {!terminal && (
-        <div className="actions run-tools">
-          <button
-            type="button"
-            className="button button-quiet"
-            disabled={busy !== null}
-            onClick={() => void control('abort')}
-          >
-            {busy === 'abort' ? 'Aborting…' : 'Abort run'}
-          </button>
-        </div>
-      )}
-
-      {run.agents.length > 0 && <Workers project={project} agents={run.agents} />}
-
-      <PilotLogView project={project} runId={run.run_id} />
-      <RunLog events={log} live={live} />
-
-      {/* Last in the view so the sticky composer stays pinned to the bottom
-          of the screen for the whole scroll, not just past its own spot. */}
-      {!terminal && (
-        <Steer
-          busy={busy !== null}
-          onSend={(action, text) => control(action, { message: text })}
-        />
-      )}
     </div>
   )
+}
+
+type RunTab = 'plan' | 'agents' | 'activity' | 'log'
+
+/** 1234567 → "1.2M". Token counts are read for magnitude, not to the unit. */
+function compact(n: number): string {
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n)
 }
 
 /**
@@ -601,7 +731,7 @@ function Steer({
 
   return (
     <form
-      className="composer steer"
+      className="steer"
       onSubmit={(e) => {
         e.preventDefault()
         void send('tell')
@@ -615,11 +745,11 @@ function Steer({
         className="input"
         rows={2}
         value={text}
-        placeholder="Tell the workers something, or ask them"
+        placeholder="Give the agents a hint, or ask them a question"
         onChange={(e) => setText(e.target.value)}
       />
       <div className="composer-tools">
-        <span className="composer-hint">Reaches every active worker on its next turn</span>
+        <span className="composer-hint">Every working agent reads it on its next step</span>
         <MicButton value={text} onChange={setText} disabled={busy} />
         <button
           type="button"
@@ -630,7 +760,7 @@ function Steer({
           Ask
         </button>
         <button type="submit" className="button button-primary" disabled={busy || empty}>
-          Tell
+          Send
         </button>
       </div>
     </form>
@@ -658,9 +788,8 @@ function Workers({ project, agents }: { project: string; agents: Agent[] }) {
 
   return (
     <>
-      <h2 className="section-head">Workers</h2>
       <p className="section-intro">
-        Open one to read its transcript — every prompt, tool call and result, as the worker saw it.
+        Open an agent to read everything it did — each prompt, tool call and result.
       </p>
       <div className="rows">
         {agents.map((a) => {
@@ -783,14 +912,14 @@ function PilotLogView({ project, runId }: { project: string; runId: string }) {
     }
   }, [project, runId])
 
-  if (!log || log.total_lines === 0) return null
+  if (!log) return <Loading what="the output" />
+  if (log.total_lines === 0) return <p className="panel-empty">Nothing was printed for this run.</p>
   const truncated = log.shown_lines < log.total_lines
 
   return (
     <>
-      <h2 className="section-head">Run log</h2>
       <p className="section-intro">
-        What the orchestrator printed as it worked.{' '}
+        What Wingman printed while running this goal.{' '}
         {truncated
           ? `The last ${log.shown_lines.toLocaleString()} of ${log.total_lines.toLocaleString()} lines.`
           : `All ${log.total_lines.toLocaleString()} ${log.total_lines === 1 ? 'line' : 'lines'}.`}
@@ -811,26 +940,22 @@ function PilotLogView({ project, runId }: { project: string; runId: string }) {
  * progress. Folded away by default: it is the working-out, not the state.
  */
 function RunLog({ events, live }: { events: RunLogEvent[]; live: boolean }) {
-  if (events.length === 0) return null
+  if (events.length === 0)
+    return <p className="panel-empty">No activity yet. Steps appear here as agents take them.</p>
   return (
     <>
-      <h2 className="section-head">Activity</h2>
-      <details className="tool run-log">
-        <summary>
-          <span className={`glyph ${live ? 'is-asserted' : 'muted'}`}>{live ? '◐' : '·'}</span>
-          <span className="figure">
-            {events.length === 200 ? 'last 200 events' : `${events.length} events`}
-          </span>
-        </summary>
-        <div className="rows">
-          {[...events].reverse().map((e, i) => (
-            <div key={`${e.t}-${i}`} className="row log-row">
-              <span className="truncate">{summarise(e)}</span>
-              <span className="figure faint">{clockOf(e.t)}</span>
-            </div>
-          ))}
-        </div>
-      </details>
+      <p className="section-intro">
+        {live ? 'Newest first, updating live.' : 'Newest first.'}{' '}
+        {events.length === 200 ? 'Showing the last 200 steps.' : `${events.length} steps.`}
+      </p>
+      <ol className="timeline">
+        {[...events].reverse().map((e, i) => (
+          <li key={`${e.t}-${i}`}>
+            <span className="timeline-time figure">{clockOf(e.t)}</span>
+            <span className="timeline-text">{summarise(e)}</span>
+          </li>
+        ))}
+      </ol>
     </>
   )
 }
@@ -1139,6 +1264,26 @@ export function runGlyph(status: RunStatus): string {
       return '◇'
     default:
       return '◐'
+  }
+}
+
+/** The run's state in words a newcomer reads without the source open. */
+export function runLabel(status: RunStatus): string {
+  switch (status) {
+    case 'planning':
+      return 'Planning'
+    case 'awaiting_approval':
+      return 'Needs approval'
+    case 'running':
+      return 'Running'
+    case 'merging':
+      return 'Merging'
+    case 'done':
+      return 'Done'
+    case 'failed':
+      return 'Failed'
+    case 'aborted':
+      return 'Stopped'
   }
 }
 

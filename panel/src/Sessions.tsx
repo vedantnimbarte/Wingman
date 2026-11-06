@@ -15,7 +15,7 @@ import { classify } from './Changes'
 import { Markdown } from './markdown'
 import { navigate } from './router'
 import { message } from './state'
-import { Empty, Failed, Icon, Loading, Note, PageHead } from './ui'
+import { Failed, Icon, Loading, Note } from './ui'
 import { MicButton } from './voice'
 
 /**
@@ -32,23 +32,25 @@ export function Sessions({ project, id }: { project: string | null; id: string |
     return (
       <div className="view">
         <Failed
-          title="No project selected"
-          detail="Sessions live in a repo. Pick one in the header."
+          title="Pick a repository first"
+          detail="Chats run inside a repository. Choose one in the sidebar."
           action={{ label: 'Go to Overview', onClick: () => navigate('/') }}
         />
       </div>
     )
   }
-  return id ? (
-    <Conversation key={id} project={project} id={id} />
-  ) : (
-    <SessionList project={project} />
+  const open = id ?? 'new'
+  return (
+    <div className={`sessions${id ? ' has-open' : ''}`}>
+      <SessionList project={project} current={open} />
+      <Conversation key={open} project={project} id={open} />
+    </div>
   )
 }
 
 /* ── List ──────────────────────────────────────────────────────────────── */
 
-function SessionList({ project }: { project: string }) {
+function SessionList({ project, current }: { project: string; current: string }) {
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
@@ -63,11 +65,14 @@ function SessionList({ project }: { project: string }) {
     }
   }, [project])
 
+  // Re-read when the open conversation changes: a new chat becomes a real
+  // session on its first turn, and it should appear in the list right away.
   useEffect(() => {
     void load()
-  }, [load])
+  }, [load, current])
 
   async function remove(id: string) {
+    if (!window.confirm('Delete this chat? Its transcript is removed from disk.')) return
     setNote(null)
     try {
       const res = await api.deleteSession(project, id)
@@ -77,9 +82,10 @@ function SessionList({ project }: { project: string }) {
       const deindexed = res.deindexed
       setNote(
         deindexed && typeof deindexed === 'object' && 'error' in deindexed
-          ? `Transcript deleted, but its search-index entry remains: ${String((deindexed as { error: unknown }).error)}`
-          : `Deleted ${id}${deindexed === false ? ' (nothing was indexed for it)' : ' and its search-index entry'}`,
+          ? `Chat deleted, but search may still find it: ${String((deindexed as { error: unknown }).error)}`
+          : 'Chat deleted.',
       )
+      if (id === current) navigate('/sessions')
       await load()
     } catch (e) {
       setNote(message(e))
@@ -88,106 +94,82 @@ function SessionList({ project }: { project: string }) {
 
   const shown = useMemo(() => matching(sessions ?? [], q), [sessions, q])
 
-  if (error)
-    return (
-      <div className="view">
-        <Failed
-          title="Could not list sessions"
-          detail={error}
-          action={{ label: 'Try again', onClick: () => void load() }}
-        />
-      </div>
-    )
-  if (!sessions) return <Loading what="sessions" />
-
   return (
-    <div className="view">
-      <PageHead
-        eyebrow="Sessions"
-        title={sessions.length === 1 ? '1 session' : `${sessions.length} sessions`}
-        intro={
-          <>
-            Transcripts in <code>.wingman/sessions/</code>, most recently written first. A
-            conversation started here is a normal session file — it shows up in{' '}
-            <code>wingman session list</code> and resumes from a terminal.
-          </>
-        }
-        actions={
-          <button
-            type="button"
-            className="button button-primary"
-            onClick={() => navigate('/sessions/new')}
-          >
-            New conversation
-          </button>
-        }
-      />
+    <aside className="session-list" aria-label="Chats">
+      <div className="session-list-head">
+        <h1>Chats</h1>
+        <button
+          type="button"
+          className="button button-primary button-sm"
+          onClick={() => navigate('/sessions/new')}
+          title="Start a new chat"
+        >
+          <Icon name="plus" size={14} />
+          New
+        </button>
+      </div>
+
+      <label className="filter-search session-search">
+        <Icon name="search" size={14} />
+        <input
+          className="input"
+          type="search"
+          placeholder="Search chats"
+          aria-label="Search chats by prompt, id or model"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+        />
+      </label>
 
       {note && <Note>{note}</Note>}
 
-      {sessions.length > 0 && (
-        <div className="filters">
-          <label className="filter-search">
-            <Icon name="search" size={14} />
-            <input
-              className="input"
-              type="search"
-              placeholder="Filter by first prompt, id or model"
-              aria-label="Filter sessions"
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-            />
-          </label>
-          {shown.length !== sessions.length && (
-            <span className="faint figure">
-              {shown.length} of {sessions.length}
-            </span>
-          )}
-        </div>
-      )}
-
-      {sessions.length === 0 ? (
-        <Empty
-          title="No conversations yet"
-          action={{ label: 'Start one', onClick: () => navigate('/sessions/new') }}
-        >
-          A conversation here writes the same transcript a terminal session does, so you can start
-          on one and finish on the other.
-        </Empty>
+      {error ? (
+        <Note tone="is-failed" role="alert">
+          Couldn't load chats: {error}
+        </Note>
+      ) : !sessions ? (
+        <Loading what="chats" />
+      ) : sessions.length === 0 ? (
+        <p className="session-list-empty">
+          No chats yet. Anything you start here also shows up in <code>wingman session list</code>.
+        </p>
       ) : shown.length === 0 ? (
-        <Empty title="Nothing matches" action={{ label: 'Clear', onClick: () => setQ('') }}>
-          No transcript here mentions “{q.trim()}” in its first prompt, its id or its model.
-        </Empty>
+        <p className="session-list-empty">No chat mentions “{q.trim()}”.</p>
       ) : (
-        <div className="rows">
+        <ul className="session-items">
           {shown.map((s) => (
-            <div key={s.session_id} className="row">
+            <li key={s.session_id}>
               <button
                 type="button"
-                className="task-toggle"
+                className="session-item"
+                aria-current={s.session_id === current ? 'page' : undefined}
                 onClick={() => navigate(`/sessions/${s.session_id}`)}
               >
-                {s.first_prompt ?? <span className="muted">(no prompt yet)</span>}
-                <span className="task-meta faint">
-                  <span className="identifier">{s.session_id}</span>
-                  {s.model && ` · ${s.model}`}
-                  {` · ${s.turns} ${s.turns === 1 ? 'turn' : 'turns'}`}
-                  {s.mtime ? ` · ${ago(s.mtime)}` : ''}
+                <span className="session-item-title">
+                  {s.first_prompt ?? <span className="faint">Empty chat</span>}
+                </span>
+                <span className="session-item-meta">
+                  {s.model && <span className="truncate">{s.model}</span>}
+                  <span>
+                    {s.turns} {s.turns === 1 ? 'message' : 'messages'}
+                  </span>
+                  {s.mtime ? <span>{ago(s.mtime)}</span> : null}
                 </span>
               </button>
               <button
                 type="button"
-                className="button button-quiet button-sm"
+                className="button button-quiet button-sm button-icon session-delete"
                 onClick={() => void remove(s.session_id)}
-                title="Delete the transcript and its search-index entry"
+                title="Delete this chat"
+                aria-label={`Delete chat: ${s.first_prompt ?? s.session_id}`}
               >
-                Delete
+                <Icon name="trash" size={14} />
               </button>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       )}
-    </div>
+    </aside>
   )
 }
 
@@ -255,7 +237,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
   const [pinned, setPinned] = useState(true)
   const [mode, setMode] = useState(() => window.localStorage.getItem(MODE_KEY) ?? '')
   const [model, setModel] = useState(() => window.localStorage.getItem(MODEL_KEY) ?? '')
-  const [timeline, setTimeline] = useState(false)
+  const [details, setDetails] = useState(() => window.innerWidth >= 1280)
   const [speak, setSpeak] = useState(() => window.localStorage.getItem(SPEAK_KEY) === '1')
   const abort = useRef<AbortController | null>(null)
   const foot = useRef<HTMLDivElement | null>(null)
@@ -347,62 +329,85 @@ function Conversation({ project, id }: { project: string; id: string }) {
 
   if (error)
     return (
-      <div className="view">
+      <div className="chat">
         <Failed
-          title="Could not load the session"
+          title="Couldn't open this chat"
           detail={error}
-          action={{ label: 'Back to sessions', onClick: () => navigate('/sessions') }}
+          action={{ label: 'Start a new chat', onClick: () => navigate('/sessions') }}
         />
       </div>
     )
-  if (!records) return <Loading what="the transcript" />
+  if (!records) return <Loading what="the chat" />
 
   const streaming = turn.state === 'streaming'
 
+  const start = records.find((r) => r.kind === 'session_start')
+  const firstAsk = records.find((r) => r.kind === 'user')
+  const title = firstAsk && firstAsk.kind === 'user' ? firstAsk.text.split('\n')[0] : 'New chat'
+  const hero = isNew && !streaming && turn.state !== 'failed'
+  const userTurns = records.filter((r) => r.kind === 'user').length
+
   return (
-    <div className="view chat">
-      <button
-        type="button"
-        className="button button-quiet back"
-        onClick={() => navigate('/sessions')}
-      >
-        <Icon name="collapse" size={14} />
-        Sessions
-      </button>
-      <header className="page-head">
-        <div className="page-title">
-          <span className="eyebrow">Conversation</span>
-          <h1 className="figure identifier">{isNew ? 'new conversation' : id}</h1>
-        </div>
+    <div className={`chat${hero ? ' chat-hero' : ''}${details && !isNew ? ' with-details' : ''}`}>
+      <div className="chat-main">
         {!isNew && (
-          <div className="actions">
+          <header className="chat-head">
+            <button
+              type="button"
+              className="button button-quiet button-sm button-icon chat-back"
+              onClick={() => navigate('/sessions')}
+              aria-label="Back to chats"
+            >
+              <Icon name="collapse" size={14} />
+            </button>
+            <h2 className="truncate" title={title}>
+              {title}
+            </h2>
             <button
               type="button"
               className="button button-quiet button-sm"
-              aria-expanded={timeline}
-              onClick={() => setTimeline((v) => !v)}
+              aria-expanded={details}
+              onClick={() => setDetails((v) => !v)}
             >
-              Timeline
+              <Icon name="system" size={14} />
+              Details
             </button>
-            <ExportActions project={project} id={id} />
+          </header>
+        )}
+
+        {hero && (
+          <div className="hero">
+            <span className="hero-mark" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 20 20" fill="currentColor">
+                <path d="M10 2.5 17.5 17 10 13.2 2.5 17Z" />
+              </svg>
+            </span>
+            <h1>What should Wingman do?</h1>
+            <p>
+              Ask about <strong>{project}</strong> or describe a change. Wingman reads the code,
+              makes the edits and checks its work.
+            </p>
+            <div className="hero-ideas">
+              {IDEAS.map((idea) => (
+                <button
+                  key={idea}
+                  type="button"
+                  className="chip"
+                  onClick={() => setPrompt(idea)}
+                >
+                  {idea}
+                </button>
+              ))}
+            </div>
           </div>
         )}
-      </header>
-
-      {timeline && !isNew && (
-        <Rewind
-          project={project}
-          id={id}
-          onRestored={(forked) => (forked ? navigate(`/sessions/${forked}`) : void load())}
-        />
-      )}
 
       <div className="transcript" ref={scroller} onScroll={onScroll}>
         <Transcript records={records} />
 
         {streaming && (
           <div className="msg msg-assistant" aria-live="polite" aria-busy="true">
-            <span className="eyebrow">Assistant</span>
+            <span className="msg-who">Wingman</span>
             {turn.thinking && (
               <details className="thinking">
                 <summary className="muted">Thinking</summary>
@@ -463,7 +468,9 @@ function Conversation({ project, id }: { project: string; id: string }) {
           rows={3}
           value={prompt}
           disabled={streaming}
-          placeholder={streaming ? 'Waiting for this turn to finish…' : 'Ask for something'}
+          placeholder={
+            streaming ? 'Wingman is working…' : isNew ? 'Describe what you want done…' : 'Reply to Wingman…'
+          }
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={(e) => {
             // Enter sends; Shift+Enter is a newline. A multi-line prompt is
@@ -487,17 +494,17 @@ function Conversation({ project, id }: { project: string; id: string }) {
               else window.localStorage.removeItem(MODE_KEY)
             }}
           >
-            <option value="">server's ceiling</option>
+            <option value="">Default permissions</option>
             {MODES.map((m) => (
               <option key={m} value={m}>
-                {m}
+                {MODE_LABELS[m]}
               </option>
             ))}
           </select>
 
           <input
             className="input composer-model"
-            placeholder="model"
+            placeholder="Default model"
             aria-label="Model for this turn"
             spellCheck={false}
             value={model}
@@ -509,7 +516,7 @@ function Conversation({ project, id }: { project: string; id: string }) {
             }}
           />
 
-          <span className="composer-hint">Enter sends · Shift+Enter for a newline · {project}</span>
+          <span className="composer-hint">Enter to send, Shift+Enter for a new line</span>
 
           {speakable() && (
             <button
@@ -527,7 +534,8 @@ function Conversation({ project, id }: { project: string; id: string }) {
                 }
               }}
             >
-              Read aloud
+              <Icon name="speak" size={15} />
+              <span className="sr-only">Read replies aloud</span>
             </button>
           )}
 
@@ -544,15 +552,68 @@ function Conversation({ project, id }: { project: string; id: string }) {
           )}
           <button
             type="submit"
-            className="button button-primary"
+            className="button button-primary button-icon composer-send"
             disabled={streaming || prompt.trim() === ''}
+            aria-label="Send"
+            title="Send"
           >
-            Send
+            <Icon name="send" size={16} />
           </button>
         </div>
       </form>
+      </div>
+
+      {details && !isNew && (
+        <aside className="chat-details" aria-label="Chat details">
+          <section>
+            <h3>About this chat</h3>
+            <dl className="facts">
+              <div>
+                <dt>Model</dt>
+                <dd className="mono">{start?.kind === 'session_start' ? start.model : '—'}</dd>
+              </div>
+              <div>
+                <dt>Provider</dt>
+                <dd>{start?.kind === 'session_start' ? start.provider : '—'}</dd>
+              </div>
+              <div>
+                <dt>Messages</dt>
+                <dd>{userTurns}</dd>
+              </div>
+              <div>
+                <dt>Chat id</dt>
+                <dd className="mono truncate" title={id}>
+                  {id}
+                </dd>
+              </div>
+            </dl>
+          </section>
+          <section>
+            <h3>Share</h3>
+            <ExportActions project={project} id={id} />
+          </section>
+          <Rewind
+            project={project}
+            id={id}
+            onRestored={(forked) => (forked ? navigate(`/sessions/${forked}`) : void load())}
+          />
+        </aside>
+      )}
     </div>
   )
+}
+
+/** Starting points for an empty chat. They fill the box; nothing is sent. */
+const IDEAS = [
+  'Explain how this repository is organised',
+  'Find a failing test and fix it',
+  'Summarise what changed on this branch',
+]
+
+const MODE_LABELS: Record<(typeof MODES)[number], string> = {
+  'read-only': 'Read only',
+  plan: 'Plan first',
+  'auto-edit': 'Edit files',
 }
 
 /**
@@ -580,10 +641,10 @@ function ExportActions({ project, id }: { project: string; id: string }) {
   }
 
   return (
-    <div className="actions">
+    <div className="actions export-actions">
       <button
         type="button"
-        className="button button-quiet button-sm"
+        className="button button-sm"
         onClick={() => void copy()}
         title={
           error ??
@@ -594,21 +655,22 @@ function ExportActions({ project, id }: { project: string; id: string }) {
       >
         <Icon name={state === 'done' ? 'check' : 'copy'} size={14} />
         {error
-          ? 'export failed'
+          ? 'Export failed'
           : state === 'failed'
-            ? 'blocked'
+            ? 'Clipboard blocked'
             : state === 'done'
-              ? 'copied'
-              : 'Copy report'}
+              ? 'Copied'
+              : 'Copy summary'}
       </button>
       {(['md', 'html', 'json'] as const).map((f) => (
         <a
           key={f}
           className="button button-quiet button-sm"
           href={exportUrl(project, id, f, true)}
-          title={`Download the report as ${f}`}
+          title={`Download the summary as ${f.toUpperCase()}`}
         >
-          {f}
+          <Icon name="down" size={13} />
+          {f.toUpperCase()}
         </a>
       ))}
     </div>
@@ -688,10 +750,10 @@ function Rewind({
   }
 
   return (
-    <section aria-label="Rewind timeline">
-      <h2 className="section-head">Timeline</h2>
-      <p className="section-intro">
-        The files each turn edited. Preview a point to see what restoring to before it would change.
+    <section aria-label="Undo history" className="rewind">
+      <h3>Undo history</h3>
+      <p className="rewind-intro">
+        Files each message changed. Preview a point to see what undoing back to it would do.
       </p>
       {error && (
         <Note tone="is-failed" role="alert">
@@ -708,7 +770,7 @@ function Rewind({
       {!points ? (
         !error && <Loading what="the timeline" />
       ) : points.length === 0 ? (
-        <p className="section-intro">No checkpoints from this session yet.</p>
+        <p className="rewind-intro">No file changes in this chat yet.</p>
       ) : (
         <div className="rows">
           {points.map((p) => (
@@ -733,7 +795,7 @@ function Rewind({
 
       {open && changes && (
         <>
-          <h3 className="section-head">Restore to before {pointLabel(open)}</h3>
+          <h4 className="rewind-head">Undo back to before {pointLabel(open)}</h4>
           {changes.length === 0 ? (
             <p className="section-intro">The files are already as they were at this point.</p>
           ) : (
@@ -766,7 +828,7 @@ function Rewind({
                   checked={truncate}
                   onChange={(e) => setTruncate(e.target.checked)}
                 />
-                also truncate the conversation to before this turn
+                Also continue the chat from before this message
               </label>
             )}
             <button
@@ -775,7 +837,7 @@ function Rewind({
               disabled={busy || (changes.length === 0 && !truncate)}
               onClick={() => void restore(open, changes.length)}
             >
-              {busy ? 'Restoring…' : 'Restore'}
+              {busy ? 'Undoing…' : 'Undo changes'}
             </button>
           </div>
         </>
@@ -886,16 +948,17 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
   switch (record.kind) {
     case 'session_start':
       return (
-        <p className="eyebrow msg-start">
-          {record.provider} · <span className="identifier figure">{record.model}</span>
-          <span className="faint"> · {clock(record.ts)}</span>
+        <p className="msg-start">
+          Chat started {clock(record.ts) && `at ${clock(record.ts)}`} with{' '}
+          <span className="mono">{record.model}</span>
+          <span className="faint"> via {record.provider}</span>
         </p>
       )
 
     case 'user':
       return (
         <div className="msg msg-user">
-          <span className="eyebrow">
+          <span className="msg-who">
             You <span className="faint">{clock(record.ts)}</span>
           </span>
           <p className="msg-text">{record.text}</p>
@@ -905,8 +968,8 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
     case 'assistant':
       return (
         <div className="msg msg-assistant">
-          <span className="eyebrow">
-            Assistant <span className="faint">{clock(record.ts)}</span>
+          <span className="msg-who">
+            Wingman <span className="faint">{clock(record.ts)}</span>
           </span>
           {record.blocks.map((b, i) => (
             <Block key={i} block={b} results={results} />
@@ -930,7 +993,7 @@ function Record({ record, results }: { record: SessionRecord; results: Results }
     case 'stop': {
       const reason = unquote(record.reason)
       return reason === 'end_turn' ? null : (
-        <p className="eyebrow msg-start is-asserted">stopped: {reason}</p>
+        <p className="msg-start is-asserted">Stopped early: {reason.replace(/_/g, ' ')}</p>
       )
     }
   }
@@ -1077,7 +1140,7 @@ function Copyable({ text, full }: { text: string; full?: string }) {
         title={state === 'failed' ? 'The browser refused clipboard access' : 'Copy'}
       >
         <Icon name={state === 'done' ? 'check' : 'copy'} size={14} />
-        {state === 'failed' ? 'blocked' : state === 'done' ? 'copied' : 'copy'}
+        {state === 'failed' ? 'Blocked' : state === 'done' ? 'Copied' : 'Copy'}
       </button>
       <pre className="figure">{text}</pre>
     </div>

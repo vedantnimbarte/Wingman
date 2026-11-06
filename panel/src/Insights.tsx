@@ -59,9 +59,8 @@ export function Insights({ project }: { project: string | null }) {
   return (
     <div className="view">
       <PageHead
-        eyebrow="Insights"
-        title="What this repo has cost"
-        intro="Real spend, the same token volume repriced against ten other models, and the tax every turn pays before you have typed anything."
+        title="Insights"
+        intro="What Wingman has cost, what the same work would cost on other models, and how often its work passes its own checks."
       />
       <Spend project={project} />
       <Timeline project={project} />

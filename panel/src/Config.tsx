@@ -139,14 +139,12 @@ export function Config() {
   return (
     <div className="view">
       <PageHead
-        eyebrow="Config"
         title="Settings"
         intro={
           <>
-            Generated from the schema the daemon derives from its own config types, so every field
-            here carries the documentation the source does. Saving writes to{' '}
-            <code className="figure">{meta.writes_to}</code> — the global file, never a repo's{' '}
-            <code>.wingman/config.toml</code>.
+            How Wingman behaves on this machine. Changes are saved to{' '}
+            <code>{meta.writes_to}</code> and apply to every repository; a repository's own{' '}
+            <code>.wingman/config.toml</code> is never touched.
           </>
         }
       />
@@ -177,23 +175,24 @@ export function Config() {
                 aria-current={s === active ? 'page' : undefined}
                 onClick={() => setSection(s)}
               >
-                {s}
+                <span className="nav-label">{humanize(s)}</span>
                 {meta.readonly_sections.includes(s) && (
-                  <span className="muted"> · read-only</span>
+                  <span className="count" title="Edit this section in the file directly">
+                    locked
+                  </span>
                 )}
               </button>
             ))}
         </nav>
 
         <section className="config-fields">
-          <h2 className="section-head">{active}</h2>
+          <h2 className="section-head">{humanize(active)}</h2>
           {resolved.description && <p className="section-intro">{resolved.description}</p>}
 
           {readOnly && (
             <Note tone="is-asserted">
-              <code>[{active}]</code> cannot be changed through the API it configures — a server
-              that can rewrite its own token, ceiling or project allowlist has no ceiling. Edit the
-              file directly.
+              These settings can't be changed from the panel, because they control who can reach
+              it. Edit <code>[{active}]</code> in the config file directly.
             </Note>
           )}
 
@@ -321,7 +320,10 @@ function FieldRow({
   return (
     <div className="row config-row">
       <label htmlFor={id} className="config-label">
-        <span className={dirty ? 'config-dirty' : undefined}>{field.path.join('.')}</span>
+        <span className={dirty ? 'config-dirty' : undefined}>
+          {humanize(field.path[field.path.length - 1] ?? '')}
+        </span>
+        <span className="config-key">{field.path.join('.')}</span>
         {field.description && <span className="config-help">{field.description}</span>}
         {fallback !== undefined && !isRedacted && (
           <span className="config-default figure muted">default {stringify(fallback)}</span>
@@ -551,4 +553,10 @@ function stringify(v: unknown, indent = 0): string {
   } catch {
     return String(v)
   }
+}
+
+/** `default_model` → "Default model". The raw key is shown beside it. */
+export function humanize(key: string): string {
+  const words = key.replace(/[_-]+/g, ' ').trim()
+  return words ? words[0].toUpperCase() + words.slice(1) : key
 }
