@@ -605,6 +605,53 @@ export type ConfigSchema = {
   writes_to: string
 }
 
+/* ── Providers ────────────────────────────────────────────────────────────
+ *
+ * `GET /v1/providers` and friends — the browser twin of `wingman login`.
+ * Keys are write-only: the server reports *where* a credential comes from,
+ * never the credential.
+ */
+
+export type CredentialSource =
+  | { kind: 'keychain' }
+  | { kind: 'keychain-missing' }
+  | { kind: 'env'; var: string }
+  | { kind: 'config' }
+  | { kind: 'none' }
+  | { kind: 'not-needed' }
+
+export type ProviderInfo = {
+  id: string
+  label: string
+  /** How it authenticates: a key, nothing (a local server), a browser sign-in, or the `claude` CLI. */
+  kind: 'api-key' | 'local' | 'oauth' | 'cli'
+  env_var: string | null
+  default_model: string
+  default_base_url: string | null
+  /** Set up by the user: it has a config section, or it is the default. */
+  connected: boolean
+  /** Has what it needs to make a call. */
+  ready: boolean
+  credential: CredentialSource
+  model: string | null
+  base_url: string | null
+  is_default: boolean
+}
+
+export type ProviderList = {
+  default_provider: string | null
+  default_model: string | null
+  providers: ProviderInfo[]
+}
+
+export type ConnectBody = {
+  api_key?: string
+  model?: string
+  base_url?: string
+  make_default?: boolean
+  skip_test?: boolean
+}
+
 /**
  * Read an SSE stream from a `POST`.
  *
@@ -885,6 +932,41 @@ export const api = {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ truncate }),
       },
+    ),
+
+  providers: () => request<ProviderList>('/v1/providers'),
+
+  /** Call the provider with these settings. Saves nothing. */
+  testProvider: (id: string, body: ConnectBody) =>
+    request<{ ok: true; model: string }>(`/v1/providers/${encodeURIComponent(id)}/test`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+
+  /** Test, then store the key in the OS keyring and record the provider. */
+  connectProvider: (id: string, body: ConnectBody) =>
+    request<{ connected: string; model: string; stored_in: 'keychain' | 'config' | 'unchanged'; is_default: boolean }>(
+      `/v1/providers/${encodeURIComponent(id)}`,
+      {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    ),
+
+  makeDefaultProvider: (id: string, model?: string) =>
+    request<{ default: string; model: string }>(`/v1/providers/${encodeURIComponent(id)}/default`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model }),
+    }),
+
+  /** Remove the keyring entry and the provider's settings. Refused for the default. */
+  disconnectProvider: (id: string) =>
+    request<{ disconnected: string; keyring_error: string | null }>(
+      `/v1/providers/${encodeURIComponent(id)}`,
+      { method: 'DELETE' },
     ),
 
   config: () => request<Record<string, unknown>>('/v1/config'),

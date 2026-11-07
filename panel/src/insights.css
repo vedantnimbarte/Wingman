@@ -1,0 +1,1099 @@
+/*
+ * Insights only. Every rule is under `.insights`, so nothing here can leak
+ * into another screen. Imported by Insights.tsx; Vite still bundles it into
+ * the single app.css the binary embeds.
+ *
+ * Charts are drawn in the accent, which never means a state. The previous
+ * period is the same accent, ghosted: one hue, two times.
+ */
+
+.insights {
+  --ins-ghost: color-mix(in srgb, var(--accent) 22%, transparent);
+  --ins-gap: var(--s-4);
+  max-width: 84rem;
+}
+
+.insights .page-head {
+  align-items: center;
+}
+
+/* ── Period switch and the small toggles ── */
+
+.insights .ins-period,
+.insights .ins-toggle {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-pill);
+  background: var(--sunken);
+}
+
+.insights .ins-period button,
+.insights .ins-toggle button {
+  min-height: 1.875rem;
+  padding: 0 var(--s-3);
+  border: 0;
+  border-radius: var(--r-pill);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-sm);
+  font-weight: var(--w-med);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.insights .ins-toggle button {
+  min-height: 1.625rem;
+  font-size: var(--t-xs);
+}
+
+.insights .ins-period button:hover,
+.insights .ins-toggle button:hover {
+  color: var(--ink);
+}
+
+.insights .ins-period button[aria-pressed='true'],
+.insights .ins-toggle button[aria-pressed='true'] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--rule);
+}
+
+/* ── Cards ── */
+
+.insights .ins-card {
+  min-width: 0;
+  padding: var(--s-4) var(--s-5) var(--s-5);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.insights .ins-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-4);
+}
+
+.insights .ins-card-head h2,
+.insights .ins-reports h2 {
+  font-size: var(--t-md);
+  letter-spacing: -0.01em;
+}
+
+.insights .ins-card-sub {
+  display: block;
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.insights .ins-card > .state {
+  max-width: none;
+}
+
+.insights .ins-card > .state-center {
+  margin: var(--s-5) auto;
+}
+
+.insights .ins-sub-head {
+  margin: var(--s-5) 0 var(--s-2);
+  font-size: var(--t-sm);
+  font-stretch: 100%;
+  letter-spacing: 0;
+}
+
+.insights .ins-foot,
+.insights .ins-muted {
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+}
+
+.insights .ins-foot {
+  margin-top: var(--s-3);
+  max-width: 40rem;
+}
+
+.insights .ins-grid,
+.insights .ins-hero {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--ins-gap);
+  margin-top: var(--ins-gap);
+}
+
+.insights .ins-hero {
+  grid-template-columns: minmax(0, 1fr) 21rem;
+  align-items: start;
+}
+
+.insights .ins-models {
+  margin-top: var(--ins-gap);
+}
+
+.insights .ins-grid {
+  align-items: start;
+}
+
+/* ── KPIs: one strip, divided, rather than four floating cards ── */
+
+.insights .ins-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.insights .ins-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-4) var(--s-5);
+}
+
+.insights .ins-kpi + .ins-kpi {
+  border-left: 1px solid var(--rule);
+}
+
+.insights .ins-kpi-label {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--muted);
+  font-size: var(--t-sm);
+  font-weight: var(--w-med);
+}
+
+.insights .ins-kpi-icon {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: 7px;
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.insights .ins-kpi-body {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--s-3);
+  min-height: 2.75rem;
+}
+
+.insights .ins-kpi-figure {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1) var(--s-2);
+  min-width: 0;
+}
+
+.insights .ins-kpi-value {
+  font-size: 2rem;
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.insights .ins-kpi-note {
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.insights .ins-delta {
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+  white-space: nowrap;
+}
+
+.insights .ins-delta.is-up {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.insights .ins-delta.is-none {
+  background: none;
+  color: var(--faint);
+  font-weight: var(--w-normal);
+}
+
+.insights .ins-spark {
+  flex: none;
+  width: 6rem;
+  height: 2rem;
+  overflow: visible;
+}
+
+.insights .ins-spark-fill {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.insights .ins-spark-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.75;
+  stroke-linejoin: round;
+}
+
+/* A progress ring for a rate, drawn with a conic gradient and a mask. */
+.insights .ins-ring {
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 50%;
+  background: conic-gradient(var(--proven) calc(var(--fill) * 360deg), var(--raised) 0);
+  -webkit-mask: radial-gradient(circle, transparent 58%, #000 60%);
+  mask: radial-gradient(circle, transparent 58%, #000 60%);
+}
+
+/* ── The spend chart ── */
+
+.insights .ins-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2) var(--s-5);
+  margin-bottom: var(--s-4);
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.insights .ins-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.insights .ins-legend strong {
+  color: var(--ink);
+  font-weight: var(--w-bold);
+}
+
+.insights .ins-legend-avg {
+  margin-left: auto;
+}
+
+.insights .ins-swatch {
+  flex: none;
+  display: inline-block;
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+  background: var(--accent);
+}
+
+.insights .ins-swatch.is-ghost {
+  background: var(--ins-ghost);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.insights .ins-swatch.is-avg {
+  height: 0;
+  border-radius: 0;
+  border-top: 2px dashed var(--faint);
+  background: none;
+}
+
+.insights .ins-chart {
+  display: grid;
+  grid-template-columns: 3.25rem minmax(0, 1fr);
+  grid-template-rows: 16rem auto;
+}
+
+.insights .ins-yaxis {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-right: var(--s-2);
+  color: var(--faint);
+  font-size: var(--t-xs);
+  text-align: right;
+  transform: translateY(-0.5em);
+}
+
+.insights .ins-yaxis span:last-child {
+  transform: translateY(0.5em);
+}
+
+.insights .ins-plot {
+  position: relative;
+  min-width: 0;
+  cursor: crosshair;
+  border-radius: 4px;
+}
+
+.insights .ins-plot:focus-visible {
+  outline-offset: 4px;
+}
+
+.insights .ins-plot svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.insights .ins-gridline {
+  stroke: var(--rule);
+  stroke-width: 1;
+}
+
+.insights .ins-bar {
+  fill: var(--accent);
+  transition: fill var(--fast) var(--ease);
+}
+
+.insights .ins-plot:hover .ins-bar:not(.is-on),
+.insights .ins-plot:focus-visible .ins-bar:not(.is-on) {
+  fill: color-mix(in srgb, var(--accent) 55%, var(--surface));
+}
+
+.insights .ins-ghost-bar {
+  fill: var(--ins-ghost);
+}
+
+.insights .ins-area {
+  fill: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.insights .ins-line {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.25;
+  stroke-linejoin: round;
+}
+
+.insights .ins-ghost-line {
+  fill: none;
+  stroke: color-mix(in srgb, var(--accent) 45%, transparent);
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+  stroke-linejoin: round;
+}
+
+.insights .ins-avg {
+  stroke: var(--faint);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+}
+
+.insights .ins-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed var(--rule-strong);
+  pointer-events: none;
+}
+
+.insights .ins-dot {
+  position: absolute;
+  width: 0.75rem;
+  height: 0.75rem;
+  border: 2px solid var(--surface);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+/* The readout. Dark in both themes, like an instrument's display. */
+.insights .ins-tip {
+  position: absolute;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 14rem;
+  margin-left: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-2);
+  background: var(--deck);
+  color: var(--deck-ink);
+  box-shadow: var(--shadow-3);
+  font-size: var(--t-sm);
+  pointer-events: none;
+}
+
+.insights .ins-tip.is-left {
+  transform: translateX(calc(-100% - var(--s-5)));
+}
+
+.insights .ins-tip-date {
+  color: var(--deck-muted);
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+}
+
+.insights .ins-tip-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--t-md);
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+}
+
+.insights .ins-tip-row span {
+  margin-left: auto;
+  color: var(--deck-muted);
+  font-size: var(--t-xs);
+  font-weight: var(--w-normal);
+  font-stretch: 100%;
+}
+
+.insights .ins-tip-row.is-ghost {
+  font-size: var(--t-sm);
+  color: var(--deck-muted);
+}
+
+.insights .ins-tip .ins-swatch {
+  background: #9590ff;
+}
+
+.insights .ins-tip .ins-swatch.is-ghost {
+  background: rgb(149 144 255 / 30%);
+  box-shadow: inset 0 0 0 1px rgb(149 144 255 / 60%);
+}
+
+.insights .ins-tip-foot {
+  margin-top: var(--s-1);
+  padding-top: var(--s-2);
+  border-top: 1px solid rgb(255 255 255 / 12%);
+  color: var(--deck-muted);
+  font-size: var(--t-xs);
+}
+
+.insights .ins-xaxis {
+  grid-column: 2;
+  display: flex;
+  justify-content: space-between;
+  padding-top: var(--s-2);
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+/* ── Worth a look ── */
+
+.insights .ins-suggest {
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(120% 60% at 100% 0%, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+    var(--surface);
+}
+
+.insights .ins-suggest-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  padding: 0;
+  list-style: none;
+}
+
+.insights .ins-tip-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--paper);
+}
+
+.insights .ins-tip-card > .lamp {
+  margin-top: 0.4rem;
+}
+
+.insights .ins-tip-card > .lamp:not([class*='is-']) {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.insights .ins-tip-card.is-failed {
+  border-color: var(--failed-edge);
+  background: var(--failed-wash);
+}
+
+.insights .ins-tip-card.is-asserted {
+  border-color: var(--asserted-edge);
+  background: var(--asserted-wash);
+}
+
+.insights .ins-tip-card .lamp.is-asserted {
+  animation: none;
+}
+
+.insights .ins-tip-title {
+  font-weight: var(--w-bold);
+  line-height: var(--lh-snug);
+  overflow-wrap: anywhere;
+}
+
+.insights .ins-tip-basis {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+}
+
+.insights .ins-tip-card .button {
+  margin-top: var(--s-2);
+}
+
+.insights .ins-suggest > .button-quiet {
+  align-self: flex-start;
+}
+
+.insights .ins-suggest-empty {
+  display: flex;
+  gap: var(--s-3);
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.insights .ins-ok {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--proven-wash);
+  color: var(--proven);
+}
+
+/* ── Spend by model ── */
+
+.insights .ins-models-body {
+  display: grid;
+  grid-template-columns: 13rem minmax(0, 1fr);
+  gap: var(--s-6);
+  align-items: center;
+}
+
+.insights .ins-donut-wrap {
+  position: relative;
+  width: 13rem;
+  height: 13rem;
+}
+
+.insights .ins-donut {
+  width: 100%;
+  height: 100%;
+}
+
+.insights .ins-slice {
+  fill: color-mix(in srgb, var(--accent) calc(var(--tone) * 100%), var(--surface));
+  stroke: var(--surface);
+  stroke-width: 1.5;
+  cursor: pointer;
+  transition: opacity var(--fast) var(--ease);
+}
+
+.insights .ins-slice.is-dim {
+  opacity: 0.3;
+}
+
+.insights .ins-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 2.75rem;
+  text-align: center;
+  pointer-events: none;
+}
+
+.insights .ins-donut-center strong {
+  font-size: 1.5rem;
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.03em;
+}
+
+.insights .ins-donut-center span {
+  max-width: 100%;
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.insights .ins-key {
+  flex: none;
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--accent) calc(var(--tone) * 100%), var(--surface));
+}
+
+.insights .ins-model {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-weight: var(--w-med);
+}
+
+.insights .ins-input-mix {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  gap: var(--s-5);
+  align-items: center;
+  margin-top: var(--s-5);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.insights .ins-input-mix strong {
+  color: var(--ink);
+}
+
+.insights .ins-mix-bar,
+.insights .ins-verdict {
+  display: flex;
+  gap: 2px;
+  height: 0.625rem;
+  border-radius: var(--r-pill);
+  overflow: hidden;
+  background: var(--raised);
+}
+
+.insights .ins-mix-bar span {
+  background: var(--accent);
+}
+
+.insights .ins-mix-bar .is-cached {
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent) 60%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+
+.insights .ins-mix-bar .is-write {
+  background: color-mix(in srgb, var(--accent) 40%, var(--surface));
+}
+
+.insights .ins-verdict .is-proven {
+  background: var(--proven);
+}
+
+.insights .ins-verdict .is-asserted {
+  background: var(--asserted);
+}
+
+.insights .ins-verdict .is-failed {
+  background: var(--failed);
+}
+
+.insights .ins-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-4);
+  margin-top: var(--s-2);
+  font-size: var(--t-sm);
+}
+
+.insights .ins-split > span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.insights .ins-split .dot::before {
+  margin-right: 0;
+}
+
+/* ── Tables ── */
+
+.insights .ins-table-wrap {
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.insights .ins-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--t-sm);
+}
+
+.insights .ins-table th {
+  padding: 0;
+  border-bottom: 1px solid var(--rule);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.insights .ins-table th button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.insights .ins-table th.is-num button {
+  justify-content: flex-end;
+}
+
+.insights .ins-table th button:hover,
+.insights .ins-table th[aria-sort='ascending'] button,
+.insights .ins-table th[aria-sort='descending'] button {
+  color: var(--ink);
+}
+
+.insights .ins-sort {
+  color: var(--faint);
+  font-size: 0.9em;
+}
+
+.insights .ins-table th[aria-sort='ascending'] .ins-sort,
+.insights .ins-table th[aria-sort='descending'] .ins-sort {
+  color: var(--accent);
+}
+
+.insights .ins-table td {
+  padding: var(--s-2) var(--s-3);
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+.insights .ins-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.insights .ins-table .is-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.insights .ins-table tbody tr {
+  transition: background var(--fast) var(--ease);
+}
+
+.insights .ins-table tbody tr:hover,
+.insights .ins-table tbody tr.is-hover {
+  background: var(--raised);
+}
+
+.insights .ins-rate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.insights .ins-rate-track {
+  width: 4rem;
+  height: 5px;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.insights .ins-rate-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+/* ── Overhead, quality, runs ── */
+
+.insights .bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
+}
+
+.insights .bar-row {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr) 3.5rem;
+  align-items: center;
+  gap: var(--s-3);
+  font-size: var(--t-sm);
+}
+
+.insights .bar-track {
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.insights .bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.insights .bar-value {
+  color: var(--muted);
+  text-align: right;
+}
+
+.insights .ins-big {
+  margin-bottom: var(--s-3);
+  font-size: 2rem;
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.insights .ins-big span {
+  color: var(--muted);
+  font-size: var(--t-base);
+  font-weight: var(--w-med);
+  letter-spacing: 0;
+}
+
+.insights .pareto {
+  height: 7rem;
+}
+
+.insights .ins-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-3);
+  margin: 0;
+}
+
+.insights .ins-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-2);
+  background: var(--sunken);
+}
+
+.insights .ins-stats dt {
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+}
+
+.insights .ins-stats dd {
+  margin: 0;
+  font-size: 1.5rem;
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.03em;
+}
+
+.insights .ins-stats span {
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.insights .ins-run-list {
+  margin: var(--s-4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.insights .ins-run-list button {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    'goal pill'
+    'bar  usd';
+  align-items: center;
+  gap: var(--s-1) var(--s-3);
+  width: 100%;
+  padding: var(--s-2);
+  border: 0;
+  border-radius: var(--r-1);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.insights .ins-run-list li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.insights .ins-run-list button:hover {
+  background: var(--raised);
+}
+
+.insights .ins-run-goal {
+  grid-area: goal;
+  font-weight: var(--w-med);
+}
+
+.insights .ins-run-list .pill {
+  grid-area: pill;
+}
+
+.insights .ins-run-bar {
+  grid-area: bar;
+  height: 4px;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  overflow: hidden;
+}
+
+.insights .ins-run-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.insights .ins-run-usd {
+  grid-area: usd;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  text-align: right;
+}
+
+/* ── More reports ── */
+
+.insights .ins-reports {
+  margin-top: var(--ins-gap);
+  padding-bottom: var(--s-4);
+}
+
+.insights .ins-reports summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  list-style: none;
+  cursor: pointer;
+}
+
+.insights .ins-reports summary::-webkit-details-marker {
+  display: none;
+}
+
+.insights .ins-reports summary svg {
+  color: var(--faint);
+  transform: rotate(90deg);
+  transition: transform var(--fast) var(--ease);
+}
+
+.insights .ins-reports[open] summary svg {
+  transform: rotate(-90deg);
+}
+
+.insights .ins-reports[open] summary {
+  margin-bottom: var(--s-4);
+}
+
+.insights .ins-report-out {
+  margin-top: var(--s-4);
+}
+
+/* ── Narrower screens ── */
+
+@media (max-width: 80rem) {
+  .insights .ins-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insights .ins-kpis {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .insights .ins-kpi:nth-child(3) {
+    border-left: 0;
+  }
+
+  .insights .ins-kpi:nth-child(n + 3) {
+    border-top: 1px solid var(--rule);
+  }
+}
+
+@media (max-width: 64rem) {
+  .insights .ins-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insights .ins-models-body,
+  .insights .ins-input-mix {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-4);
+  }
+
+  .insights .ins-donut-wrap {
+    justify-self: center;
+  }
+}
+
+@media (max-width: 40rem) {
+  .insights .page-head .actions {
+    width: 100%;
+  }
+
+  .insights .ins-period {
+    width: 100%;
+  }
+
+  .insights .ins-period button {
+    flex: 1;
+  }
+
+  .insights .ins-kpis {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insights .ins-kpi + .ins-kpi {
+    border-left: 0;
+    border-top: 1px solid var(--rule);
+  }
+
+  .insights .ins-card {
+    padding: var(--s-4);
+  }
+
+  .insights .ins-legend-avg {
+    margin-left: 0;
+  }
+
+  .insights .ins-chart {
+    grid-template-columns: 2.75rem minmax(0, 1fr);
+    grid-template-rows: 12rem auto;
+  }
+
+  .insights .ins-tip {
+    min-width: 12rem;
+  }
+
+  .insights .ins-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

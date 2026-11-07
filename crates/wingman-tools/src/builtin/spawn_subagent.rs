@@ -30,6 +30,9 @@ pub struct SubagentSpec {
     /// "codegen", "reason"). Empty = unclassified; the runner may route
     /// classified subagents to a cheaper/faster model via `[router.classes]`.
     pub task_class: String,
+    /// Strip every tool that writes, runs a subprocess, or comes from MCP.
+    /// Read-only subagents are safe to run concurrently with each other.
+    pub read_only: bool,
 }
 
 pub struct SpawnSubagent {
@@ -56,6 +59,8 @@ struct Args {
     /// Optional task class used for model routing.
     #[serde(default)]
     task_class: String,
+    #[serde(default)]
+    read_only: bool,
 }
 
 #[async_trait]
@@ -82,7 +87,9 @@ impl Tool for SpawnSubagent {
                 "Run an isolated inner agent loop on a focused sub-task and return its final ",
                 "assistant text. The subagent has its own conversation history (no access to ",
                 "the parent's). Use this to parallelize research or protect the parent's ",
-                "context window from large tool outputs. Cannot nest deeper than one level."
+                "context window from large tool outputs. Cannot nest deeper than one level. ",
+                "Set read_only=true for research/lookup: several read-only subagents in one ",
+                "batch run in parallel; any other subagent runs alone."
             )
             .into(),
             input_schema: json!({
@@ -91,7 +98,8 @@ impl Tool for SpawnSubagent {
                     "task": { "type": "string", "description": "The exact sub-task prompt." },
                     "description": { "type": "string", "description": "Short orientation for the subagent." },
                     "model": { "type": "string", "description": "Override `provider/model` for the subagent. Empty = inherit." },
-                    "task_class": { "type": "string", "description": "Task class for model routing: 'search' or 'summarize' for lookup/condense work (may use a faster model), 'codegen' or 'reason' for work needing the strongest model. Empty = inherit the session model." }
+                    "task_class": { "type": "string", "description": "Task class for model routing: 'search' or 'summarize' for lookup/condense work (may use a faster model), 'codegen' or 'reason' for work needing the strongest model. Empty = inherit the session model." },
+                    "read_only": { "type": "boolean", "description": "No write/shell/MCP tools. Read-only subagents in the same batch run concurrently." }
                 },
                 "required": ["task"],
                 "additionalProperties": false
@@ -109,6 +117,7 @@ impl Tool for SpawnSubagent {
             description: args.description,
             model: args.model,
             task_class: args.task_class,
+            read_only: args.read_only,
         };
         match (self.runner)(spec).await {
             Ok(text) => ToolOutcome::ok(text),

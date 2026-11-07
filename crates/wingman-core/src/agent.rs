@@ -321,6 +321,7 @@ impl Default for AgentConfig {
                 "recall_memory".into(),
                 "recall_session".into(),
                 "read_session".into(),
+                "trace_ref".into(),
             ],
             loop_guard: crate::loopguard::LoopGuard::default(),
             steer: None,
@@ -334,6 +335,23 @@ pub struct AgentLoop {
     config: AgentConfig,
     /// Conversation history that persists across calls to `run`.
     history: Vec<Message>,
+}
+
+impl AgentConfig {
+    /// May this call run concurrently with the rest of its batch?
+    ///
+    /// Requires absence from `mutating_tools` too, so adding a name to
+    /// `parallel_safe_tools` by mistake cannot silently race a write. A
+    /// `spawn_subagent` with `read_only: true` gets a registry stripped of
+    /// write/shell/MCP tools, so it is as safe as a `read_file`.
+    pub fn call_is_parallel_safe(&self, name: &str, input: &serde_json::Value) -> bool {
+        if self.mutating_tools.iter().any(|t| t == name) {
+            return false;
+        }
+        self.parallel_safe_tools.iter().any(|t| t == name)
+            || (name == "spawn_subagent"
+                && input.get("read_only") == Some(&serde_json::Value::Bool(true)))
+    }
 }
 
 impl AgentLoop {
@@ -910,10 +928,10 @@ impl AgentLoop {
                 }
 
                 let count = tool_calls.len();
-                let concurrency = if tool_calls.iter().all(|(_, name, _)| {
-                    config.parallel_safe_tools.iter().any(|t| t == name)
-                        && !config.mutating_tools.iter().any(|t| t == name)
-                }) {
+                let concurrency = if tool_calls
+                    .iter()
+                    .all(|(_, name, input)| config.call_is_parallel_safe(name, input))
+                {
                     count.max(1)
                 } else {
                     1
@@ -1028,6 +1046,17 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    #[test]
+    fn only_read_only_subagents_join_a_parallel_batch() {
+        let c = AgentConfig::default();
+        use serde_json::json as j;
+        assert!(c.call_is_parallel_safe("read_file", &j!({})));
+        assert!(c.call_is_parallel_safe("spawn_subagent", &j!({"task": "x", "read_only": true})));
+        assert!(!c.call_is_parallel_safe("spawn_subagent", &j!({"task": "x"})));
+        assert!(!c.call_is_parallel_safe("spawn_subagent", &j!({"read_only": "true"})));
+        assert!(!c.call_is_parallel_safe("run_shell", &j!({"read_only": true})));
+    }
 
     /// Provider that replays a scripted sequence of responses, one per
     /// `complete` call.

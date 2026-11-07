@@ -320,7 +320,32 @@ const PRESET_REVIEW: &[&str] = &[
     "recall_memory",
     "recall_session",
     "read_session",
+    "trace_ref",
     "ask_user",
+];
+
+/// Tools kept by the built-in `router` preset: the session talks, reads and
+/// delegates, and cannot edit or run anything itself. Every change goes to a
+/// background pilot run. Structure, not prompting, is what makes delegation
+/// reliable: a model told to delegate still decides some jobs are "small".
+const PRESET_ROUTER: &[&str] = &[
+    "read_file",
+    "glob",
+    "grep",
+    "list_dir",
+    "semantic_search",
+    "outline",
+    "find_symbol",
+    "who_calls",
+    "recall_memory",
+    "recall_session",
+    "read_session",
+    "trace_ref",
+    "ask_user",
+    "update_tasks",
+    "pilot_run",
+    "pilot_status",
+    "pilot_tell",
 ];
 
 /// Tools kept by the built-in `minimal` preset: the smallest set that can
@@ -352,6 +377,7 @@ impl ToolsConfig {
         let builtin = match self.preset.as_str() {
             "review" => PRESET_REVIEW,
             "minimal" => PRESET_MINIMAL,
+            "router" => PRESET_ROUTER,
             _ => return None,
         };
         Some(builtin.iter().map(|s| (*s).to_string()).collect())
@@ -359,7 +385,7 @@ impl ToolsConfig {
 
     /// Every preset name that resolves, for error messages and `--help`.
     pub fn known_presets(&self) -> Vec<String> {
-        let mut names: Vec<String> = ["review", "minimal"]
+        let mut names: Vec<String> = ["review", "minimal", "router"]
             .iter()
             .map(|s| (*s).to_string())
             .chain(self.presets.keys().cloned())
@@ -2816,6 +2842,11 @@ pub struct PilotConfig {
     /// retries.
     #[serde(default = "default_turn_rollback_after")]
     pub turn_rollback_after: u32,
+    /// Progress watchdog: a worker that makes this many tool calls without
+    /// changing a file is nudged, and at twice this many it is stopped and
+    /// handed to the retry ladder. Reviewers are exempt. 0 turns it off.
+    #[serde(default = "default_stall_tool_calls")]
+    pub stall_tool_calls: u32,
 
     pub approval: PilotApprovalConfig,
     pub pr: PilotPrConfig,
@@ -2850,6 +2881,7 @@ impl Default for PilotConfig {
             max_manager_ticks: default_max_manager_ticks(),
             turn_gate_cmd: "cargo check --workspace".into(),
             turn_rollback_after: default_turn_rollback_after(),
+            stall_tool_calls: default_stall_tool_calls(),
             approval: PilotApprovalConfig::default(),
             pr: PilotPrConfig::default(),
             sandbox: PilotSandboxConfig::default(),
@@ -3082,6 +3114,23 @@ pub struct PilotDaemonConfig {
     /// old behaviour and is not recommended.
     #[serde(default = "default_max_auto_dispatch_per_cycle")]
     pub max_auto_dispatch_per_cycle: usize,
+    /// Act ahead, quietly. A `Trusted` candidate that scores in the propose
+    /// band (below `auto_threshold`) is attempted anyway instead of waiting
+    /// in the queue. A PR opens only when every task passes its gates, it is
+    /// never auto-merged, and a failed attempt sends no notifications; the
+    /// candidate stays queued for a human. Widens the score band, never the
+    /// trust band: `Known`/`Untrusted` work is still never run unasked.
+    /// Shares `max_auto_dispatch_per_cycle` with `auto_dispatch`.
+    pub speculative: bool,
+    /// Slow-path triage policy, written as plain prose ("skip anything about
+    /// the docs site; dependency bumps for test-only crates can run"). The
+    /// code rules (trust allowlists, score thresholds) stay the fast path:
+    /// only candidates they leave in the propose band reach a model, which
+    /// judges them against this text. The judge can drop a candidate or
+    /// promote a `Trusted` one to auto-run; it can never promote anything
+    /// less trusted. Empty (the default) skips the model entirely. Uses
+    /// `[router].fast_model` when set.
+    pub policy: String,
     /// J3 file-drop intake directory (relative to the repo root). When the
     /// `intake` source is enabled, each `*.md` here is normalized into a goal
     /// candidate and flows through the same score/dispatch path as discovered
@@ -3125,6 +3174,11 @@ fn default_intake_dir() -> String {
     ".wingman/intake".into()
 }
 
+/// A real task rarely needs more than a few dozen reads between edits.
+fn default_stall_tool_calls() -> u32 {
+    40
+}
+
 fn default_max_retries_per_task() -> u32 {
     3
 }
@@ -3144,6 +3198,8 @@ impl Default for PilotDaemonConfig {
             trusted_labels: vec!["wingman:auto".into()],
             auto_dispatch: false,
             max_auto_dispatch_per_cycle: default_max_auto_dispatch_per_cycle(),
+            speculative: false,
+            policy: String::new(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
             // coverage_gaps, intake, ask, pr_reviews, pr_checks. The default advertises only
             // `github_issues`; add the others explicitly.

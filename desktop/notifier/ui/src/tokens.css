@@ -16,59 +16,58 @@
 :root {
   color-scheme: light dark;
 
-  --paper: #fbfbfc;
+  --paper: #f8f9fb;
   --surface: #ffffff;
-  --raised: #f2f3f6;
-  --sunken: #f6f7f9;
+  --raised: #f0f2f5;
+  --sunken: #f3f4f7;
 
-  --ink: #14161b;
-  --muted: #5f6879;
-  --faint: #666e7d;
+  --ink: #161922;
+  --muted: #5b6372;
+  --faint: #677080;
 
-  --rule: #e5e7ec;
-  --rule-strong: #d2d7e0;
+  --rule: #e4e7ec;
+  --rule-strong: #d3d8e0;
 
   --proven: #0b7a5a;
   --asserted: #a85f0b;
   --failed: #b03a2e;
 
-  --proven-wash: color-mix(in srgb, var(--proven) 6%, var(--surface));
-  --asserted-wash: color-mix(in srgb, var(--asserted) 6%, var(--surface));
-  --failed-wash: color-mix(in srgb, var(--failed) 6%, var(--surface));
+  --proven-wash: color-mix(in srgb, var(--proven) 8%, var(--surface));
+  --asserted-wash: color-mix(in srgb, var(--asserted) 8%, var(--surface));
+  --failed-wash: color-mix(in srgb, var(--failed) 8%, var(--surface));
   --proven-edge: color-mix(in srgb, var(--proven) 26%, transparent);
   --asserted-edge: color-mix(in srgb, var(--asserted) 28%, transparent);
   --failed-edge: color-mix(in srgb, var(--failed) 26%, transparent);
 
-  --shadow-1: 0 1px 2px rgb(17 20 27 / 5%);
-  --shadow-2: 0 1px 2px rgb(17 20 27 / 4%), 0 8px 20px -8px rgb(17 20 27 / 12%);
-  --shadow-3: 0 2px 6px rgb(17 20 27 / 6%), 0 28px 64px -16px rgb(17 20 27 / 24%);
+  --shadow-1: 0 1px 2px rgb(22 25 34 / 5%);
+  --shadow-2: 0 1px 2px rgb(22 25 34 / 4%), 0 10px 24px -10px rgb(22 25 34 / 16%);
+  --shadow-3: 0 2px 6px rgb(22 25 34 / 6%), 0 28px 64px -18px rgb(22 25 34 / 28%);
 
-  --sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI Variable Text', 'Segoe UI', Roboto,
-    sans-serif;
+  --sans: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   --mono: ui-monospace, 'Cascadia Mono', 'SF Mono', 'Segoe UI Mono', Menlo, Consolas, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #0c0e12;
-    --surface: #14171d;
-    --raised: #1c2027;
-    --sunken: #0f1217;
+    --paper: #101318;
+    --surface: #161a21;
+    --raised: #1e232c;
+    --sunken: #0d1014;
 
-    --ink: #e9ecf2;
-    --muted: #949cab;
-    --faint: #818b9d;
+    --ink: #e7eaf0;
+    --muted: #9aa2b1;
+    --faint: #848d9e;
 
-    --rule: #232830;
-    --rule-strong: #333a45;
+    --rule: #232833;
+    --rule-strong: #323946;
 
     --proven: #3fb68b;
     --asserted: #e0a458;
-    --failed: #e0705f;
+    --failed: #e8786a;
 
     --shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
-    --shadow-2: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 20px -8px rgb(0 0 0 / 55%);
-    --shadow-3: 0 2px 6px rgb(0 0 0 / 35%), 0 28px 64px -16px rgb(0 0 0 / 65%);
+    --shadow-2: 0 1px 2px rgb(0 0 0 / 30%), 0 10px 24px -10px rgb(0 0 0 / 60%);
+    --shadow-3: 0 2px 6px rgb(0 0 0 / 35%), 0 28px 64px -18px rgb(0 0 0 / 70%);
   }
 }
 

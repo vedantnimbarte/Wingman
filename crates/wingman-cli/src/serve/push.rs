@@ -12,7 +12,8 @@
 //! that a run finished. Delivery is best-effort with one retry: a dead
 //! notification endpoint must never be able to stall a run.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +33,8 @@ pub const POLL: Duration = Duration::from_secs(2);
 #[derive(Default)]
 pub struct Seen {
     statuses: HashMap<(String, String), RunStatus>,
+    /// Runs already reported as `run.died`, so a dead run is said once.
+    died: HashSet<(String, String)>,
 }
 
 /// One thing worth telling someone about.
@@ -42,6 +45,10 @@ pub struct Transition {
     pub run_id: String,
     pub goal: String,
     pub status: RunStatus,
+    /// `run.finished` only: the PR it opened, if any.
+    pub pr_url: Option<String>,
+    /// `run.finished` only: tasks that ended failed or blocked.
+    pub failed_tasks: Vec<String>,
 }
 
 impl Transition {
@@ -52,6 +59,9 @@ impl Transition {
             "run_id": self.run_id,
             "goal": self.goal,
             "status": self.status,
+            "pr_url": self.pr_url,
+            "failed_tasks": self.failed_tasks,
+            "text": self.text(),
         })
     }
 
@@ -64,10 +74,30 @@ impl Transition {
                     self.goal, self.run_id
                 )
             }
-            "run.finished" => format!(
-                "Run {}: \"{}\" ({})",
+            "run.finished" => {
+                let mut s = format!(
+                    "Run {}: \"{}\" ({})",
+                    status_word(self.status),
+                    self.goal,
+                    self.run_id
+                );
+                if let Some(pr) = &self.pr_url {
+                    s.push_str(&format!(" — PR {pr}"));
+                }
+                if !self.failed_tasks.is_empty() {
+                    s.push_str(&format!(
+                        " — failed tasks: {}",
+                        self.failed_tasks.join(", ")
+                    ));
+                }
+                s
+            }
+            "run.died" => format!(
+                "Run stopped without finishing (last status: {}): \"{}\" ({}). Its process \
+                 is gone; see .wingman/autonomous/{}/pilot.log",
                 status_word(self.status),
                 self.goal,
+                self.run_id,
                 self.run_id
             ),
             other => format!("{other}: \"{}\" ({})", self.goal, self.run_id),
@@ -100,6 +130,25 @@ pub fn poll(projects: &[Project], seen: &mut Seen, emit: bool) -> Vec<Transition
         };
         for run in runs {
             let key = (project.id.clone(), run.run_id.clone());
+            // A run whose process is gone but whose status never reached a
+            // final one: crashed, killed, rejected at the plan gate, or a
+            // plan-only run that has nothing more to do.
+            if !run.is_terminal() && !seen.died.contains(&key) && process_gone(&run.dir) {
+                seen.died.insert(key.clone());
+                seen.statuses.insert(key, run.status);
+                if emit {
+                    out.push(Transition {
+                        event: "run.died",
+                        project: project.id.clone(),
+                        run_id: run.run_id,
+                        goal: run.goal,
+                        status: run.status,
+                        pr_url: None,
+                        failed_tasks: Vec::new(),
+                    });
+                }
+                continue;
+            }
             let previous = seen.statuses.insert(key, run.status);
             if previous == Some(run.status) || !emit {
                 continue;
@@ -111,16 +160,77 @@ pub fn poll(projects: &[Project], seen: &mut Seen, emit: bool) -> Vec<Transition
                 RunStatus::Running => "run.started",
                 _ => continue,
             };
+            let (pr_url, failed_tasks) = if event == "run.finished" {
+                finish_details(&run.dir)
+            } else {
+                (None, Vec::new())
+            };
             out.push(Transition {
                 event,
                 project: project.id.clone(),
                 run_id: run.run_id,
                 goal: run.goal,
                 status: run.status,
+                pr_url,
+                failed_tasks,
             });
         }
     }
     out
+}
+
+/// True when the run recorded a pid and that process no longer exists. A run
+/// with no `pid` file (one started before pids were recorded) is never
+/// called dead.
+// ponytail: a recycled pid reads as alive, so that run goes unreported
+// rather than misreported. A start-time check closes it if it ever matters.
+fn process_gone(run_dir: &std::path::Path) -> bool {
+    std::fs::read_to_string(run_dir.join("pid"))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .is_some_and(|pid| !crate::commands::indexd::process_alive(pid))
+}
+
+/// PR url and failed/blocked task ids from a finished run's snapshot.
+fn finish_details(run_dir: &std::path::Path) -> (Option<String>, Vec<String>) {
+    use wingman_autonomous::model::TaskStatus;
+    let Ok(state) = dashboard::load_state(run_dir) else {
+        return (None, Vec::new());
+    };
+    let failed = state
+        .tasks
+        .iter()
+        .filter(|t| matches!(t.status, TaskStatus::Failed | TaskStatus::Blocked))
+        .map(|t| t.id.clone())
+        .collect();
+    (state.pr_url, failed)
+}
+
+/// One project's run transitions as sentences, for a chat front end (the
+/// TUI). Finished, awaiting approval and died only: a run starting is the
+/// chat's own doing or noise. Stops when the receiver is dropped.
+pub fn watch_project(root: PathBuf) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let projects = vec![Project {
+            id: String::new(),
+            root,
+        }];
+        let mut seen = Seen::default();
+        let _ = poll(&projects, &mut seen, false);
+        loop {
+            tokio::time::sleep(POLL).await;
+            for t in poll(&projects, &mut seen, true) {
+                if t.event == "run.started" {
+                    continue;
+                }
+                if tx.send(t.text()).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    rx
 }
 
 /// Background task: watch for transitions and POST the subscribed ones.
@@ -218,6 +328,45 @@ mod tests {
         let next = poll(&projects, &mut seen, true);
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].event, "run.finished");
+    }
+
+    #[test]
+    fn finished_runs_carry_their_pr_and_dead_runs_are_reported_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let projects = vec![Project {
+            id: "repo".into(),
+            root: root.clone(),
+        }];
+        let mut seen = Seen::default();
+
+        seed(&root, "2026-08-18-1042-dddddd", "running");
+        assert!(poll(&projects, &mut seen, true).is_empty());
+        let dir = root.join(".wingman/autonomous/2026-08-18-1042-dddddd");
+        let mut state: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("state.json")).unwrap())
+                .unwrap();
+        state["status"] = json!("done");
+        state["pr_url"] = json!("https://github.com/o/r/pull/9");
+        std::fs::write(dir.join("state.json"), state.to_string()).unwrap();
+        let done = poll(&projects, &mut seen, true);
+        assert_eq!(done[0].event, "run.finished");
+        assert!(
+            done[0].text().contains("PR https://github.com/o/r/pull/9"),
+            "{}",
+            done[0].text()
+        );
+
+        // A live pid is not dead; a pid that cannot exist is.
+        seed(&root, "2026-08-18-1042-eeeeee", "running");
+        let live = root.join(".wingman/autonomous/2026-08-18-1042-eeeeee");
+        std::fs::write(live.join("pid"), std::process::id().to_string()).unwrap();
+        assert!(poll(&projects, &mut seen, true).is_empty());
+        std::fs::write(live.join("pid"), u32::MAX.to_string()).unwrap();
+        let died = poll(&projects, &mut seen, true);
+        assert_eq!(died.len(), 1);
+        assert_eq!(died[0].event, "run.died");
+        assert!(poll(&projects, &mut seen, true).is_empty(), "said once");
     }
 
     #[test]

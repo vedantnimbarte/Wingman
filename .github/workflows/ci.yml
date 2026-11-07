@@ -40,8 +40,9 @@ jobs:
         #   - ubuntu-24.04 ships glibc 2.39: wingman embeds ONNX Runtime
         #     (fastembed -> ort), whose prebuilt binary needs glibc >= 2.38 to
         #     link — same floor as the release build.
-        #   - macos-14 is Apple Silicon; windows-latest is x86_64-msvc.
-        os: [ubuntu-24.04, macos-14, windows-latest]
+        #   - macos-15 is Apple Silicon (GitHub retired the macos-14 image);
+        #     windows-latest is x86_64-msvc.
+        os: [ubuntu-24.04, macos-15, windows-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Rust toolchain
