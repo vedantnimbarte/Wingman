@@ -21,10 +21,10 @@ import { Failed, Loading, PageHead } from './ui'
 type Tab = 'diff' | 'explain' | 'review' | 'attest'
 
 const TABS: { id: Tab; label: string; about: string }[] = [
-  { id: 'diff', label: 'Diff', about: 'the working-tree diff for one file' },
-  { id: 'explain', label: 'Explain', about: 'the current changes, in prose' },
-  { id: 'review', label: 'Review', about: 'a PR, or local commits against a base' },
-  { id: 'attest', label: 'Attest', about: 'what this machine sent anywhere' },
+  { id: 'diff', label: 'Diff', about: "See exactly what changed in one file since the last commit." },
+  { id: 'explain', label: 'Explain', about: 'Get a plain-language summary of everything you have changed.' },
+  { id: 'review', label: 'Review', about: 'Have Wingman review a pull request, or your commits against a branch.' },
+  { id: 'attest', label: 'Network', about: 'Check every outside service this machine sent data to.' },
 ]
 
 export function Changes({ project }: { project: string | null }) {
@@ -87,9 +87,8 @@ export function Changes({ project }: { project: string | null }) {
   return (
     <div className="view">
       <PageHead
-        eyebrow="Changes"
-        title="What changed, and whether it holds"
-        intro="A file's working-tree diff, an explanation of the current changes, a review of them, and what this machine has sent anywhere. The same four subcommands a terminal runs, in this repo."
+        title="Changes"
+        intro="Check your work before you commit it: what changed, what it means, whether it holds up, and what left this machine."
       />
 
       <div className="tabs" role="tablist" aria-label="Change views">

@@ -1,0 +1,2689 @@
+{
+ "defaults": {
+  "audit": {
+   "enabled": false,
+   "log_path": null
+  },
+  "default_model": null,
+  "default_provider": null,
+  "git": {
+   "auto_commit": false,
+   "auto_commit_prefix": "wingman: "
+  },
+  "hooks": {
+   "import_claude_code": false,
+   "post_tool_use": [],
+   "pre_tool_use": [],
+   "stop": [],
+   "user_prompt_submit": []
+  },
+  "learn": {
+   "allow_global_memory_writes": false,
+   "search_hint_tokens": 300
+  },
+  "logging": {
+   "file": true,
+   "filter": "info,wingman=info"
+  },
+  "mcp": {},
+  "permission_mode": "read-only",
+  "pilot": {
+   "approval": {
+    "auto_approve_globs": [
+     "crates/**/*.rs",
+     "docs/**",
+     "README.md"
+    ],
+    "auto_approve_max_tasks": 5,
+    "auto_approve_usd": 1.0,
+    "dangerous_paths": [
+     "**/migrations/**",
+     ".github/**",
+     "**/auth/**",
+     "**/secrets*",
+     "Cargo.lock"
+    ],
+    "notify_channel": "desktop",
+    "notify_only_window_secs": 60
+   },
+   "capabilities": {},
+   "critic_model": null,
+   "critic_other_family": false,
+   "daemon": {
+    "auto_dispatch": false,
+    "auto_threshold": 0.75,
+    "enabled": false,
+    "feedback_poll_secs": 3600,
+    "intake_dir": ".wingman/intake",
+    "max_auto_dispatch_per_cycle": 1,
+    "max_concurrent_runs": 2,
+    "max_review_rounds": 3,
+    "policy": "",
+    "poll_interval_secs": 300,
+    "slack_signing_secret": null,
+    "sources": [
+     "github_issues"
+    ],
+    "speculative": false,
+    "trusted_authors": [],
+    "trusted_labels": [
+     "wingman:auto"
+    ],
+    "watch_debounce_ms": 1000
+   },
+   "default_model": null,
+   "max_concurrent_agents": 4,
+   "max_manager_ticks": 200,
+   "max_retries_per_task": 3,
+   "max_total_tokens": 20000000,
+   "max_usd": 10.0,
+   "notifications": {
+    "decision": [
+     "desktop",
+     "slack"
+    ],
+    "desktop_inbox": false,
+    "digest_cron": "0 9 * * *",
+    "escalation": [
+     "desktop",
+     "slack",
+     "email"
+    ],
+    "info": "suppress",
+    "progress": "digest",
+    "webhooks": "<redacted>"
+   },
+   "pr": {
+    "auto_merge": false,
+    "auto_merge_max_severity": "low",
+    "base_branch": "main",
+    "require_ci_green": true,
+    "reviewer_rework_severity": "high"
+   },
+   "refine": {
+    "challenge_threshold": "medium",
+    "max_clarifying_questions": 3,
+    "suggest_alternatives": true
+   },
+   "reviewer_model": null,
+   "sandbox": {
+    "allow_unsandboxed_vm_tasks": false,
+    "container_image": "wingman/sandbox:latest",
+    "cpus": 2,
+    "default_tier": "host",
+    "env": [],
+    "memory_mib": 4096,
+    "network": "bridge",
+    "pids_limit": 512,
+    "vm": {
+     "chroot_base_dir": "/srv/jailer",
+     "firecracker_bin": "firecracker",
+     "jailer_bin": "jailer",
+     "jailer_gid": 65534,
+     "jailer_uid": 65534,
+     "kernel_image": "",
+     "rootfs_image": "",
+     "tap_device": "",
+     "use_jailer": true,
+     "worktree_drive_mib": 4096
+    },
+    "vm_provider": "firecracker"
+   },
+   "security": {
+    "allowed_licenses": [
+     "MIT",
+     "Apache-2.0",
+     "BSD-3-Clause",
+     "BSD-2-Clause",
+     "ISC",
+     "MPL-2.0",
+     "Unicode-DFS-2016"
+    ],
+    "block_severity": "medium",
+    "denied_licenses": [],
+    "dependency_audit": true,
+    "secrets_scanner": "gitleaks"
+   },
+   "skills": {
+    "index": "",
+    "packs": []
+   },
+   "stall_tool_calls": 40,
+   "task_timeout_secs": 1800,
+   "tier": "copilot",
+   "turn_gate_cmd": "cargo check --workspace",
+   "turn_rollback_after": 2,
+   "worker_max_turns": 60,
+   "worker_model": null
+  },
+  "privacy": {
+   "local_only": false
+  },
+  "providers": {},
+  "reasoning": "",
+  "router": {
+   "classes": {},
+   "fallback_models": [],
+   "fast_model": null,
+   "learned_min_samples": null,
+   "local_model": null
+  },
+  "schedule": [],
+  "serve": {
+   "addr": "127.0.0.1:8787",
+   "max_concurrent_turns": 2,
+   "max_permission_mode": "auto-edit",
+   "projects": [],
+   "push": {
+    "events": [],
+    "url": null
+   },
+   "request_timeout_secs": 1800,
+   "token": null
+  },
+  "team": {
+   "endpoint": null,
+   "token": null
+  },
+  "telemetry": {
+   "otlp": {
+    "endpoint": null,
+    "headers": {},
+    "service_name": null
+   }
+  },
+  "tokens": {
+   "compact_at_tokens": 120000,
+   "max_usd_per_session": null,
+   "prompt_cache": true,
+   "tool_output_max_lines": 400
+  },
+  "tools": {
+   "allow_network": false,
+   "ask_user_desktop_timeout_secs": 0,
+   "custom": [],
+   "defer": [],
+   "disabled_tools": [],
+   "loop_abort_at": 8,
+   "loop_exempt": [
+    "update_tasks",
+    "task_complete"
+   ],
+   "loop_warn_at": 4,
+   "loop_window": 24,
+   "preset": "",
+   "presets": {},
+   "prune_threshold_chars": 8192,
+   "redact_output_secrets": true,
+   "repeat_exempt": [
+    "update_tasks",
+    "task_complete"
+   ],
+   "repeat_thresholds": [
+    3,
+    5,
+    8
+   ],
+   "run_plan": false,
+   "shell_denylist": [],
+   "shell_sandbox": "auto",
+   "spill_tool_output": true,
+   "tool_output_max_lines": null,
+   "tool_timeout_secs": 120
+  },
+  "tui": {
+   "colors": {
+    "assistant": null,
+    "code_block": null,
+    "error": null,
+    "system": null,
+    "tool_err": null,
+    "tool_name": null,
+    "tool_ok": null,
+    "tool_summary": null,
+    "user_prompt": null
+   },
+   "show_token_usage": true,
+   "theme": "default"
+  },
+  "verify": {
+   "affected_tests": true,
+   "browser": {
+    "baseline": null,
+    "threshold": 0.02,
+    "tolerance": 3,
+    "url": "<redacted>"
+   },
+   "golden": true,
+   "lsp_diagnostics": true,
+   "max_retries": 2,
+   "turn_gate": "auto"
+  }
+ },
+ "readonly_sections": [
+  "serve"
+ ],
+ "redacted_keys": [
+  "api_key",
+  "token",
+  "webhook_secret",
+  "slack_signing_secret",
+  "webhooks",
+  "url",
+  "endpoint"
+ ],
+ "schema": {
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "additionalProperties": false,
+  "definitions": {
+   "AuditConfig": {
+    "additionalProperties": false,
+    "description": "Append-only audit trail of tool calls \u2014 an enterprise/compliance aid.",
+    "properties": {
+     "enabled": {
+      "default": false,
+      "description": "When true, every tool dispatch appends a JSONL record (timestamp, tool, a redacted input summary, error flag) to the audit log.",
+      "type": "boolean"
+     },
+     "log_path": {
+      "default": null,
+      "description": "Log file path. Defaults to `<project>/.wingman/audit.log` when unset.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "BrowserVerifyConfig": {
+    "additionalProperties": false,
+    "description": "Headless-browser visual verification settings (see [`VerifyConfig::browser`]).",
+    "properties": {
+     "baseline": {
+      "default": null,
+      "description": "Baseline screenshot path (PNG). Relative to the project root. The first run with no baseline writes one and passes.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "threshold": {
+      "default": 0.02,
+      "description": "Max fraction of differing pixels (0.0..=1.0) before the gate fails.",
+      "format": "double",
+      "type": "number"
+     },
+     "tolerance": {
+      "default": 3,
+      "description": "Per-channel tolerance (0..=255) that absorbs anti-aliasing jitter.",
+      "format": "uint8",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "url": {
+      "default": "",
+      "description": "URL to load and screenshot (e.g. a local dev server). Empty disables it.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "ChallengeThreshold": {
+    "description": "The goal-challenge gate, for the schema only.\n\n[`SeverityLevel`] plus `off`, because `refine::challenge_threshold` reads `off` before it tries the severity parser.",
+    "oneOf": [
+     {
+      "description": "Never challenge the goal.",
+      "enum": [
+       "off"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Challenge on any doubt at all.",
+      "enum": [
+       "info"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Challenge on minor doubts and above.",
+      "enum": [
+       "low"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Challenge when the goal looks substantively wrong.",
+      "enum": [
+       "medium"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Challenge only on serious doubts.",
+      "enum": [
+       "high"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Challenge only when the goal looks certain to cause harm.",
+      "enum": [
+       "critical"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "CustomToolConfig": {
+    "additionalProperties": false,
+    "description": "A user-defined command tool (see [`ToolsConfig::custom`]).",
+    "properties": {
+     "command": {
+      "default": "",
+      "description": "Shell command to run. The tool input JSON arrives on stdin and in `$WINGMAN_TOOL_INPUT`; stdout becomes the tool result.",
+      "type": "string"
+     },
+     "description": {
+      "default": "",
+      "description": "One-line description shown to the model.",
+      "type": "string"
+     },
+     "name": {
+      "default": "",
+      "description": "Tool name the model calls (e.g. \"run_migration\"). Snake_case advised.",
+      "type": "string"
+     },
+     "timeout_secs": {
+      "default": null,
+      "description": "Optional timeout in seconds (default 30).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "GitConfig": {
+    "additionalProperties": false,
+    "description": "Git-native workflow options.",
+    "properties": {
+     "auto_commit": {
+      "default": false,
+      "description": "When true, after a turn in which the agent edited files (and the verification gate, if any, passed), auto-commit the working-tree changes with a generated message \u2014 so every AI change is a reviewable, revertable commit. Off by default. Only commits inside a git repo.",
+      "type": "boolean"
+     },
+     "auto_commit_prefix": {
+      "default": "wingman: ",
+      "description": "Prefix for generated commit subjects.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "Hook": {
+    "additionalProperties": false,
+    "properties": {
+     "block": {
+      "default": false,
+      "description": "If true, a non-zero exit cancels the action (rejects the tool call for `pre_tool_use`, rejects the prompt for `user_prompt_submit`).",
+      "type": "boolean"
+     },
+     "command": {
+      "default": "",
+      "description": "Shell command to execute. Run via `sh -c` (or `cmd /C` on Windows).",
+      "type": "string"
+     },
+     "match_tool": {
+      "default": "",
+      "description": "Glob-ish substring match on tool name; empty = match all. Only used for tool-related hook kinds.",
+      "type": "string"
+     },
+     "timeout_secs": {
+      "default": 10,
+      "description": "Timeout in seconds (default: 10).",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "HooksConfig": {
+    "additionalProperties": false,
+    "description": "User-defined shell hooks. Each hook is a shell command run when the matching event fires. A hook that exits non-zero with `block: true` turns a tool call into an error (for `pre_tool_use`) or surfaces a warning otherwise.",
+    "properties": {
+     "import_claude_code": {
+      "default": false,
+      "description": "Also run hooks from an existing Claude Code `settings.json`, so you do not have to rewrite a working hooks block to try Wingman.\n\nOff by default. Hooks execute shell commands, and running another tool's configuration because it happened to be on disk is a surprise with an arbitrary blast radius. `wingman doctor` says when an importable file is present, so opting in is discoverable.\n\n`~/.claude/settings.json` is yours and is imported as-is. A project-level `.claude/settings.json` is part of whatever repository you cloned and is imported only after `wingman trust` on that file \u2014 the same rule `<project>/.wingman/config.toml` already follows.",
+      "type": "boolean"
+     },
+     "post_tool_use": {
+      "default": [],
+      "description": "Fired after a tool runs. Receives `WINGMAN_TOOL_NAME`, `WINGMAN_TOOL_INPUT`, `WINGMAN_TOOL_OUTPUT`, `WINGMAN_TOOL_IS_ERROR`.",
+      "items": {
+       "$ref": "#/definitions/Hook"
+      },
+      "type": "array"
+     },
+     "pre_tool_use": {
+      "default": [],
+      "description": "Fired before a tool runs. Receives `WINGMAN_TOOL_NAME` and `WINGMAN_TOOL_INPUT` (JSON) in the env.",
+      "items": {
+       "$ref": "#/definitions/Hook"
+      },
+      "type": "array"
+     },
+     "stop": {
+      "default": [],
+      "description": "Fired when the assistant emits its final Stop for a user turn. Receives `WINGMAN_STOP_REASON`.",
+      "items": {
+       "$ref": "#/definitions/Hook"
+      },
+      "type": "array"
+     },
+     "user_prompt_submit": {
+      "default": [],
+      "description": "Fired when the user submits a prompt. Receives `WINGMAN_USER_PROMPT`. If `block: true` and the hook exits non-zero, the prompt is rejected.",
+      "items": {
+       "$ref": "#/definitions/Hook"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   },
+   "IsolationTierName": {
+    "description": "Where pilot workers run, for the schema only.\n\nMatches `IsolationTier::parse`, which recognises `container` and `vm` and falls back to `host`.",
+    "oneOf": [
+     {
+      "description": "Directly on this machine, in a git worktree.",
+      "enum": [
+       "host"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Inside a container image.",
+      "enum": [
+       "container"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Inside a virtual machine.",
+      "enum": [
+       "vm"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "LearnConfig": {
+    "additionalProperties": false,
+    "description": "Settings for the memory / skills loop.",
+    "properties": {
+     "allow_global_memory_writes": {
+      "default": false,
+      "description": "May the *agent* write global memories (`~/.wingman/memory/`)?\n\nGlobal memories are rendered into the system prompt of every future session in every project, so a prompt injection in one cloned repo that induces `save_memory` gets attacker-chosen text into unrelated work indefinitely. Off by default: the agent may still write project-scoped memories freely, and you can always write global ones yourself (they are plain markdown files).",
+      "type": "boolean"
+     },
+     "search_hint_tokens": {
+      "default": 300,
+      "description": "Search escalation: before each user turn, search the project index with the request and hand the agent the top matching files, line ranges and symbols, so it starts reading instead of grepping. This is the token budget for that block (estimated at ~4 chars/token); hits that would overflow it are dropped. `0` turns it off and the index is not opened for it.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "LoggingConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "file": {
+      "default": true,
+      "description": "Write logs to a file under `~/.wingman/logs/`.",
+      "type": "boolean"
+     },
+     "filter": {
+      "default": "info,wingman=info",
+      "description": "`tracing-subscriber` env-filter directive.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "McpServerConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "args": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "command": {
+      "default": null,
+      "description": "Command to spawn for stdio transport.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "cwd": {
+      "default": null,
+      "description": "Working directory for the stdio child process.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "env": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "default": {},
+      "description": "Environment variables for the stdio child process. Most MCP servers take their API key / config via env, so this is required to reach them.",
+      "type": "object"
+     },
+     "headers": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "default": {},
+      "description": "Extra HTTP headers for http transport (e.g. `Authorization`). Needed to reach authenticated remote MCP servers.",
+      "type": "object"
+     },
+     "transport": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/McpTransport"
+       }
+      ],
+      "default": "stdio",
+      "description": "Transport: \"stdio\" (default) or \"http\"."
+     },
+     "trusted": {
+      "default": false,
+      "description": "Whether this server's tools are trusted to run in read-only/plan mode. MCP tools are opaque \u2014 we can't tell a safe search tool from one that writes files or runs commands \u2014 so by default they are gated to edit-capable modes (auto-edit/yolo) just like the shell tool. Set this true only for servers you know are side-effect-free.",
+      "type": "boolean"
+     },
+     "url": {
+      "default": null,
+      "description": "URL for http transport.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "McpTransport": {
+    "description": "MCP transports, for the schema only.\n\nThe only closed set here that the code already enforces: `mcp::connect` rejects anything else with `unknown transport`.",
+    "oneOf": [
+     {
+      "description": "Spawn the server as a child process and speak over its stdio.",
+      "enum": [
+       "stdio"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Connect to an already-running server over HTTP.",
+      "enum": [
+       "http"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "OtlpConfig": {
+    "additionalProperties": false,
+    "description": "OTLP/HTTP (JSON) export. Off unless an endpoint is set here or through `WINGMAN_OTLP_ENDPOINT` / `OTEL_EXPORTER_OTLP_ENDPOINT`.\n\nEnvironment overrides and `${ENV_VAR}` / `keyring:<id>` header values are resolved where the exporter starts (`wingman_session::otlp::settings`), not on load, so a resolved secret never sits in a `Config` that may be saved back to disk or served by `wingman serve`.",
+    "properties": {
+     "endpoint": {
+      "default": null,
+      "description": "Collector base URL, e.g. `http://localhost:4318`. `/v1/traces` and `/v1/metrics` are appended.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "headers": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "default": {},
+      "description": "Extra request headers (auth). Values support `${ENV_VAR}` and `keyring:<id>`.",
+      "type": "object"
+     },
+     "service_name": {
+      "default": null,
+      "description": "`service.name` resource attribute. Defaults to `wingman`.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "PermissionMode": {
+    "description": "Permission model \u2014 controls when the user is prompted before writes / shell.",
+    "oneOf": [
+     {
+      "description": "Reads/searches free; every write or shell call prompts.",
+      "enum": [
+       "read-only"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Like read-only, but the assistant is expected to produce an explicit plan via `present_plan` before any write/shell tool runs. Once the user approves the plan, the runtime promotes the session to `auto-edit` for the remainder of the user turn.",
+      "enum": [
+       "plan"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Writes/shell inside the project tree auto-allowed; out-of-tree paths and a denylist of destructive shell patterns still prompt.",
+      "enum": [
+       "auto-edit"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "No prompts. Only enabled per-session via `--yolo`; never persisted.",
+      "enum": [
+       "yolo"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "PilotApprovalConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "auto_approve_globs": {
+      "default": [
+       "crates/**/*.rs",
+       "docs/**",
+       "README.md"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "auto_approve_max_tasks": {
+      "default": 5,
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "auto_approve_usd": {
+      "default": 1.0,
+      "format": "double",
+      "type": "number"
+     },
+     "dangerous_paths": {
+      "default": [
+       "**/migrations/**",
+       ".github/**",
+       "**/auth/**",
+       "**/secrets*",
+       "Cargo.lock"
+      ],
+      "description": "Plans touching these globs always require a hard approval gate.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "notify_channel": {
+      "default": "desktop",
+      "description": "Where notify-only plans are surfaced (e.g. \"desktop\", \"slack:<webhook>\").",
+      "type": "string"
+     },
+     "notify_only_window_secs": {
+      "default": 60,
+      "description": "\"Veto in N seconds\" window for medium-risk plans.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "PilotConfig": {
+    "additionalProperties": false,
+    "description": "Top-level pilot-mode settings. See `plan.md` \u00a7 Unified config schema.\n\nDefaults mirror the table in the plan: `copilot` tier, 4-way concurrency, $10 budget, 30-minute task timeout, `cargo check --workspace` as the per-turn gate (E5).",
+    "properties": {
+     "approval": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotApprovalConfig"
+       }
+      ],
+      "default": {
+       "auto_approve_globs": [
+        "crates/**/*.rs",
+        "docs/**",
+        "README.md"
+       ],
+       "auto_approve_max_tasks": 5,
+       "auto_approve_usd": 1.0,
+       "dangerous_paths": [
+        "**/migrations/**",
+        ".github/**",
+        "**/auth/**",
+        "**/secrets*",
+        "Cargo.lock"
+       ],
+       "notify_channel": "desktop",
+       "notify_only_window_secs": 60
+      }
+     },
+     "capabilities": {
+      "additionalProperties": {
+       "type": "boolean"
+      },
+      "default": {},
+      "description": "Per-capability overrides. Each key turns one E1\u2013E13 / J1\u2013J15 capability on or off regardless of the tier's defaults.",
+      "type": "object"
+     },
+     "critic_model": {
+      "default": null,
+      "description": "J10 \u2014 model for the critic agent (`provider/model_id`). Defaults to `reviewer_model`, then `default_model`. Choose one from another family than `worker_model`: a critic with the workers' blind spots agrees with them.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "critic_other_family": {
+      "default": false,
+      "description": "J10 \u2014 refuse to start a run whose critic shares `worker_model`'s model family, or whose family (either side) Wingman cannot tell from the name. Checked only while the `critic` capability is on.",
+      "type": "boolean"
+     },
+     "daemon": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotDaemonConfig"
+       }
+      ],
+      "default": {
+       "auto_dispatch": false,
+       "auto_threshold": 0.75,
+       "enabled": false,
+       "feedback_poll_secs": 3600,
+       "intake_dir": ".wingman/intake",
+       "max_auto_dispatch_per_cycle": 1,
+       "max_concurrent_runs": 2,
+       "max_review_rounds": 3,
+       "policy": "",
+       "poll_interval_secs": 300,
+       "slack_signing_secret": null,
+       "sources": [
+        "github_issues"
+       ],
+       "speculative": false,
+       "trusted_authors": [],
+       "trusted_labels": [
+        "wingman:auto"
+       ],
+       "watch_debounce_ms": 1000
+      }
+     },
+     "default_model": {
+      "default": null,
+      "description": "Model used for the manager agent, reviewers, and the critic. Form: `provider/model_id` (e.g. `anthropic/claude-opus-4-7`).",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "max_concurrent_agents": {
+      "default": 4,
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_manager_ticks": {
+      "default": 200,
+      "description": "Scheduling decisions the manager may make before the run is declared stuck. Only decisions count: ticks where work is in flight and nothing needs deciding are free, so this bounds manager *activity* rather than elapsed time. Was hardcoded to 64, which a single long task could exhaust just by being watched.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_retries_per_task": {
+      "default": 3,
+      "description": "How far the E5 retry ladder may climb for one task.\n\nThe rungs are: 1 retry on the same model, 2 retry on an escalated model, 3 decompose via the splitter, and above that the task is Blocked. So this is also a choice of *which rungs exist* \u2014 at 1 a task gets one same-model retry and is then blocked, and the escalation and splitter rungs are unreachable no matter what the planner does.\n\n3 makes the whole documented ladder available, and matches `OrchestratorConfig::default()`. The pilot CLI used to hardcode 1, which is why runs blocked tasks at `attempts=1` and reported the ladder as exhausted when it had barely started.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_total_tokens": {
+      "default": 20000000,
+      "description": "Hard cap on total tokens (in + out) for a pilot run. 0 disables.\n\nBackstop for `max_usd`: spend is priced from a hardcoded table, and a model that isn't in it prices at $0, which silently disables the USD cap. Token counts are recorded for every model, so this bound always applies.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_usd": {
+      "default": 10.0,
+      "format": "double",
+      "type": "number"
+     },
+     "notifications": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotNotificationsConfig"
+       }
+      ],
+      "default": {
+       "decision": [
+        "desktop",
+        "slack"
+       ],
+       "desktop_inbox": false,
+       "digest_cron": "0 9 * * *",
+       "escalation": [
+        "desktop",
+        "slack",
+        "email"
+       ],
+       "info": "suppress",
+       "progress": "digest",
+       "webhooks": {}
+      }
+     },
+     "pr": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotPrConfig"
+       }
+      ],
+      "default": {
+       "auto_merge": false,
+       "auto_merge_max_severity": "low",
+       "base_branch": "main",
+       "require_ci_green": true,
+       "reviewer_rework_severity": "high"
+      }
+     },
+     "refine": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotRefineConfig"
+       }
+      ],
+      "default": {
+       "challenge_threshold": "medium",
+       "max_clarifying_questions": 3,
+       "suggest_alternatives": true
+      }
+     },
+     "reviewer_model": {
+      "default": null,
+      "description": "Model for the per-task reviewer, and for the critic when `critic_model` is unset. Defaults to `default_model` when unset \u2014 point it at a stronger model for tougher review.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "sandbox": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotSandboxConfig"
+       }
+      ],
+      "default": {
+       "allow_unsandboxed_vm_tasks": false,
+       "container_image": "wingman/sandbox:latest",
+       "cpus": 2,
+       "default_tier": "host",
+       "env": [],
+       "memory_mib": 4096,
+       "network": "bridge",
+       "pids_limit": 512,
+       "vm": {
+        "chroot_base_dir": "/srv/jailer",
+        "firecracker_bin": "firecracker",
+        "jailer_bin": "jailer",
+        "jailer_gid": 65534,
+        "jailer_uid": 65534,
+        "kernel_image": "",
+        "rootfs_image": "",
+        "tap_device": "",
+        "use_jailer": true,
+        "worktree_drive_mib": 4096
+       },
+       "vm_provider": "firecracker"
+      }
+     },
+     "security": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotSecurityConfig"
+       }
+      ],
+      "default": {
+       "allowed_licenses": [
+        "MIT",
+        "Apache-2.0",
+        "BSD-3-Clause",
+        "BSD-2-Clause",
+        "ISC",
+        "MPL-2.0",
+        "Unicode-DFS-2016"
+       ],
+       "block_severity": "medium",
+       "denied_licenses": [],
+       "dependency_audit": true,
+       "secrets_scanner": "gitleaks"
+      }
+     },
+     "skills": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotSkillsConfig"
+       }
+      ],
+      "default": {
+       "index": "",
+       "packs": []
+      }
+     },
+     "stall_tool_calls": {
+      "default": 40,
+      "description": "Progress watchdog: a worker that makes this many tool calls without changing a file is nudged, and at twice this many it is stopped and handed to the retry ladder. Reviewers are exempt. 0 turns it off.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "task_timeout_secs": {
+      "default": 1800,
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "tier": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotTier"
+       }
+      ],
+      "default": "copilot"
+     },
+     "turn_gate_cmd": {
+      "default": "cargo check --workspace",
+      "description": "Shell command run between worker turns as a sanity gate (E5). Empty disables the per-turn check.",
+      "type": "string"
+     },
+     "turn_rollback_after": {
+      "default": 2,
+      "description": "E5.5 \u2014 how many times in a row `turn_gate_cmd` may fail before the worker restores its worktree to the last state that passed it. Only used while the `turn_rollback` capability is on (autopilot by default). Each rollback also buys the worker a fresh round of gate retries.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "worker_max_turns": {
+      "default": 60,
+      "description": "How many model turns a worker gets before the agent loop stops.\n\nSeparate from the interactive default because the jobs are not alike: a chat turn answers a question, a pilot worker has to read the code, edit it, run a build, read the errors, fix them, re-run, and only then report. Inheriting the interactive budget of 16 meant workers ran out mid-task and exited cleanly without ever calling `task_complete` \u2014 the supervisor then threw the work away as failed and the retry ladder spent the whole run rediscovering the same wall.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "worker_model": {
+      "default": null,
+      "description": "Cheaper model used for worker subprocesses.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "PilotDaemonConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "auto_dispatch": {
+      "default": false,
+      "description": "J2 \u2014 when true, a candidate the daemon scores as `AutoRun` is dispatched into a real nested pilot run (plans, spawns workers, opens a PR) instead of only being queued. Default false so enabling the daemon surfaces work without silently opening PRs; flip it on once the trust config (`trusted_authors`/`trusted_labels`, `auto_threshold`) is tuned.",
+      "type": "boolean"
+     },
+     "auto_threshold": {
+      "default": 0.75,
+      "format": "double",
+      "type": "number"
+     },
+     "enabled": {
+      "default": false,
+      "type": "boolean"
+     },
+     "feedback_poll_secs": {
+      "default": 3600,
+      "description": "R2 \u2014 how often, in seconds, the daemon polls the PRs its runs opened for their post-merge outcome (merged, closed) and records it for the cross-run learner. Checked between discovery cycles, so it runs at most once per `poll_interval_secs` even when set lower. `0` turns it off; `wingman pilot feedback` still polls on demand.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "intake_dir": {
+      "default": ".wingman/intake",
+      "description": "J3 file-drop intake directory (relative to the repo root). When the `intake` source is enabled, each `*.md` here is normalized into a goal candidate and flows through the same score/dispatch path as discovered work. A Slack/email gateway that writes messages into this directory is the \"transport\"; wingman consumes it, so no in-process listener is needed. An optional first line `author: <name>` sets trust.",
+      "type": "string"
+     },
+     "max_auto_dispatch_per_cycle": {
+      "default": 1,
+      "description": "J2 \u2014 the most autonomous runs one discovery cycle may start.\n\n`auto_dispatch` opens PRs with nobody watching, and a cycle that discovers twenty `AutoRun` candidates would previously dispatch all twenty back to back. This bounds the blast radius of one cycle to a number you chose. Candidates over the cap are still queued, so nothing is lost \u2014 they are picked up by a later cycle or by a human reading the queue.\n\nDefaults to 1: the daemon makes progress every cycle, at a rate `poll_interval_secs` already governs. `0` means no cap, which is the old behaviour and is not recommended.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_concurrent_runs": {
+      "default": 2,
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_review_rounds": {
+      "default": 3,
+      "description": "`pr_reviews` / `pr_checks` sources \u2014 the most rework rounds (review and CI together) the daemon runs on one of pilot's own PRs. Each round addresses the trusted reviewers' open threads, pushes to the PR branch and replies; a reviewer who keeps asking for more past this cap is answered by a human. Rounds also share one `[pilot].max_usd` budget per PR, so the cap bounds time and the budget bounds spend.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "policy": {
+      "default": "",
+      "description": "Slow-path triage policy, written as plain prose (\"skip anything about the docs site; dependency bumps for test-only crates can run\"). The code rules (trust allowlists, score thresholds) stay the fast path: only candidates they leave in the propose band reach a model, which judges them against this text. The judge can drop a candidate or promote a `Trusted` one to auto-run; it can never promote anything less trusted. Empty (the default) skips the model entirely. Uses `[router].fast_model` when set.",
+      "type": "string"
+     },
+     "poll_interval_secs": {
+      "default": 300,
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "slack_signing_secret": {
+      "default": null,
+      "description": "Slack app **signing secret**, used to verify `X-Slack-Signature` on every request to `wingman pilot intake slack`. Without it the intake server refuses all requests \u2014 an unauthenticated listener that accepts a body-supplied author is remote task execution. Supports a `${ENV_VAR}` placeholder so the secret isn't stored in plaintext.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "sources": {
+      "default": [
+       "github_issues"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "speculative": {
+      "default": false,
+      "description": "Act ahead, quietly. A `Trusted` candidate that scores in the propose band (below `auto_threshold`) is attempted anyway instead of waiting in the queue. A PR opens only when every task passes its gates, it is never auto-merged, and a failed attempt sends no notifications; the candidate stays queued for a human. Widens the score band, never the trust band: `Known`/`Untrusted` work is still never run unasked. Shares `max_auto_dispatch_per_cycle` with `auto_dispatch`.",
+      "type": "boolean"
+     },
+     "trusted_authors": {
+      "default": [],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "trusted_labels": {
+      "default": [
+       "wingman:auto"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "watch_debounce_ms": {
+      "default": 1000,
+      "description": "J13 \u2014 under `pilot daemon --watch`, how long file and git-hook events must go quiet before they wake a cycle. One save or one `git pull` arrives as a burst of events; this collapses each burst into a single cycle. Raise it if an editor or build tool keeps waking the daemon.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "PilotNotificationsConfig": {
+    "additionalProperties": false,
+    "description": "R5 \u2014 notification routing & digesting. Each severity tier routes to a set of channels, or the special sinks \"digest\" (batched) / \"suppress\". `escalation` / `decision` are channel lists (immediate); `progress` / `info` are single tokens that may be a channel, \"digest\", or \"suppress\".",
+    "properties": {
+     "decision": {
+      "default": [
+       "desktop",
+       "slack"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "desktop_inbox": {
+      "default": false,
+      "description": "Write notifications routed to the `desktop` channel into `~/.wingman/notifications.jsonl`, where the Wingman desktop app renders them as popups you can approve, answer or dismiss in place.\n\nOff by default: without the app running the file is written and never read. Note that `progress` defaults to `digest`, so turning this on surfaces *failures* but not successful completions \u2014 set `progress = \"desktop\"` as well if you want those too.",
+      "type": "boolean"
+     },
+     "digest_cron": {
+      "default": "0 9 * * *",
+      "description": "Cron expression for flushing the digest queue.",
+      "type": "string"
+     },
+     "escalation": {
+      "default": [
+       "desktop",
+       "slack",
+       "email"
+      ],
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "info": {
+      "default": "suppress",
+      "type": "string"
+     },
+     "progress": {
+      "default": "digest",
+      "type": "string"
+     },
+     "webhooks": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "default": {},
+      "description": "Delivery endpoints per channel name: `channel -> webhook URL`. A routed channel with an entry here is POSTed a `{\"text\": ...}` payload (the Slack incoming-webhook shape; also works for Discord/Teams/generic receivers and email-webhook services). Channels without an entry fall back to the terminal. Values support `${ENV_VAR}` so the URL (a secret) can come from the environment.",
+      "type": "object"
+     }
+    },
+    "type": "object"
+   },
+   "PilotPrConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "auto_merge": {
+      "default": false,
+      "type": "boolean"
+     },
+     "auto_merge_max_severity": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/SeverityLevel"
+       }
+      ],
+      "default": "low",
+      "description": "\"low\" | \"medium\" | \"high\" \u2014 auto-merge is vetoed if `wingman review` turns up any finding at or above this severity."
+     },
+     "base_branch": {
+      "default": "main",
+      "description": "Branch the pilot opens its PR against. Defaults to `main`; set this to your repo's default branch (e.g. `master`). The `WINGMAN_PILOT_BASE_BRANCH` env var overrides it for one-off runs.",
+      "type": "string"
+     },
+     "require_ci_green": {
+      "default": true,
+      "type": "boolean"
+     },
+     "reviewer_rework_severity": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/SeverityLevel"
+       }
+      ],
+      "default": "high",
+      "description": "Severity at/above which the per-task reviewer sends work back for rework: \"low\" | \"medium\" | \"high\" | \"critical\". Defaults to `high` \u2014 acceptance checks already gate functional correctness before review, so an over-eager reviewer model can't loop a correct change. Lower it for stricter review with a well-calibrated reviewer model."
+     }
+    },
+    "type": "object"
+   },
+   "PilotRefineConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "challenge_threshold": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/ChallengeThreshold"
+       }
+      ],
+      "default": "medium",
+      "description": "\"off\" | \"low\" | \"medium\" | \"high\" \u2014 how aggressively the agent challenges goals it thinks are wrong."
+     },
+     "max_clarifying_questions": {
+      "default": 3,
+      "description": "Cap on clarifying questions the agent may ask before planning (J1).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "suggest_alternatives": {
+      "default": true,
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
+   "PilotSandboxConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "allow_unsandboxed_vm_tasks": {
+      "default": false,
+      "description": "Fail-closed switch for the untrusted/irreversible (\"vm\") tier. When no vm backend is available (not Linux, no `/dev/kvm`, no `firecracker`, no kernel/rootfs configured), pilot *refuses* to run a vm-tier task rather than silently executing it unsandboxed on the host. Set to true to accept host execution for those tasks.",
+      "type": "boolean"
+     },
+     "container_image": {
+      "default": "wingman/sandbox:latest",
+      "description": "Image a container-tier worker runs in. It must provide `sh`, `git` and a Linux `wingman` on PATH; Wingman does not publish one.",
+      "type": "string"
+     },
+     "cpus": {
+      "default": 2,
+      "description": "CPUs a sandboxed worker may use (`docker --cpus`, Firecracker `vcpu_count`).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "default_tier": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/IsolationTierName"
+       }
+      ],
+      "default": "host",
+      "description": "\"host\" | \"container\" | \"vm\" \u2014 where workers run by default."
+     },
+     "env": {
+      "default": [],
+      "description": "Environment variables forwarded into the sandbox, by name \u2014 typically the provider API key (`ANTHROPIC_API_KEY`). OS-keyring credentials are not reachable from inside a sandbox.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "memory_mib": {
+      "default": 4096,
+      "description": "Memory ceiling in MiB (`docker --memory`, Firecracker `mem_size_mib`).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "network": {
+      "default": "bridge",
+      "description": "Docker network for a container-tier worker: \"bridge\", \"none\", or the name of a network you created with its own egress rules. The worker calls its model provider from inside the sandbox, so \"none\" leaves it unable to reach anything that isn't also in the container.",
+      "type": "string"
+     },
+     "pids_limit": {
+      "default": 512,
+      "description": "Process ceiling for a container-tier worker (`docker --pids-limit`).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "vm": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PilotVmConfig"
+       }
+      ],
+      "default": {
+       "chroot_base_dir": "/srv/jailer",
+       "firecracker_bin": "firecracker",
+       "jailer_bin": "jailer",
+       "jailer_gid": 65534,
+       "jailer_uid": 65534,
+       "kernel_image": "",
+       "rootfs_image": "",
+       "tap_device": "",
+       "use_jailer": true,
+       "worktree_drive_mib": 4096
+      },
+      "description": "Firecracker settings for the vm tier."
+     },
+     "vm_provider": {
+      "default": "firecracker",
+      "description": "\"firecracker\" is the only vm backend. Any other value keeps the vm tier unavailable, which means fail-closed.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "PilotSecurityConfig": {
+    "additionalProperties": false,
+    "description": "R6 \u2014 security pass run before E8's auto-merge gate.",
+    "properties": {
+     "allowed_licenses": {
+      "default": [
+       "MIT",
+       "Apache-2.0",
+       "BSD-3-Clause",
+       "BSD-2-Clause",
+       "ISC",
+       "MPL-2.0",
+       "Unicode-DFS-2016"
+      ],
+      "description": "SPDX identifiers permitted for dependencies a run adds to a lockfile (`Cargo.lock`, `package-lock.json`). Empty allows any license not in `denied_licenses`.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "block_severity": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/SeverityLevel"
+       }
+      ],
+      "default": "medium",
+      "description": "Findings at or above this severity block auto-merge. \"info\" | \"low\" | \"medium\" | \"high\" | \"critical\"."
+     },
+     "denied_licenses": {
+      "default": [],
+      "description": "SPDX identifiers never permitted, even when also allowed. A denied license is a critical finding.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "dependency_audit": {
+      "default": true,
+      "description": "Run `cargo audit` when the run changed a `Cargo.lock`. Skipped, and said so, when cargo-audit is not installed.",
+      "type": "boolean"
+     },
+     "secrets_scanner": {
+      "default": "gitleaks",
+      "description": "Secrets scanner binary to run over the run's commits: \"gitleaks\", or a path to it. Skipped, and said so in the security summary, when it is not on PATH. Empty disables the external scanner (the built-in heuristic scan still runs).",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "PilotSkillsConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "index": {
+      "default": "",
+      "description": "Skill-pack registry index: a git URL (https/ssh) or local directory holding `index.json`. Empty means packs are cloned straight from `https://github.com/<owner>/<name>`, unsigned and without dependencies.",
+      "type": "string"
+     },
+     "packs": {
+      "default": [],
+      "description": "Installed skill packs, each `owner/name@semver` (a caret requirement when resolved through `index`).",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     }
+    },
+    "type": "object"
+   },
+   "PilotTier": {
+    "description": "Capability tier \u2014 which pilot-mode features are on by default.\n\n`assist` keeps the user in the loop on every decision; `copilot` is the default for day-to-day work; `autopilot` enables daemon discovery, the critic agent, and sandboxed execution. See `plan.md` \u00a7 Capability tiers.",
+    "enum": [
+     "assist",
+     "copilot",
+     "autopilot"
+    ],
+    "type": "string"
+   },
+   "PilotVmConfig": {
+    "additionalProperties": false,
+    "description": "J11 \u2014 Firecracker microVM backend for the vm sandbox tier (Linux + KVM).",
+    "properties": {
+     "chroot_base_dir": {
+      "default": "/srv/jailer",
+      "description": "Directory the jailer builds its chroots under.",
+      "type": "string"
+     },
+     "firecracker_bin": {
+      "default": "firecracker",
+      "description": "`firecracker` binary. Must be an absolute path when `use_jailer` is on.",
+      "type": "string"
+     },
+     "jailer_bin": {
+      "default": "jailer",
+      "type": "string"
+     },
+     "jailer_gid": {
+      "default": 65534,
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "jailer_uid": {
+      "default": 65534,
+      "description": "Unprivileged uid/gid the jailer drops Firecracker to.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "kernel_image": {
+      "default": "",
+      "description": "Uncompressed guest kernel (`vmlinux`). Empty = vm tier unavailable.",
+      "type": "string"
+     },
+     "rootfs_image": {
+      "default": "",
+      "description": "ext4 root filesystem providing `/sbin/wingman-sandbox-init`, `sh`, `git` and `wingman`. Attached read-only. Empty = vm tier unavailable.",
+      "type": "string"
+     },
+     "tap_device": {
+      "default": "",
+      "description": "Pre-created tap device for guest networking. Empty = no network interface, so the guest can only reach a provider inside the VM.",
+      "type": "string"
+     },
+     "use_jailer": {
+      "default": true,
+      "description": "Run Firecracker under its `jailer` (chroot, uid/gid drop, cgroups). The jailer needs root.",
+      "type": "boolean"
+     },
+     "worktree_drive_mib": {
+      "default": 4096,
+      "description": "Size of the ext4 drive the worktree copy is packed into.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "PrivacyConfig": {
+    "additionalProperties": false,
+    "description": "Fully-local, air-gapped operation. When `local_only` is on, Wingman refuses any non-local provider (base URL must be localhost/127.0.0.1), disables the network tools (`web_fetch`/`web_search`) regardless of permission mode, and `wingman attest` reports the guarantees \u2014 for regulated / air-gapped teams that cloud agents structurally can't serve.",
+    "properties": {
+     "local_only": {
+      "default": false,
+      "type": "boolean"
+     }
+    },
+    "type": "object"
+   },
+   "ProviderConfig": {
+    "additionalProperties": true,
+    "properties": {
+     "api_key": {
+      "default": null,
+      "description": "API key. Resolved against env at load time if it looks like `${ENV_VAR}`.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "base_url": {
+      "default": null,
+      "description": "Override base URL \u2014 used for OpenAI-compatible aggregators (OpenRouter, LiteLLM, LM Studio, vLLM, etc.).",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "model": {
+      "default": null,
+      "description": "Optional explicit model id for this provider.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "ReasoningLevel": {
+    "description": "The four canonical `reasoning` levels, for the schema only.\n\nNever deserialized \u2014 [`Config::reasoning`] is a `String` so the parser's aliases keep working. This exists so `GET /v1/config/schema` describes the field as a choice rather than as free text, which is the difference between a settings form with a dropdown and one where `hgih` is accepted until the daemon rejects the save.",
+    "oneOf": [
+     {
+      "description": "No reasoning. The default \u2014 it costs output tokens.",
+      "enum": [
+       "off"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "A short budget. Anthropic 4096 thinking tokens, OpenAI `low`.",
+      "enum": [
+       "low"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Anthropic 16384 thinking tokens, OpenAI `medium`.",
+      "enum": [
+       "medium"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Anthropic 32768 thinking tokens, OpenAI `high`.",
+      "enum": [
+       "high"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "RouterConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "classes": {
+      "additionalProperties": {
+       "type": "string"
+      },
+      "default": {},
+      "description": "Task-class routing. Maps a task class (e.g. \"search\", \"summarize\", \"codegen\") to either the literal string \"fast\" (use `fast_model`), \"default\" (use the session model), or an explicit `provider/model_id`. Classes not listed here use the session model.\n\n```toml [router.classes] search    = \"fast\" summarize = \"fast\" codegen   = \"default\" ```",
+      "type": "object"
+     },
+     "fallback_models": {
+      "default": [],
+      "description": "Ordered fallback chain. If the primary model errors (network / rate-limit / provider 5xx), the runtime walks this list in order. Each entry is `provider/model_id`.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "fast_model": {
+      "default": null,
+      "description": "\"Fast\" model used for classification, summarization, and recap. Form: `provider/model_id`, e.g. `anthropic/claude-haiku-4-5-20251001`.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "learned_min_samples": {
+      "default": null,
+      "description": "Learned routing, off unless set. Once a model has at least this many verification-gate results for a task class in this repo, the model with the best record there serves that class: the session model when no `--model` is given, and a pilot worker role's first attempt. Only models that have already run the class are candidates. `wingman router stats` shows the table it picks from.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "local_model": {
+      "default": null,
+      "description": "Local model for the privacy preset \u2014 the target of the \"local\" class keyword. Form: `provider/model_id`, e.g. `ollama/llama3.1`. When classes like `summarize`/`compaction` map to \"local\", those steps never leave the machine. `wingman router preset local` prints a recommended block.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "SandboxPolicy": {
+    "description": "OS-level containment policy for `run_shell`, for the schema only.\n\n`run_shell` tests for `off` and `required` by name and treats everything else as `auto`, so these three are the whole vocabulary.",
+    "oneOf": [
+     {
+      "description": "Wrap when a mechanism is available, run unconfined when none is.",
+      "enum": [
+       "auto"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Never wrap.",
+      "enum": [
+       "off"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Refuse to run at all unless the filesystem can be scoped.",
+      "enum": [
+       "required"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "ScheduledTask": {
+    "additionalProperties": false,
+    "properties": {
+     "every_secs": {
+      "default": 0,
+      "description": "Cadence in seconds; the task fires when at least this many seconds have elapsed since its last successful run.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "id": {
+      "default": "",
+      "description": "Stable id used to record last-run-at.",
+      "type": "string"
+     },
+     "model": {
+      "default": null,
+      "description": "Optional model override (`provider/model`).",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "prompt": {
+      "default": "",
+      "description": "Prompt to send headlessly.",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   },
+   "ServeConfig": {
+    "additionalProperties": false,
+    "description": "Settings for the HTTP API daemon. See `docs/HTTP-API.md`.",
+    "properties": {
+     "addr": {
+      "default": "127.0.0.1:8787",
+      "description": "Bind address. Binding anything other than loopback requires a token of at least [`MIN_REMOTE_TOKEN_LEN`] characters.",
+      "type": "string"
+     },
+     "max_concurrent_turns": {
+      "default": 2,
+      "description": "Concurrent agent turns across all projects. Further turns queue.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_permission_mode": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/PermissionMode"
+       }
+      ],
+      "default": "auto-edit",
+      "description": "Ceiling on the permission mode any request may obtain. A request may ask for less; it can never obtain more. `yolo` additionally requires `--allow-yolo` on the command line \u2014 remote arbitrary shell should take a deliberate act at launch, not a config line someone forgot."
+     },
+     "projects": {
+      "default": [],
+      "description": "The repos this server will serve. Nothing outside this list is reachable, so a stolen token cannot point the agent at an arbitrary directory.",
+      "items": {
+       "$ref": "#/definitions/ServeProject"
+      },
+      "type": "array"
+     },
+     "push": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/ServePushConfig"
+       }
+      ],
+      "default": {
+       "events": [],
+       "url": null
+      },
+      "description": "Outbound push so a phone need not poll."
+     },
+     "request_timeout_secs": {
+      "default": 1800,
+      "description": "Wall clock for a single turn or exec, in seconds.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "token": {
+      "default": null,
+      "description": "Bearer token every request must present. Supports `${ENV_VAR}` indirection, or the literal `\"keyring\"` to read the entry written by `wingman serve --init-token`.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "ServeProject": {
+    "additionalProperties": false,
+    "description": "One repo the API may operate on.",
+    "properties": {
+     "id": {
+      "default": null,
+      "description": "URL-safe identifier used in paths (`/v1/projects/<id>/\u2026`). Defaults to the directory name when omitted.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "root": {
+      "description": "Absolute path to the repository root.",
+      "type": "string"
+     }
+    },
+    "required": [
+     "root"
+    ],
+    "type": "object"
+   },
+   "ServePushConfig": {
+    "additionalProperties": false,
+    "description": "Outbound push: the server POSTs to `url` on subscribed events.",
+    "properties": {
+     "events": {
+      "default": [],
+      "description": "Event kinds to push. Empty means every kind the server emits.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "url": {
+      "default": null,
+      "description": "Target URL. Slack incoming-webhook shape, or any POST endpoint. Supports `${ENV_VAR}` indirection.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "SeverityLevel": {
+    "description": "The severity ladder, for the schema only.\n\nOne enum for every `*_severity` gate, because they are all parsed by the same `Severity: FromStr` in `wingman-autonomous` and a per-field list would be three chances to drift from it.",
+    "oneOf": [
+     {
+      "description": "Informational / nitpick. Never blocks.",
+      "enum": [
+       "info"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Worth fixing, but not on its own a reason to stop.",
+      "enum": [
+       "low"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "The usual gate: real problems, not stylistic ones.",
+      "enum": [
+       "medium"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Serious \u2014 correctness, security, or data loss.",
+      "enum": [
+       "high"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "Must-fix; always blocks auto-merge and escalates.",
+      "enum": [
+       "critical"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "TeamConfig": {
+    "additionalProperties": false,
+    "description": "Optional HTTP endpoint for server-backed team memory (`wingman memory push` / `pull`). The git-backed `wingman memory sync` needs no server; this is for teams that prefer a central store.",
+    "properties": {
+     "endpoint": {
+      "default": null,
+      "description": "Base URL of the team memory service. Empty disables push/pull.",
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "token": {
+      "default": null,
+      "description": "Bearer token. Supports `${ENV_VAR}` and `keyring:...` like other secrets.",
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "TelemetryConfig": {
+    "additionalProperties": false,
+    "description": "Observability export. See `docs/CONFIGURATION.md`.",
+    "properties": {
+     "otlp": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/OtlpConfig"
+       }
+      ],
+      "default": {
+       "endpoint": null,
+       "headers": {},
+       "service_name": null
+      }
+     }
+    },
+    "type": "object"
+   },
+   "ThemeColors": {
+    "additionalProperties": false,
+    "properties": {
+     "assistant": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "code_block": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "error": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "system": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "tool_err": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "tool_name": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "tool_ok": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "tool_summary": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "user_prompt": {
+      "default": null,
+      "type": [
+       "string",
+       "null"
+      ]
+     }
+    },
+    "type": "object"
+   },
+   "ThemeName": {
+    "description": "The TUI themes that actually resolve, for the schema only.\n\nKept in step with `wingman_tui::theme::resolve`, which matches `light` and `mono` and falls through to the default for everything else. Like [`ReasoningLevel`] this is never deserialized: the field stays a `String` so an unrecognised name still loads and falls back, rather than bricking the binary over a cosmetic setting.",
+    "oneOf": [
+     {
+      "description": "The shipped dark theme.",
+      "enum": [
+       "default"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "For light terminals.",
+      "enum": [
+       "light"
+      ],
+      "type": "string"
+     },
+     {
+      "description": "No colour beyond the terminal's own foreground.",
+      "enum": [
+       "mono"
+      ],
+      "type": "string"
+     }
+    ]
+   },
+   "TokenConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "compact_at_tokens": {
+      "default": 120000,
+      "description": "Compact when used context exceeds this many tokens.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "max_usd_per_session": {
+      "default": null,
+      "description": "Optional soft budget: warn once when a session's estimated USD spend crosses this. `None` disables the warning. (Pilot mode has a hard `max_usd`; this is the interactive/headless soft guardrail.)",
+      "format": "double",
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "prompt_cache": {
+      "default": true,
+      "description": "Enable provider prompt caching where supported.",
+      "type": "boolean"
+     },
+     "tool_output_max_lines": {
+      "default": 400,
+      "description": "Cap on a single tool output before head/tail truncation kicks in.",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "ToolsConfig": {
+    "additionalProperties": false,
+    "description": "Per-project tool settings.",
+    "properties": {
+     "allow_network": {
+      "default": false,
+      "description": "Allow `web_fetch`/`web_search` in read-only/plan mode too. Off by default: network egress is otherwise gated to auto-edit/yolo so it can't be used as a data-exfiltration channel. Set true if you want look-ups while researching before you enter an edit mode.",
+      "type": "boolean"
+     },
+     "ask_user_desktop_timeout_secs": {
+      "default": 0,
+      "description": "Seconds `ask_user` waits for an answer from the Wingman desktop app.\n\n`0` (default) keeps the behaviour this tool has always had: with no interactive terminal it returns the \"proceed with your best judgment\" note immediately. Set it non-zero to route questions to the desktop popup instead \u2014 one key is both the switch and the deadline, so the two cannot drift apart. A headless run is never blocked longer than this, and if the app is not running the question is not routed at all.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "custom": {
+      "default": [],
+      "description": "User-defined command tools: extend the agent with a shell command without recompiling. Each becomes a tool the model can call; the tool input JSON is passed as `$WINGMAN_TOOL_INPUT` and stdin, and stdout is the result. Runs under the shell permission (auto-edit/yolo).",
+      "items": {
+       "$ref": "#/definitions/CustomToolConfig"
+      },
+      "type": "array"
+     },
+     "defer": {
+      "default": [],
+      "description": "Tool-name patterns whose schemas are withheld from every request and reached through `tool_search` / `tool_call` instead. A trailing `*` matches by prefix. Empty (default) puts every tool in every request.\n\n`preset` above is the static answer to the same cost \u2014 it decides what a session is *for* and drops the rest. This is the dynamic one, for tools worth having but rarely used: an MCP server's twenty schemas are billed on all of a session's turns and wanted on perhaps one, so `defer = [\"mcp__*\"]` trades a round trip in that turn for the schemas in the other forty-nine.\n\nDeferring is not disabling: a deferred tool is registered, gated, and callable exactly as before. `wingman context` reports what the change bought.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "disabled_tools": {
+      "default": [],
+      "description": "Comma-separated list of tools to disable for this project.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "loop_abort_at": {
+      "default": 8,
+      "description": "Occurrences within `loop_window` at which the turn is *ended* (default 8; `0` disables the guard entirely).\n\nThe one place Wingman stops a turn over repetition rather than advising about it. An advisory is right for an interactive session where someone is watching and can hit Esc; it is not a control for `wingman pilot`, a subagent, or a `--print` run in CI, any of which will otherwise spend the whole `max_turns` budget on a call whose answer stopped changing eight repetitions ago.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "loop_exempt": {
+      "default": [
+       "update_tasks",
+       "task_complete"
+      ],
+      "description": "Tools the cycle guard ignores: pollers and bookkeeping (default `[\"update_tasks\", \"task_complete\"]`). Trailing `*` matches by prefix.\n\nSome tools repeat with identical arguments because that is what they are *for*. \"Is the job done yet\" is byte-identical every time and its answer changes only when something else changes the world. Name those here \u2014 an MCP server's status-poll tool is the common case \u2014 or the guard will end the turn for doing its job.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "loop_warn_at": {
+      "default": 4,
+      "description": "Occurrences within `loop_window` at which the model is told it is looping (default 4; `0` disables the warning).",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "loop_window": {
+      "default": 24,
+      "description": "How many recent tool calls the cycle guard keeps in its window (default 24).\n\n`repeat_thresholds` above only ever sees a *run* of identical calls; its chain resets as soon as the arguments change, so an alternating `grep X \u2192 read_file Y \u2192 grep X \u2192 read_file Y` cycle is invisible to it. This window counts how often the same call appears among the last N, regardless of what came between.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "preset": {
+      "default": "",
+      "description": "Restrict the session to one named tool preset (`--preset`, or `[tools].preset` in config). Empty = every registered tool.\n\nEvery tool's schema is billed on every request, so a session that only reads code pays for `write_file`, `apply_patch`, and `run_shell` on every turn. A preset is a keep-list: tools outside it are unregistered at startup, exactly as `disabled_tools` does, and `wingman context` then reports the smaller number.\n\nBuilt-ins are `review` and `minimal`; `[tools.presets]` defines or overrides any name.",
+      "type": "string"
+     },
+     "presets": {
+      "additionalProperties": {
+       "items": {
+        "type": "string"
+       },
+       "type": "array"
+      },
+      "default": {},
+      "description": "User-defined tool presets: name \u2192 the tools to keep. A trailing `*` matches by prefix (`lsp_*`). A name defined here shadows a built-in.",
+      "type": "object"
+     },
+     "prune_threshold_chars": {
+      "default": 8192,
+      "description": "Prune a tool result larger than this many characters when the session is over the compaction threshold (default 8192; `0` disables pruning).\n\nCompaction folds whole turns into a recap, discarding the assistant's reasoning along with the bulk. Pruning takes the bulk only, which usually postpones compaction entirely.",
+      "format": "uint",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "redact_output_secrets": {
+      "default": true,
+      "description": "Redact high-confidence secret tokens (OpenAI `sk-\u2026`, GitHub `ghp_\u2026`, AWS `AKIA\u2026`, Slack `xox\u2026`, JWTs, `-----BEGIN \u2026 PRIVATE KEY-----`) in tool *output* before it reaches the model \u2014 so the agent can't surface or exfiltrate a credential it happened to read. On by default; only matches unambiguous token shapes to avoid mangling legitimate content.",
+      "type": "boolean"
+     },
+     "repeat_exempt": {
+      "default": [
+       "update_tasks",
+       "task_complete"
+      ],
+      "description": "Tools that are transparent to the repeat guard's chain (default `[\"update_tasks\", \"task_complete\"]`).\n\nAn excluded call neither increments the counter nor resets it, so bookkeeping interleaved into a loop cannot launder it: `grep X \u2192 update_tasks \u2192 grep X` still counts as two consecutive `grep X`. Supports a trailing `*` wildcard.",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "repeat_thresholds": {
+      "default": [
+       3,
+       5,
+       8
+      ],
+      "description": "Consecutive-repeat counts at which the agent is reminded that it is repeating itself (default `[3, 5, 8]`; empty disables the guard).\n\nA run of calls to the same tool with identical arguments is almost always a loop the model cannot see itself in. At each threshold the tool result gains an advisory telling it to re-read the last result and either change approach or conclude. It never blocks a call and never rewrites one \u2014 a legitimately repeated call is delayed by nothing.",
+      "items": {
+       "format": "uint32",
+       "minimum": 0.0,
+       "type": "integer"
+      },
+      "type": "array"
+     },
+     "run_plan": {
+      "default": false,
+      "description": "Offer the `run_plan` tool: let the model chain a few tool calls in one round trip, feeding an earlier call's output into a later call's arguments. Off by default \u2014 it is a prototype, and it changes what a single tool call can set in motion.\n\nIt does not widen permissions: every call inside a plan is dispatched normally and gated by the current mode exactly as it would be alone. What it widens is *blast radius per model decision*, which is why this is opt-in and why a project config cannot turn it on.",
+      "type": "boolean"
+     },
+     "shell_denylist": {
+      "default": [],
+      "description": "Additional shell patterns to always deny even in yolo mode. e.g. [\"rm -rf /\", \"sudo\"]",
+      "items": {
+       "type": "string"
+      },
+      "type": "array"
+     },
+     "shell_sandbox": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/SandboxPolicy"
+       }
+      ],
+      "default": "auto",
+      "description": "OS-level containment for `run_shell`: `auto` | `off` | `required`.\n\nThe permission modes confine the *file tools* to the project tree, but a shell command can read anything the user can \u2014 so in `auto-edit` the agent could `cat ~/.ssh/id_rsa` while `read_file` on the same path was refused. The denylist cannot close that; it is pattern matching against someone who can spell things differently.\n\n- `auto` (default) \u2014 confine when the platform provides a mechanism (`bwrap` on Linux, `sandbox-exec` on macOS), otherwise run unconfined and say so once. - `required` \u2014 refuse to run shell commands at all when no mechanism is available. Use for untrusted code. - `off` \u2014 never wrap."
+     },
+     "spill_tool_output": {
+      "default": true,
+      "description": "Keep the full text of a truncated tool result on disk, under `<project>/.wingman/spill/<session>/`, and tell the model where it is (default true).\n\n`tool_output_max_lines` caps what a result costs the model by keeping the head and tail. Without spilling, the elided middle is simply gone. With it, the model gets a path it can re-read with `read_file`'s `offset`/`limit` \u2014 the same context cost, minus the one-way door.",
+      "type": "boolean"
+     },
+     "tool_output_max_lines": {
+      "default": null,
+      "description": "Override the tool output budget (max lines per tool call) for this project. `None` or `0` falls back to `[tokens].tool_output_max_lines`. Resolve via [`Config::effective_tool_output_max_lines`].",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": [
+       "integer",
+       "null"
+      ]
+     },
+     "tool_timeout_secs": {
+      "default": 120,
+      "description": "Backstop deadline, in seconds, for a single tool call (default 120).\n\nWithout it a wedged language server, a slow host, or an unresponsive MCP server hangs the turn with no upper bound. Tools that bound themselves \u2014 `run_shell`, custom command tools, `spawn_subagent` \u2014 opt out via `Tool::owns_timeout`, so raising this does not extend them and lowering it does not truncate them. `0` disables the backstop entirely.",
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+     }
+    },
+    "type": "object"
+   },
+   "TuiConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "colors": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/ThemeColors"
+       }
+      ],
+      "default": {
+       "assistant": null,
+       "code_block": null,
+       "error": null,
+       "system": null,
+       "tool_err": null,
+       "tool_name": null,
+       "tool_ok": null,
+       "tool_summary": null,
+       "user_prompt": null
+      },
+      "description": "Optional color overrides; if any are set they override the named theme for that one role. Values are crossterm/ratatui color names (`\"red\"`, `\"darkgray\"`, \u2026) or `\"#rrggbb\"` hex."
+     },
+     "show_token_usage": {
+      "default": true,
+      "type": "boolean"
+     },
+     "theme": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/ThemeName"
+       }
+      ],
+      "default": "default",
+      "description": "Theme name: `\"default\"` | `\"light\"` | `\"mono\"`.\n\nResolved by `wingman_tui::theme::resolve`, which falls back to the default for any other value rather than failing \u2014 which is why this is a `String` and not an enum. It is a fixed set, not a lookup into `~/.wingman/themes/`: there is no loader for per-file themes."
+     }
+    },
+    "type": "object"
+   },
+   "VerifyConfig": {
+    "additionalProperties": false,
+    "properties": {
+     "affected_tests": {
+      "default": true,
+      "description": "After edits, also run the tests of the *changed* crates/packages (not the full suite) as part of the gate. Cargo projects only for now; a no-op elsewhere. Composes onto `turn_gate` (needs it not \"off\").",
+      "type": "boolean"
+     },
+     "browser": {
+      "allOf": [
+       {
+        "$ref": "#/definitions/BrowserVerifyConfig"
+       }
+      ],
+      "default": {
+       "baseline": null,
+       "threshold": 0.02,
+       "tolerance": 3,
+       "url": ""
+      },
+      "description": "Optional headless-browser visual verification. When `url` is set and a baseline screenshot exists, a turn that edited files loads the URL, screenshots it, and fails if it differs from the baseline by more than `threshold`. Needs a Chrome/Chromium binary (build with the `browser` feature); fail-open otherwise."
+     },
+     "golden": {
+      "default": true,
+      "description": "Run captured characterization goldens (`wingman golden`) as part of the gate: a change that alters a snapshotted command's output fails verification. The regression net for undertested/legacy code \u2014 \"verified correct, not just verified builds\". On by default (no-op with no goldens). Composes onto `turn_gate`.",
+      "type": "boolean"
+     },
+     "lsp_diagnostics": {
+      "default": true,
+      "description": "After edits, also fold the language server's diagnostics for the *changed* files into the gate: a turn that introduced a type error the compiler-check command didn't surface (or in a language with no cheap compile step) fails verification. Backed by whatever LSP server is on PATH; a graceful no-op (passes with a note) when none is installed. Composes onto `turn_gate` (needs it not \"off\").",
+      "type": "boolean"
+     },
+     "max_retries": {
+      "default": 2,
+      "description": "How many gate failures are fed back to the model for self-correction before the stop is accepted anyway (with a failing receipt).",
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+     },
+     "turn_gate": {
+      "default": "auto",
+      "description": "Post-edit turn gate. Run after a turn in which mutating tools executed, before the agent is allowed to stop: - \"auto\": detect a check command from the project type (Cargo.toml \u2192 `cargo check`, tsconfig.json \u2192 `tsc --noEmit`, \u2026) - \"off\": never gate - anything else: the exact shell command to run",
+      "type": "string"
+     }
+    },
+    "type": "object"
+   }
+  },
+  "description": "Top-level merged configuration. Constructed via [`Config::load`].",
+  "properties": {
+   "audit": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/AuditConfig"
+     }
+    ],
+    "default": {
+     "enabled": false,
+     "log_path": null
+    },
+    "description": "Audit logging (compliance trail of tool calls)."
+   },
+   "default_model": {
+    "default": null,
+    "type": [
+     "string",
+     "null"
+    ]
+   },
+   "default_provider": {
+    "default": null,
+    "type": [
+     "string",
+     "null"
+    ]
+   },
+   "git": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/GitConfig"
+     }
+    ],
+    "default": {
+     "auto_commit": false,
+     "auto_commit_prefix": "wingman: "
+    },
+    "description": "Git-native workflow (Aider-style auto-commit)."
+   },
+   "hooks": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/HooksConfig"
+     }
+    ],
+    "default": {
+     "import_claude_code": false,
+     "post_tool_use": [],
+     "pre_tool_use": [],
+     "stop": [],
+     "user_prompt_submit": []
+    },
+    "description": "User-defined shell hooks fired at well-known points."
+   },
+   "learn": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/LearnConfig"
+     }
+    ],
+    "default": {
+     "allow_global_memory_writes": false,
+     "search_hint_tokens": 300
+    },
+    "description": "Self-improvement loop (memory, skills)."
+   },
+   "logging": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/LoggingConfig"
+     }
+    ],
+    "default": {
+     "file": true,
+     "filter": "info,wingman=info"
+    }
+   },
+   "mcp": {
+    "additionalProperties": {
+     "$ref": "#/definitions/McpServerConfig"
+    },
+    "default": {},
+    "description": "MCP servers, keyed by user-chosen short name. Activated in M3.",
+    "type": "object"
+   },
+   "permission_mode": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/PermissionMode"
+     }
+    ],
+    "default": "read-only"
+   },
+   "pilot": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/PilotConfig"
+     }
+    ],
+    "default": {
+     "approval": {
+      "auto_approve_globs": [
+       "crates/**/*.rs",
+       "docs/**",
+       "README.md"
+      ],
+      "auto_approve_max_tasks": 5,
+      "auto_approve_usd": 1.0,
+      "dangerous_paths": [
+       "**/migrations/**",
+       ".github/**",
+       "**/auth/**",
+       "**/secrets*",
+       "Cargo.lock"
+      ],
+      "notify_channel": "desktop",
+      "notify_only_window_secs": 60
+     },
+     "capabilities": {},
+     "critic_model": null,
+     "critic_other_family": false,
+     "daemon": {
+      "auto_dispatch": false,
+      "auto_threshold": 0.75,
+      "enabled": false,
+      "feedback_poll_secs": 3600,
+      "intake_dir": ".wingman/intake",
+      "max_auto_dispatch_per_cycle": 1,
+      "max_concurrent_runs": 2,
+      "max_review_rounds": 3,
+      "policy": "",
+      "poll_interval_secs": 300,
+      "slack_signing_secret": null,
+      "sources": [
+       "github_issues"
+      ],
+      "speculative": false,
+      "trusted_authors": [],
+      "trusted_labels": [
+       "wingman:auto"
+      ],
+      "watch_debounce_ms": 1000
+     },
+     "default_model": null,
+     "max_concurrent_agents": 4,
+     "max_manager_ticks": 200,
+     "max_retries_per_task": 3,
+     "max_total_tokens": 20000000,
+     "max_usd": 10.0,
+     "notifications": {
+      "decision": [
+       "desktop",
+       "slack"
+      ],
+      "desktop_inbox": false,
+      "digest_cron": "0 9 * * *",
+      "escalation": [
+       "desktop",
+       "slack",
+       "email"
+      ],
+      "info": "suppress",
+      "progress": "digest",
+      "webhooks": {}
+     },
+     "pr": {
+      "auto_merge": false,
+      "auto_merge_max_severity": "low",
+      "base_branch": "main",
+      "require_ci_green": true,
+      "reviewer_rework_severity": "high"
+     },
+     "refine": {
+      "challenge_threshold": "medium",
+      "max_clarifying_questions": 3,
+      "suggest_alternatives": true
+     },
+     "reviewer_model": null,
+     "sandbox": {
+      "allow_unsandboxed_vm_tasks": false,
+      "container_image": "wingman/sandbox:latest",
+      "cpus": 2,
+      "default_tier": "host",
+      "env": [],
+      "memory_mib": 4096,
+      "network": "bridge",
+      "pids_limit": 512,
+      "vm": {
+       "chroot_base_dir": "/srv/jailer",
+       "firecracker_bin": "firecracker",
+       "jailer_bin": "jailer",
+       "jailer_gid": 65534,
+       "jailer_uid": 65534,
+       "kernel_image": "",
+       "rootfs_image": "",
+       "tap_device": "",
+       "use_jailer": true,
+       "worktree_drive_mib": 4096
+      },
+      "vm_provider": "firecracker"
+     },
+     "security": {
+      "allowed_licenses": [
+       "MIT",
+       "Apache-2.0",
+       "BSD-3-Clause",
+       "BSD-2-Clause",
+       "ISC",
+       "MPL-2.0",
+       "Unicode-DFS-2016"
+      ],
+      "block_severity": "medium",
+      "denied_licenses": [],
+      "dependency_audit": true,
+      "secrets_scanner": "gitleaks"
+     },
+     "skills": {
+      "index": "",
+      "packs": []
+     },
+     "stall_tool_calls": 40,
+     "task_timeout_secs": 1800,
+     "tier": "copilot",
+     "turn_gate_cmd": "cargo check --workspace",
+     "turn_rollback_after": 2,
+     "worker_max_turns": 60,
+     "worker_model": null
+    },
+    "description": "Pilot mode (multi-agent orchestrator). See `plan.md` \u00a7 Unified Pilot Mode. A legacy `[autonomous]` section is auto-migrated into `[pilot]` on load with a one-time warning."
+   },
+   "privacy": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/PrivacyConfig"
+     }
+    ],
+    "default": {
+     "local_only": false
+    },
+    "description": "Privacy / air-gapped mode."
+   },
+   "providers": {
+    "additionalProperties": {
+     "$ref": "#/definitions/ProviderConfig"
+    },
+    "default": {},
+    "description": "Per-provider configuration, keyed by stable provider id (e.g. \"anthropic\", \"openai\", \"gemini\", \"ollama\", \"openrouter\").",
+    "type": "object"
+   },
+   "reasoning": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/ReasoningLevel"
+     }
+    ],
+    "default": "off",
+    "description": "How hard the model should think before answering: `\"off\"` | `\"low\"` | `\"medium\"` | `\"high\"`.\n\nOne portable level rather than each vendor's native parameter \u2014 it maps onto Anthropic's thinking budget, OpenAI's `reasoning_effort`, and Gemini's `thinkingConfig`. Backends with no reasoning control ignore it; `wingman doctor` says which those are.\n\nDefaults to `\"off\"`: reasoning costs output tokens, so turning it on is your call, not ours.\n\nStays a `String` rather than becoming an enum: `ReasoningEffort::parse` accepts `none`, `false`, `med` and `max` as aliases, and a serde enum would turn every config using one of those into a load error. The schema is taught the four canonical levels instead, so a settings UI offers a choice without the type refusing what the parser accepts."
+   },
+   "router": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/RouterConfig"
+     }
+    ],
+    "default": {
+     "classes": {},
+     "fallback_models": [],
+     "fast_model": null,
+     "learned_min_samples": null,
+     "local_model": null
+    }
+   },
+   "schedule": {
+    "default": [],
+    "description": "Periodic prompts that fire when `wingman schedule run` is invoked (e.g. from cron / a launchd plist / Task Scheduler).",
+    "items": {
+     "$ref": "#/definitions/ScheduledTask"
+    },
+    "type": "array"
+   },
+   "serve": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/ServeConfig"
+     }
+    ],
+    "default": {
+     "addr": "127.0.0.1:8787",
+     "max_concurrent_turns": 2,
+     "max_permission_mode": "auto-edit",
+     "projects": [],
+     "push": {
+      "events": [],
+      "url": null
+     },
+     "request_timeout_secs": 1800,
+     "token": null
+    },
+    "description": "HTTP/SSE API (`wingman serve`). Global-config only \u2014 deliberately absent from `PROJECT_SAFE_KEYS`, so a cloned repo's `.wingman/ config.toml` can never set the token, widen the project allowlist, or raise the permission ceiling. See `docs/HTTP-API.md`."
+   },
+   "team": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/TeamConfig"
+     }
+    ],
+    "default": {
+     "endpoint": null,
+     "token": null
+    },
+    "description": "Team memory server (optional, beyond the git-backed `memory sync`)."
+   },
+   "telemetry": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/TelemetryConfig"
+     }
+    ],
+    "default": {
+     "otlp": {
+      "endpoint": null,
+      "headers": {},
+      "service_name": null
+     }
+    },
+    "description": "Export turns and tool calls to an OpenTelemetry collector. Global (or trusted) config only: absent from `PROJECT_SAFE_KEYS`, so a cloned repo cannot point your session metadata at its own endpoint."
+   },
+   "tokens": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/TokenConfig"
+     }
+    ],
+    "default": {
+     "compact_at_tokens": 120000,
+     "max_usd_per_session": null,
+     "prompt_cache": true,
+     "tool_output_max_lines": 400
+    }
+   },
+   "tools": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/ToolsConfig"
+     }
+    ],
+    "default": {
+     "allow_network": false,
+     "ask_user_desktop_timeout_secs": 0,
+     "custom": [],
+     "defer": [],
+     "disabled_tools": [],
+     "loop_abort_at": 8,
+     "loop_exempt": [
+      "update_tasks",
+      "task_complete"
+     ],
+     "loop_warn_at": 4,
+     "loop_window": 24,
+     "preset": "",
+     "presets": {},
+     "prune_threshold_chars": 8192,
+     "redact_output_secrets": true,
+     "repeat_exempt": [
+      "update_tasks",
+      "task_complete"
+     ],
+     "repeat_thresholds": [
+      3,
+      5,
+      8
+     ],
+     "run_plan": false,
+     "shell_denylist": [],
+     "shell_sandbox": "auto",
+     "spill_tool_output": true,
+     "tool_output_max_lines": null,
+     "tool_timeout_secs": 120
+    },
+    "description": "Per-project tool settings."
+   },
+   "tui": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/TuiConfig"
+     }
+    ],
+    "default": {
+     "colors": {
+      "assistant": null,
+      "code_block": null,
+      "error": null,
+      "system": null,
+      "tool_err": null,
+      "tool_name": null,
+      "tool_ok": null,
+      "tool_summary": null,
+      "user_prompt": null
+     },
+     "show_token_usage": true,
+     "theme": "default"
+    }
+   },
+   "verify": {
+    "allOf": [
+     {
+      "$ref": "#/definitions/VerifyConfig"
+     }
+    ],
+    "default": {
+     "affected_tests": true,
+     "browser": {
+      "baseline": null,
+      "threshold": 0.02,
+      "tolerance": 3,
+      "url": ""
+     },
+     "golden": true,
+     "lsp_diagnostics": true,
+     "max_retries": 2,
+     "turn_gate": "auto"
+    },
+    "description": "Post-edit verification (turn gate + receipts)."
+   }
+  },
+  "title": "Config",
+  "type": "object"
+ },
+ "writes_to": "~/.wingman/config.toml"
+}

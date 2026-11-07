@@ -92,3 +92,45 @@ export function linePath(fractions: number[], w: number, h: number): string {
     .map((f, i) => `${i === 0 ? 'M' : 'L'}${xAt(i, fractions.length, w)} ${h - f * h}`)
     .join(' ')
 }
+
+/**
+ * A round number at or above `max`, for a y-axis ceiling: 1, 2, 2.5 or 5
+ * times a power of ten. An axis that tops out at $17.76 reads as noise; one
+ * at $20 reads as a scale.
+ */
+export function niceCeil(max: number): number {
+  if (!(max > 0)) return 1
+  const step = Math.pow(10, Math.floor(Math.log10(max)))
+  for (const m of [1, 2, 2.5, 5, 10]) if (m * step >= max - 1e-9) return round(m * step)
+  return round(10 * step)
+}
+
+/**
+ * Change from `prev` to `cur` as a fraction. Null when there was nothing to
+ * compare against — "+∞%" over a quiet previous period is not a trend.
+ */
+export function change(cur: number, prev: number): number | null {
+  if (!(prev > 0) || !Number.isFinite(cur)) return null
+  return (cur - prev) / prev
+}
+
+/** Each value's slice of a ring, as [start, end] fractions of the turn. */
+export function arcs(values: number[]): [number, number][] {
+  const running = cumulative(values)
+  return running.map((end, i) => [i === 0 ? 0 : running[i - 1], end])
+}
+
+/**
+ * A ring segment from fraction `a` to `b` of a full turn, starting at 12
+ * o'clock, between radii `r0` (inner) and `r1` (outer), centred on (c, c).
+ */
+export function arcPath(a: number, b: number, c: number, r0: number, r1: number): string {
+  // A full ring cannot be one arc: start and end coincide and it draws nothing.
+  if (b - a >= 0.9999) b = a + 0.9999
+  const pt = (f: number, r: number) => {
+    const t = f * 2 * Math.PI - Math.PI / 2
+    return `${round(c + r * Math.cos(t))} ${round(c + r * Math.sin(t))}`
+  }
+  const large = b - a > 0.5 ? 1 : 0
+  return `M${pt(a, r1)} A${r1} ${r1} 0 ${large} 1 ${pt(b, r1)} L${pt(b, r0)} A${r0} ${r0} 0 ${large} 0 ${pt(a, r0)} Z`
+}

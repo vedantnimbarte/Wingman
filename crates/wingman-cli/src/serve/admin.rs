@@ -182,60 +182,83 @@ pub async fn patch_config(req: &Request, sock: &mut TcpStream) -> std::io::Resul
         .await;
     }
 
-    let path = match wingman_config::global_config_path() {
-        Ok(p) => p,
-        Err(e) => return http::write_err(sock, 500, &format!("resolving config path: {e}")).await,
-    };
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-
-    // Edited as a document, not re-serialised from a `toml::Table`. Parsing to
-    // a table and printing it back drops every comment in the user's config
-    // and reorders the whole file, so a one-field change through the panel
-    // would arrive as a total rewrite — and their annotations would be gone
-    // with no way to notice until they went looking.
-    let mut doc: toml_edit::DocumentMut = match existing.parse() {
-        Ok(d) => d,
-        Err(e) => {
-            return http::write_err(
+    let patch = Value::Object(patch);
+    match edit_global(|doc| merge_json(doc, &patch)) {
+        Ok(path) => {
+            http::write_json(
                 sock,
-                500,
-                &format!("existing config is not valid TOML: {e}"),
+                200,
+                &json!({ "written": path.to_string_lossy(), "restart_required": true }),
             )
             .await
         }
-    };
+        Err(e) => http::write_err(sock, e.status, &e.message).await,
+    }
+}
 
-    for (k, v) in patch {
-        match json_to_item(&v) {
-            Some(item) => merge_item(doc.as_table_mut(), &k, item),
-            None => {
-                return http::write_err(
-                    sock,
-                    400,
-                    &format!("value for '{k}' is not expressible in TOML"),
-                )
-                .await
-            }
+/// Why a global-config edit did not land, as the HTTP status to answer with.
+#[derive(Debug)]
+pub struct EditError {
+    pub status: u16,
+    pub message: String,
+}
+
+impl EditError {
+    fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
         }
     }
+}
 
-    // Round-trip through the real parser before writing: a patch that
-    // produces a config Wingman cannot load would take the whole CLI down,
-    // not just this request.
+/// Merge a TOML-shaped JSON object into a document, key by key.
+pub fn merge_json(doc: &mut toml_edit::DocumentMut, patch: &Value) -> Result<(), String> {
+    let Value::Object(map) = patch else {
+        return Err("patch must be a JSON object".into());
+    };
+    for (k, v) in map {
+        let item =
+            json_to_item(v).ok_or_else(|| format!("value for '{k}' is not expressible in TOML"))?;
+        merge_item(doc.as_table_mut(), k, item);
+    }
+    Ok(())
+}
+
+/// Edit the **global** config file as a document and write it back.
+///
+/// The one path every API write takes — `PATCH /v1/config` and the provider
+/// routes alike — so they share three guarantees:
+///
+/// - Edited as a document, not re-serialised from a `toml::Table`. Parsing to
+///   a table and printing it back drops every comment and reorders the file,
+///   so a one-field change from the panel would arrive as a total rewrite.
+/// - Round-tripped through the real parser before writing: an edit that
+///   produces a config Wingman cannot load would take the whole CLI down, not
+///   just this request.
+/// - Written through a temp file and a rename, so a crash leaves the old file.
+pub fn edit_global(
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<(), String>,
+) -> Result<std::path::PathBuf, EditError> {
+    let path = wingman_config::global_config_path()
+        .map_err(|e| EditError::new(500, format!("resolving config path: {e}")))?;
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| EditError::new(500, format!("existing config is not valid TOML: {e}")))?;
+
+    edit(&mut doc).map_err(|e| EditError::new(400, e))?;
+
     let rendered = doc.to_string();
-    if let Err(e) = toml::from_str::<wingman_config::Config>(&rendered) {
-        return http::write_err(sock, 400, &format!("patch produces an invalid config: {e}")).await;
-    }
-
-    if let Err(e) = write_atomic(&path, &rendered) {
-        return http::write_err(sock, 500, &format!("writing config: {e}")).await;
-    }
-    http::write_json(
-        sock,
-        200,
-        &json!({ "written": path.to_string_lossy(), "restart_required": true }),
-    )
-    .await
+    toml::from_str::<wingman_config::Config>(&rendered).map_err(|e| {
+        EditError::new(
+            400,
+            format!("this change would make the config invalid: {e}"),
+        )
+    })?;
+    write_atomic(&path, &rendered)
+        .map_err(|e| EditError::new(500, format!("writing config: {e}")))?;
+    Ok(path)
 }
 
 /// Merge one key into a table, recursing so a patch of

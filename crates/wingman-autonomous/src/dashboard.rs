@@ -317,7 +317,7 @@ pub fn build_model(
             usd: t.usd,
             elapsed_secs: span_secs(t.started_at.as_deref(), t.ended_at.as_deref(), now),
             attempts: t.attempts,
-            agent: t.agent.as_deref().map(&name_of),
+            agent: t.agent.as_deref().map(name_of),
         })
         .collect();
 

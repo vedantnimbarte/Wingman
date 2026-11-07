@@ -373,6 +373,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
     let mut store = RunStore::create(&run_path, &run_id, &goal, &base_commit, &integration)
         .await
         .context("opening run store")?;
+    record_pid(&run_path);
 
     // `info` routes to `suppress` by default, so this needs both
     // `desktop_inbox = true` and `info = "desktop"` — opt-in twice, which is
@@ -694,6 +695,7 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
             pilot.sandbox.clone(),
             sandbox_avail.clone(),
             tool_synthesis_for(&pilot, &project.config_file),
+            pilot.stall_tool_calls,
         )?,
         base_branch,
         project_root: project.root.clone(),
@@ -1274,6 +1276,16 @@ fn resolve_base_commit(repo_root: &std::path::Path, base: Option<&str>) -> Resul
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Write this process's pid to `<run_dir>/pid`, so a watcher can tell a run
+/// that is still working from one whose process died before it reached a
+/// final status (`serve::push`'s `run.died`). Best-effort: without it a dead
+/// run just goes unreported, as before.
+fn record_pid(run_path: &std::path::Path) {
+    if let Err(e) = std::fs::write(run_path.join("pid"), std::process::id().to_string()) {
+        tracing::debug!("could not record pid for {}: {e}", run_path.display());
+    }
+}
+
 /// Re-exec the current binary as a detached background process for `-d`.
 ///
 /// The child re-runs the same `pilot run` invocation (minus `-d`) with its
@@ -1611,6 +1623,7 @@ pub async fn resume(
         ));
     }
 
+    record_pid(&run_path);
     let mut store = wingman_autonomous::RunStore::load(&run_path)
         .await
         .with_context(|| format!("loading run {run_id}"))?;
@@ -1702,6 +1715,7 @@ pub async fn resume(
             cfg.pilot.sandbox.clone(),
             sandbox_avail.clone(),
             tool_synthesis_for(&cfg.pilot, &project.config_file),
+            cfg.pilot.stall_tool_calls,
         )?,
         base_branch,
         project_root: project.root,
@@ -1921,6 +1935,7 @@ fn build_real_worker_spawner(
     sandbox: wingman_config::PilotSandboxConfig,
     avail: wingman_autonomous::sandbox::TierAvailability,
     tool_synthesis: Option<wingman_autonomous::approval::ApprovalTier>,
+    stall_tool_calls: u32,
 ) -> Result<wingman_autonomous::orchestrator::WorkerSpawner> {
     let wingman_bin = std::env::current_exe().context("locating wingman binary")?;
     let worker_model = worker_model.to_string();
@@ -1991,6 +2006,7 @@ fn build_real_worker_spawner(
                     checkpoint_hygiene,
                     sandbox: None,
                     tool_synthesis,
+                    stall_tool_calls,
                 };
                 // Recorded on the task (with its ladder attempt), so the
                 // manager and `pilot status` see why it failed rather than a
@@ -2415,7 +2431,9 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
         // and `poll_interval_secs` governs the rate across cycles.
         let mut dispatched = 0usize;
         let mut deferred = 0usize;
+        let mut judge: Option<(std::sync::Arc<dyn wingman_core::Provider>, String)> = None;
         for (cand, action) in &results {
+            let mut action = *action;
             eprintln!(
                 "[pilot] daemon cycle {n}: {:?} — {} (score {:.2}, {})",
                 action,
@@ -2435,13 +2453,30 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
                 continue; // already handled in a prior cycle/run
             }
             seen.insert(key);
+            // Slow path: the code rules above settled AutoRun/Ignore; only a
+            // Propose goes to the policy judge, and only when one is written.
+            if action == wingman_autonomous::daemon::DaemonAction::Propose
+                && !pilot.daemon.policy.trim().is_empty()
+            {
+                let judged = judge_by_policy(&cfg, &mut judge, cand, action).await;
+                if judged != action {
+                    eprintln!(
+                        "[pilot] daemon: policy judge {action:?} -> {judged:?} for {:?}",
+                        cand.title
+                    );
+                    action = judged;
+                }
+                if action == wingman_autonomous::daemon::DaemonAction::Ignore {
+                    continue;
+                }
+            }
             // A dry run leaves no durable trace: the queue is what later
             // daemons dedup on, so recording a candidate here would stop the
             // real daemon from ever dispatching what the dry run only showed.
             let queued = if dry_run {
                 Ok(())
             } else {
-                append_daemon_queue(&queue_path, cand, *action)
+                append_daemon_queue(&queue_path, cand, action)
             };
             if let Err(e) = queued {
                 eprintln!("[pilot] daemon: failed to queue candidate: {e:#}");
@@ -2452,8 +2487,10 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
             // before the next.
             // ponytail: sequential dispatch honours "one at a time"; true
             // parallel nested runs (daemon.max_concurrent_runs) is future work.
-            if pilot.daemon.auto_dispatch
-                && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun)
+            let speculative = is_speculative(&pilot.daemon, cand, action);
+            if speculative
+                || (pilot.daemon.auto_dispatch
+                    && matches!(action, wingman_autonomous::daemon::DaemonAction::AutoRun))
             {
                 // Bound how much one cycle may start on its own. The candidate
                 // is already queued above, so hitting the cap defers work
@@ -2471,8 +2508,13 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
                 if dry_run {
                     // Validation path (#34): show the decision, open nothing.
                     eprintln!(
-                        "[pilot] daemon: [dry-run] would auto-dispatch a run for {:?} \
+                        "[pilot] daemon: [dry-run] would {} a run for {:?} \
                          (source {}, score {:.2})",
+                        if speculative {
+                            "speculatively try"
+                        } else {
+                            "auto-dispatch"
+                        },
                         cand.title,
                         cand.source,
                         cand.score()
@@ -2493,14 +2535,41 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
                     rework_pr_checks(&cfg, &runner, &project.root, run_id).await;
                     continue;
                 }
-                eprintln!("[pilot] daemon: auto-dispatching run for {:?}", cand.title);
+                eprintln!(
+                    "[pilot] daemon: {} run for {:?}",
+                    if speculative {
+                        "speculatively trying"
+                    } else {
+                        "auto-dispatching"
+                    },
+                    cand.title
+                );
                 dispatched += 1;
+                // Minted here so the queue can link source -> run for
+                // `trace_ref` (Chain of Recall).
+                let run_id = new_run_id();
+                if !dry_run {
+                    let link = serde_json::json!({
+                        "source": cand.source,
+                        "title": cand.title,
+                        "run_id": run_id,
+                    });
+                    if let Err(e) = wingman_config::append_line(&queue_path, &link.to_string()) {
+                        eprintln!("[pilot] daemon: failed to record run link: {e:#}");
+                    }
+                }
                 let opts = PilotOptions {
                     goal: cand.title.clone(),
-                    yes: true, // trusted, already scored above threshold
+                    yes: true, // trusted; scored above threshold, or speculative
+                    run_id: Some(run_id),
                     ..PilotOptions::default()
                 };
-                match run(cfg.clone(), opts).await {
+                let run_cfg = if speculative {
+                    quiet(&cfg)
+                } else {
+                    cfg.clone()
+                };
+                match run(run_cfg, opts).await {
                     Ok(code) => {
                         eprintln!("[pilot] daemon: dispatched run exited {code:?}")
                     }
@@ -2548,6 +2617,84 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
             }
         };
     }
+}
+
+/// One policy-judge call for `cand`. The provider is built on first use and
+/// reused for the rest of the cycle. Any failure keeps `rule`: a judge that
+/// cannot be reached leaves the candidate for a human, which is where it was.
+async fn judge_by_policy(
+    cfg: &Config,
+    judge: &mut Option<(std::sync::Arc<dyn wingman_core::Provider>, String)>,
+    cand: &wingman_autonomous::daemon::Candidate,
+    rule: wingman_autonomous::daemon::DaemonAction,
+) -> wingman_autonomous::daemon::DaemonAction {
+    use wingman_autonomous::daemon::{apply_policy_verdict, policy_prompt, POLICY_SYSTEM};
+    if judge.is_none() {
+        let sel = cfg
+            .router
+            .fast_model
+            .as_deref()
+            .and_then(|m| cfg.resolve_model_spec(m))
+            .map(|(provider_id, model)| runtime::Selection { provider_id, model })
+            .map(Ok)
+            .unwrap_or_else(|| runtime::resolve_selection(cfg, None));
+        match sel.and_then(|s| Ok((runtime::build_provider(cfg, &s.provider_id)?, s.model))) {
+            Ok(p) => *judge = Some(p),
+            Err(e) => {
+                eprintln!(
+                    "[pilot] daemon: policy judge unavailable ({e:#}); keeping rule decisions"
+                );
+                return rule;
+            }
+        }
+    }
+    let Some((provider, model)) = judge.as_ref() else {
+        return rule;
+    };
+    let mut req = wingman_core::CompletionRequest::new(model.clone());
+    req.system = Some(POLICY_SYSTEM.to_string());
+    req.max_tokens = 16; // one word; headroom for providers that count a preamble
+    req.temperature = Some(0.0);
+    req.messages = vec![wingman_core::Message {
+        role: wingman_core::Role::User,
+        content: vec![wingman_core::ContentBlock::Text {
+            text: policy_prompt(&cfg.pilot.daemon.policy, cand),
+        }],
+    }];
+    match wingman_core::complete_text(provider.as_ref(), req).await {
+        Ok(reply) => apply_policy_verdict(cand, rule, &reply),
+        Err(e) => {
+            eprintln!("[pilot] daemon: policy judge failed ({e:#}); keeping {rule:?}");
+            rule
+        }
+    }
+}
+
+/// `[pilot.daemon].speculative`: a trusted candidate in the propose band.
+fn is_speculative(
+    daemon: &wingman_config::PilotDaemonConfig,
+    cand: &wingman_autonomous::daemon::Candidate,
+    action: wingman_autonomous::daemon::DaemonAction,
+) -> bool {
+    daemon.speculative
+        && action == wingman_autonomous::daemon::DaemonAction::Propose
+        && cand.trust == wingman_autonomous::intake::TrustLevel::Trusted
+        // Rework rounds push straight onto an open PR, which is not quiet.
+        && wingman_autonomous::pr_reviews::run_id_from_source(&cand.source).is_none()
+        && wingman_autonomous::pr_checks::run_id_from_source(&cand.source).is_none()
+}
+
+/// Config for a speculative run: silent unless it produces a passing PR, and
+/// that PR waits for a human. The pipeline already skips merge and PR when
+/// any task fails, so all that is left is to mute the failure paths.
+fn quiet(cfg: &Config) -> Config {
+    let mut c = cfg.clone();
+    c.pilot.pr.auto_merge = false;
+    c.pilot.notifications.escalation.clear();
+    c.pilot.notifications.decision.clear();
+    c.pilot.notifications.progress = "suppress".into();
+    c.pilot.notifications.info = "suppress".into();
+    c
 }
 
 /// J13 — install the git hooks that wake `pilot daemon --watch`.
@@ -3577,6 +3724,8 @@ pub async fn validate_providers(
             cfg.pilot.sandbox.clone(),
             sandbox_avail.clone(),
             None,
+            // The matrix measures the provider; keep the watchdog out of it.
+            0,
         )?;
         // The id is a config key and this directory is deleted: keep it one
         // plain path component.
@@ -3751,6 +3900,51 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use wingman_autonomous::control::{append, ControlCommand};
+
+    #[test]
+    fn speculative_widens_the_score_band_but_never_trust_and_runs_quietly() {
+        use wingman_autonomous::daemon::{Candidate, DaemonAction::*};
+        use wingman_autonomous::intake::TrustLevel::*;
+        let mut d = wingman_config::PilotDaemonConfig {
+            speculative: true,
+            ..Default::default()
+        };
+        let cand = |trust| Candidate {
+            source: "github_issue#1".into(),
+            title: "t".into(),
+            value: 0.5,
+            confidence: 0.5,
+            risk: 0.5,
+            trust,
+        };
+        assert!(is_speculative(&d, &cand(Trusted), Propose));
+        assert!(
+            !is_speculative(&d, &cand(Known), Propose),
+            "never widens trust"
+        );
+        assert!(!is_speculative(&d, &cand(Trusted), Ignore));
+        assert!(
+            !is_speculative(&d, &cand(Trusted), AutoRun),
+            "AutoRun is not speculative"
+        );
+        let rework = Candidate {
+            source: "pr_review:run1#3".into(),
+            ..cand(Trusted)
+        };
+        assert!(
+            !is_speculative(&d, &rework, Propose),
+            "PR rework is never quiet"
+        );
+        d.speculative = false;
+        assert!(!is_speculative(&d, &cand(Trusted), Propose));
+
+        let mut cfg = Config::default();
+        cfg.pilot.pr.auto_merge = true;
+        let q = quiet(&cfg);
+        assert!(!q.pilot.pr.auto_merge);
+        assert!(q.pilot.notifications.escalation.is_empty());
+        assert!(q.pilot.notifications.decision.is_empty());
+    }
 
     /// Rollback discards a worker's edits, so it is autopilot's by default and
     /// an explicit capability wins either way; the threshold only travels to

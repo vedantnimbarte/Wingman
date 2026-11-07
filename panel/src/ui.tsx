@@ -40,9 +40,50 @@ const PATHS = {
   trash: 'M4.5 6h11M8 6V4.5h4V6M5.8 6l.7 10h7l.7-10',
   down: 'M10 4.5v11M5.5 11 10 15.5 14.5 11',
   filter: 'M3.5 5h13l-5 5.7v4.8l-3-1.6v-3.2Z',
+  branch: 'M6 3.5v13M6 16.5a1.75 1.75 0 1 0 0-3.5M14 7a1.75 1.75 0 1 0 0-3.5 1.75 1.75 0 0 0 0 3.5Zm0 0c0 4-8 3-8 6',
+  updown: 'M7 8l3-3 3 3M7 12l3 3 3-3',
+  system: 'M3.5 4.5h13v9h-13zM7.5 16.5h5M10 13.5v3',
+  plus: 'M10 4.5v11M4.5 10h11',
+  spark: 'M10 3v4M10 13v4M3 10h4M13 10h4M5.5 5.5l2.3 2.3M12.2 12.2l2.3 2.3M14.5 5.5l-2.3 2.3M7.8 12.2l-2.3 2.3',
+  clock: 'M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM10 6.5V10l2.5 1.5',
+  coin: 'M10 17a7 7 0 1 0 0-14 7 7 0 0 0 0 14ZM12.2 7.6c-.4-.7-1.2-1.1-2.2-1.1-1.3 0-2.2.7-2.2 1.7 0 2.3 4.6 1.2 4.6 3.6 0 1-1 1.7-2.4 1.7-1 0-1.9-.4-2.3-1.2M10 5.3v1.2M10 13.5v1.2',
+  index: 'M4 5.5c0-1.1 2.7-2 6-2s6 .9 6 2-2.7 2-6 2-6-.9-6-2ZM4 5.5v9c0 1.1 2.7 2 6 2s6-.9 6-2v-9M4 10c0 1.1 2.7 2 6 2s6-.9 6-2',
+  play: 'M6.5 4.5v11l9-5.5Z',
+  tasks: 'M8 5.5h8.5M8 10h8.5M8 14.5h8.5M3.5 5.5l1 1 2-2M3.5 10l1 1 2-2M3.5 14.5l1 1 2-2',
+  agent: 'M10 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM4.5 16.5a5.5 5.5 0 0 1 11 0',
+  file: 'M5.5 3.5h6l3 3v10h-9ZM11.5 3.5v3h3',
+  undo: 'M7 6.5 3.5 10 7 13.5M3.5 10h8a4 4 0 0 1 0 8H9',
+  send: 'M10 16V4.5M5 9l5-5 5 5',
+  speak: 'M4 8v4h3l4 3.5v-11L7 8ZM14 7.5a3.5 3.5 0 0 1 0 5',
 } as const
 
 export type IconName = keyof typeof PATHS
+
+/**
+ * The Wingman mark: the two chevrons from `assets/logo.svg`, same paths and
+ * stroke, drawn in `currentColor` so it takes the panel's theme rather than
+ * the README's fixed purples. The viewBox squares the mark's bounds. The
+ * favicon in `index.html` repeats these paths, since it cannot import this.
+ */
+export function Logo({ size = 16 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="-4 -6 60 60"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M0 34 26 2 52 34" />
+      <path d="M11 46 26 26 41 46" opacity="0.55" />
+    </svg>
+  )
+}
 
 export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
   return (
@@ -72,12 +113,10 @@ export function Icon({ name, size = 16 }: { name: IconName; size?: number }) {
  * six pages that happen to share a stylesheet.
  */
 export function PageHead({
-  eyebrow,
   title,
   intro,
   actions,
 }: {
-  eyebrow: React.ReactNode
   title: React.ReactNode
   intro?: React.ReactNode
   actions?: React.ReactNode
@@ -85,7 +124,6 @@ export function PageHead({
   return (
     <header className="page-head">
       <div className="page-title">
-        <span className="eyebrow">{eyebrow}</span>
         <h1>{title}</h1>
         {intro && <p className="page-intro">{intro}</p>}
       </div>

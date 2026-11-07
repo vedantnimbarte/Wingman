@@ -1,0 +1,770 @@
+/*
+ * Settings only. Every rule is under `.settings`, so nothing here reaches
+ * another screen. Imported by Config.tsx; Vite still bundles it into the one
+ * app.css the binary embeds.
+ */
+
+.settings {
+  max-width: 84rem;
+}
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 13.5rem minmax(0, 1fr);
+  gap: var(--s-6);
+  align-items: start;
+}
+
+/* ── The settings sidebar ── */
+
+.settings .settings-nav {
+  position: sticky;
+  top: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.settings .settings-nav-title {
+  padding: var(--s-2) var(--s-3) var(--s-1);
+  color: var(--faint);
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+}
+
+.settings .settings-nav .nav-item:hover {
+  background: var(--raised);
+}
+
+.settings .settings-nav .nav-item[aria-current='page'] {
+  background: var(--accent-wash);
+  box-shadow: none;
+  color: var(--accent);
+}
+
+.settings-page {
+  min-width: 0;
+}
+
+.settings .settings-head {
+  margin-bottom: var(--s-5);
+}
+
+.settings .settings-head h1 {
+  font-size: var(--t-xl);
+  letter-spacing: -0.025em;
+}
+
+.settings .settings-head p {
+  max-width: 46rem;
+  margin-top: var(--s-1);
+  color: var(--muted);
+}
+
+/* ── Field pages ── */
+
+.settings .settings-card {
+  max-width: 50rem;
+  margin-bottom: var(--s-4);
+  padding: var(--s-4) var(--s-5) var(--s-2);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.settings .settings-card > header {
+  padding-bottom: var(--s-3);
+  border-bottom: 1px solid var(--rule);
+}
+
+.settings .settings-card > header h2 {
+  font-size: var(--t-md);
+  letter-spacing: -0.01em;
+}
+
+.settings .settings-card > header p {
+  margin-top: 2px;
+  color: var(--faint);
+  font-size: var(--t-sm);
+}
+
+.settings .settings-card .rows {
+  border-top: 0;
+}
+
+.settings .settings-card .rows > .row:last-child {
+  border-bottom: 0;
+}
+
+.settings .settings-card .note {
+  margin: var(--s-3) 0;
+}
+
+.settings .settings-card > .report {
+  margin: var(--s-3) 0 var(--s-3);
+}
+
+.settings .config-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) min(20rem, 45%);
+  gap: var(--s-1) var(--s-5);
+  padding: var(--s-4) 0;
+}
+
+.settings .config-row > .config-input {
+  width: auto;
+}
+
+/* The raw key and the developer notes, folded under the row. */
+.settings .config-more {
+  grid-column: 1 / -1;
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.settings .config-more summary {
+  width: max-content;
+  cursor: pointer;
+}
+
+.settings .config-more summary:hover {
+  color: var(--ink);
+}
+
+.settings .config-more[open] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding-bottom: var(--s-1);
+}
+
+.settings .config-more .config-help {
+  max-width: 46rem;
+  color: var(--faint);
+}
+
+.settings .config-default {
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.settings .config-label > span:first-child {
+  font-size: var(--t-base);
+}
+
+/* A setting that is on or off reads as a switch, not a form checkbox. */
+.settings .config-input input[type='checkbox'] {
+  appearance: none;
+  position: relative;
+  width: 2.375rem;
+  height: 1.375rem;
+  margin: var(--s-1) 0 0;
+  border-radius: var(--r-pill);
+  background: var(--rule-strong);
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.settings .config-input input[type='checkbox']::before {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 25%);
+  transition: transform var(--fast) var(--ease);
+}
+
+.settings .config-input input[type='checkbox']:checked {
+  background: var(--accent);
+}
+
+.settings .config-input input[type='checkbox']:checked::before {
+  transform: translateX(1rem);
+}
+
+.settings .config-input input[type='checkbox']:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Advanced: the section list beside the card. */
+.settings .config-body {
+  grid-template-columns: 11rem minmax(0, 1fr);
+}
+
+.settings .config-nav {
+  border-right: 0;
+  padding-right: 0;
+}
+
+.settings .config-nav .nav-item:hover {
+  background: var(--raised);
+}
+
+.settings .config-nav .nav-item[aria-current='page'] {
+  background: var(--surface);
+  box-shadow: var(--shadow-1), inset 0 0 0 1px var(--rule);
+  color: var(--accent);
+}
+
+.settings .config-fields {
+  max-width: none;
+}
+
+.settings .config-save {
+  max-width: 50rem;
+}
+
+/* ── Providers ── */
+
+.settings .prov-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  width: 100%;
+}
+
+.settings .providers > .note {
+  max-width: none;
+}
+
+/* Initials on a tile, tinted from the provider's id: variety without
+   borrowing anyone's logo. */
+.settings .prov-mono {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 10px;
+  background: hsl(var(--h, 245) 70% 94%);
+  color: hsl(var(--h, 245) 45% 32%);
+  font-size: var(--t-sm);
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.01em;
+}
+
+.settings .prov-mono.is-lg {
+  width: 3rem;
+  height: 3rem;
+  border-radius: 13px;
+  font-size: var(--t-md);
+}
+
+.settings .prov-mono.is-empty {
+  background: var(--raised);
+  color: var(--faint);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .settings .prov-mono:not(.is-empty) {
+    background: hsl(var(--h, 245) 30% 20%);
+    color: hsl(var(--h, 245) 70% 82%);
+  }
+}
+
+:root[data-theme='dark'] .settings .prov-mono:not(.is-empty) {
+  background: hsl(var(--h, 245) 30% 20%);
+  color: hsl(var(--h, 245) 70% 82%);
+}
+
+/* The default: the one choice here that changes every chat and run. */
+.settings .prov-default {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  gap: var(--s-5);
+  align-items: center;
+  padding: var(--s-5);
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--r-3);
+  background:
+    radial-gradient(90% 140% at 0% 0%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 60%),
+    var(--surface);
+}
+
+.settings .prov-default-main {
+  display: flex;
+  gap: var(--s-4);
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.settings .prov-default-label {
+  color: var(--accent);
+  font-size: var(--t-xs);
+  font-weight: var(--w-bold);
+}
+
+.settings .prov-default-value {
+  margin-top: 2px;
+  font-size: 1.375rem;
+  font-weight: var(--w-bold);
+  font-stretch: var(--head-width);
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.settings .prov-default-value span {
+  color: var(--muted);
+  font-weight: var(--w-med);
+}
+
+.settings .prov-default-help {
+  margin-top: var(--s-1);
+  color: var(--muted);
+  font-size: var(--t-sm);
+  max-width: 26rem;
+}
+
+.settings .prov-default-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: var(--s-2);
+  align-items: end;
+}
+
+.settings .prov-default-form .picker-trigger,
+.settings .prov-default-form .input {
+  width: 100%;
+}
+
+.settings .prov-default-error {
+  grid-column: 1 / -1;
+}
+
+.settings .prov-section {
+  margin-top: var(--s-6);
+}
+
+.settings .prov-section h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  font-size: var(--t-lg);
+}
+
+.settings .prov-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  flex-wrap: wrap;
+}
+
+.settings .prov-section-head h2 {
+  margin-bottom: var(--s-3);
+}
+
+.settings .prov-search {
+  flex: 0 1 18rem;
+  margin-bottom: var(--s-3);
+}
+
+.settings .prov-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(14.5rem, 1fr));
+  gap: var(--s-3);
+}
+
+.settings .prov-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  min-width: 0;
+  padding: var(--s-4);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+}
+
+.settings .prov-card.is-default {
+  border-color: var(--accent-edge);
+}
+
+.settings .prov-card-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin-bottom: var(--s-1);
+}
+
+.settings .prov-card h3 {
+  font-size: var(--t-md);
+  letter-spacing: -0.01em;
+}
+
+.settings .prov-about {
+  flex: 1;
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+}
+
+.settings .prov-model,
+.settings .prov-url {
+  color: var(--muted);
+  font-size: var(--t-xs);
+  overflow-wrap: anywhere;
+}
+
+.settings .prov-url {
+  color: var(--faint);
+}
+
+.settings .prov-cta {
+  width: 100%;
+  margin-top: auto;
+}
+
+.settings .prov-card .prov-cta {
+  margin-top: var(--s-2);
+}
+
+.settings .prov-tag {
+  padding: 0.05rem 0.5rem;
+  border-radius: var(--r-pill);
+  background: var(--raised);
+  color: var(--muted);
+  font-size: var(--t-xs);
+  font-weight: var(--w-med);
+  white-space: nowrap;
+}
+
+.settings .prov-tag.is-default {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.settings .prov-cred {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  color: var(--muted);
+  font-size: var(--t-sm);
+  line-height: var(--lh-snug);
+}
+
+.settings .prov-cred .lamp {
+  width: 0.45rem;
+  height: 0.45rem;
+}
+
+.settings .prov-cred.is-asserted {
+  color: var(--asserted);
+}
+
+.settings .prov-cred.is-failed {
+  color: var(--failed);
+}
+
+.settings .prov-cred .lamp.is-asserted {
+  animation: none;
+}
+
+/* Every provider, as a list: scanning 74 cards is a chore, 74 rows is not. */
+.settings .prov-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--rule);
+  border-radius: var(--r-2);
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.settings .prov-list li + li {
+  border-top: 1px solid var(--rule);
+}
+
+.settings .prov-list button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  padding: var(--s-3) var(--s-4);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.settings .prov-list button:hover {
+  background: var(--raised);
+}
+
+.settings .prov-list-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.settings .prov-list-name {
+  font-weight: var(--w-med);
+}
+
+.settings .prov-list-about {
+  color: var(--faint);
+  font-size: var(--t-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings .prov-list-action {
+  color: var(--accent);
+  font-size: var(--t-sm);
+  font-weight: var(--w-med);
+}
+
+/* ── The connect sheet: slides in from the right ── */
+
+.settings .prov-backdrop {
+  justify-items: end;
+  align-content: stretch;
+  padding: 0;
+}
+
+.settings .prov-sheet {
+  display: flex;
+  flex-direction: column;
+  width: min(30rem, 100%);
+  height: 100%;
+  overflow-y: auto;
+  border-left: 1px solid var(--rule-strong);
+  background: var(--surface);
+  box-shadow: var(--shadow-3);
+  animation: prov-in 220ms var(--ease);
+}
+
+.settings .prov-sheet:focus {
+  outline: none;
+}
+
+@keyframes prov-in {
+  from {
+    transform: translateX(2rem);
+    opacity: 0;
+  }
+}
+
+.settings .prov-sheet-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--s-3);
+  align-items: start;
+  padding: var(--s-5) var(--s-5) var(--s-4);
+  border-bottom: 1px solid var(--rule);
+}
+
+.settings .prov-sheet-head h2 {
+  font-size: var(--t-lg);
+}
+
+.settings .prov-sheet-head p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.settings .prov-sheet-status {
+  margin: var(--s-4) var(--s-5) 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-1);
+  background: var(--sunken);
+}
+
+.settings .prov-sheet-status .prov-tag {
+  margin-left: auto;
+}
+
+.settings .prov-sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-4);
+  padding: var(--s-5);
+}
+
+.settings .prov-sheet-body > p {
+  color: var(--muted);
+}
+
+.settings .prov-sheet-body .note {
+  margin: 0;
+}
+
+.settings .prov-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.settings .prov-field .input {
+  width: 100%;
+}
+
+.settings .prov-key {
+  display: flex;
+  gap: var(--s-1);
+}
+
+.settings .prov-key .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings .prov-hint {
+  color: var(--faint);
+  font-size: var(--t-xs);
+}
+
+.settings .prov-hint a,
+.settings .prov-sheet a {
+  color: var(--accent);
+}
+
+.settings .prov-more,
+.settings .prov-skip {
+  align-self: flex-start;
+  margin-top: calc(var(--s-2) * -1);
+}
+
+.settings .prov-check {
+  font-size: var(--t-sm);
+}
+
+.settings .prov-sheet-actions {
+  display: flex;
+  gap: var(--s-2);
+}
+
+.settings .prov-sheet-actions .button-primary {
+  flex: 1;
+}
+
+.settings .prov-cli {
+  padding-top: var(--s-3);
+  border-top: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: var(--t-sm);
+}
+
+.settings .prov-cli summary {
+  color: var(--ink);
+  font-weight: var(--w-med);
+  cursor: pointer;
+}
+
+.settings .prov-cli p {
+  margin-top: var(--s-2);
+}
+
+.settings .prov-command {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  padding: var(--s-1) var(--s-1) var(--s-1) var(--s-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-1);
+  background: var(--sunken);
+}
+
+.settings .prov-command code {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  background: none;
+  overflow-wrap: anywhere;
+}
+
+.settings .prov-sheet-foot {
+  margin-top: auto;
+  padding: var(--s-4) var(--s-5);
+  border-top: 1px solid var(--rule);
+}
+
+.settings .prov-remove {
+  color: var(--failed);
+}
+
+.settings .prov-remove:hover:not(:disabled) {
+  background: var(--failed-wash);
+  color: var(--failed);
+}
+
+/* ── Narrower screens ── */
+
+@media (max-width: 72rem) {
+  .settings .prov-default {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 52rem) {
+  .settings-layout {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--s-4);
+  }
+
+  .settings .settings-nav {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: var(--s-1);
+  }
+
+  .settings .settings-nav-title {
+    display: none;
+  }
+
+  .settings .settings-nav .nav-item {
+    flex: none;
+    width: auto;
+  }
+
+  .settings .config-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 40rem) {
+  .settings .config-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings .prov-default {
+    padding: var(--s-4);
+  }
+
+  .settings .prov-default-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings .settings-card {
+    padding: var(--s-3) var(--s-4) var(--s-1);
+  }
+
+  .settings .prov-sheet {
+    width: 100%;
+    border-left: 0;
+  }
+}

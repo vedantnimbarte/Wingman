@@ -367,10 +367,19 @@ files count, ignored files and `.wingman/` do not, and HEAD is not moved.
 Each rollback buys a fresh round of retries: the gate gets
 `2 × turn_rollback_after` failures before the worker gives up.
 
+**Progress watchdog.** A worker can be alive and still going nowhere: reading
+the same files, re-running the same failing test. Uptime checks and
+`task_timeout_secs` catch that only at the very end. After `stall_tool_calls`
+tool calls without a file edit, the worker gets a note telling it to make the
+change or report what blocks it. At twice that it is stopped, and the retry
+ladder takes over with the reason in the failure history. Reviewers are
+exempt, since they never write. `0` turns it off.
+
 ```toml
 [pilot]
 turn_gate_cmd       = "cargo check --workspace"  # also warms speculative worktrees
 turn_rollback_after = 2
+stall_tool_calls    = 40
 
 [pilot.capabilities]
 adaptive_concurrency = true    # host-load sampling (every tier)
@@ -677,6 +686,35 @@ enabled           = true
 sources           = ["github_issues", "todos", "intake", "ask"]
 watch_debounce_ms = 1000   # raise it if an editor or build keeps waking the daemon
 ```
+
+### Triage policy and speculative runs
+
+Code rules come first, so most candidates never reach a model: trust
+allowlists and the `value × confidence ÷ risk` score settle `AutoRun` and
+`Ignore`. Only what they leave in the propose band goes to the **policy
+judge**, one short model call against a policy you write in plain prose. The
+judge can drop a candidate, or promote a `Trusted` one to auto-run. It cannot
+promote anything less trusted, because the item text comes from outside and
+may be written to talk the judge into it. When the judge fails or gives an
+unclear answer, the code rules' decision stands. It uses `[router].fast_model`
+when one is set.
+
+**Speculative runs** act ahead. A `Trusted` candidate in the propose band is
+attempted right away instead of waiting in the queue. If every task passes
+its gates, a PR opens and waits for a human, since auto-merge is off for these
+runs. If not, nothing is announced, and the candidate stays queued. The
+setting widens the score band, never the trust band, and shares
+`max_auto_dispatch_per_cycle` with `auto_dispatch`.
+
+```toml
+[pilot.daemon]
+policy      = "Skip anything about the docs site. Test-only dependency bumps can run."
+speculative = true
+```
+
+Every daemon-started run is linked to the issue or check that caused it in
+`.wingman/daemon-queue.jsonl`, so `trace_ref github_issue#12` finds the run,
+its PR and its workers' sessions.
 
 ```bash
 wingman pilot hooks install     # once per clone

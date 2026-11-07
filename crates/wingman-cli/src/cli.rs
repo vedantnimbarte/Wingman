@@ -32,7 +32,7 @@ pub struct Cli {
     )]
     pub reasoning: Option<String>,
 
-    /// Restrict this session to a named tool preset: `review` | `minimal`, or
+    /// Restrict this session to a named tool preset: `review` | `minimal` | `router`, or
     /// any name under `[tools.presets]`. Tools outside it are not registered,
     /// so their schemas are not billed — check the saving with
     /// `wingman --preset review context`.
@@ -2040,6 +2040,7 @@ pub async fn run() -> Result<ExitCode> {
                 plan_approver,
                 recall_runner,
                 session_indexer,
+                run_notices: Some(crate::serve::push::watch_project(project.root.clone())),
             };
             wingman_tui::init_theme(&cfg.tui);
             wingman_tui::run(agent, ctx).await?;

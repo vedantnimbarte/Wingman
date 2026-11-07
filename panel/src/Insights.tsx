@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   type ApiSchema,
@@ -10,852 +10,1194 @@ import {
   type RunSummary,
 } from './api'
 import { money } from './Board'
-import { areaPath, coverage, cumulative, decadeBounds, linePath, logFraction } from './charts'
+import {
+  arcPath,
+  arcs,
+  areaPath,
+  change,
+  coverage,
+  cumulative,
+  decadeBounds,
+  linePath,
+  logFraction,
+  niceCeil,
+} from './charts'
+import './insights.css'
 import { Output } from './output'
 import { navigate } from './router'
-import { runClass, runGlyph } from './Runs'
+import { runClass, runGlyph, runLabel } from './Runs'
 import { message } from './state'
-import { Empty, Failed, Loading, PageHead } from './ui'
+import { Empty, Failed, Icon, Loading, PageHead, Pill, type IconName } from './ui'
 
 /**
- * Insights — what this repo costs, what it would have cost elsewhere, and
- * what every turn pays before you type.
+ * Insights — what this repo costs, how that is changing, and how well the
+ * work holds up.
  *
- * Four charts, each answering a question the figures alone do not:
+ * Laid out as a dashboard. One period switch drives the top of the page: four
+ * figures with their change against the previous period, and a daily spend
+ * chart that draws the previous period behind this one, so "is this normal?"
+ * is answered by looking. Beside it, a short list of things worth a look, each
+ * derived from a number on this page and citing it — nothing is guessed.
  *
- * 1. **Composition** — of the total, how much is which model, and how much of
- *    the input was cache rather than fresh tokens.
- * 2. **The repricing ladder** — the page's signature. Every alternative model
- *    on one log axis with a *datum line* at what you actually paid. Cheaper
- *    models stop short of the line; dearer ones cross it. The crossing is the
- *    whole argument, and it is made without a single hue.
- * 3. **Spend over time** — from `GET /cost/timeline`, which prices this
- *    repo's session transcripts by day.
- * 4. **The per-turn tax** — 28 tool schemas as a Pareto, so "how many tools
- *    are most of the tax" is answerable by looking.
+ * Two scopes, stated wherever they appear: the daily timeline, metrics and
+ * runs are this repository; the per-model totals come from
+ * `~/.wingman/usage.json`, which is every repository on this machine.
  *
- * Between them, **whether it is working** — the metrics DIFFERENTIATION.md
- * says to track, from `GET /metrics`: time to first token, tokens per
- * completed task, verified-done rate, and routing outcomes.
- *
- * The palette rule holds throughout: colour encodes epistemic status and
- * nothing else. Every chart here is drawn in ink and the neutrals, and the
- * status hues appear only where a verdict is what is being reported — run
- * outcomes, and verification receipts. Nothing on this page is coloured
- * because it is a chart.
+ * Colour: charts are the accent, which never means a state. Green, amber and
+ * red appear only where a verdict is being reported — checks that passed or
+ * failed, and how runs ended.
  */
+
+/** Periods offered. Thirty is the default because a month is how spend is asked about. */
+const WINDOWS = [7, 30, 90] as const
+
 export function Insights({ project }: { project: string | null }) {
   if (!project) {
     return (
       <div className="view">
         <Failed
-          title="No project selected"
-          detail="These reports are per-repo. Pick one in the header."
+          title="Pick a repository first"
+          detail="Insights are per repository. Choose one in the sidebar."
           action={{ label: 'Go to Overview', onClick: () => navigate('/') }}
         />
       </div>
     )
   }
+  return <Dashboard project={project} />
+}
+
+/* ── Data ──────────────────────────────────────────────────────────────── */
+
+type Load<T> = { value: T | null; error: string | null; reload: () => void }
+
+/**
+ * One request, its result and its failure. The previous value is kept while a
+ * reload is in flight, so switching the period does not blank the page.
+ */
+function useLoad<T>(fetch: () => Promise<T>, deps: unknown[]): Load<T> {
+  const [value, setValue] = useState<T | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [n, setN] = useState(0)
+  const run = useCallback(fetch, deps)
+
+  useEffect(() => {
+    let live = true
+    run()
+      .then((v) => {
+        if (!live) return
+        setValue(v)
+        setError(null)
+      })
+      .catch((e: unknown) => live && setError(message(e)))
+    return () => {
+      live = false
+    }
+  }, [run, n])
+
+  return { value, error, reload: () => setN((x) => x + 1) }
+}
+
+/** How many runs are priced individually — one request each, so it is capped and says so. */
+const RECENT = 10
+
+type PricedRuns = { all: RunSummary[]; priced: { run: RunSummary; usd: number }[] }
+
+async function loadRuns(project: string): Promise<PricedRuns> {
+  const all = await api.runs(project)
+  const priced = await Promise.all(
+    all.slice(0, RECENT).map(async (run) => {
+      try {
+        return { run, usd: (await api.run(project, run.run_id)).totals.usd }
+      } catch {
+        return { run, usd: 0 }
+      }
+    }),
+  )
+  return { all, priced }
+}
+
+/** The fetched timeline split into this period and the one before it. */
+type Periods = {
+  cur: CostTimeline['days']
+  prev: CostTimeline['days']
+  timeline: CostTimeline
+}
+
+function split(t: CostTimeline | null, days: number): Periods | null {
+  if (!t) return null
+  // Twice the window was asked for. A short history returns fewer days, in
+  // which case the previous period is whatever is left, possibly nothing.
+  const cur = t.days.slice(-days)
+  const prev = t.days.slice(0, Math.max(0, t.days.length - days)).slice(-days)
+  return { cur, prev, timeline: t }
+}
+
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0)
+
+/* ── Page ──────────────────────────────────────────────────────────────── */
+
+function Dashboard({ project }: { project: string }) {
+  const [days, setDays] = useState<number>(30)
+
+  // Always with `compare`: repricing the same token volume against other
+  // models is half the point of the spend section.
+  const cost = useLoad(() => api.cost(project, true), [project])
+  const timeline = useLoad(() => api.costTimeline(project, days * 2), [project, days])
+  const metrics = useLoad(() => api.metrics(project), [project])
+  const context = useLoad(() => api.context(project), [project])
+  const runs = useLoad(() => loadRuns(project), [project])
+
+  const periods = split(timeline.value, days)
+
   return (
-    <div className="view">
+    <div className="view insights">
       <PageHead
-        eyebrow="Insights"
-        title="What this repo has cost"
-        intro="Real spend, the same token volume repriced against ten other models, and the tax every turn pays before you have typed anything."
+        title="Insights"
+        intro="What Wingman costs in this repository, how that is changing, and how often its work passes its own checks."
+        actions={
+          <div className="ins-period" role="group" aria-label="Period">
+            {WINDOWS.map((w) => (
+              <button
+                key={w}
+                type="button"
+                aria-pressed={days === w}
+                onClick={() => setDays(w)}
+              >
+                {w} days
+              </button>
+            ))}
+          </div>
+        }
       />
-      <Spend project={project} />
-      <Timeline project={project} />
-      <Working project={project} />
-      <Outcomes project={project} />
-      <Context project={project} />
+
+      <Kpis periods={periods} days={days} metrics={metrics.value} error={timeline.error} />
+
+      <div className="ins-hero">
+        <SpendChart periods={periods} days={days} error={timeline.error} onRetry={timeline.reload} />
+        <Suggestions
+          cost={cost.value}
+          periods={periods}
+          days={days}
+          metrics={metrics.value}
+          context={context.value}
+          runs={runs.value}
+        />
+      </div>
+
+      <Models load={cost} />
+
+      <div className="ins-grid">
+        <Alternatives cost={cost.value} />
+        <Overhead load={context} />
+      </div>
+
+      <div className="ins-grid">
+        <Quality load={metrics} />
+        <Outcomes runs={runs.value} />
+      </div>
+
       <Reports project={project} />
     </div>
   )
 }
 
-/* ── Spend ─────────────────────────────────────────────────────────────── */
-
-/**
- * The headline, what it is made of, and what it would have cost elsewhere.
- *
- * One caveat is stated on screen rather than buried here: `wingman cost`
- * reads `~/.wingman/usage.json`, which is machine-wide and has no project in
- * it. Labelling this figure with the repo's name would be wrong, so it says
- * what it actually measures.
- */
-function Spend({ project }: { project: string }) {
-  const [report, setReport] = useState<CostReport | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  const load = useCallback(async () => {
-    try {
-      // Always with `compare`: repricing the same token volume against other
-      // models is the point of the report, not an extra.
-      setReport(await api.cost(project, true))
-      setError(null)
-    } catch (e) {
-      setError(message(e))
-    }
-  }, [project])
-
-  useEffect(() => {
-    void load()
-  }, [load])
-
-  if (error)
-    return (
-      <Failed
-        title="Could not read cost"
-        detail={error}
-        action={{ label: 'Try again', onClick: () => void load() }}
-      />
-    )
-  if (!report) return <Loading what="cost" />
-
-  if (report.rows.length === 0) {
-    return (
-      <Empty title="Nothing spent yet">
-        Cost accrues as you run turns and pilot runs. Start a conversation or dispatch a card and
-        this page fills in.
-      </Empty>
-    )
-  }
-
-  const cacheRead = report.rows.reduce((n, r) => n + r.cache_read_tokens, 0)
-  const cacheWrite = report.rows.reduce((n, r) => n + r.cache_write_tokens, 0)
-  const freshInput = report.rows.reduce((n, r) => n + r.input_tokens, 0)
-
+/** A titled card. Every block on this page is one. */
+function Card({
+  title,
+  sub,
+  aside,
+  id,
+  className = '',
+  children,
+}: {
+  title: string
+  sub?: React.ReactNode
+  aside?: React.ReactNode
+  id?: string
+  className?: string
+  children: React.ReactNode
+}) {
   return (
-    <section className="panel">
-      <span className="eyebrow">Total spend · every project on this machine</span>
-      <p className="headline">{money(report.total_usd)}</p>
-      <p className="section-intro">
-        {report.total_input_tokens.toLocaleString()} tokens in ·{' '}
-        {report.total_output_tokens.toLocaleString()} out, across{' '}
-        {report.rows.length === 1 ? 'one model' : `${report.rows.length} models`}. This is{' '}
-        <code>~/.wingman/usage.json</code>, which counts every repo — the chart below is this one.
-      </p>
-
-      <Composition report={report} />
-
-      <h3 className="chart-head">What the input was made of</h3>
-      <Tokens fresh={freshInput} cacheRead={cacheRead} cacheWrite={cacheWrite} />
-
-      <Ladder report={report} />
+    <section className={`ins-card ${className}`} id={id} aria-label={title}>
+      <header className="ins-card-head">
+        <div>
+          <h2>{title}</h2>
+          {sub && <p className="ins-card-sub">{sub}</p>}
+        </div>
+        {aside}
+      </header>
+      {children}
     </section>
   )
 }
 
-/**
- * The total as one bar, split by model.
- *
- * Segments are separated by ink density and a hairline, never a hue. Two
- * models is a bar that could have been a sentence; five is a bar that could
- * not, and the same drawing has to work for both.
- */
-function Composition({ report }: { report: CostReport }) {
-  const rows = [...report.rows].sort((a, b) => b.usd - a.usd)
-  const total = report.total_usd
-  if (!(total > 0)) return null
+/* ── KPIs ──────────────────────────────────────────────────────────────── */
+
+function Kpis({
+  periods,
+  days,
+  metrics,
+  error,
+}: {
+  periods: Periods | null
+  days: number
+  metrics: Metrics | null
+  error: string | null
+}) {
+  const cur = periods?.cur ?? []
+  const prev = periods?.prev ?? []
+  const spend = sum(cur.map((d) => d.usd))
+  const spendPrev = sum(prev.map((d) => d.usd))
+  const turns = sum(cur.map((d) => d.turns))
+  const turnsPrev = sum(prev.map((d) => d.turns))
+  const per = turns ? spend / turns : 0
+  const perPrev = turnsPrev ? spendPrev / turnsPrev : 0
+  const vs = `vs previous ${days} days`
+  const ready = periods !== null
 
   return (
-    <>
-      <h3 className="chart-head">Where it went</h3>
-      <div
-        className="stack"
-        role="img"
-        aria-label={rows
-          .map((r) => `${r.key}: ${money(r.usd)}, ${Math.round((r.usd / total) * 100)}%`)
-          .join('; ')}
-      >
-        {rows.map((r, i) => (
+    <div className="ins-kpis">
+      <Kpi
+        icon="coin"
+        label="Spent in this repo"
+        value={ready ? money(spend) : '—'}
+        delta={ready ? change(spend, spendPrev) : null}
+        note={error ? 'Could not load the timeline' : `Last ${days} days, ${vs}`}
+        spark={cur.map((d) => d.usd)}
+      />
+      <Kpi
+        icon="sessions"
+        label="Messages"
+        value={ready ? turns.toLocaleString() : '—'}
+        delta={ready ? change(turns, turnsPrev) : null}
+        note={`Answered by Wingman, ${vs}`}
+        spark={cur.map((d) => d.turns)}
+      />
+      <Kpi
+        icon="tasks"
+        label="Cost per message"
+        value={ready && turns ? money(per) : '—'}
+        delta={ready ? change(per, perPrev) : null}
+        note="Spend divided by messages"
+        spark={cur.map((d) => (d.turns ? d.usd / d.turns : 0))}
+      />
+      <Kpi
+        icon="check"
+        label="Checks passed"
+        value={rate(metrics?.verified_done_rate ?? null)}
+        note={
+          metrics && metrics.gated_turns
+            ? `${metrics.verified_turns} of ${metrics.gated_turns} checked messages, all time`
+            : 'No checked messages yet'
+        }
+        meter={metrics?.verified_done_rate ?? null}
+      />
+    </div>
+  )
+}
+
+function Kpi({
+  icon,
+  label,
+  value,
+  delta,
+  note,
+  spark,
+  meter,
+}: {
+  icon: IconName
+  label: string
+  value: string
+  delta?: number | null
+  note: string
+  spark?: number[]
+  meter?: number | null
+}) {
+  return (
+    <div className="ins-kpi">
+      <span className="ins-kpi-label">
+        <span className="ins-kpi-icon" aria-hidden="true">
+          <Icon name={icon} size={14} />
+        </span>
+        {label}
+      </span>
+      <div className="ins-kpi-body">
+        <div className="ins-kpi-figure">
+          <span className="ins-kpi-value">{value}</span>
+          {delta !== undefined && <Delta value={delta} />}
+        </div>
+        {spark && spark.some((v) => v > 0) && <Spark values={spark} />}
+        {meter != null && (
           <span
-            key={r.key}
-            className="stack-seg"
-            // Rank, as ink density. The dearest model is solid; each one
-            // after it steps back, bottoming out well above the track so the
-            // last segment is still a segment and not the empty bar.
-            style={{ width: `${(r.usd / total) * 100}%`, '--tone': tone(i, rows.length) } as never}
-            title={`${r.key} · ${money(r.usd)}`}
+            className="ins-ring"
+            style={{ '--fill': meter } as React.CSSProperties}
+            aria-hidden="true"
           />
-        ))}
+        )}
       </div>
-      {/* The legend and the per-model ledger are the same rows: a swatch ties
-          each line to its segment, and the exact figures stay on the rail
-          rather than hiding in a tooltip. A chart that replaces the numbers
-          with a shape has taken something away. */}
-      <div className="rows">
-        {rows.map((r, i) => (
-          <div key={r.key} className="row">
-            <span className="legend-item">
-              <span className="legend-key" style={{ '--tone': tone(i, rows.length) } as never} />
-              <span className="figure truncate">{r.key}</span>
-            </span>
-            <span className="figure">
-              {money(r.usd)} <span className="muted">{Math.round((r.usd / total) * 100)}%</span>
-              <br />
-              <span className="muted">
-                {r.input_tokens.toLocaleString()} in · {r.output_tokens.toLocaleString()} out
-                {r.cache_read_tokens > 0 && ` · ${r.cache_read_tokens.toLocaleString()} cache read`}
-                {r.cache_write_tokens > 0 &&
-                  ` · ${r.cache_write_tokens.toLocaleString()} cache write`}
-              </span>
-            </span>
-          </div>
-        ))}
-      </div>
-    </>
+      <span className="ins-kpi-note">{note}</span>
+    </div>
   )
 }
 
 /**
- * Ink density for the nth of `count` series, as an opacity.
+ * A change as a small neutral pill. Not green or red: spend going up is not a
+ * failure and going down is not a success, so it gets an arrow, not a verdict.
+ */
+function Delta({ value }: { value: number | null }) {
+  if (value === null) return <span className="ins-delta is-none">no earlier data</span>
+  const pct = Math.round(value * 100)
+  const dir = pct > 0 ? 'up' : pct < 0 ? 'down' : 'flat'
+  return (
+    <span className={`ins-delta is-${dir}`} title="Change against the previous period">
+      {dir === 'up' ? '↑' : dir === 'down' ? '↓' : '→'} {Math.abs(pct)}%
+    </span>
+  )
+}
+
+/** A sparkline: shape only, no axis. The figure beside it carries the number. */
+function Spark({ values }: { values: number[] }) {
+  const W = 96
+  const H = 32
+  const peak = Math.max(...values, 0)
+  const scaled = values.map((v) => (peak > 0 ? v / peak : 0))
+  return (
+    <svg className="ins-spark" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+      <path className="ins-spark-fill" d={areaPath(values, W, H)} />
+      <path className="ins-spark-line" d={linePath(scaled, W, H)} vectorEffect="non-scaling-stroke" />
+    </svg>
+  )
+}
+
+/* ── The spend chart ───────────────────────────────────────────────────── */
+
+/**
+ * Daily spend, this period over the last.
  *
- * The ramp stops at 0.35 rather than running to zero: a segment nobody can
- * see is a segment that is not in the chart.
+ * The previous period is drawn behind this one, aligned day for day, so a
+ * spike reads as a spike only if it is one. Hover, tap or arrow-key along it
+ * for a day's figures; the readout is also announced, so the chart is usable
+ * without seeing it.
+ */
+function SpendChart({
+  periods,
+  days,
+  error,
+  onRetry,
+}: {
+  periods: Periods | null
+  days: number
+  error: string | null
+  onRetry: () => void
+}) {
+  const [style, setStyle] = useState<'bars' | 'line'>('bars')
+  const [at, setAt] = useState<number | null>(null)
+  const plot = useRef<HTMLDivElement | null>(null)
+
+  if (error)
+    return (
+      <Card title="Daily spend">
+        <Failed title="Couldn't load daily spend" detail={error} action={{ label: 'Try again', onClick: onRetry }} />
+      </Card>
+    )
+  if (!periods) return <Card title="Daily spend"><Loading what="daily spend" /></Card>
+
+  const { cur, prev, timeline } = periods
+  const values = cur.map((d) => d.usd)
+  // The previous period, right-aligned to this one so day N sits over day N.
+  const ghost = cur.map((_, i) => prev[prev.length - cur.length + i]?.usd ?? null)
+  const total = sum(values)
+  const prevTotal = sum(prev.map((d) => d.usd))
+  const top = niceCeil(Math.max(...values, ...ghost.map((v) => v ?? 0), 0))
+  const avg = cur.length ? total / cur.length : 0
+  const n = values.length
+
+  const W = 720
+  const H = 220
+  const y = (v: number) => H - (v / top) * H
+  const slot = W / Math.max(n, 1)
+  const xLine = (i: number) => (n <= 1 ? W / 2 : (i / (n - 1)) * W)
+  const xMid = (i: number) => (style === 'bars' ? i * slot + slot / 2 : xLine(i))
+
+  function pick(clientX: number) {
+    const box = plot.current?.getBoundingClientRect()
+    if (!box || n === 0) return
+    const f = Math.min(1, Math.max(0, (clientX - box.left) / box.width))
+    setAt(style === 'bars' ? Math.min(n - 1, Math.floor(f * n)) : Math.round(f * (n - 1)))
+  }
+
+  function onKey(e: React.KeyboardEvent) {
+    if (n === 0) return
+    if (e.key === 'ArrowRight') setAt((a) => Math.min(n - 1, (a ?? -1) + 1))
+    else if (e.key === 'ArrowLeft') setAt((a) => Math.max(0, (a ?? n) - 1))
+    else if (e.key === 'Home') setAt(0)
+    else if (e.key === 'End') setAt(n - 1)
+    else if (e.key === 'Escape') setAt(null)
+    else return
+    e.preventDefault()
+  }
+
+  const day = at !== null ? cur[at] : null
+  const before = at !== null ? ghost[at] : null
+  const ticks = [top, top / 2, 0]
+  const labels = n ? [0, Math.floor((n - 1) / 2), n - 1] : []
+
+  return (
+    <Card
+      title="Daily spend"
+      sub="This repository's chats and runs, priced by day."
+      className="ins-chart-card"
+      aside={
+        <div className="ins-toggle" role="group" aria-label="Chart style">
+          {(['bars', 'line'] as const).map((s) => (
+            <button key={s} type="button" aria-pressed={style === s} onClick={() => setStyle(s)}>
+              {s === 'bars' ? 'Bars' : 'Line'}
+            </button>
+          ))}
+        </div>
+      }
+    >
+      <div className="ins-legend">
+        <span>
+          <i className="ins-swatch" aria-hidden="true" />
+          Last {days} days <strong>{money(total)}</strong>
+        </span>
+        <span>
+          <i className="ins-swatch is-ghost" aria-hidden="true" />
+          Previous {days} days <strong>{prev.length ? money(prevTotal) : '—'}</strong>
+        </span>
+        <span className="ins-legend-avg">
+          <i className="ins-swatch is-avg" aria-hidden="true" />
+          Daily average <strong>{money(avg)}</strong>
+        </span>
+      </div>
+
+      {total === 0 && prevTotal === 0 ? (
+        <Empty title={timeline.last_day ? 'Nothing spent in this period' : 'No spend in this repository yet'}>
+          {timeline.last_day
+            ? `The last day anything was spent here was ${timeline.last_day}. Pick a longer period to see it.`
+            : 'Start a chat or a run in this repository and each day it costs anything lands here.'}
+        </Empty>
+      ) : (
+        <div className="ins-chart">
+          <div className="ins-yaxis" aria-hidden="true">
+            {ticks.map((t) => (
+              <span key={t}>{t === 0 ? '$0' : money(t)}</span>
+            ))}
+          </div>
+          <div
+            className="ins-plot"
+            ref={plot}
+            tabIndex={0}
+            role="img"
+            aria-label={`Daily spend over the last ${days} days, ${money(total)} in total. Use the arrow keys to read each day.`}
+            onMouseMove={(e) => pick(e.clientX)}
+            onMouseLeave={() => setAt(null)}
+            onTouchStart={(e) => pick(e.touches[0].clientX)}
+            onTouchMove={(e) => pick(e.touches[0].clientX)}
+            onKeyDown={onKey}
+            onBlur={() => setAt(null)}
+          >
+            <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" aria-hidden="true">
+              {ticks.map((t) => (
+                <line key={t} className="ins-gridline" x1="0" x2={W} y1={y(t)} y2={y(t)} vectorEffect="non-scaling-stroke" />
+              ))}
+              {style === 'bars' ? (
+                <>
+                  {ghost.map((v, i) =>
+                    v ? (
+                      <rect key={`g${i}`} className="ins-ghost-bar" x={i * slot + slot * 0.08} width={slot * 0.84} y={y(v)} height={H - y(v)} />
+                    ) : null,
+                  )}
+                  {values.map((v, i) => (
+                    <rect
+                      key={i}
+                      className={`ins-bar${at === i ? ' is-on' : ''}`}
+                      x={i * slot + slot * 0.2}
+                      width={slot * 0.6}
+                      y={y(v)}
+                      height={H - y(v)}
+                    />
+                  ))}
+                </>
+              ) : (
+                <>
+                  <path
+                    className="ins-ghost-line"
+                    d={linePath(ghost.map((v) => (v ?? 0) / top), W, H)}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <path className="ins-area" d={areaPath(values, W, H, top)} />
+                  <path className="ins-line" d={linePath(values.map((v) => v / top), W, H)} vectorEffect="non-scaling-stroke" />
+                </>
+              )}
+              <line className="ins-avg" x1="0" x2={W} y1={y(avg)} y2={y(avg)} vectorEffect="non-scaling-stroke" />
+            </svg>
+
+            {at !== null && day && (
+              <>
+                <span className="ins-guide" style={{ left: `${(xMid(at) / W) * 100}%` }} aria-hidden="true" />
+                <span
+                  className="ins-dot"
+                  style={{ left: `${(xMid(at) / W) * 100}%`, top: `${(y(day.usd) / H) * 100}%` }}
+                  aria-hidden="true"
+                />
+                <div
+                  className={`ins-tip${xMid(at) > W * 0.6 ? ' is-left' : ''}`}
+                  style={{ left: `${(xMid(at) / W) * 100}%` }}
+                >
+                  <span className="ins-tip-date">{formatDate(day.date, true)}</span>
+                  <span className="ins-tip-row">
+                    <i className="ins-swatch" aria-hidden="true" />
+                    {money(day.usd)}
+                    <span>{day.turns} {day.turns === 1 ? 'message' : 'messages'}</span>
+                  </span>
+                  <span className="ins-tip-row is-ghost">
+                    <i className="ins-swatch is-ghost" aria-hidden="true" />
+                    {before == null ? '—' : money(before)}
+                    <span>previous period</span>
+                  </span>
+                  <span className="ins-tip-foot">
+                    {compactNum(day.input_tokens)} in · {compactNum(day.output_tokens)} out
+                    {day.cache_read_tokens > 0 && ` · ${compactNum(day.cache_read_tokens)} from cache`}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="ins-xaxis" aria-hidden="true">
+            {labels.map((i) => (
+              <span key={i}>{cur[i] ? formatDate(cur[i].date) : ''}</span>
+            ))}
+          </div>
+          <p className="sr-only" aria-live="polite">
+            {day ? `${formatDate(day.date, true)}: ${money(day.usd)}, ${day.turns} messages.` : ''}
+          </p>
+        </div>
+      )}
+    </Card>
+  )
+}
+
+/** `2026-11-04` → "Nov 4" (or "Wed, Nov 4"). Parsed as a calendar date, not a UTC instant. */
+function formatDate(iso: string, long = false): string {
+  const [y, m, d] = iso.split('-').map(Number)
+  if (!y || !m || !d) return iso
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    ...(long ? { weekday: 'short' } : {}),
+  })
+}
+
+function compactNum(n: number): string {
+  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n)
+}
+
+/* ── Worth a look ──────────────────────────────────────────────────────── */
+
+export type Suggestion = {
+  id: string
+  tone: 'is-failed' | 'is-asserted' | 'is-info'
+  title: string
+  /** The number the suggestion rests on, so it can be checked. */
+  basis: string
+  action?: { label: string; to: string }
+}
+
+/**
+ * Things on this page worth a look, ranked.
+ *
+ * Every rule reads a figure that is on screen and cites it. No rule
+ * recommends a model: a cheaper model that needs three attempts is not
+ * cheaper, so a price gap is reported as a price gap and nothing more.
+ */
+export function suggest(input: {
+  cost: CostReport | null
+  spend: number
+  spendPrev: number
+  days: number
+  unpriced: number
+  metrics: Metrics | null
+  context: ContextReport | null
+  runs: RunSummary[]
+}): Suggestion[] {
+  const out: Suggestion[] = []
+  const { cost, metrics, context } = input
+
+  const failedRuns = input.runs.filter((r) => r.status === 'failed').length
+  if (failedRuns > 0)
+    out.push({
+      id: 'runs',
+      tone: 'is-failed',
+      title: `${failedRuns} ${failedRuns === 1 ? 'run' : 'runs'} failed`,
+      basis: `${failedRuns} of ${input.runs.length} runs in this repository ended in a failure.`,
+      action: { label: 'Open runs', to: '/runs' },
+    })
+
+  if (metrics && metrics.gated_turns >= 5 && (metrics.verified_done_rate ?? 1) < 0.9) {
+    const red = metrics.gated_turns - metrics.verified_turns
+    out.push({
+      id: 'checks',
+      tone: 'is-failed',
+      title: `${red} changes failed their checks`,
+      basis: `${rate(metrics.verified_done_rate)} of ${metrics.gated_turns} checked messages passed. Below 90% is worth reading why.`,
+      action: { label: 'Open chats', to: '/sessions' },
+    })
+  }
+
+  const weak = metrics?.routing
+    .filter((r) => r.total >= 5 && r.pass_rate < 0.5)
+    .sort((a, b) => a.pass_rate - b.pass_rate)[0]
+  if (weak)
+    out.push({
+      id: 'routing',
+      tone: 'is-asserted',
+      title: `${weak.model} struggles with ${weak.task_class} tasks`,
+      basis: `It passed ${weak.passed} of ${weak.total} (${rate(weak.pass_rate)}). Another model may be a better default for this kind of work.`,
+      action: { label: 'See pass rates', to: '#routing' },
+    })
+
+  if (input.unpriced > 0)
+    out.push({
+      id: 'unpriced',
+      tone: 'is-asserted',
+      title: `${input.unpriced} messages have no price`,
+      basis: 'Their model is not in the pricing table, so the spend shown here is lower than the real cost.',
+      action: { label: 'Open settings', to: '/config' },
+    })
+
+  const swing = change(input.spend, input.spendPrev)
+  if (swing !== null && Math.abs(swing) >= 0.5 && input.spend >= 1)
+    out.push({
+      id: 'swing',
+      tone: 'is-info',
+      title: `Spend is ${swing > 0 ? 'up' : 'down'} ${Math.round(Math.abs(swing) * 100)}%`,
+      basis: `${money(input.spend)} in the last ${input.days} days, against ${money(input.spendPrev)} in the ${input.days} before.`,
+    })
+
+  if (cost && cost.total_usd > 0) {
+    const used = new Set(cost.rows.map((r) => r.key))
+    const cheapest = cost.comparison
+      .filter((c) => !used.has(c.model))
+      .sort((a, b) => a.would_cost_usd - b.would_cost_usd)[0]
+    if (cheapest && cost.total_usd - cheapest.would_cost_usd >= 1)
+      out.push({
+        id: 'price',
+        tone: 'is-info',
+        title: `${cheapest.model} would have cost ${money(cost.total_usd - cheapest.would_cost_usd)} less`,
+        basis: `Same tokens repriced: ${money(cheapest.would_cost_usd)} against ${money(cost.total_usd)} paid. A price, not a recommendation.`,
+        action: { label: 'Compare models', to: '#alternatives' },
+      })
+  }
+
+  const tool = context ? [...context.tools].sort((a, b) => b.tokens - a.tokens)[0] : undefined
+  if (context && tool && context.first_turn_tokens > 0 && tool.tokens / context.first_turn_tokens >= 0.15)
+    out.push({
+      id: 'tool',
+      tone: 'is-info',
+      title: `${tool.name} is ${Math.round((tool.tokens / context.first_turn_tokens) * 100)}% of every message's overhead`,
+      basis: `Its description costs ${tool.tokens.toLocaleString()} tokens before anything is typed. Turning off tools you never use makes every message cheaper.`,
+      action: { label: 'See overhead', to: '#overhead' },
+    })
+
+  return out
+}
+
+function Suggestions({
+  cost,
+  periods,
+  days,
+  metrics,
+  context,
+  runs,
+}: {
+  cost: CostReport | null
+  periods: Periods | null
+  days: number
+  metrics: Metrics | null
+  context: ContextReport | null
+  runs: PricedRuns | null
+}) {
+  const list = useMemo(
+    () =>
+      suggest({
+        cost,
+        spend: sum(periods?.cur.map((d) => d.usd) ?? []),
+        spendPrev: sum(periods?.prev.map((d) => d.usd) ?? []),
+        days,
+        unpriced: periods?.timeline.unpriced_turns ?? 0,
+        metrics,
+        context,
+        runs: runs?.all ?? [],
+      }),
+    [cost, periods, days, metrics, context, runs],
+  )
+  const [all, setAll] = useState(false)
+  const shown = all ? list : list.slice(0, 3)
+
+  function go(to: string) {
+    if (to.startsWith('#')) document.getElementById(to.slice(1))?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    else navigate(to)
+  }
+
+  return (
+    <Card
+      title="Worth a look"
+      sub="Worked out from the numbers on this page."
+      className="ins-suggest"
+      aside={list.length > 0 ? <span className="count">{list.length}</span> : undefined}
+    >
+      {list.length === 0 ? (
+        <div className="ins-suggest-empty">
+          <span className="ins-ok" aria-hidden="true">
+            <Icon name="check" />
+          </span>
+          <p>Nothing stands out. Spend is steady, checks are passing and every message is priced.</p>
+        </div>
+      ) : (
+        <ul className="ins-suggest-list">
+          {shown.map((s) => (
+            <li key={s.id} className={`ins-tip-card ${s.tone}`}>
+              <span className={`lamp ${s.tone === 'is-info' ? '' : s.tone}`} aria-hidden="true" />
+              <div>
+                <p className="ins-tip-title">{s.title}</p>
+                <p className="ins-tip-basis">{s.basis}</p>
+                {s.action && (
+                  <button type="button" className="button button-sm" onClick={() => go(s.action!.to)}>
+                    {s.action.label}
+                  </button>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+      {list.length > 3 && (
+        <button type="button" className="button button-quiet button-sm" onClick={() => setAll((a) => !a)}>
+          {all ? 'Show fewer' : `Show ${list.length - 3} more`}
+        </button>
+      )}
+    </Card>
+  )
+}
+
+/* ── Spend by model ────────────────────────────────────────────────────── */
+
+/**
+ * Accent density for the nth of `count` series. The ramp stops at 0.3 rather
+ * than running to zero: a slice nobody can see is not in the chart.
  */
 function tone(i: number, count: number): number {
   if (count <= 1) return 1
-  return 1 - (i / (count - 1)) * 0.65
+  return 1 - (i / (count - 1)) * 0.7
 }
 
-/**
- * Input, split into what was billed as fresh and what came from cache.
- *
- * Cache traffic was on the wire from the first release and rendered nowhere.
- * It is the number that reconciles this page with the invoice: a repo that is
- * 80% cache reads pays a fraction of what its input count implies. Cached
- * tokens are hatched rather than tinted — the one texture on the page, and it
- * means "not fresh" rather than decorating a series.
- */
-function Tokens({
-  fresh,
-  cacheRead,
-  cacheWrite,
-}: {
-  fresh: number
-  cacheRead: number
-  cacheWrite: number
-}) {
-  const total = fresh + cacheRead + cacheWrite
-  if (total === 0) return null
-  const pct = (n: number) => `${(n / total) * 100}%`
+type ModelRow = CostReport['rows'][number] & { share: number; tokens: number }
+
+function Models({ load }: { load: Load<CostReport> }) {
+  const [metric, setMetric] = useState<'usd' | 'tokens'>('usd')
+  const [hover, setHover] = useState<string | null>(null)
+  const report = load.value
+
+  const sub = (
+    <>
+      Every repository on this machine, from <code>~/.wingman/usage.json</code>.
+    </>
+  )
+
+  if (load.error)
+    return (
+      <Card title="Spend by model" sub={sub}>
+        <Failed title="Couldn't load spend by model" detail={load.error} action={{ label: 'Try again', onClick: load.reload }} />
+      </Card>
+    )
+  if (!report) return <Card title="Spend by model" sub={sub}><Loading what="spend by model" /></Card>
+  if (report.rows.length === 0)
+    return (
+      <Card title="Spend by model" sub={sub}>
+        <Empty title="Nothing spent yet">
+          Spend appears here once Wingman answers a message or carries out a run.
+        </Empty>
+      </Card>
+    )
+
+  const tokensOf = (r: CostReport['rows'][number]) => r.input_tokens + r.output_tokens + r.cache_read_tokens + r.cache_write_tokens
+  const totalTokens = sum(report.rows.map(tokensOf))
+  const rows: ModelRow[] = report.rows.map((r) => ({
+    ...r,
+    tokens: tokensOf(r),
+    share: metric === 'usd' ? (report.total_usd ? r.usd / report.total_usd : 0) : totalTokens ? tokensOf(r) / totalTokens : 0,
+  }))
+  const ranked = [...rows].sort((a, b) => b.share - a.share)
+  const slices = arcs(ranked.map((r) => r.share))
+  const focus = ranked.find((r) => r.key === hover)
+
+  const cacheRead = sum(report.rows.map((r) => r.cache_read_tokens))
+  const cacheWrite = sum(report.rows.map((r) => r.cache_write_tokens))
+  const fresh = sum(report.rows.map((r) => r.input_tokens))
+  const input = fresh + cacheRead + cacheWrite
 
   return (
-    <>
-      <div className="stack" role="img" aria-label={`${fresh.toLocaleString()} fresh input tokens, ${cacheRead.toLocaleString()} read from cache, ${cacheWrite.toLocaleString()} written to cache`}>
-        <span className="stack-seg" style={{ width: pct(fresh), '--tone': 1 } as never} title={`fresh input · ${fresh.toLocaleString()}`} />
-        {cacheRead > 0 && (
-          <span className="stack-seg is-cached" style={{ width: pct(cacheRead) } as never} title={`cache read · ${cacheRead.toLocaleString()}`} />
-        )}
-        {cacheWrite > 0 && (
-          <span className="stack-seg" style={{ width: pct(cacheWrite), '--tone': 0.4 } as never} title={`cache write · ${cacheWrite.toLocaleString()}`} />
-        )}
+    <Card
+      title="Spend by model"
+      sub={sub}
+      className="ins-models"
+      aside={
+        <div className="ins-toggle" role="group" aria-label="Measure">
+          <button type="button" aria-pressed={metric === 'usd'} onClick={() => setMetric('usd')}>
+            Spend
+          </button>
+          <button type="button" aria-pressed={metric === 'tokens'} onClick={() => setMetric('tokens')}>
+            Tokens
+          </button>
+        </div>
+      }
+    >
+      <div className="ins-models-body">
+        <div className="ins-donut-wrap">
+          <svg
+            className="ins-donut"
+            viewBox="0 0 120 120"
+            role="img"
+            aria-label={ranked.map((r) => `${r.key}: ${Math.round(r.share * 100)}%`).join('; ')}
+          >
+            {ranked.map((r, i) =>
+              r.share > 0 ? (
+                <path
+                  key={r.key}
+                  d={arcPath(slices[i][0], slices[i][1], 60, 40, 56)}
+                  className={`ins-slice${hover && hover !== r.key ? ' is-dim' : ''}`}
+                  style={{ '--tone': tone(i, ranked.length) } as React.CSSProperties}
+                  onMouseEnter={() => setHover(r.key)}
+                  onMouseLeave={() => setHover(null)}
+                />
+              ) : null,
+            )}
+          </svg>
+          <div className="ins-donut-center" aria-hidden="true">
+            <strong>
+              {focus
+                ? `${Math.round(focus.share * 100)}%`
+                : metric === 'usd'
+                  ? money(report.total_usd)
+                  : compactNum(totalTokens)}
+            </strong>
+            <span className="truncate">{focus ? focus.key : metric === 'usd' ? 'total spend' : 'total tokens'}</span>
+          </div>
+        </div>
+
+        <SortTable<ModelRow>
+          rows={rows}
+          rowKey={(r) => r.key}
+          initial={{ key: 'usd', dir: 'desc' }}
+          onHover={setHover}
+          hovered={hover}
+          columns={[
+            {
+              key: 'key',
+              label: 'Model',
+              value: (r) => r.key,
+              render: (r) => (
+                <span className="ins-model">
+                  <i
+                    className="ins-key"
+                    style={{ '--tone': tone(ranked.indexOf(r), ranked.length) } as React.CSSProperties}
+                    aria-hidden="true"
+                  />
+                  {r.key}
+                </span>
+              ),
+            },
+            { key: 'usd', label: 'Spend', value: (r) => r.usd, render: (r) => money(r.usd), numeric: true },
+            {
+              key: 'share',
+              label: 'Share',
+              value: (r) => r.share,
+              render: (r) => `${Math.round(r.share * 100)}%`,
+              numeric: true,
+            },
+            { key: 'input', label: 'Input', value: (r) => r.input_tokens, render: (r) => compactNum(r.input_tokens), numeric: true },
+            { key: 'output', label: 'Output', value: (r) => r.output_tokens, render: (r) => compactNum(r.output_tokens), numeric: true },
+            {
+              key: 'cache',
+              label: 'From cache',
+              value: (r) => r.cache_read_tokens,
+              render: (r) => (r.cache_read_tokens ? compactNum(r.cache_read_tokens) : '—'),
+              numeric: true,
+            },
+          ]}
+        />
       </div>
-      <p className="section-intro">
-        {cacheRead > 0 ? (
-          <>
-            {cacheRead.toLocaleString()} of {total.toLocaleString()} input tokens came from cache
-            {cacheWrite > 0 && `, and ${cacheWrite.toLocaleString()} were written to it`}. Cache
-            reads bill well below fresh input on every provider that offers them, which is why the
-            total above and the invoice can disagree in your favour.
-          </>
-        ) : (
-          <>
-            No cache traffic yet — every one of these {total.toLocaleString()} input tokens was
-            billed fresh. Prompt caching is where a repeated system prompt stops being charged like
-            a new one.
-          </>
-        )}
-      </p>
-    </>
+
+      {input > 0 && (
+        <div className="ins-input-mix">
+          <div className="ins-mix-bar" role="img" aria-label={`${fresh.toLocaleString()} fresh input tokens, ${cacheRead.toLocaleString()} read from cache, ${cacheWrite.toLocaleString()} written to cache`}>
+            <span style={{ flexGrow: fresh }} />
+            {cacheRead > 0 && <span className="is-cached" style={{ flexGrow: cacheRead }} />}
+            {cacheWrite > 0 && <span className="is-write" style={{ flexGrow: cacheWrite }} />}
+          </div>
+          <p>
+            {cacheRead > 0 ? (
+              <>
+                <strong>{Math.round((cacheRead / input) * 100)}%</strong> of input came from cache,
+                which costs far less than fresh input. That is why this total can come in under your
+                provider's list price.
+              </>
+            ) : (
+              <>No input came from cache yet, so every input token was billed at full price.</>
+            )}
+          </p>
+        </div>
+      )}
+    </Card>
   )
 }
 
+/* ── Sortable table ────────────────────────────────────────────────────── */
+
+type Column<T> = {
+  key: string
+  label: string
+  value: (r: T) => string | number
+  render?: (r: T) => React.ReactNode
+  numeric?: boolean
+}
+
+function SortTable<T>({
+  rows,
+  columns,
+  rowKey,
+  initial,
+  onHover,
+  hovered,
+}: {
+  rows: T[]
+  columns: Column<T>[]
+  rowKey: (r: T) => string
+  initial: { key: string; dir: 'asc' | 'desc' }
+  onHover?: (key: string | null) => void
+  hovered?: string | null
+}) {
+  const [sort, setSort] = useState(initial)
+  const col = columns.find((c) => c.key === sort.key) ?? columns[0]
+  const sorted = [...rows].sort((a, b) => {
+    const x = col.value(a)
+    const y = col.value(b)
+    const cmp = typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
+
+  return (
+    <div className="ins-table-wrap">
+      <table className="ins-table">
+        <thead>
+          <tr>
+            {columns.map((c) => {
+              const on = c.key === sort.key
+              return (
+                <th
+                  key={c.key}
+                  scope="col"
+                  className={c.numeric ? 'is-num' : undefined}
+                  aria-sort={on ? (sort.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSort({
+                        key: c.key,
+                        dir: on ? (sort.dir === 'asc' ? 'desc' : 'asc') : c.numeric ? 'desc' : 'asc',
+                      })
+                    }
+                  >
+                    {c.label}
+                    <span className="ins-sort" aria-hidden="true">
+                      {on ? (sort.dir === 'asc' ? '↑' : '↓') : '↕'}
+                    </span>
+                  </button>
+                </th>
+              )
+            })}
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((r) => (
+            <tr
+              key={rowKey(r)}
+              className={hovered === rowKey(r) ? 'is-hover' : undefined}
+              onMouseEnter={() => onHover?.(rowKey(r))}
+              onMouseLeave={() => onHover?.(null)}
+            >
+              {columns.map((c) => (
+                <td key={c.key} className={c.numeric ? 'is-num' : undefined}>
+                  {c.render ? c.render(r) : c.value(r)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/* ── Other models ──────────────────────────────────────────────────────── */
+
 /**
- * The signature: every priced model on one log axis, with a datum line at
- * what this machine actually paid.
- *
- * A linear axis cannot carry this data — the live spread runs $0.21 to $42.06,
- * so the eight cheapest models collapse into a smear against the dearest. The
- * axis is logarithmic and *says so*, with a tick per decade, because a log
- * axis that does not announce itself is a chart that overstates the cheap end.
- *
- * The datum is the point. Cheaper models stop short of the line, dearer ones
- * cross it, and which side a model falls on is the only thing anyone reads
- * this chart to learn.
+ * Every priced model on one log axis, with a line at what was actually paid.
+ * Cheaper models stop short of the line, dearer ones cross it. The axis is
+ * logarithmic and says so: the cheap end of a 200× spread is otherwise a smear.
  */
-function Ladder({ report }: { report: CostReport }) {
-  // The comparison list includes the model you are already on, and its figure
-  // is your actual spend to the last decimal — the server derives both from
-  // the same token volume. Charting it beside the "you" bar is the same number
-  // twice, so it is dropped rather than labelled.
-  const used = new Set(report.rows.map((r) => r.key))
-  const alternatives = report.comparison.filter((c) => !used.has(c.model))
-  if (alternatives.length === 0) return null
+function Alternatives({ cost }: { cost: CostReport | null }) {
+  const sub = 'The same tokens, priced on every model Wingman knows.'
+  if (!cost) return <Card title="Same work, other models" sub={sub} id="alternatives"><Loading what="prices" /></Card>
+
+  // The comparison includes the model already in use, priced at exactly what
+  // was paid; charting it beside "you paid" is the same number twice.
+  const used = new Set(cost.rows.map((r) => r.key))
+  const alternatives = cost.comparison.filter((c) => !used.has(c.model))
+  if (alternatives.length === 0 || !(cost.total_usd > 0))
+    return (
+      <Card title="Same work, other models" sub={sub} id="alternatives">
+        <p className="ins-muted">There is nothing to compare yet.</p>
+      </Card>
+    )
 
   const bars = [
-    // Named after the model only when there was one. With two in the rows
-    // above, labelling the total with the first one reads as that model's
-    // spend and is off by the other model's.
-    {
-      model: report.rows.length === 1 ? report.rows[0].key : 'this machine',
-      usd: report.total_usd,
-      actual: true,
-    },
+    { model: cost.rows.length === 1 ? cost.rows[0].key : 'You paid', usd: cost.total_usd, actual: true },
     ...alternatives.map((c) => ({ model: c.model, usd: c.would_cost_usd, actual: false })),
   ].sort((a, b) => a.usd - b.usd)
 
-  const { lo, hi, ticks } = decadeBounds(
-    Math.min(...bars.map((b) => b.usd)),
-    Math.max(...bars.map((b) => b.usd)),
-  )
-  const datum = logFraction(report.total_usd, lo, hi)
-  const cheapest = Math.min(...alternatives.map((c) => c.would_cost_usd))
-  const saving = report.total_usd - cheapest
+  const { lo, hi, ticks } = decadeBounds(Math.min(...bars.map((b) => b.usd)), Math.max(...bars.map((b) => b.usd)))
+  const datum = logFraction(cost.total_usd, lo, hi)
 
   return (
-    <>
-      <h2 className="section-head">What the same work would have cost</h2>
-      <p className="section-intro">
-        Your real token volume, repriced against every model Wingman knows. Only a
-        provider-agnostic agent can show you this — and it is a price comparison, not a
-        recommendation: a cheaper model that needs three attempts is not cheaper.
-      </p>
-
+    <Card title="Same work, other models" sub={sub} id="alternatives">
       <div className="ladder">
-        {/* One hairline through every row, at what was actually paid. */}
         <span className="ladder-datum" style={{ '--at': datum } as never} aria-hidden="true">
-          <span className="ladder-datum-tag figure">{money(report.total_usd)}</span>
+          <span className="ladder-datum-tag figure">{money(cost.total_usd)}</span>
         </span>
-
-        {bars.map((b) => {
-          const width = logFraction(b.usd, lo, hi)
-          return (
-            <div key={b.model} className={`ladder-row${b.actual ? ' is-actual' : ''}`}>
-              <span className="figure ladder-label truncate" title={b.model}>
-                {b.model}
-              </span>
-              <span className="ladder-track">
-                <span className="ladder-fill" style={{ width: `${width * 100}%` }} />
-              </span>
-              <span className="figure ladder-value">{money(b.usd)}</span>
-            </div>
-          )
-        })}
-
+        {bars.map((b) => (
+          <div key={b.model} className={`ladder-row${b.actual ? ' is-actual' : ''}`}>
+            <span className="figure ladder-label truncate" title={b.model}>
+              {b.model}
+            </span>
+            <span className="ladder-track">
+              <span className="ladder-fill" style={{ width: `${logFraction(b.usd, lo, hi) * 100}%` }} />
+            </span>
+            <span className="figure ladder-value">{money(b.usd)}</span>
+          </div>
+        ))}
         <div className="ladder-axis" aria-hidden="true">
           {ticks.map((t) => (
             <span key={t} className="ladder-tick figure" style={{ '--at': logFraction(t, lo, hi) } as never}>
-              {/* Two decimals below a dollar, none above: the axis follows
-                  `money()`'s convention at the end where cents are the unit,
-                  and "$0.1" on a ledger is a typo nobody reads as ten cents. */}
               {t < 1 ? `$${t.toFixed(2)}` : `$${t.toLocaleString()}`}
             </span>
           ))}
         </div>
       </div>
-
-      <p className="section-intro">
-        Log scale — each tick is ten times the last, or the cheap end of a 200× spread would be
-        invisible. The line is what you paid.
-        {saving > 0 && (
-          <>
-            {' '}
-            The cheapest model priced here would have been{' '}
-            <strong className="figure">{money(saving)}</strong> less for the identical token volume.
-          </>
-        )}
+      <p className="ins-foot">
+        The line is what you paid. Each tick is ten times the last. A cheaper model that needs more
+        attempts is not really cheaper — check its pass rate below before switching.
       </p>
-    </>
+    </Card>
   )
 }
 
-/* ── Over time ─────────────────────────────────────────────────────────── */
+/* ── Per-message overhead ──────────────────────────────────────────────── */
 
-/** Windows offered. Thirty is the default because a month is how spend is asked about. */
-const WINDOWS = [7, 30, 90] as const
-
-/**
- * Spend per day, from this repo's transcripts.
- *
- * This is the one number on the page that is actually scoped to the project,
- * and it will not match the total above — that one is machine-wide. Both say
- * which they are, every time they appear, rather than leaving the reader to
- * discover the discrepancy by arithmetic.
- */
-function Timeline({ project }: { project: string }) {
-  const [data, setData] = useState<CostTimeline | null>(null)
-  const [days, setDays] = useState<number>(30)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let live = true
-    api
-      .costTimeline(project, days)
-      .then((d) => live && setData(d))
-      .catch((e: unknown) => live && setError(message(e)))
-    return () => {
-      live = false
-    }
-  }, [project, days])
-
-  if (error) return <p className="is-failed dot figure">{error}</p>
-  if (!data) return null
-
-  const values = data.days.map((d) => d.usd)
-  const peak = Math.max(...values, 0)
-  const busiest = data.days[values.indexOf(peak)]
-
-  return (
-    <section className="panel">
-      <div className="chart-bar">
-        <div>
-          <h2 className="section-head">Spend over time</h2>
-          <p className="section-intro">
-            This repo's sessions, priced by day — not the machine-wide figure above.
-          </p>
-        </div>
-        <div className="segmented" role="group" aria-label="Window">
-          {WINDOWS.map((w) => (
-            <button
-              key={w}
-              type="button"
-              className={`segmented-option${days === w ? ' is-on' : ''}`}
-              aria-pressed={days === w}
-              onClick={() => setDays(w)}
-            >
-              {w}d
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {data.window_usd > 0 ? (
-        <>
-          <p className="figure chart-figure">
-            {money(data.window_usd)}
-            <span className="muted">
-              {' '}
-              over {days} days · {data.total_turns} turns in {data.sessions}{' '}
-              {data.sessions === 1 ? 'session' : 'sessions'}
-            </span>
-          </p>
-          <Area values={values} label={`Daily spend over the last ${days} days`} />
-          <div className="axis-dates figure muted">
-            <span>{data.days[0]?.date}</span>
-            {peak > 0 && busiest && (
-              <span className="axis-peak">
-                peak {money(peak)} on {busiest.date}
-              </span>
-            )}
-            <span>{data.days[data.days.length - 1]?.date}</span>
-          </div>
-        </>
-      ) : (
-        <Empty title={data.last_day ? 'Nothing spent in this window' : 'No sessions in this repo yet'}>
-          {data.last_day ? (
-            <>
-              The last session that cost anything here was on{' '}
-              <span className="figure">{data.last_day}</span>. Widen the window to see it.
-            </>
-          ) : (
-            <>
-              This chart reads <code>.wingman/sessions</code>. Start a conversation in this repo and
-              each turn lands here the moment it is billed.
-            </>
-          )}
-        </Empty>
-      )}
-
-      {data.unpriced_turns > 0 && (
-        <p className="section-intro">
-          {data.unpriced_turns} {data.unpriced_turns === 1 ? 'turn is' : 'turns are'} missing from
-          this total: their model has no entry in the pricing table, and guessing a price would be
-          worse than saying so.
-        </p>
-      )}
-    </section>
-  )
-}
-
-/**
- * The daily series as a filled area.
- *
- * Geometry only — every label lives in HTML beside it. Text inside a `viewBox`
- * scales with the box, so a chart that is legible on a laptop sets 6px type on
- * a phone. Keeping the SVG to paths means it can stretch to any width.
- */
-function Area({ values, label }: { values: number[]; label: string }) {
-  const W = 720
-  const H = 120
-  // The fill and the line over it are the same series: one closed to the
-  // baseline, one left open. `linePath` takes 0–1, so the values are scaled
-  // against the same peak the area uses.
-  const peak = Math.max(...values, 0)
-  const scaled = values.map((v) => (peak > 0 ? v / peak : 0))
-  return (
-    <svg className="area" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={label}>
-      <path className="area-fill" d={areaPath(values, W, H)} />
-      <path className="area-line" d={linePath(scaled, W, H)} vectorEffect="non-scaling-stroke" />
-    </svg>
-  )
-}
-
-/* ── Working ───────────────────────────────────────────────────────────── */
-
-/** A nullable rate as a whole percentage; an absent rate is a dash, never 0%. */
-export function rate(x: number | null): string {
-  return x == null ? '—' : `${Math.round(x * 100)}%`
-}
-
-/**
- * Whether the agent is getting faster, cheaper, and more often right.
- *
- * Headline numbers are tiles, because each is one figure and a chart of one
- * figure is a decoration. The verification split is the second place on the
- * page the status hues are earned: a green receipt and a red one are verdicts.
- * Routing pass-rates are a measure, not a verdict, so they stay in ink.
- */
-function Working({ project }: { project: string }) {
-  const [m, setM] = useState<Metrics | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let live = true
-    api
-      .metrics(project)
-      .then((d) => live && setM(d))
-      .catch((e: unknown) => live && setError(message(e)))
-    return () => {
-      live = false
-    }
-  }, [project])
-
-  if (error) return <p className="is-failed dot figure">{error}</p>
-  if (!m) return null
-
-  const ttft = m.time_to_first_token_ms
-  const red = m.gated_turns - m.verified_turns
-
-  return (
-    <section className="panel">
-      <h2 className="section-head">Is it working</h2>
-      <p className="section-intro">
-        From this repo's session transcripts, so it covers every surface that ran a turn here —
-        the terminal, <code>--print</code>, pilot workers and this panel.
-      </p>
-
-      {m.turns === 0 ? (
-        <Empty title="No turns recorded yet">
-          These fill in as sessions in this repo finish turns. Nothing is estimated.
-        </Empty>
-      ) : (
-        <>
-          <div className="tiles">
-            <div className="tile">
-              <span className="eyebrow">Time to first token</span>
-              <span className="tile-value">{ttft.median == null ? '—' : `${ttft.median} ms`}</span>
-              <span className="tile-note figure">
-                median · p90 {ttft.p90 == null ? '—' : `${ttft.p90} ms`} · {ttft.samples}{' '}
-                {ttft.samples === 1 ? 'session' : 'sessions'}
-              </span>
-            </div>
-            <div className="tile">
-              <span className="eyebrow">Tokens per completed task</span>
-              <span className="tile-value">
-                {m.tokens_per_completed_task == null
-                  ? '—'
-                  : Math.round(m.tokens_per_completed_task).toLocaleString()}
-              </span>
-              <span className="tile-note figure">
-                {m.total_tokens.toLocaleString()} tokens · {m.completed_turns} of {m.turns} turns
-                completed
-              </span>
-            </div>
-            <div className="tile">
-              <span className="eyebrow">Verified-done rate</span>
-              <span className="tile-value">{rate(m.verified_done_rate)}</span>
-              <span className="tile-note figure">
-                {m.verified_turns} of {m.gated_turns} gated turns · {rate(m.session_verified_done_rate)}{' '}
-                of sessions
-              </span>
-            </div>
-          </div>
-
-          {m.gated_turns > 0 && (
-            <>
-              <h3 className="chart-head">How gated turns ended</h3>
-              <div className="stack" role="img" aria-label={`${m.verified_turns} green receipts, ${red} red`}>
-                {m.verified_turns > 0 && (
-                  <span className="stack-seg is-proven" style={{ width: `${(m.verified_turns / m.gated_turns) * 100}%` }} title={`${m.verified_turns} green`} />
-                )}
-                {red > 0 && (
-                  <span className="stack-seg is-failed" style={{ width: `${(red / m.gated_turns) * 100}%` }} title={`${red} red`} />
-                )}
-              </div>
-              <p className="section-intro">
-                <span className="is-proven dot">{m.verified_turns} ended green</span>,{' '}
-                <span className="is-failed dot">{red} ended red</span>. Turns that changed nothing
-                never run the gate and are not in this bar.
-              </p>
-            </>
-          )}
-        </>
-      )}
-
-      <h3 className="chart-head">Routing outcomes</h3>
-      {m.routing.length === 0 ? (
-        <p className="section-intro">
-          None recorded for this repo yet. A row lands per verified turn, by task class and model.
-        </p>
-      ) : (
-        <div className="bars">
-          {m.routing.map((r) => (
-            <div key={`${r.task_class}/${r.model}`} className="bar-row">
-              <span className="figure bar-label truncate" title={`${r.task_class} · ${r.model}`}>
-                <span className="muted">{r.task_class}</span> {r.model}
-              </span>
-              <span className="bar-track">
-                <span className="bar-fill" style={{ width: `${r.pass_rate * 100}%` }} />
-              </span>
-              <span className="figure bar-value">
-                {r.passed}/{r.total} · {rate(r.pass_rate)}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-/* ── Outcomes ──────────────────────────────────────────────────────────── */
-
-/** How many runs are priced individually. Named because the cap is stated. */
-const RECENT = 10
-
-/**
- * Pilot runs: how they ended, and what each one cost.
- *
- * The one section on this page where the status hues are earned — a run that
- * failed is a verdict, not a series. Spend still gets typography.
- *
- * **The cap is deliberate and stated on screen.** One request per run means
- * pricing a repo with two hundred runs would be two hundred requests to draw a
- * bar chart. Ten is enough to see a trend; silently truncating to ten and
- * calling it "spend by run" would be the dishonest version.
- */
-function Outcomes({ project }: { project: string }) {
-  const [rows, setRows] = useState<{ run: RunSummary; usd: number }[] | null>(null)
-  const [all, setAll] = useState<RunSummary[]>([])
-
-  useEffect(() => {
-    let live = true
-    void (async () => {
-      try {
-        const runs = await api.runs(project)
-        if (!live) return
-        setAll(runs)
-        const priced = await Promise.all(
-          runs.slice(0, RECENT).map(async (run) => {
-            try {
-              const state = await api.run(project, run.run_id)
-              return { run, usd: state.totals.usd }
-            } catch {
-              return { run, usd: 0 }
-            }
-          }),
-        )
-        if (live) setRows(priced)
-      } catch {
-        // The section is an extra. Spend above is the report.
-        if (live) setRows([])
-      }
-    })()
-    return () => {
-      live = false
-    }
-  }, [project])
-
-  if (!rows || rows.length === 0) return null
-
-  const ceiling = Math.max(...rows.map((r) => r.usd), 0.0001)
-  const done = all.filter((r) => r.status === 'done').length
-  const failed = all.filter((r) => r.status === 'failed' || r.status === 'aborted').length
-  const open = all.length - done - failed
-
-  return (
-    <section className="panel">
-      <h2 className="section-head">Runs, by outcome and spend</h2>
-
-      <div className="stack" role="img" aria-label={`${done} done, ${failed} failed, ${open} still running`}>
-        {done > 0 && <span className="stack-seg is-proven" style={{ width: `${(done / all.length) * 100}%` }} title={`${done} done`} />}
-        {open > 0 && <span className="stack-seg is-asserted" style={{ width: `${(open / all.length) * 100}%` }} title={`${open} running`} />}
-        {failed > 0 && <span className="stack-seg is-failed" style={{ width: `${(failed / all.length) * 100}%` }} title={`${failed} failed`} />}
-      </div>
-      <p className="section-intro">
-        {all.length} {all.length === 1 ? 'run' : 'runs'} — <span className="is-proven dot">{done} done</span>,{' '}
-        <span className="is-asserted dot">{open} still going</span>,{' '}
-        <span className="is-failed dot">{failed} failed or aborted</span>.
-        {all.length > RECENT && ` The newest ${RECENT} are priced below; each one is a separate read.`}
-      </p>
-
-      <div className="bars">
-        {rows.map(({ run, usd }) => (
-          <div key={run.run_id} className="bar-row">
-            <button
-              type="button"
-              className="figure bar-label bar-link truncate"
-              onClick={() => navigate(`/runs/${run.run_id}`)}
-              title={run.goal}
-            >
-              <span className={`glyph ${runClass(run.status)}`} aria-hidden="true">
-                {runGlyph(run.status)}
-              </span>
-              {run.goal}
-            </button>
-            <span className="bar-track">
-              <span className="bar-fill" style={{ width: `${(usd / ceiling) * 100}%` }} />
-            </span>
-            <span className="figure bar-value">{usd > 0 ? money(usd) : '—'}</span>
-          </div>
-        ))}
-      </div>
-    </section>
-  )
-}
-
-/* ── Context ───────────────────────────────────────────────────────────── */
-
-/** How much of the tax the dashed marker calls out. */
+/** The share of the overhead the Pareto's dashed line marks. */
 const PARETO = 0.8
 
-function Context({ project }: { project: string }) {
-  const [report, setReport] = useState<ContextReport | null>(null)
-  const [error, setError] = useState<string | null>(null)
+function Overhead({ load }: { load: Load<ContextReport> }) {
   const [all, setAll] = useState(false)
+  const sub = 'What every message costs before you type anything.'
+  const report = load.value
+  if (load.error)
+    return (
+      <Card title="Fixed cost per message" sub={sub} id="overhead">
+        <Failed title="Couldn't load the overhead" detail={load.error} action={{ label: 'Try again', onClick: load.reload }} />
+      </Card>
+    )
+  if (!report) return <Card title="Fixed cost per message" sub={sub} id="overhead"><Loading what="the overhead" /></Card>
 
-  useEffect(() => {
-    let live = true
-    api
-      .context(project)
-      .then((r) => live && setReport(r))
-      .catch((e: unknown) => live && setError(message(e)))
-    return () => {
-      live = false
-    }
-  }, [project])
-
-  if (error) return <p className="is-failed dot figure">{error}</p>
-  if (!report) return null
-
-  const shown = all ? report.tools : report.tools.slice(0, 8)
-  const widest = report.tools[0]?.tokens ?? 1
-  const tokens = report.tools.map((t) => t.tokens)
+  // Largest first: the Pareto and the "top N" both depend on it, so it is not
+  // left to whatever order the server happened to send.
+  const tools = [...report.tools].sort((a, b) => b.tokens - a.tokens)
+  const tokens = tools.map((t) => t.tokens)
   const needed = coverage(tokens, PARETO)
+  const shown = all ? tools : tools.slice(0, 5)
+  const widest = tools[0]?.tokens ?? 1
+  const promptShare = report.first_turn_tokens ? report.system_prompt_tokens / report.first_turn_tokens : 0
 
   return (
-    <section className="panel">
-      <h2 className="section-head">The per-turn tax</h2>
-      <p className="section-intro">
-        What every turn pays before you type anything. Most agents never tell you this number.
+    <Card title="Fixed cost per message" sub={sub} id="overhead">
+      <p className="ins-big">
+        {report.first_turn_tokens.toLocaleString()} <span>tokens</span>
       </p>
-
-      <p className="figure chart-figure">
-        {report.first_turn_tokens.toLocaleString()}
-        <span className="muted"> tokens on the first turn</span>
-      </p>
-      <div className="stack" role="img" aria-label={`${report.system_prompt_tokens} tokens of system prompt, ${report.tool_schema_tokens} of tool schemas`}>
-        <span
-          className="stack-seg"
-          style={{ width: `${(report.system_prompt_tokens / report.first_turn_tokens) * 100}%`, '--tone': 1 } as never}
-          title={`system prompt · ${report.system_prompt_tokens.toLocaleString()}`}
-        />
-        <span
-          className="stack-seg"
-          style={{ width: `${(report.tool_schema_tokens / report.first_turn_tokens) * 100}%`, '--tone': 0.55 } as never}
-          title={`tool schemas · ${report.tool_schema_tokens.toLocaleString()}`}
-        />
+      <div className="ins-mix-bar" role="img" aria-label={`${report.system_prompt_tokens} tokens of instructions, ${report.tool_schema_tokens} of tool descriptions`}>
+        <span style={{ flexGrow: report.system_prompt_tokens }} />
+        <span className="is-write" style={{ flexGrow: report.tool_schema_tokens }} />
       </div>
-      <div className="legend">
-        <span className="legend-item">
-          <span className="legend-key" style={{ '--tone': 1 } as never} />
-          <span className="figure">system prompt</span>
-          <span className="figure legend-value">{report.system_prompt_tokens.toLocaleString()}</span>
+      <div className="ins-split">
+        <span>
+          <i className="ins-key" style={{ '--tone': 1 } as React.CSSProperties} aria-hidden="true" />
+          Instructions <strong>{Math.round(promptShare * 100)}%</strong>
         </span>
-        <span className="legend-item">
-          <span className="legend-key" style={{ '--tone': 0.55 } as never} />
-          <span className="figure">
-            tool schemas <span className="muted">· {report.tool_count} tools</span>
-          </span>
-          <span className="figure legend-value">{report.tool_schema_tokens.toLocaleString()}</span>
+        <span>
+          <i className="ins-key" style={{ '--tone': 0.45 } as React.CSSProperties} aria-hidden="true" />
+          {report.tool_count} tool descriptions <strong>{Math.round((1 - promptShare) * 100)}%</strong>
         </span>
       </div>
 
-      <h3 className="chart-head">Which tools are the tax</h3>
-      <Pareto values={tokens} names={report.tools.map((t) => t.name)} />
-      <p className="section-intro">
-        Columns are tools, tallest first; the curve is the running share of the schema tax and the
-        dashed line is {Math.round(PARETO * 100)}% of it.{' '}
-        <strong className="figure">
+      <h3 className="ins-sub-head">Which tools cost the most</h3>
+      <Pareto values={tokens} names={tools.map((t) => t.name)} />
+      <p className="ins-foot">
+        <strong>
           {needed} of {report.tools.length} tools
         </strong>{' '}
-        account for that much — cutting anything below the crossing barely moves the number.
+        make up {Math.round(PARETO * 100)}% of the tool cost (the dashed line). Turning off tools
+        outside that group barely changes it.
       </p>
-
       <div className="bars">
         {shown.map((t) => (
           <div key={t.name} className="bar-row">
             <span className="figure bar-label truncate">{t.name}</span>
             <span className="bar-track">
-              <span
-                className="bar-fill"
-                style={{ width: `${widest > 0 ? (t.tokens / widest) * 100 : 0}%` }}
-              />
+              <span className="bar-fill" style={{ width: `${widest > 0 ? (t.tokens / widest) * 100 : 0}%` }} />
             </span>
-            <span className="figure bar-value">{t.tokens}</span>
+            <span className="figure bar-value">{Math.round(t.tokens).toLocaleString()}</span>
           </div>
         ))}
       </div>
-      {report.tools.length > shown.length && (
-        <button type="button" className="button button-quiet" onClick={() => setAll(true)}>
-          Show all {report.tools.length}
+      {report.tools.length > 5 && (
+        <button type="button" className="button button-quiet button-sm" onClick={() => setAll((a) => !a)}>
+          {all ? 'Show fewer' : `Show all ${report.tools.length} tools`}
         </button>
       )}
-    </section>
+    </Card>
   )
 }
 
 /**
- * Ranked columns with the cumulative share drawn over them.
- *
- * The columns answer "which", the curve answers "how many before it stops
- * mattering" — the second question is why this is a Pareto and not another
- * ranked bar list. Both share one x-scale, so the crossing sits over the
- * column that causes it.
+ * Ranked columns with the running share drawn over them. The columns answer
+ * "which", the curve "how many before it stops mattering".
  */
 function Pareto({ values, names }: { values: number[]; names: string[] }) {
   const W = 720
-  const H = 150
+  const H = 120
   const peak = Math.max(...values, 1)
   const running = cumulative(values)
   const slot = W / Math.max(values.length, 1)
-  const barW = Math.max(slot - 3, 1)
+  const barW = Math.max(slot - 4, 1)
 
   return (
-    <svg className="pareto" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${values.length} tool schemas by token cost, largest first, with their cumulative share`}>
+    <svg className="pareto" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={`${values.length} tools by token cost, largest first, with their running share`}>
       <line className="pareto-marker" x1="0" y1={H - PARETO * H} x2={W} y2={H - PARETO * H} vectorEffect="non-scaling-stroke" />
       {values.map((v, i) => (
-        <rect
-          key={names[i]}
-          className="pareto-bar"
-          x={i * slot}
-          y={H - (v / peak) * H}
-          width={barW}
-          height={(v / peak) * H}
-        >
-          <title>{`${names[i]} · ${v} tokens · ${Math.round(running[i] * 100)}% cumulative`}</title>
+        <rect key={names[i]} className="pareto-bar" x={i * slot} y={H - (v / peak) * H} width={barW} height={(v / peak) * H} rx="2">
+          <title>{`${names[i]} · ${Math.round(v)} tokens · ${Math.round(running[i] * 100)}% so far`}</title>
         </rect>
       ))}
       <path className="pareto-curve" d={linePath(running, W, H)} vectorEffect="non-scaling-stroke" />
@@ -863,15 +1205,177 @@ function Pareto({ values, names }: { values: number[]; names: string[] }) {
   )
 }
 
-/* ── The long tail ─────────────────────────────────────────────────────── */
+/* ── Quality ───────────────────────────────────────────────────────────── */
+
+/** A nullable rate as a whole percentage; an absent rate is a dash, never 0%. */
+export function rate(x: number | null): string {
+  return x == null ? '—' : `${Math.round(x * 100)}%`
+}
+
+type RouteRow = Metrics['routing'][number]
+
+function Quality({ load }: { load: Load<Metrics> }) {
+  const sub = "From this repository's chats, runs and terminal sessions."
+  const m = load.value
+  if (load.error)
+    return (
+      <Card title="How well it works" sub={sub}>
+        <Failed title="Couldn't load quality figures" detail={load.error} action={{ label: 'Try again', onClick: load.reload }} />
+      </Card>
+    )
+  if (!m) return <Card title="How well it works" sub={sub}><Loading what="quality figures" /></Card>
+  if (m.turns === 0)
+    return (
+      <Card title="How well it works" sub={sub}>
+        <Empty title="No messages yet">
+          These fill in as Wingman answers messages in this repository. Nothing is estimated.
+        </Empty>
+      </Card>
+    )
+
+  const ttft = m.time_to_first_token_ms
+  const red = m.gated_turns - m.verified_turns
+  const secs = (ms: number | null) => (ms == null ? '—' : ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`)
+
+  return (
+    <Card title="How well it works" sub={sub} className="ins-quality">
+      <dl className="ins-stats">
+        <div>
+          <dt>First reply in</dt>
+          <dd>{secs(ttft.median)}</dd>
+          <span>Typical · slowest 10% {secs(ttft.p90)}</span>
+        </div>
+        <div>
+          <dt>Tokens per finished task</dt>
+          <dd>{m.tokens_per_completed_task == null ? '—' : compactNum(m.tokens_per_completed_task)}</dd>
+          <span>
+            {m.completed_turns.toLocaleString()} of {m.turns.toLocaleString()} messages finished
+          </span>
+        </div>
+      </dl>
+
+      {m.gated_turns > 0 && (
+        <>
+          <h3 className="ins-sub-head">Changes that were checked</h3>
+          <div className="ins-verdict" role="img" aria-label={`${m.verified_turns} passed, ${red} failed`}>
+            {m.verified_turns > 0 && <span className="is-proven" style={{ flexGrow: m.verified_turns }} />}
+            {red > 0 && <span className="is-failed" style={{ flexGrow: red }} />}
+          </div>
+          <div className="ins-split">
+            <span className="is-proven dot">{m.verified_turns} passed</span>
+            <span className="is-failed dot">{red} failed</span>
+            <span className="ins-muted">Messages that changed nothing are not checked.</span>
+          </div>
+        </>
+      )}
+
+      <h3 className="ins-sub-head" id="routing">
+        Pass rate by model and task type
+      </h3>
+      {m.routing.length === 0 ? (
+        <p className="ins-muted">Nothing recorded yet. A row appears once a checked change finishes.</p>
+      ) : (
+        <SortTable<RouteRow>
+          rows={m.routing}
+          rowKey={(r) => `${r.task_class}/${r.model}`}
+          initial={{ key: 'rate', dir: 'desc' }}
+          columns={[
+            { key: 'task', label: 'Task type', value: (r) => r.task_class, render: (r) => humanTask(r.task_class) },
+            { key: 'model', label: 'Model', value: (r) => r.model },
+            { key: 'total', label: 'Tries', value: (r) => r.total, numeric: true },
+            {
+              key: 'rate',
+              label: 'Passed',
+              value: (r) => r.pass_rate,
+              numeric: true,
+              render: (r) => (
+                <span className="ins-rate">
+                  <span className="ins-rate-track" aria-hidden="true">
+                    <span style={{ width: `${r.pass_rate * 100}%` }} />
+                  </span>
+                  {rate(r.pass_rate)}
+                  <span className="ins-muted">
+                    {' '}
+                    {r.passed}/{r.total}
+                  </span>
+                </span>
+              ),
+            },
+          ]}
+        />
+      )}
+    </Card>
+  )
+}
+
+/** `test-fix` → "Test fix". */
+function humanTask(t: string): string {
+  const w = t.replace(/[-_]+/g, ' ')
+  return w ? w[0].toUpperCase() + w.slice(1) : t
+}
+
+/* ── Runs ──────────────────────────────────────────────────────────────── */
+
+function Outcomes({ runs }: { runs: PricedRuns | null }) {
+  const sub = 'How runs in this repository ended, and what the newest ones cost.'
+  if (!runs) return <Card title="Runs" sub={sub}><Loading what="runs" /></Card>
+  const { all, priced } = runs
+  if (all.length === 0)
+    return (
+      <Card title="Runs" sub={sub}>
+        <Empty title="No runs yet" action={{ label: 'Go to the board', onClick: () => navigate('/board') }}>
+          Press Start on a board card and Wingman plans and carries out the work as a run.
+        </Empty>
+      </Card>
+    )
+
+  const done = all.filter((r) => r.status === 'done').length
+  const failed = all.filter((r) => r.status === 'failed' || r.status === 'aborted').length
+  const open = all.length - done - failed
+  const ceiling = Math.max(...priced.map((r) => r.usd), 0.0001)
+
+  return (
+    <Card title="Runs" sub={sub} className="ins-runs">
+      <div className="ins-verdict" role="img" aria-label={`${done} done, ${open} in progress, ${failed} failed or stopped`}>
+        {done > 0 && <span className="is-proven" style={{ flexGrow: done }} />}
+        {open > 0 && <span className="is-asserted" style={{ flexGrow: open }} />}
+        {failed > 0 && <span className="is-failed" style={{ flexGrow: failed }} />}
+      </div>
+      <div className="ins-split">
+        <span className="is-proven dot">{done} done</span>
+        <span className="is-asserted dot">{open} in progress</span>
+        <span className="is-failed dot">{failed} failed or stopped</span>
+      </div>
+
+      <ul className="ins-run-list">
+        {priced.map(({ run, usd }) => (
+          <li key={run.run_id}>
+            <button type="button" onClick={() => navigate(`/runs/${run.run_id}`)} title={run.goal}>
+              <span className="ins-run-goal truncate">{run.goal}</span>
+              <Pill status={runClass(run.status)} glyph={runGlyph(run.status)}>
+                {runLabel(run.status)}
+              </Pill>
+              <span className="ins-run-bar" aria-hidden="true">
+                <span style={{ width: `${(usd / ceiling) * 100}%` }} />
+              </span>
+              <span className="ins-run-usd">{usd > 0 ? money(usd) : '—'}</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+      {all.length > RECENT && (
+        <p className="ins-foot">The newest {RECENT} of {all.length} runs are priced here.</p>
+      )}
+    </Card>
+  )
+}
+
+/* ── More reports ──────────────────────────────────────────────────────── */
 
 /**
- * Every other read route, listed from `GET /v1/schema`.
- *
- * The route table is generated from the table the server dispatches on and
- * "cannot drift from the implementation — they are the same array", so this
- * list gains a report the day one is added, with the description the table
- * already carries.
+ * Every other read route, listed from `GET /v1/schema` — generated from the
+ * server's own route table, so a report added to the CLI appears here without
+ * this page changing. Folded away: it is a toolbox, not a dashboard.
  */
 function Reports({ project }: { project: string }) {
   const [schema, setSchema] = useState<ApiSchema | null>(null)
@@ -886,7 +1390,7 @@ function Reports({ project }: { project: string }) {
       .apiSchema()
       .then((s) => live && setSchema(s))
       .catch(() => {
-        /* The reports list is optional furniture; spend above is the report. */
+        /* Optional furniture: the dashboard above is the report. */
       })
     return () => {
       live = false
@@ -895,21 +1399,9 @@ function Reports({ project }: { project: string }) {
 
   if (!schema) return null
 
-  // Read-only, project-scoped, no path parameter left to fill, and not one of
-  // the surfaces that already has a screen of its own — which now includes
-  // diff, explain, review and attest, since Changes gives all four a home with
-  // their arguments attached.
-  const own = [
-    '/cost',
-    '/context',
-    '/metrics',
-    '/pilot',
-    '/sessions',
-    '/diff',
-    '/explain',
-    '/review',
-    '/attest',
-  ]
+  // Read-only, project-scoped, nothing left to fill in, and without a screen
+  // of its own elsewhere in the panel.
+  const own = ['/cost', '/context', '/metrics', '/pilot', '/sessions', '/diff', '/explain', '/review', '/attest']
   const routes = schema.routes.filter(
     (r) =>
       r.method === 'GET' &&
@@ -918,6 +1410,7 @@ function Reports({ project }: { project: string }) {
       !r.path.includes('{id}') &&
       !own.some((o) => r.path.includes(o)),
   )
+  if (routes.length === 0) return null
 
   async function run(r: RouteInfo) {
     const tail = r.path.split('{project}/')[1]
@@ -935,14 +1428,16 @@ function Reports({ project }: { project: string }) {
   }
 
   return (
-    <section className="panel">
-      <h2 className="section-head">Reports</h2>
-      <p className="section-intro">
-        Listed from <code>GET /v1/schema</code>, which is generated from the server's own route
-        table — so a report added to the CLI appears here without this page changing. Each one runs
-        the same subcommand a terminal would.
-      </p>
-
+    <details className="ins-card ins-reports">
+      <summary>
+        <span>
+          <h2>More reports</h2>
+          <span className="ins-card-sub">
+            {routes.length} more reports Wingman can run for this repository
+          </span>
+        </span>
+        <Icon name="expand" size={14} />
+      </summary>
       <div className="report-grid">
         {routes.map((r) => {
           const tail = r.path.split('{project}/')[1]
@@ -955,28 +1450,24 @@ function Reports({ project }: { project: string }) {
               aria-pressed={open === tail}
               onClick={() => void run(r)}
             >
-              <span className="figure report-name">{tail}</span>
+              <span className="report-name">{humanTask(tail.replace('/', ' '))}</span>
               <span className="muted report-about">{r.about ?? r.returns ?? ''}</span>
-              <span className="figure report-action">
-                {running ? 'running…' : open === tail ? 'shown below' : 'Run'}
-              </span>
+              <span className="report-action">{running ? 'Running…' : open === tail ? 'Shown below' : 'Run'}</span>
             </button>
           )
         })}
       </div>
-
       {error && (
         <p className="is-failed dot figure" role="alert">
           {error}
         </p>
       )}
-
       {open && result != null && (
-        <>
-          <h3 className="chart-head figure">{open}</h3>
+        <div className="ins-report-out">
+          <h3 className="ins-sub-head">{humanTask(open.replace('/', ' '))}</h3>
           <Output value={result} />
-        </>
+        </div>
       )}
-    </section>
+    </details>
   )
 }
