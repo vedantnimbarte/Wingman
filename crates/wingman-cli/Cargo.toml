@@ -51,7 +51,7 @@ toml = { workspace = true }
 # being compiled anyway, not a new one. Parsing to `toml::Table` and
 # re-serialising would silently drop the user's comments and reorder every
 # section on save.
-toml_edit = "0.22"
+toml_edit = "0.25"
 rand = { workspace = true }
 sha2 = { workspace = true }
 base64 = { workspace = true }
