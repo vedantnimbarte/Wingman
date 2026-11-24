@@ -534,20 +534,17 @@ fn nbconvert_command(file_name: &str, timeout_secs: u64) -> Result<String, Strin
     // `./` so a name starting with `-` is not read as an option.
     let arg = format!("./{file_name}");
     let arg = if cfg!(windows) {
-        // ponytail: cmd.exe cannot be handed a quoted argument through
-        // tokio's `.arg()` (it escapes `"` as `\"`, which cmd does not
-        // understand), so names that would need quoting are refused. Lift
-        // this with `raw_arg` in `run_shell::prepare` when that path is fixed.
-        if file_name
-            .chars()
-            .any(|c| c.is_whitespace() || "\"%^&|<>()!".contains(c))
-        {
+        // `run_shell` hands this to cmd via `raw_arg("/S /C \"…\"")`, so a
+        // double-quoted argument survives intact and `&|<>()^` are inert
+        // inside it. Two characters are not: `"` has no escape inside a
+        // quoted cmd argument, and `%` still expands `%VAR%` there.
+        if let Some(c) = file_name.chars().find(|c| matches!(c, '"' | '%')) {
             return Err(format!(
-                "notebook_run cannot pass `{file_name}` to cmd.exe safely (it contains a space \
-                 or shell metacharacter) — rename the notebook, or run jupyter via run_shell"
+                "notebook_run cannot pass `{file_name}` to cmd.exe safely: it contains `{c}`, \
+                 which cmd cannot quote — rename the notebook, or run jupyter via run_shell"
             ));
         }
-        arg
+        format!("\"{arg}\"")
     } else {
         format!("'{}'", arg.replace('\'', r"'\''"))
     };
@@ -1131,9 +1128,17 @@ mod tests {
         assert!(cmd.contains("--ExecutePreprocessor.allow_errors=True"));
         assert!(cmd.contains("--ExecutePreprocessor.timeout=120"));
         if cfg!(windows) {
-            assert!(cmd.ends_with(" ./analysis.ipynb"), "{cmd}");
-            assert!(nbconvert_command("my notebook.ipynb", 1).is_err());
-            assert!(nbconvert_command("a&calc.ipynb", 1).is_err());
+            assert!(cmd.ends_with(r#" "./analysis.ipynb""#), "{cmd}");
+            assert!(nbconvert_command("My Notebook.ipynb", 1)
+                .unwrap()
+                .ends_with(r#" "./My Notebook.ipynb""#));
+            assert!(nbconvert_command("a&calc (1).ipynb", 1).is_ok());
+            assert!(nbconvert_command("a\"b.ipynb", 1)
+                .unwrap_err()
+                .contains("`\"`"));
+            assert!(nbconvert_command("%PATH%.ipynb", 1)
+                .unwrap_err()
+                .contains("`%`"));
         } else {
             assert!(cmd.ends_with(" './analysis.ipynb'"), "{cmd}");
             assert!(nbconvert_command("it's; rm -rf ~.ipynb", 1)

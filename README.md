@@ -71,8 +71,10 @@ have to trust. See [docs/LEARNING-LOOP.md](docs/LEARNING-LOOP.md).
 
 **5. Windows is a first-class target.**
 Developed and tested on Windows from day one, not ported to it. The one place
-this is currently *not* true is shell containment — see
-[Known limits](#known-limits), which says so rather than hiding it.
+this is currently *not* true is shell containment: on Windows, shell commands
+the agent runs are **not** confined to your project and can read any file your
+user can (Linux and macOS scope them). See [Known limits](#known-limits) and
+[#124](https://github.com/vedantnimbarte/Wingman/issues/124).
 
 ### What it deliberately doesn't do
 
@@ -113,7 +115,7 @@ it:
 cargo install --git https://github.com/vedantnimbarte/Wingman wingman-cli
 ```
 
-Building needs Rust 1.80+ and a C toolchain for some transitive crates.
+Building needs Rust 1.89+ and a C toolchain for some transitive crates.
 
 ---
 

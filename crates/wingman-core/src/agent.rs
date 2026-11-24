@@ -480,6 +480,17 @@ impl AgentLoop {
         self.provider.capabilities().reasoning
     }
 
+    /// Whether the active provider accepts `ContentBlock::Image`. Callers
+    /// with an image to send check this and say so rather than letting an
+    /// adapter drop it.
+    pub fn provider_supports_vision(&self) -> bool {
+        self.provider.capabilities().vision
+    }
+
+    pub fn provider_id(&self) -> &str {
+        self.provider.id()
+    }
+
     /// The base system prompt this loop sends, before any per-turn injection.
     /// Handle on this loop's steer inbox, for a UI that wants to redirect a
     /// turn while it runs. `None` when steering was not configured.
@@ -498,7 +509,27 @@ impl AgentLoop {
     /// Drive a single user turn to completion. The returned stream yields
     /// events live and terminates after a `Stop` event.
     pub fn run(&mut self, user_prompt: String) -> BoxStream<'_, AgentEvent> {
-        self.history.push(Message::user_text(user_prompt.clone()));
+        self.run_blocks(vec![ContentBlock::text(user_prompt)])
+    }
+
+    /// [`run`](Self::run) with a user message that is more than text — an
+    /// attached image, say. The recorded prompt is the message's text blocks.
+    pub fn run_blocks(&mut self, content: Vec<ContentBlock>) -> BoxStream<'_, AgentEvent> {
+        let user_prompt = content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        self.history.push(Message {
+            role: Role::User,
+            content,
+        });
 
         let provider = self.provider.clone();
         let tools = self.tools.clone();
@@ -2369,6 +2400,45 @@ mod steer_tests {
         drop(stream);
         let reqs = seen.lock().unwrap().clone();
         (reqs, events)
+    }
+
+    #[tokio::test]
+    async fn run_blocks_sends_an_image_in_the_user_message() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = AgentLoop::new(
+            Arc::new(TwoStepProvider {
+                seen: seen.clone(),
+                inbox: Arc::new(crate::steer::SteerInbox::new()),
+            }),
+            Arc::new(OkTool),
+            AgentConfig {
+                model: "m".into(),
+                ..Default::default()
+            },
+        );
+        let mut stream = agent.run_blocks(vec![
+            ContentBlock::text("why is this misaligned? [IMAGE: shot.png]"),
+            ContentBlock::Image {
+                data: "aGk=".into(),
+                media_type: "image/png".into(),
+            },
+        ]);
+        while stream.next().await.is_some() {}
+        drop(stream);
+        let first = seen.lock().unwrap()[0].clone();
+        let user = first
+            .messages
+            .iter()
+            .find(|m| m.role == Role::User)
+            .unwrap();
+        assert!(user.content.iter().any(|b| matches!(
+            b,
+            ContentBlock::Image { data, media_type } if data == "aGk=" && media_type == "image/png"
+        )));
+        assert!(user.content.iter().any(|b| matches!(
+            b,
+            ContentBlock::Text { text } if text.contains("[IMAGE: shot.png]")
+        )));
     }
 
     #[tokio::test]
