@@ -127,13 +127,16 @@ pub type TaskSplitter = Arc<
 >;
 
 /// E7 — per-task inline reviewer (E7). Given a task that just reached
-/// `Review`, returns `None` to approve it (finalize proceeds to `Done`) or
-/// `Some(notes)` to send it back for rework. The block-gate severity logic
+/// `Review` (carrying its earlier review rounds in `task.reviews`), returns
+/// `rework: None` to approve it (finalize proceeds to `Done`) or
+/// `Some(notes)` to send it back, plus the round's report to record. The block-gate severity logic
 /// lives inside the closure (built in the pipeline from `pr` config), so the
 /// orchestrator stays config-agnostic. Runs at the finalize choke point so it
 /// can't race the manager. `None` reviewer disables inline review.
 pub type Reviewer =
-    Arc<dyn Fn(Task) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
+    Arc<dyn Fn(Task) -> Pin<Box<dyn Future<Output = ReviewerOutput> + Send>> + Send + Sync>;
+
+pub use crate::review::ReviewerOutput;
 
 /// Per-spawn context handed to a [`WorkerSpawner`].
 #[derive(Clone)]
@@ -2363,7 +2366,32 @@ async fn handle_finalize(
     // threads into the next attempt's failure history (bounded by
     // max_retries). No new rework channel — it reuses the E5 ladder.
     if let Some(reviewer) = reviewer {
-        if let Some(notes) = reviewer(task.clone()).await {
+        let out = reviewer(task.clone()).await;
+        if let Some(report) = out.qa {
+            store
+                .lock()
+                .await
+                .append(Event::TaskQa {
+                    t: RunStore::now(),
+                    id: task_id.to_string(),
+                    report,
+                })
+                .await?;
+        }
+        if let Some(report) = out.report {
+            // Recorded before the status change so the next round, which
+            // reads `task.reviews`, sees this one.
+            store
+                .lock()
+                .await
+                .append(Event::TaskReview {
+                    t: RunStore::now(),
+                    id: task_id.to_string(),
+                    report,
+                })
+                .await?;
+        }
+        if let Some(notes) = out.rework {
             let mut store = store.lock().await;
             store
                 .append(Event::TaskStatus {
@@ -4382,9 +4410,27 @@ mod tests {
             store
         }
 
-        // Reviewer that always requests rework.
-        let rework: Reviewer =
-            std::sync::Arc::new(|_task| Box::pin(async { Some("add tests".to_string()) }));
+        // Reviewer that always requests rework, with a report to record.
+        let rework: Reviewer = std::sync::Arc::new(|_task| {
+            Box::pin(async {
+                ReviewerOutput {
+                    qa: Some(crate::qa::QaReport {
+                        summary: "covered".into(),
+                        ..Default::default()
+                    }),
+                    rework: Some("add tests".to_string()),
+                    report: Some(crate::review::ReviewReport {
+                        findings: vec![crate::review::ReviewFinding {
+                            severity: "high".into(),
+                            message: "no tests".into(),
+                            id: Some("R1".into()),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                }
+            })
+        });
         let dir = tempdir().unwrap();
         let store = seed_review(dir.path()).await;
         let (handle, join) = spawn_full(
@@ -4403,11 +4449,17 @@ mod tests {
         let t = handle.snapshot().await.unwrap().task("t1").unwrap().clone();
         assert_eq!(t.status, TaskStatus::Failed);
         assert!(t.outcome.unwrap().summary.contains("add tests"));
+        // The round is on the task for the next reviewer to re-check.
+        assert_eq!(t.reviews.len(), 1);
+        assert_eq!(t.qa.len(), 1);
+        assert_eq!(t.qa[0].summary, "covered");
+        assert_eq!(t.reviews[0].findings[0].id.as_deref(), Some("R1"));
         handle.shutdown().await;
         let _ = join.await;
 
         // Approving reviewer lets the same task finalize to Done.
-        let approve: Reviewer = std::sync::Arc::new(|_task| Box::pin(async { None }));
+        let approve: Reviewer =
+            std::sync::Arc::new(|_task| Box::pin(async { ReviewerOutput::default() }));
         let dir = tempdir().unwrap();
         let store = seed_review(dir.path()).await;
         let (handle, join) = spawn_full(

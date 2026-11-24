@@ -70,11 +70,68 @@ pub struct Capture {
     pub console_errors: Vec<String>,
 }
 
+/// How [`capture_with`] renders the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureOpts {
+    /// CSS pixels. Below 600 the page is emulated as a mobile device.
+    pub width: u32,
+    pub height: u32,
+    /// Emulate `prefers-color-scheme: dark` (else `light`).
+    pub dark: bool,
+    /// Grow the viewport to the page's scroll height, capped at
+    /// [`MAX_FULL_PAGE_HEIGHT`], so the shot covers more than the first screen.
+    pub full_page: bool,
+}
+
+/// Tallest full-page shot. Vision models downscale or refuse very tall
+/// images, and the top of a long page is where most problems show anyway.
+pub const MAX_FULL_PAGE_HEIGHT: u32 = 3000;
+
 /// Load `url` in a headless Chrome/Chromium and screenshot it. Requires a
 /// Chrome binary on the system (headless_chrome locates or fetches one).
 #[cfg(feature = "chrome")]
 pub fn capture(url: &str, timeout: std::time::Duration) -> Result<Capture> {
+    capture_impl(url, timeout, None)
+}
+
+/// [`capture`] at a set viewport and color scheme. `capture` itself is left
+/// as it was, so screenshot baselines taken with it stay comparable.
+#[cfg(feature = "chrome")]
+pub fn capture_with(url: &str, timeout: std::time::Duration, opts: CaptureOpts) -> Result<Capture> {
+    capture_impl(url, timeout, Some(opts))
+}
+
+#[cfg(feature = "chrome")]
+fn device_metrics(
+    width: u32,
+    height: u32,
+) -> headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
+    headless_chrome::protocol::cdp::Emulation::SetDeviceMetricsOverride {
+        width,
+        height,
+        device_scale_factor: 1.0,
+        mobile: width < 600,
+        scale: None,
+        screen_width: None,
+        screen_height: None,
+        position_x: None,
+        position_y: None,
+        dont_set_visible_size: None,
+        screen_orientation: None,
+        viewport: None,
+        display_feature: None,
+        device_posture: None,
+    }
+}
+
+#[cfg(feature = "chrome")]
+fn capture_impl(
+    url: &str,
+    timeout: std::time::Duration,
+    render: Option<CaptureOpts>,
+) -> Result<Capture> {
     use headless_chrome::protocol::cdp::types::Event;
+    use headless_chrome::protocol::cdp::Emulation::{MediaFeature, SetEmulatedMedia};
     use headless_chrome::protocol::cdp::Page::CaptureScreenshotFormatOption;
     use headless_chrome::{Browser, LaunchOptions};
     use std::sync::{Arc, Mutex};
@@ -115,12 +172,48 @@ pub fn capture(url: &str, timeout: std::time::Duration) -> Result<Capture> {
         }));
     }
 
+    if let Some(o) = render {
+        tab.call_method(device_metrics(o.width, o.height))
+            .map_err(|e| BrowserError::Browser(e.to_string()))?;
+        tab.call_method(SetEmulatedMedia {
+            media: None,
+            features: Some(vec![MediaFeature {
+                name: "prefers-color-scheme".into(),
+                value: if o.dark { "dark" } else { "light" }.into(),
+            }]),
+        })
+        .map_err(|e| BrowserError::Browser(e.to_string()))?;
+    }
+
     tab.navigate_to(url)
         .map_err(|e| BrowserError::Browser(e.to_string()))?;
     tab.wait_until_navigated()
         .map_err(|e| BrowserError::Browser(e.to_string()))?;
     // Give async console/exception events a moment to arrive.
     std::thread::sleep(std::time::Duration::from_millis(300));
+    if let Some(o) = render.filter(|o| o.full_page) {
+        // In device pixels: a page wider than a phone is zoomed out
+        // (`visualViewport.scale` < 1), and its CSS height would leave the
+        // bottom of the shot empty.
+        let tall = tab
+            .evaluate(
+                "Math.ceil(document.documentElement.scrollHeight * \
+                 (window.visualViewport ? window.visualViewport.scale : 1))",
+                false,
+            )
+            .ok()
+            .and_then(|r| r.value)
+            .and_then(|v| v.as_f64())
+            .map_or(o.height, |h| {
+                (h as u32).clamp(o.height, MAX_FULL_PAGE_HEIGHT)
+            });
+        if tall > o.height {
+            tab.call_method(device_metrics(o.width, tall))
+                .map_err(|e| BrowserError::Browser(e.to_string()))?;
+            // Let layout settle at the new size.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
     let png = tab
         .capture_screenshot(CaptureScreenshotFormatOption::Png, None, None, true)
         .map_err(|e| BrowserError::Browser(e.to_string()))?;
@@ -136,6 +229,15 @@ pub fn capture(_url: &str, _timeout: std::time::Duration) -> Result<Capture> {
     Err(BrowserError::Browser(
         "browser capture requires the `chrome` feature (and a Chrome/Chromium binary)".into(),
     ))
+}
+
+#[cfg(not(feature = "chrome"))]
+pub fn capture_with(
+    url: &str,
+    timeout: std::time::Duration,
+    _opts: CaptureOpts,
+) -> Result<Capture> {
+    capture(url, timeout)
 }
 
 #[cfg(test)]

@@ -2807,6 +2807,10 @@ pub struct PilotConfig {
     /// stronger model for tougher review.
     #[serde(default)]
     pub reviewer_model: Option<String>,
+    /// Model for the per-task QA gate (`per_task_qa`). Defaults to
+    /// `reviewer_model`, then `default_model`.
+    #[serde(default)]
+    pub qa_model: Option<String>,
     /// J10 — model for the critic agent (`provider/model_id`). Defaults to
     /// `reviewer_model`, then `default_model`. Choose one from another family
     /// than `worker_model`: a critic with the workers' blind spots agrees
@@ -2886,6 +2890,7 @@ impl Default for PilotConfig {
             worker_model: None,
             max_retries_per_task: default_max_retries_per_task(),
             reviewer_model: None,
+            qa_model: None,
             critic_model: None,
             critic_other_family: false,
             max_concurrent_agents: 4,
@@ -2969,6 +2974,11 @@ pub struct PilotPrConfig {
     /// stricter review with a well-calibrated reviewer model.
     #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
     pub reviewer_rework_severity: String,
+    /// Severity at/above which a QA gap (a required behaviour with no test)
+    /// sends the task back. Same scale and default as
+    /// `reviewer_rework_severity`. Only used with the `per_task_qa` capability.
+    #[cfg_attr(feature = "schema", schemars(with = "SeverityLevel"))]
+    pub qa_rework_severity: String,
 }
 
 impl Default for PilotPrConfig {
@@ -2984,6 +2994,7 @@ impl Default for PilotPrConfig {
             require_ci_green: true,
             base_branch: "main".into(),
             reviewer_rework_severity: "high".into(),
+            qa_rework_severity: "high".into(),
         }
     }
 }
@@ -3670,6 +3681,11 @@ mod tests {
             ),
             (
                 &defs["PilotPrConfig"]["properties"]["reviewer_rework_severity"],
+                "SeverityLevel",
+                sev.clone(),
+            ),
+            (
+                &defs["PilotPrConfig"]["properties"]["qa_rework_severity"],
                 "SeverityLevel",
                 sev.clone(),
             ),

@@ -43,6 +43,7 @@ pub mod pr_checks;
 pub mod pr_reviews;
 pub mod provider_matrix;
 pub mod provider_support;
+pub mod qa;
 pub mod refine;
 pub mod reporting;
 pub mod review;

@@ -19,6 +19,7 @@ pub mod card;
 pub mod column;
 pub mod dispatch;
 pub mod intake;
+pub mod lint;
 pub mod registry;
 pub mod rollup;
 pub mod store;

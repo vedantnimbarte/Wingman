@@ -409,6 +409,108 @@ fn truncate(s: &str, n: usize) -> String {
     out
 }
 
+/// `board lint`: ask a fast model whether each Backlog card (or one card) is
+/// clear enough to run unattended. `write` puts the suggested acceptance
+/// criteria into the goal. Exits 1 when any card is vague, so a script can
+/// gate `board dispatch` on it.
+pub async fn lint(
+    card: Option<String>,
+    project: Option<String>,
+    json: bool,
+    write: bool,
+) -> Result<ExitCode> {
+    use wingman_board::lint::{lint_prompt, parse_lint, with_acceptance, LintVerdict, LINT_SYSTEM};
+
+    let store = open()?;
+    let cards: Vec<wingman_board::Card> = match card {
+        Some(c) => vec![store.find_card(&c)?],
+        None => {
+            let pid = current_project(&store, project)?;
+            store
+                .board(Some(&pid))?
+                .into_iter()
+                .filter(|b| b.column == Column::Backlog)
+                .map(|b| b.card)
+                .collect()
+        }
+    };
+    if cards.is_empty() {
+        println!("no Backlog cards to lint");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let cfg = crate::cli::load_config()?;
+    // Judging a short text routes like the other side calls: the fast model
+    // unless `[router.classes] summarize` says otherwise.
+    let spec = cfg.router.resolve_side_call("summarize");
+    let sel = crate::runtime::resolve_selection(&cfg, spec.as_deref())
+        .context("board lint needs a model: run `wingman login` or set [router].fast_model")?;
+    let provider = crate::runtime::build_provider(&cfg, &sel.provider_id)?;
+
+    let mut vague = 0usize;
+    let mut out_json = Vec::new();
+    for c in &cards {
+        let mut req = wingman_core::CompletionRequest::new(sel.model.clone());
+        req.system = Some(LINT_SYSTEM.to_string());
+        req.max_tokens = 800;
+        req.temperature = Some(0.0);
+        req.messages = vec![wingman_core::Message {
+            role: wingman_core::Role::User,
+            content: vec![wingman_core::ContentBlock::Text {
+                text: lint_prompt(c),
+            }],
+        }];
+        let reply = wingman_core::complete_text(provider.as_ref(), req)
+            .await
+            .with_context(|| format!("linting card {}", c.short()))?;
+        let r = match parse_lint(wingman_autonomous::pipeline::extract_json(&reply)) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{}  {}: {e}", c.short(), c.title);
+                continue;
+            }
+        };
+        if r.verdict == LintVerdict::Vague {
+            vague += 1;
+        }
+        let written = write && !r.acceptance.is_empty();
+        if written {
+            store.update_card(&c.id, None, Some(&with_acceptance(c, &r.acceptance)))?;
+        }
+        if json {
+            out_json.push(serde_json::json!({
+                "id": c.id, "title": c.title, "verdict": r.verdict,
+                "questions": r.questions, "acceptance": r.acceptance, "written": written,
+            }));
+            continue;
+        }
+        let tag = match r.verdict {
+            LintVerdict::Clear => "clear",
+            LintVerdict::Vague => "VAGUE",
+        };
+        println!("{}  {tag:5}  {}", c.short(), c.title);
+        for q in &r.questions {
+            println!("        ? {q}");
+        }
+        for a in &r.acceptance {
+            println!("        - {a}");
+        }
+        if written {
+            println!("        (acceptance criteria written to the goal)");
+        }
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&out_json)?);
+    } else if vague > 0 && !write {
+        println!("\n{vague} vague card(s). Answer the questions in the goal, or rerun with --write to add the criteria.");
+    }
+    Ok(if vague > 0 {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

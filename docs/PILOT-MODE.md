@@ -28,7 +28,23 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > provider from the table below works). The per-task reviewer sends work back
 > only on **high-severity** findings — a task's acceptance checks already gate
 > functional correctness before it reaches review, so an over-eager reviewer
-> model can't loop a correct change. The PR base branch is configurable via
+> model can't loop a correct change. Findings classed `over_engineering`
+> never send work back on their own. The reviewer reads the goal, the
+> acceptance criteria and the diff before the worker's own account, which it
+> treats as claims to check. It also **remembers** earlier rounds: each round
+> is saved as a `task.review` event, and its findings get ids (`R1`, `R2`, …).
+> On rework the next round must mark every earlier finding `fixed`,
+> `not_fixed` or `no_longer_applies`, and a blocking one still `not_fixed`
+> sends the task back again. Settled points are not raised again.
+> An optional **QA gate** runs before the reviewer: turn it on with
+> `[pilot.capabilities] per_task_qa = true` (off on every tier by default).
+> It asks whether each acceptance criterion is asserted by a test in the
+> diff, and at which layer (unit, integration, e2e). It records a ledger and
+> any gaps as a `task.qa` event. A gap at or above
+> `[pilot.pr].qa_rework_severity` (default `high`) sends the task back, and
+> the reviewer is skipped for that round. It runs on `[pilot].qa_model`, else
+> `reviewer_model`, else `default_model`. A failed or unparseable QA call
+> never blocks. The PR base branch is configurable via
 > `[pilot.pr].base_branch` (default `main`).
 > `autopilot` is experimental but most of its edges are now wired. The
 > discovery daemon polls `github_issues`, `todos`, `ci_failures`,

@@ -385,6 +385,8 @@ mod tests {
             security_config: wingman_config::PilotSecurityConfig::default(),
             disabled_tools: Vec::new(),
             run_reviewer: false,
+            run_qa: false,
+            qa_model: String::new(),
             critic: None,
             merge_fixer: false,
             knowledge_keeper: None,

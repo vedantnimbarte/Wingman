@@ -10,8 +10,8 @@ skill pack that runs Build → QA → Review lanes over a GitHub Projects board.
 This plan takes the ideas that fit Wingman. It doesn't copy the skill pack's
 text or its GitHub-centred storage.
 
-> **Status: phase 1 built** (on `feat/factory-loop`, not yet merged), with
-> phase 1b deferred until 1a shows noise. Phases 2–4 are planned. Each phase
+> **Status: all four phases built** (on `feat/factory-loop`, not yet merged),
+> with phase 1b deferred until 1a shows noise. Each phase
 > ships on its own. Deviations are recorded at the end of each phase.
 
 ---
@@ -178,6 +178,28 @@ drop: it files with the label `needs-triage`.
 - A prior finding marked `not_fixed` at or above the gate: rework.
 - `TaskReview` events replay through `apply()`.
 
+### As built (deviations from the plan above)
+
+- **Earlier rounds ride on the task.** `Task.reviews` holds every round's
+  report, projected from `task.review` events. The reviewer closure already
+  receives the task, so it gets its history for free. The closure now
+  returns `ReviewerOutput { rework, report }`, and `handle_finalize` records
+  the report before the status change.
+- **Ids are assigned in code, not by the model.** After parsing,
+  `number_findings` continues from the highest earlier id. The model only
+  refers back to ids it was shown.
+- **An unchecked or made-up prior id is ignored.** That fails open, the same
+  way a missing verdict does. Only an explicit `not_fixed` on a real blocking
+  finding sends work back.
+- **Single call, ordered prompt.** The order is goal, criteria, diff, earlier
+  findings, then the worker's account. The reviewer is asked for
+  `hypotheses` first. The ceiling still applies: the model has the summary in
+  context.
+- **Visibility.** `pilot watch`'s live log gets a `task.review` line per
+  round. The full reports are in the run's `tasks.jsonl` and in `state.json`
+  under each task's `reviews`. The task-detail overlay and `pilot export`
+  don't show them yet; add that when someone wants to read them there.
+
 ---
 
 ## Phase 3: QA gate and `board lint`
@@ -230,6 +252,24 @@ drop: it files with the label `needs-triage`.
 - Lint verdict parsing.
 - `--write` is idempotent: running it twice adds no duplicate section.
 
+### As built (deviations from the plan above)
+
+- **QA rides in the reviewer's slot.** The orchestrator still calls one
+  closure at finalize. The pipeline builds it when either `per_task_reviewer`
+  or `per_task_qa` is on, and `qa_then_review` runs QA first, then the
+  reviewer. `ReviewerOutput` gained a `qa` field, which `handle_finalize`
+  records as `task.qa` before the review. The task carries its rounds in
+  `Task.qa`, like `Task.reviews`.
+- **A failed QA call never blocks.** No report means no rework, matching the
+  reviewer.
+- **A `none` ledger row is not a gap by itself.** Only a gap the model names,
+  at or above the gate, sends work back. Docs and config tasks would otherwise
+  bounce for having no tests.
+- **`board lint` exits 1 on a vague card**, so it can gate `board dispatch`
+  in a script. The plan didn't say what the exit code should be.
+- **Not validated against a live model.** Both calls are covered by unit
+  tests with canned replies. The lint command was run up to the model call.
+
 ---
 
 ## Phase 4: `wingman polish`
@@ -279,6 +319,33 @@ build feature, and without it the command says so and exits.
   live capture is behind the feature, like `BrowserGate`.
 
 ---
+
+### As built (deviations from the plan above)
+
+- **The brief is positional:** `wingman polish <url> "<brief>"`. The code
+  lives in `wingman-cli/src/commands/polish.rs`; `capture_with` and
+  `CaptureOpts` were added to `wingman-browser`, and the existing `capture`
+  is unchanged, so `[verify.browser]` baselines still compare.
+- **Full-page shots are capped at 3,000 px tall,** measured in device pixels.
+  A page wider than a phone is zoomed out by mobile Chrome, so its CSS height
+  would leave the bottom of the shot empty. Found by looking at a real shot.
+- **The checker sees only the current shots plus the ledger,** not before and
+  after sheets. That's four images a round, not eight. Before and after are
+  listed side by side in the report.
+- **What the fixer is told vs. what is enforced.** It is told the rules
+  (reuse tokens, guard shared components, stay in scope). The loop enforces
+  two of them itself: a non-zero exit (agent error or red gate) resets the
+  round, and so does any change outside `--scope`. A reset is
+  `git reset --hard` plus `git clean -fd`, both excluding `.wingman/`. That's
+  safe because polish refuses to start on a dirty tree.
+- **The model is resolved before the branch is created,** so a missing model
+  leaves the checkout untouched.
+- **Shots are never committed,** so the PR body lists local paths, not images.
+- **Tested.** Unit tests cover the stop rules, parsing, slugs, the scope check
+  and the git reset path. An end-to-end run used real headless Chrome against
+  a local page and a mock model server: check, fixer (a real headless agent
+  run), reshoot, closing check, report. Not run against a real vision model,
+  so the rubric's scoring quality is untested.
 
 ## Not doing (and why)
 

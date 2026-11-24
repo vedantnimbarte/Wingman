@@ -413,6 +413,26 @@ pub enum Command {
         #[command(subcommand)]
         action: PrAction,
     },
+    /// Critique-and-fix loop on one page: screenshots at desktop and phone
+    /// widths, light and dark, a vision check, an agent fix, repeat. Runs on a
+    /// new `polish/<page>` branch; needs a clean tree, a running dev server,
+    /// and a build with `--features browser`.
+    #[command(display_order = 12)]
+    Polish {
+        /// The page, e.g. `http://localhost:3000/settings`.
+        url: String,
+        /// What is wrong or what you want, in your words.
+        brief: String,
+        /// Only allow edits under these paths (repeatable).
+        #[arg(long)]
+        scope: Vec<String>,
+        /// Fix rounds before a closing check.
+        #[arg(long, default_value_t = 3)]
+        rounds: u32,
+        /// Push the branch and open a draft PR with the report.
+        #[arg(long)]
+        pr: bool,
+    },
     /// Explain-and-teach the current changes: a per-file "what changed and
     /// why it matters" walkthrough of the working diff, aimed at a reviewer or
     /// junior. Routes to the fast model when configured.
@@ -619,6 +639,19 @@ pub enum BoardAction {
         /// Include hidden projects.
         #[arg(long)]
         all: bool,
+    },
+    /// Check Backlog cards are clear enough to run unattended; suggest
+    /// acceptance criteria. Exits 1 if any card is vague.
+    Lint {
+        /// One card (id or prefix). Default: every Backlog card in this project.
+        card: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        json: bool,
+        /// Write the suggested acceptance criteria into each card's goal.
+        #[arg(long)]
+        write: bool,
     },
     /// Dump cards and dispatch history — the backup story for a per-machine DB.
     Export {
@@ -1487,6 +1520,13 @@ pub async fn run() -> Result<ExitCode> {
             PrAction::Address { pr } => commands::pr::address(pr).await,
         },
         Some(Command::Explain { local, staged }) => commands::explain::run(local, staged).await,
+        Some(Command::Polish {
+            url,
+            brief,
+            scope,
+            rounds,
+            pr,
+        }) => commands::polish::run(url, brief, scope, rounds, pr).await,
         Some(Command::Diff { file, patch }) => commands::diff::run(file, patch).await,
         Some(Command::Bg { action }) => match action {
             BgAction::Start {
@@ -1534,6 +1574,12 @@ pub async fn run() -> Result<ExitCode> {
                 all,
             }) => commands::board::projects(forget, restore, relocate, all).await,
             Some(BoardAction::Export { json }) => commands::board::export(json).await,
+            Some(BoardAction::Lint {
+                card,
+                project,
+                json,
+                write,
+            }) => commands::board::lint(card, project, json, write).await,
         },
         Some(Command::Pilot { action }) => match action {
             PilotAction::Run {

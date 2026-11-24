@@ -32,6 +32,7 @@ pub mod pilot_telemetry;
 pub mod pilot_ui;
 pub mod pilot_watch_tui;
 pub mod plugin;
+pub mod polish;
 pub mod pr;
 pub mod review;
 pub mod review_multi;

@@ -220,6 +220,13 @@ pub struct Task {
     /// 1 on the first attempt; >1 after a requeue.
     #[serde(default)]
     pub attempts: u32,
+    /// Per-task reviewer rounds, oldest first. The next round re-checks
+    /// every finding in these before raising anything new.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviews: Vec<crate::review::ReviewReport>,
+    /// Per-task QA gate rounds, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub qa: Vec<crate::qa::QaReport>,
 }
 
 impl Task {
@@ -243,6 +250,8 @@ impl Task {
             started_at: None,
             ended_at: None,
             attempts: 0,
+            reviews: Vec::new(),
+            qa: Vec::new(),
         }
     }
 }
@@ -439,6 +448,22 @@ pub enum Event {
         id: String,
         agent: String,
         worktree: String,
+    },
+
+    /// The per-task QA gate's report for one round.
+    #[serde(rename = "task.qa")]
+    TaskQa {
+        t: String,
+        id: String,
+        report: crate::qa::QaReport,
+    },
+
+    /// The per-task reviewer's report for one round, findings numbered.
+    #[serde(rename = "task.review")]
+    TaskReview {
+        t: String,
+        id: String,
+        report: crate::review::ReviewReport,
     },
 
     /// Task transitioned status.
@@ -656,6 +681,8 @@ impl Event {
             | Event::TaskCreate { t, .. }
             | Event::TaskAssign { t, .. }
             | Event::TaskStatus { t, .. }
+            | Event::TaskReview { t, .. }
+            | Event::TaskQa { t, .. }
             | Event::TaskTool { t, .. }
             | Event::TaskAttempt { t, .. }
             | Event::TaskCommit { t, .. }
@@ -748,6 +775,8 @@ pub fn apply(state: &mut RunState, event: &Event) {
                 started_at: None,
                 ended_at: None,
                 attempts: 0,
+                reviews: Vec::new(),
+                qa: Vec::new(),
             };
             match existing {
                 Some(i) => state.tasks[i] = task,
@@ -971,6 +1000,16 @@ pub fn apply(state: &mut RunState, event: &Event) {
             // Also recorded after the run ended; `pr_reviews` reads the
             // rounds straight off the log, so replay is a no-op too.
         }
+        Event::TaskReview { id, report, .. } => {
+            if let Some(t) = state.task_mut(id) {
+                t.reviews.push(report.clone());
+            }
+        }
+        Event::TaskQa { id, report, .. } => {
+            if let Some(t) = state.task_mut(id) {
+                t.qa.push(report.clone());
+            }
+        }
     }
 }
 
@@ -1014,6 +1053,32 @@ mod tests {
         apply(&mut s, &spawn("a1"));
         apply(&mut s, &usd("a1", "opus-5", 0.25));
         assert_eq!(s.agent("a1").unwrap().model.as_deref(), Some("opus-5"));
+    }
+
+    #[test]
+    fn task_review_events_replay_onto_the_task_in_order() {
+        let mut s = state();
+        s.tasks.push(Task::new("t1", Role::Developer, "x"));
+        for summary in ["round 1", "round 2"] {
+            let ev = Event::TaskReview {
+                t: "2026-08-21T10:00:00Z".into(),
+                id: "t1".into(),
+                report: crate::review::ReviewReport {
+                    summary: summary.into(),
+                    ..Default::default()
+                },
+            };
+            // Through the wire format, as `RunStore::load` replays it.
+            let line = serde_json::to_string(&ev).unwrap();
+            assert!(line.contains("\"ev\":\"task.review\""), "{line}");
+            apply(&mut s, &serde_json::from_str(&line).unwrap());
+        }
+        let summaries: Vec<_> = s.tasks[0]
+            .reviews
+            .iter()
+            .map(|r| r.summary.as_str())
+            .collect();
+        assert_eq!(summaries, ["round 1", "round 2"]);
     }
 
     #[test]

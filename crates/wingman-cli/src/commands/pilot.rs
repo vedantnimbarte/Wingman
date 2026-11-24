@@ -714,6 +714,8 @@ pub async fn run(cfg: Config, opts: PilotOptions) -> Result<ExitCode> {
         security_config: pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&pilot, "per_task_reviewer"),
+        run_qa: capability_on(&pilot, "per_task_qa"),
+        qa_model: aux_model(&cfg, &pilot, &selection.model),
         critic,
         // Resolve through the same provider/model split the manager uses so a
         // `provider/model` config value (e.g. `openrouter/deepseek/…`) becomes
@@ -975,6 +977,23 @@ fn append_digest_line(path: &std::path::Path, severity: &str, body: &str) -> std
     wingman_config::append_line(path, &line.to_string())
 }
 
+/// The QA gate's model: `qa_model`, else `reviewer_model`, else
+/// `default_model`, else the run's. Resolved to the bare id the provider's API
+/// expects, like the reviewer's.
+fn aux_model(cfg: &Config, pilot: &wingman_config::PilotConfig, fallback: &str) -> String {
+    match pilot
+        .qa_model
+        .clone()
+        .or_else(|| pilot.reviewer_model.clone())
+        .or_else(|| pilot.default_model.clone())
+    {
+        Some(s) => runtime::resolve_selection(cfg, Some(&s))
+            .map(|sel| sel.model)
+            .unwrap_or_else(|_| fallback.to_string()),
+        None => fallback.to_string(),
+    }
+}
+
 /// Resolve whether a pilot capability is on: an explicit
 /// `[pilot.capabilities]` override wins; otherwise the tier default from
 /// the plan's tier→capability matrix applies.
@@ -986,6 +1005,9 @@ fn capability_on(pilot: &wingman_config::PilotConfig, key: &str) -> bool {
     match key {
         // Per-task reviewer (E7): on for copilot and autopilot.
         "per_task_reviewer" => matches!(pilot.tier, Copilot | Autopilot),
+        // Per-task QA gate: off on every tier until it is shown to pay for
+        // its extra call per task.
+        "per_task_qa" => false,
         // Mandatory checkpoint hygiene (E11): fails multi-file work that never
         // checkpointed, so autopilot-only by default.
         "checkpoint_hygiene" => matches!(pilot.tier, Autopilot),
@@ -1737,6 +1759,8 @@ pub async fn resume(
         security_config: cfg.pilot.security.clone(),
         disabled_tools: cfg.tools.disabled_tools.clone(),
         run_reviewer: capability_on(&cfg.pilot, "per_task_reviewer"),
+        run_qa: capability_on(&cfg.pilot, "per_task_qa"),
+        qa_model: aux_model(&cfg, &cfg.pilot, &selection.model),
         critic: critic(
             &cfg,
             &cfg.pilot,
@@ -3785,6 +3809,8 @@ pub async fn validate_providers(
                 security_config: cfg.pilot.security.clone(),
                 disabled_tools: cfg.tools.disabled_tools.clone(),
                 run_reviewer: false,
+                run_qa: false,
+                qa_model: model.clone(),
                 critic: None,
                 merge_fixer: false,
                 knowledge_keeper: None,

@@ -83,6 +83,10 @@ pub struct PipelineInputs {
     pub disabled_tools: Vec<String>,
     /// E7 — run a per-task reviewer agent after the run. Off by default.
     pub run_reviewer: bool,
+    /// Per-task QA gate, before the reviewer (`per_task_qa`). Off by default.
+    pub run_qa: bool,
+    /// Model the QA gate runs on (`[pilot].qa_model`, else the reviewer's).
+    pub qa_model: String,
     /// J10 — the critic agent that runs before the auto-merge gate; `None`
     /// skips it. The CLI resolves it from `[pilot].critic_model`, so it can
     /// sit on another provider than the manager.
@@ -205,9 +209,20 @@ pub async fn run_to_completion(
     // auto-merge gate below so its severity branch is live.
     let review_log: std::sync::Arc<std::sync::Mutex<Vec<(String, InlineReview)>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let reviewer: Option<orchestrator::Reviewer> = if inputs.run_reviewer {
+    let reviewer: Option<orchestrator::Reviewer> = if inputs.run_reviewer || inputs.run_qa {
         let provider = aux_provider.clone();
         let model = inputs.reviewer_model.clone();
+        let run_review = inputs.run_reviewer;
+        let qa = inputs.run_qa.then(|| {
+            (
+                inputs.qa_model.clone(),
+                inputs
+                    .pr_config
+                    .qa_rework_severity
+                    .parse::<crate::severity::Severity>()
+                    .unwrap_or(REVIEWER_REWORK_GATE),
+            )
+        });
         // The reviewer's rework bar is its own knob (`[pilot.pr]
         // reviewer_rework_severity`, default `high`), deliberately separate
         // from `auto_merge_max_severity` (which governs the merge decision):
@@ -229,22 +244,29 @@ pub async fn run_to_completion(
             let run_id = run_id_for_review.clone();
             let base = base_for_review.clone();
             let log = review_log_for_closure.clone();
+            let qa = qa.clone();
             Box::pin(async move {
                 // Review the task's real diff. With no diff to show (git error,
                 // empty change), approve rather than reject a change the model
                 // can't see — the old sight-unseen path rejected correct work
                 // and deadlocked the run.
-                let diff = crate::worktree::task_diff(&repo, &run_id, &task.id, &base)?;
-                let (rework, outcome) =
-                    review_task_inline(provider.as_ref(), &model, &task, &diff, gate).await;
+                let Some(diff) = crate::worktree::task_diff(&repo, &run_id, &task.id, &base) else {
+                    return crate::review::ReviewerOutput::default();
+                };
+                let review = run_review.then_some((model.as_str(), gate));
+                let qa = qa.as_ref().map(|(m, g)| (m.as_str(), *g));
+                let (out, outcome) =
+                    qa_then_review(provider.as_ref(), &task, &diff, qa, review).await;
                 if let Some(o) = outcome {
                     log.lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push((task.id.clone(), o));
                 }
-                rework
+                out
             })
-                as std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>>
+                as std::pin::Pin<
+                    Box<dyn std::future::Future<Output = crate::review::ReviewerOutput> + Send>,
+                >
         }))
     } else {
         None
@@ -1453,7 +1475,7 @@ async fn complete_text(
 
 /// Extract the first top-level JSON object from a possibly-chatty reply
 /// (models sometimes wrap JSON in prose or fences).
-fn extract_json(s: &str) -> &str {
+pub fn extract_json(s: &str) -> &str {
     match (s.find('{'), s.rfind('}')) {
         (Some(a), Some(b)) if b > a => &s[a..=b],
         _ => s,
@@ -1703,16 +1725,26 @@ async fn review_task_inline(
     task: &crate::model::Task,
     diff: &str,
     block_gate: crate::severity::Severity,
-) -> (Option<String>, Option<InlineReview>) {
-    const SYSTEM: &str = "You are a pragmatic code reviewer. Review the task's actual diff \
-        (below) against its stated goal and reply with ONLY a JSON object: \
-        {\"verdict\":\"approve\"|\"rework\", \
-        \"summary\":\"...\", \"findings\":[{\"severity\":\"low|medium|high|critical\", \
-        \"message\":\"...\"}]}. Judge only the diff shown; do not demand changes \
+) -> (crate::review::ReviewerOutput, Option<InlineReview>) {
+    const SYSTEM: &str = "You are a pragmatic code reviewer and an independent second \
+        solver. Review the task's actual diff against its goal and acceptance criteria. \
+        Reply with ONLY a JSON object, fields in this order: \
+        {\"hypotheses\":[\"what must be true for this to be right, and where it would \
+        most likely break\"], \
+        \"prior\":[{\"id\":\"R1\",\"status\":\"fixed|not_fixed|no_longer_applies\", \
+        \"evidence\":\"file:line for fixed; what is still wrong for not_fixed\"}], \
+        \"verdict\":\"approve\"|\"rework\", \"summary\":\"...\", \
+        \"findings\":[{\"severity\":\"low|medium|high|critical\", \
+        \"class\":\"gap|bug|verification_miss|scope_drift|over_engineering\", \
+        \"message\":\"...\", \"file\":\"...\", \"line\":0}]}. \
+        Write the hypotheses from the goal, criteria and diff alone; the worker's \
+        account comes last and is claims to check, not evidence. If earlier findings \
+        are listed, mark every one in `prior` before raising anything new, and do not \
+        raise a settled point again. Judge only the diff shown; do not demand changes \
         for code you cannot see. Approve when the diff satisfies the goal. Only \
         request rework for a concrete defect — a bug, a broken build, or the goal \
-        left unmet — and record it as a medium-or-higher finding. Do not rework \
-        over style nits or preferences; file those as low-severity and approve.";
+        left unmet — and record it as a medium-or-higher finding. File style nits as \
+        low and needless complexity as over_engineering; neither is a reason to rework.";
     let summary = task
         .outcome
         .as_ref()
@@ -1726,24 +1758,17 @@ async fn review_task_inline(
     } else {
         diff.to_string()
     };
-    let user = format!(
-        "Task #{}: {}\nRole: {}\nGoal: {}\nWorker summary: {}\n\n## Diff\n```diff\n{}\n```",
-        task.id,
-        task.title,
-        task.role.as_str(),
-        task.goal,
-        summary,
-        diff_block,
-    );
+    let user = inline_review_prompt(task, &diff_block, summary);
     // A failed call or unparseable reply means "no verdict", which the caller
     // records as *unreviewed* rather than silently counting as approved.
     let Ok((text, _usage)) = complete_text(provider, model, SYSTEM, &user).await else {
-        return (None, None);
+        return (Default::default(), None);
     };
-    let Ok(report) = crate::review::parse_review(extract_json(&text)) else {
-        return (None, None);
+    let Ok(mut report) = crate::review::parse_review(extract_json(&text)) else {
+        return (Default::default(), None);
     };
-    let rework = report.next_status(block_gate) == TaskStatus::Todo;
+    report.number_findings(&task.reviews);
+    let rework = report.next_status(&task.reviews, block_gate) == TaskStatus::Todo;
     let outcome = InlineReview {
         verdict: if rework {
             crate::review::Verdict::Rework
@@ -1752,11 +1777,121 @@ async fn review_task_inline(
         },
         max_severity: report.max_severity(),
     };
-    if rework {
-        (Some(report.rework_notes(block_gate)), Some(outcome))
-    } else {
-        (None, Some(outcome))
+    let notes = rework.then(|| report.rework_notes(&task.reviews, block_gate));
+    (
+        crate::review::ReviewerOutput {
+            rework: notes,
+            report: Some(report),
+            qa: None,
+        },
+        Some(outcome),
+    )
+}
+
+/// The finalize gate for one task: QA first, then the reviewer. A task that
+/// left its own behaviour untested goes back before a reviewer spends a call
+/// on it, so a QA bounce carries no review report. Either stage may be off
+/// (`None`); each is `(model, rework gate)`.
+async fn qa_then_review(
+    provider: &dyn Provider,
+    task: &crate::model::Task,
+    diff: &str,
+    qa: Option<(&str, crate::severity::Severity)>,
+    review: Option<(&str, crate::severity::Severity)>,
+) -> (crate::review::ReviewerOutput, Option<InlineReview>) {
+    let mut qa_report = None;
+    if let Some((qa_model, qa_gate)) = qa {
+        qa_report = qa_task_inline(provider, qa_model, task, diff).await;
+        if let Some(r) = qa_report.as_ref().filter(|r| r.blocks(qa_gate)) {
+            let rework = Some(r.rework_notes(qa_gate));
+            return (
+                crate::review::ReviewerOutput {
+                    rework,
+                    report: None,
+                    qa: qa_report,
+                },
+                None,
+            );
+        }
     }
+    let Some((model, gate)) = review else {
+        return (
+            crate::review::ReviewerOutput {
+                qa: qa_report,
+                ..Default::default()
+            },
+            None,
+        );
+    };
+    let (mut out, outcome) = review_task_inline(provider, model, task, diff, gate).await;
+    out.qa = qa_report;
+    (out, outcome)
+}
+
+/// The QA gate's call. A failed call or unparseable reply is no report, and
+/// no report never blocks: QA narrows what merges, it can't wedge a run.
+async fn qa_task_inline(
+    provider: &dyn Provider,
+    model: &str,
+    task: &crate::model::Task,
+    diff: &str,
+) -> Option<crate::qa::QaReport> {
+    const MAX_DIFF_CHARS: usize = 12_000;
+    let diff: String = if diff.chars().count() > MAX_DIFF_CHARS {
+        let head: String = diff.chars().take(MAX_DIFF_CHARS).collect();
+        format!("{head}\n… (diff truncated)")
+    } else {
+        diff.to_string()
+    };
+    let user = crate::qa::qa_prompt(task, &diff);
+    let (text, _usage) = complete_text(provider, model, crate::qa::QA_SYSTEM, &user)
+        .await
+        .ok()?;
+    crate::qa::parse_qa(extract_json(&text)).ok()
+}
+
+/// The reviewer's user message. Order matters: goal, criteria and diff come
+/// before the worker's own account, so the reviewer forms its view first.
+/// Earlier rounds' findings, if any, are listed with their ids.
+fn inline_review_prompt(task: &crate::model::Task, diff: &str, worker_summary: &str) -> String {
+    let mut out = format!(
+        "Task #{}: {}\nRole: {}\nGoal: {}\n",
+        task.id,
+        task.title,
+        task.role.as_str(),
+        task.goal
+    );
+    if !task.acceptance.is_empty() {
+        out.push_str("\n## Acceptance criteria (all passed before review)\n");
+        for a in &task.acceptance {
+            out.push_str(&format!(
+                "- {}\n",
+                serde_json::to_string(a).unwrap_or_default()
+            ));
+        }
+    }
+    out.push_str(&format!("\n## Diff\n```diff\n{diff}\n```\n"));
+    let earlier: Vec<_> = task.reviews.iter().flat_map(|r| &r.findings).collect();
+    if !earlier.is_empty() {
+        out.push_str("\n## Earlier review findings (mark each one in `prior`)\n");
+        for f in earlier {
+            let loc = match (&f.file, f.line) {
+                (Some(file), Some(line)) => format!(" ({file}:{line})"),
+                (Some(file), None) => format!(" ({file})"),
+                _ => String::new(),
+            };
+            out.push_str(&format!(
+                "- {} [{}]{loc} {}\n",
+                f.id.as_deref().unwrap_or("?"),
+                f.severity(),
+                f.message
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\n## Worker's account (claims to check, not evidence)\n{worker_summary}\n"
+    ));
+    out
 }
 
 /// What the inline reviewer concluded about one task.
@@ -2183,6 +2318,97 @@ pub(crate) mod tests {
     use crate::model::{Event, Role, RunStatus, Task, TaskStatus};
     use crate::orchestrator::{fake_happy_spawner, OrchestratorConfig};
     use crate::pr::{CommandOut, CommandRunner};
+
+    #[test]
+    fn inline_review_prompt_puts_the_workers_account_last_and_lists_earlier_findings() {
+        let mut t = Task::new("t1", Role::Developer, "Add parser");
+        t.goal = "parse it".into();
+        t.acceptance = vec![crate::model::Acceptance::Shell {
+            cmd: "cargo test".into(),
+        }];
+        t.reviews = vec![crate::review::ReviewReport {
+            findings: vec![crate::review::ReviewFinding {
+                severity: "high".into(),
+                message: "panics on empty input".into(),
+                file: Some("src/p.rs".into()),
+                line: Some(3),
+                id: Some("R1".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let p = inline_review_prompt(&t, "+fn parse() {}", "all done, trust me");
+        let pos = |needle: &str| p.find(needle).unwrap_or_else(|| panic!("{needle} in {p}"));
+        assert!(pos("cargo test") < pos("## Diff"));
+        assert!(pos("## Diff") < pos("R1 [high] (src/p.rs:3) panics on empty input"));
+        assert!(pos("panics on empty input") < pos("all done, trust me"));
+
+        t.reviews.clear();
+        assert!(!inline_review_prompt(&t, "d", "s").contains("Earlier review findings"));
+    }
+
+    #[tokio::test]
+    async fn qa_gap_bounces_the_task_and_skips_the_reviewer() {
+        // A high gap at the high gate: back to the worker, no review round.
+        let provider = CannedTextProvider {
+            text: r#"{"ledger":[{"criterion":"empty input","layer":"none"}],
+                      "gaps":[{"severity":"high","message":"empty input untested","layer":"unit"}]}"#
+                .into(),
+        };
+        let high = crate::severity::Severity::High;
+        let (out, outcome) = qa_then_review(
+            &provider,
+            &done_task("t1"),
+            "+x",
+            Some(("qa", high)),
+            Some(("rv", high)),
+        )
+        .await;
+        assert!(out.rework.unwrap().contains("empty input untested"));
+        assert!(
+            out.report.is_none(),
+            "reviewer must not run after a QA bounce"
+        );
+        assert!(outcome.is_none());
+        assert_eq!(out.qa.unwrap().gaps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn qa_pass_hands_over_to_the_reviewer_and_keeps_its_report() {
+        // One canned reply that parses as both a clean QA report and an approval.
+        let provider = CannedTextProvider {
+            text: r#"{"verdict":"approve","ledger":[{"criterion":"c","layer":"unit","evidence":"t.rs:1"}],"gaps":[]}"#
+                .into(),
+        };
+        let high = crate::severity::Severity::High;
+        let (out, outcome) = qa_then_review(
+            &provider,
+            &done_task("t1"),
+            "+x",
+            Some(("qa", high)),
+            Some(("rv", high)),
+        )
+        .await;
+        assert!(out.rework.is_none());
+        assert!(out.report.is_some(), "reviewer ran");
+        assert!(outcome.is_some());
+        assert_eq!(
+            out.qa.unwrap().ledger[0].evidence.as_deref(),
+            Some("t.rs:1")
+        );
+    }
+
+    #[tokio::test]
+    async fn unparseable_qa_never_blocks() {
+        let provider = CannedTextProvider {
+            text: "no json here".into(),
+        };
+        let high = crate::severity::Severity::High;
+        let (out, _) =
+            qa_then_review(&provider, &done_task("t1"), "+x", Some(("qa", high)), None).await;
+        assert!(out.rework.is_none());
+        assert!(out.qa.is_none());
+    }
 
     #[test]
     fn changed_lockfiles_finds_each_lockfile_once() {
@@ -2863,6 +3089,8 @@ pub(crate) mod tests {
             security_config: wingman_config::PilotSecurityConfig::default(),
             disabled_tools: Vec::new(),
             run_reviewer: false,
+            run_qa: false,
+            qa_model: "stub".into(),
             critic: None,
             reviewer_model: "stub".into(),
             sandbox_default_tier: "host".into(),
@@ -3138,6 +3366,7 @@ pub(crate) mod tests {
                 auto_merge_max_severity: "low".into(),
                 base_branch: "main".into(),
                 reviewer_rework_severity: "high".into(),
+                qa_rework_severity: "high".into(),
             },
             true, // auto-approved
             wingman_config::PilotTier::Copilot,
@@ -3246,6 +3475,7 @@ pub(crate) mod tests {
                 auto_merge_max_severity: "low".into(),
                 base_branch: "main".into(),
                 reviewer_rework_severity: "high".into(),
+                qa_rework_severity: "high".into(),
             },
             true,
             wingman_config::PilotTier::Copilot,
@@ -3282,6 +3512,7 @@ pub(crate) mod tests {
                 auto_merge_max_severity: "low".into(),
                 base_branch: "main".into(),
                 reviewer_rework_severity: "high".into(),
+                qa_rework_severity: "high".into(),
             },
             true,
             wingman_config::PilotTier::Copilot,
@@ -3616,9 +3847,12 @@ pub(crate) mod tests {
             crate::severity::Severity::Medium,
         )
         .await;
-        let (notes, outcome) = notes;
-        assert!(notes.is_some(), "rework verdict must return notes");
-        assert!(notes.unwrap().contains("no error handling"));
+        let (out, outcome) = notes;
+        let notes = out.rework.expect("rework verdict must return notes");
+        assert!(notes.contains("R1 [high] no error handling"), "{notes}");
+        // The numbered report comes back for finalize to record.
+        let report = out.report.expect("a parsed review is recorded");
+        assert_eq!(report.findings[0].id.as_deref(), Some("R1"));
         // The verdict is now recorded too, so the auto-merge gate can see it.
         let outcome = outcome.expect("a parsed review must yield a verdict");
         assert_eq!(outcome.verdict, crate::review::Verdict::Rework);
@@ -3640,8 +3874,9 @@ pub(crate) mod tests {
             crate::severity::Severity::Medium,
         )
         .await;
-        let (notes, outcome) = notes;
-        assert!(notes.is_none(), "garbage must fail open to approve");
+        let (out, outcome) = notes;
+        assert!(out.rework.is_none(), "garbage must fail open to approve");
+        assert!(out.report.is_none(), "garbage is not a review round");
         // But an unparseable reply is *not* a review: recording it as one
         // would let the auto-merge gate believe a diff was reviewed when the
         // reviewer never actually produced a verdict.
