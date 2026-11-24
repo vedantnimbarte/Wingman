@@ -28,7 +28,23 @@ autopilot  (experimental) Agent flies and navigates. Daemon mode, critic
 > provider from the table below works). The per-task reviewer sends work back
 > only on **high-severity** findings — a task's acceptance checks already gate
 > functional correctness before it reaches review, so an over-eager reviewer
-> model can't loop a correct change. The PR base branch is configurable via
+> model can't loop a correct change. Findings classed `over_engineering`
+> never send work back on their own. The reviewer reads the goal, the
+> acceptance criteria and the diff before the worker's own account, which it
+> treats as claims to check. It also **remembers** earlier rounds: each round
+> is saved as a `task.review` event, and its findings get ids (`R1`, `R2`, …).
+> On rework the next round must mark every earlier finding `fixed`,
+> `not_fixed` or `no_longer_applies`, and a blocking one still `not_fixed`
+> sends the task back again. Settled points are not raised again.
+> An optional **QA gate** runs before the reviewer: turn it on with
+> `[pilot.capabilities] per_task_qa = true` (off on every tier by default).
+> It asks whether each acceptance criterion is asserted by a test in the
+> diff, and at which layer (unit, integration, e2e). It records a ledger and
+> any gaps as a `task.qa` event. A gap at or above
+> `[pilot.pr].qa_rework_severity` (default `high`) sends the task back, and
+> the reviewer is skipped for that round. It runs on `[pilot].qa_model`, else
+> `reviewer_model`, else `default_model`. A failed or unparseable QA call
+> never blocks. The PR base branch is configurable via
 > `[pilot.pr].base_branch` (default `main`).
 > `autopilot` is experimental but most of its edges are now wired. The
 > discovery daemon polls `github_issues`, `todos`, `ci_failures`,
@@ -184,6 +200,80 @@ the cause and never skip or weaken a test or CI step, and it marks the logs as
 tool output, not instructions. Checks from outside GitHub Actions are named in
 the goal without a log. `trusted_authors` is not required for this source: the
 branch is pilot's and the logs are CI's own output.
+
+## Telemetry intake: Sentry, PostHog, custom
+
+Add `sentry`, `posthog` or `custom` to `sources`, and the daemon turns
+production signals into **Backlog cards** on `wingman board`. These sources
+never dispatch a run. An error count is not a spec, so you read the card and
+dispatch it yourself (`wingman board dispatch <id>`).
+
+```toml
+[pilot.daemon]
+enabled = true
+sources = ["sentry", "posthog", "custom"]
+
+[pilot.daemon.sentry]
+org         = "acme"
+project     = "web"
+token       = "${SENTRY_AUTH_TOKEN}"   # scopes: event:read project:read
+# base_url  = "https://de.sentry.io"   # EU or self-hosted
+# window_days = 14
+
+[pilot.daemon.posthog]
+host           = "https://eu.posthog.com"
+project_id     = "12345"
+token          = "${POSTHOG_PERSONAL_API_KEY}"
+failure_events = ["checkout_failed"]
+# min_users = 5
+# signals = ["exception", "failure_events", "rageclick", "web_vitals"]
+
+[[pilot.daemon.custom]]                # any number of these
+name    = "tracker"
+kind    = "cli"                        # or "http" with url = "…" and token = "${…}"
+command = ["gh", "api", "repos/acme/web/issues?labels=bug"]
+items   = ""                           # JSON pointer to the array; "" = the document
+id      = "/number"                    # default /id
+title   = "/title"                     # default /title
+link    = "/html_url"                  # optional; body = "/…" also optional
+```
+
+What each source files:
+
+| Source | One card per | Files when | Fingerprint |
+| --- | --- | --- | --- |
+| `sentry` | unresolved issue seen in the window | always | `sentry:<id>` |
+| `posthog` `exception` | error-tracking issue | at least `min_users` people | `posthog:exception:<id>` |
+| `posthog` `failure_events` | configured event name | at least `min_users` people | `posthog:event:<name>` |
+| `posthog` `rageclick` | page path | at least `min_users` people | `posthog:rage:<path>` |
+| `posthog` `web_vitals` | page path, at least 50 samples | p75 LCP > 4 s, INP > 500 ms or CLS > 0.25 | `posthog:vitals:<path>` |
+| `custom` | item in the array | always | `custom:<name>:<id>` |
+
+**Dedup.** The fingerprint is stored on the card as the label `fp:<fingerprint>`.
+If an open card already has that label, it gets a `seen again <date>` line in
+its notes, at most once a day. An archived card is refiled as a recurrence
+only when the source saw the problem *after* you archived it. Otherwise
+archiving a card would be undone on the next poll. A source that gives no
+timestamp (`custom`) never refiles an archived card.
+
+**Cards.** The title is the problem. The goal is the title plus the evidence
+(links, counts, first and last seen), marked as data from outside, not
+instructions. Labels are `intake`, `intake:<source>` and `fp:…`, so
+`wingman board list --label intake` lists everything intake filed.
+
+**Coverage.** Every cycle logs one line per source: `read N`, or
+`unavailable — <why>` when the token is missing, the HTTP call fails, or a
+command exits non-zero. A broken source is never reported as a quiet one. A
+PostHog source fails as a whole if any one of its queries fails.
+
+Telemetry is remote, so `--watch` file-change wakes skip it. Git-hook wakes
+and polls run it. `--dry-run` prints `would file` lines and writes nothing.
+`custom` commands run directly, never through a shell, with a 30 s timeout,
+in the repo root.
+
+Not validated live: the Sentry and PostHog request and response shapes come
+from their API docs and are covered by fixture tests only. The `custom` path
+has been run end to end.
 
 ## Status
 

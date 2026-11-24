@@ -218,6 +218,8 @@ pub fn task_from_planned(planned: &PlannedTask) -> Task {
         started_at: None,
         ended_at: None,
         attempts: 0,
+        reviews: Vec::new(),
+        qa: Vec::new(),
     }
 }
 

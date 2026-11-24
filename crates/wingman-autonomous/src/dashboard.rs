@@ -592,6 +592,22 @@ fn render_log_line(ev: &Event, names: &std::collections::BTreeMap<String, String
             },
             format!("{short_ts}  task.attempt {id} rung {rung} → {status:?}"),
         ),
+        Event::TaskReview { id, report, .. } => (
+            if report.findings.is_empty() { Ok } else { Info },
+            format!(
+                "{short_ts}  task.review  {id}: {} finding(s), {} re-checked",
+                report.findings.len(),
+                report.prior.len()
+            ),
+        ),
+        Event::TaskQa { id, report, .. } => (
+            if report.gaps.is_empty() { Ok } else { Info },
+            format!(
+                "{short_ts}  task.qa      {id}: {} criteria, {} gap(s)",
+                report.ledger.len(),
+                report.gaps.len()
+            ),
+        ),
         Event::Escalation { trigger, .. } => (
             Warn,
             format!("{short_ts}  escalation   {}", trigger.short_label()),

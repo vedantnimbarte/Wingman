@@ -293,7 +293,10 @@ mod tests {
         write(src.path(), "commands/review.md", "Review $ARGUMENTS");
         write(src.path(), ".git/HEAD", "ref: x");
 
-        install(global.path(), &src.path().to_string_lossy()).unwrap();
+        assert_eq!(
+            install(global.path(), &src.path().to_string_lossy()).unwrap(),
+            ExitCode::SUCCESS
+        );
         let dest = plugins::plugins_dir(global.path()).join("demo");
         assert!(dest.join("commands/review.md").is_file());
         assert!(!dest.join(".git").exists(), ".git is not part of a plugin");

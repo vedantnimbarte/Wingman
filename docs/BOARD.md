@@ -9,7 +9,26 @@ wingman board                        # the TUI
 wingman board add "Fix LSP restart storm"
 wingman board dispatch c3f1          # starts a pilot run for that card
 wingman board list --json            # scriptable
+wingman board lint                   # is each Backlog card clear enough to run?
 ```
+
+### `board lint`
+
+A dispatched card runs with nobody to ask, so a vague goal gets guessed at.
+`wingman board lint` sends each Backlog card in the current project (or one
+card: `board lint c3f1`) to the fast model and prints a verdict:
+
+- **clear** or **VAGUE**;
+- for a vague card, up to three questions a person should answer first;
+- up to five testable acceptance criteria for the goal as written.
+
+`--write` adds the criteria to the card's goal under an
+`Acceptance criteria:` heading, which the planner turns into each task's
+acceptance checks. Running it again replaces that section instead of adding
+another. `--json` is for scripts. The command exits 1 when any card is vague,
+so `wingman board lint c3f1 && wingman board dispatch c3f1` only dispatches a
+clear card. It uses the `summarize` route: `[router.classes] summarize` if
+set, else `[router].fast_model`, else your default model.
 
 Status: **shipped.** Build order and the reasoning behind each decision are in
 [BOARD-PLAN.md](BOARD-PLAN.md); exact schema, types, and derivation rules are

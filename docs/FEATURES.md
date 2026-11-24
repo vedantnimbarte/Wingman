@@ -409,6 +409,11 @@ Wingman different; this is everything else it does.
   and set `[verify.browser].url` to make the turn gate load a URL, screenshot
   it, and fail if it drifts from a baseline. Not in the default build, and it
   fails open — with no browser present the gate passes rather than blocking.
+- **`wingman polish`.** *(Opt-in build.)* A bounded critique-and-fix loop on
+  one page. It screenshots the page at desktop and phone widths, light and
+  dark, scores it against a fixed design rubric, has an agent fix the ranked
+  problems, and commits only green rounds, on a branch of its own. See
+  [CLI.md](CLI.md).
 - **Agent browser.** *(Opt-in build.)* The same `--features browser` build
   gives the agent a `browser` tool: one headless Chrome tab, started on first
   use and closed with the session, that it can navigate, click and type into,
@@ -476,6 +481,19 @@ Wingman different; this is everything else it does.
   replies on each thread, and resolves only the threads the push actually
   changed. Rounds per PR are capped and share `[pilot].max_usd`. See
   [PILOT-MODE.md](PILOT-MODE.md#review-rounds-on-pilots-prs).
+- **Per-task QA gate (opt-in).** With `per_task_qa` on, each finished task is
+  checked for tests that assert its acceptance criteria at the right layer
+  before the reviewer sees it. A serious gap sends it back. See
+  [PILOT-MODE.md](PILOT-MODE.md).
+- **`board lint`.** Flags vague Backlog cards, asks the questions they leave
+  open, and can write testable acceptance criteria into the goal. It exits 1
+  on a vague card, so it can gate `board dispatch`. See [BOARD.md](BOARD.md).
+- **Telemetry intake.** The `sentry`, `posthog` and `custom` daemon sources
+  file production errors, failing events, rage clicks, slow pages, or any
+  JSON feed as Backlog cards on `wingman board`. Cards are deduped by a
+  fingerprint label, and a card you archived is refiled only if the problem
+  comes back. These sources never dispatch a run. See
+  [PILOT-MODE.md](PILOT-MODE.md#telemetry-intake-sentry-posthog-custom).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,
