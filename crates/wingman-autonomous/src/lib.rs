@@ -53,6 +53,7 @@ pub mod security;
 pub mod severity;
 pub mod skillpack;
 pub mod store;
+pub mod telemetry;
 pub mod tools;
 pub mod watcher;
 pub mod worker;

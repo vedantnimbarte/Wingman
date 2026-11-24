@@ -18,6 +18,7 @@
 pub mod card;
 pub mod column;
 pub mod dispatch;
+pub mod intake;
 pub mod registry;
 pub mod rollup;
 pub mod store;
@@ -26,6 +27,7 @@ pub mod view;
 pub use card::{Card, NewCard};
 pub use column::{Badge, BoardCard, Column};
 pub use dispatch::{DispatchOpts, DispatchPlan, Dispatched};
+pub use intake::{fp_label, Filed};
 pub use registry::Project;
 pub use rollup::{Rollup, SubRow};
 pub use store::{BoardError, BoardStore, Result};

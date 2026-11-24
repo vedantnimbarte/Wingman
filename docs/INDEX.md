@@ -79,6 +79,7 @@ Welcome to Wingman's technical documentation. This index guides you to the right
   - Best for: seeing what is planned, running, in review and done across every repo — with the agent, model, cost and logs behind each task.
   - Read this if: you want a backlog that survives runs, or you're implementing it.
   - Spec: [BOARD-SPEC.md](BOARD-SPEC.md). Build order and design record: [BOARD-PLAN.md](BOARD-PLAN.md). Status: **shipped** — in the terminal and in the panel ([WEB-UI.md](WEB-UI.md)).
+- **[FACTORY-LOOP-PLAN.md](FACTORY-LOOP-PLAN.md)** — Plan for telemetry intake (Sentry/PostHog/custom → board cards), a reviewer that remembers prior findings, a per-task QA gate with `board lint`, and `wingman polish`. Status: **phase 1 (telemetry intake) built**, phases 2–4 planned.
 
 - **[DIFFERENTIATION.md](DIFFERENTIATION.md)** — Differentiation roadmap (model routing, warm repo index, verification receipts, team memory).
   - Best for: Understanding how Wingman plans to beat Claude Code/Codex on speed, trust, and retention.

@@ -28,6 +28,7 @@ pub mod metrics;
 pub mod notify;
 pub mod pilot;
 pub mod pilot_intake;
+pub mod pilot_telemetry;
 pub mod pilot_ui;
 pub mod pilot_watch_tui;
 pub mod plugin;

@@ -2340,7 +2340,9 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
         "pr_checks",
     ];
     for s in &pilot.daemon.sources {
-        if !IMPLEMENTED_SOURCES.contains(&s.as_str()) {
+        if !IMPLEMENTED_SOURCES.contains(&s.as_str())
+            && !super::pilot_telemetry::SOURCES.contains(&s.as_str())
+        {
             eprintln!(
                 "[pilot] daemon: source '{s}' is configured but not yet implemented — ignoring it \
                  (implemented: {IMPLEMENTED_SOURCES:?})."
@@ -2418,6 +2420,11 @@ pub async fn daemon(cfg: Config, cycles: usize, dry_run: bool, watch: bool) -> R
             poll_feedback(&runner, &project.root, n).await;
         }
 
+        // Telemetry sources are remote, so a file save never wakes them. They
+        // file board cards and never reach the dispatch path below.
+        if wake != Wake::FileChange {
+            super::pilot_telemetry::intake_cycle(&pilot.daemon, &project.root, dry_run, n).await;
+        }
         let results = wingman_autonomous::daemon::run_cycle(
             &runner,
             &project.root,

@@ -476,6 +476,12 @@ Wingman different; this is everything else it does.
   replies on each thread, and resolves only the threads the push actually
   changed. Rounds per PR are capped and share `[pilot].max_usd`. See
   [PILOT-MODE.md](PILOT-MODE.md#review-rounds-on-pilots-prs).
+- **Telemetry intake.** The `sentry`, `posthog` and `custom` daemon sources
+  file production errors, failing events, rage clicks, slow pages, or any
+  JSON feed as Backlog cards on `wingman board`. Cards are deduped by a
+  fingerprint label, and a card you archived is refiled only if the problem
+  comes back. These sources never dispatch a run. See
+  [PILOT-MODE.md](PILOT-MODE.md#telemetry-intake-sentry-posthog-custom).
 - **VS Code extension.** `editors/vscode` brings `semantic_search` and
   `recall_memory` into the editor over `wingman mcp-serve`.
 - **Agent Client Protocol.** `wingman acp` speaks ACP over stdio, so Zed,

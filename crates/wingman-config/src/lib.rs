@@ -1703,6 +1703,21 @@ impl Config {
                 }
             }
         }
+        // Telemetry source tokens.
+        let daemon = &mut self.pilot.daemon;
+        let tokens = daemon
+            .sentry
+            .iter_mut()
+            .map(|s| &mut s.token)
+            .chain(daemon.posthog.iter_mut().map(|p| &mut p.token))
+            .chain(daemon.custom.iter_mut().filter_map(|c| c.token.as_mut()));
+        for s in tokens {
+            if let Some(name) = strip_env_placeholder(s) {
+                if let Ok(val) = std::env::var(name) {
+                    *s = val;
+                }
+            }
+        }
         // Notification webhook URLs are secrets too — resolve `${ENV_VAR}`.
         for url in self.pilot.notifications.webhooks.values_mut() {
             if let Some(name) = strip_env_placeholder(url) {
@@ -3160,6 +3175,106 @@ pub struct PilotDaemonConfig {
     /// budget bounds spend.
     #[serde(default = "default_max_review_rounds")]
     pub max_review_rounds: u32,
+    /// `sentry` source — unresolved Sentry issues filed as board cards.
+    pub sentry: Option<SentrySourceConfig>,
+    /// `posthog` source — exceptions, failure events, rage clicks and slow
+    /// pages filed as board cards.
+    pub posthog: Option<PostHogSourceConfig>,
+    /// `custom` source — any JSON endpoint or command, mapped by pointers.
+    pub custom: Vec<CustomSourceConfig>,
+}
+
+/// `[pilot.daemon.sentry]`. Telemetry sources never dispatch: each finding is
+/// filed as a Backlog card, deduped by a fingerprint label.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct SentrySourceConfig {
+    /// `https://sentry.io`, `https://de.sentry.io`, or a self-hosted origin.
+    pub base_url: String,
+    pub org: String,
+    pub project: String,
+    /// Auth token with `event:read project:read`. Use `${SENTRY_AUTH_TOKEN}`.
+    pub token: String,
+    pub window_days: u32,
+}
+
+impl Default for SentrySourceConfig {
+    fn default() -> Self {
+        Self {
+            base_url: "https://sentry.io".into(),
+            org: String::new(),
+            project: String::new(),
+            token: String::new(),
+            window_days: 14,
+        }
+    }
+}
+
+/// `[pilot.daemon.posthog]`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct PostHogSourceConfig {
+    /// `https://us.posthog.com`, `https://eu.posthog.com`, or self-hosted.
+    pub host: String,
+    pub project_id: String,
+    /// Personal API key with query read access. Use `${POSTHOG_PERSONAL_API_KEY}`.
+    pub token: String,
+    pub window_days: u32,
+    /// A signal files only once this many distinct people hit it.
+    pub min_users: u32,
+    /// Event names that mean "this user's action failed" (e.g. `checkout_failed`).
+    pub failure_events: Vec<String>,
+    /// Which signals to query: `exception`, `failure_events`, `rageclick`, `web_vitals`.
+    pub signals: Vec<String>,
+}
+
+impl Default for PostHogSourceConfig {
+    fn default() -> Self {
+        Self {
+            host: "https://us.posthog.com".into(),
+            project_id: String::new(),
+            token: String::new(),
+            window_days: 14,
+            min_users: 5,
+            failure_events: Vec::new(),
+            signals: vec![
+                "exception".into(),
+                "failure_events".into(),
+                "rageclick".into(),
+                "web_vitals".into(),
+            ],
+        }
+    }
+}
+
+/// `[[pilot.daemon.custom]]` — a JSON endpoint (`kind = "http"`) or a command
+/// that prints JSON (`kind = "cli"`). Fields are JSON pointers (RFC 6901).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomSourceConfig {
+    /// Short name; part of the fingerprint, so don't rename it casually.
+    pub name: String,
+    /// `http` or `cli`.
+    pub kind: String,
+    /// URL for `http`.
+    pub url: String,
+    /// Program and args for `cli`. Run directly, never through a shell.
+    pub command: Vec<String>,
+    /// Bearer token for `http`. Supports `${ENV_VAR}`.
+    pub token: Option<String>,
+    /// Pointer to the array of items. Empty = the document itself.
+    pub items: String,
+    /// Pointer (inside an item) to a stable id. Defaults to `/id`.
+    pub id: String,
+    /// Pointer to a one-line title. Defaults to `/title`.
+    pub title: String,
+    /// Optional pointer to a longer description.
+    pub body: String,
+    /// Optional pointer to a link back to the item.
+    pub link: String,
 }
 
 fn default_feedback_poll_secs() -> u64 {
@@ -3201,14 +3316,18 @@ impl Default for PilotDaemonConfig {
             speculative: false,
             policy: String::new(),
             // Live sources: github_issues, todos, ci_failures, dependabot,
-            // coverage_gaps, intake, ask, pr_reviews, pr_checks. The default advertises only
-            // `github_issues`; add the others explicitly.
+            // coverage_gaps, intake, ask, pr_reviews, pr_checks, and the
+            // board-filing telemetry sources sentry, posthog, custom. The
+            // default advertises only `github_issues`; add the others explicitly.
             sources: vec!["github_issues".into()],
             slack_signing_secret: None,
             intake_dir: default_intake_dir(),
             feedback_poll_secs: default_feedback_poll_secs(),
             watch_debounce_ms: 1000,
             max_review_rounds: default_max_review_rounds(),
+            sentry: None,
+            posthog: None,
+            custom: Vec::new(),
         }
     }
 }
