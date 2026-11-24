@@ -546,14 +546,16 @@ pub async fn run(ascii: bool) -> Result<ExitCode> {
         let mut terminal = pilot_ui::setup()?;
         let outcome = run_loop(&mut terminal, &mut ui);
         pilot_ui::teardown(&mut terminal)?;
-        outcome?;
+        // `run_loop` only ever exits with SUCCESS; errors are what matter here.
+        let _ = outcome?;
 
         // `o` drops out of the loop so the board's terminal is fully restored
         // before `pilot watch` claims it; we re-enter when the user quits it.
         let Some((root, run_id)) = ui.handoff.take() else {
             return Ok(ExitCode::SUCCESS);
         };
-        super::pilot_watch_tui::run(&root, Some(run_id), 250, ui.glyphs.ascii)?;
+        // Back to the board whatever `pilot watch` exited with.
+        let _ = super::pilot_watch_tui::run(&root, Some(run_id), 250, ui.glyphs.ascii)?;
         ui.reload();
     }
 }
