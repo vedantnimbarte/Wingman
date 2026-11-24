@@ -32,4 +32,14 @@ ignore = [
     # because it arrived with the `pdf` feature and should not appear
     # unexplained.
     "RUSTSEC-2026-0192",
+
+    # libsqlite3-sys 0.28.0 — the bundled SQLite (< 3.54) can return stale
+    # page-cache memory when a database is opened with a crafted sibling `-wal`
+    # file of a different page size. Local only: the victim must open files a
+    # less trusted party wrote. Our databases are ones Wingman creates (board,
+    # learn, the RAG index), but a project's `.wingman/` index could arrive in
+    # a cloned repo. Fixed in libsqlite3-sys 0.39 (rusqlite >= 0.41), which
+    # needs cc >= 1.2 — the same tree-sitter-javascript `cc = "~1.0.90"` pin as
+    # ring above. Clears with the tree-sitter 0.22 -> 0.23 migration.
+    "RUSTSEC-2026-0459",
 ]
