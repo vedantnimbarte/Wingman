@@ -189,7 +189,7 @@ Insert into SQLite with embedding vector
   would read as passed and failed (see decisions/0016).
 
 **Relevant code:**
-- `crates/wingman-ts/src/highlight.rs` — runs `tree-sitter-highlight` with each grammar's bundled query.
+- `crates/wingman-ts/src/highlight.rs` — runs `tree-sitter-highlight` with each grammar's bundled query (Kotlin's grammar ships none, so its query is `crates/wingman-ts/queries/kotlin-highlights.scm`).
 - `crates/wingman-tui/src/widgets/code.rs` — maps scopes to styles from the theme.
 - `crates/wingman-tui/src/modal/file_view.rs` — the file view.
 

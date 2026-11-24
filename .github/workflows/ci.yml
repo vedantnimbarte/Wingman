@@ -21,7 +21,7 @@ permissions:
 # releases). Dependabot's github-actions ecosystem keeps them current.
 #
 # `dtolnay/rust-toolchain` is the deliberate exception: it selects the
-# toolchain *by ref name* (`@stable`, `@1.88`), so pinning it to a SHA
+# toolchain *by ref name* (`@stable`, `@1.89`), so pinning it to a SHA
 # would silently change which Rust it installs.
 
 env:
@@ -71,16 +71,17 @@ jobs:
         run: cargo fmt --all --check
 
   # MSRV check: verify the workspace still compiles on its declared floor
-  # (rust-version = "1.88"). 1.88 is the real floor today — the dependency tree
-  # (darling 0.23 → 1.88, icu 2.2 → 1.86, built → 1.87) pulls it up. Required
+  # (rust-version = "1.89"). 1.89 is the real floor today — rusqlite 0.41+
+  # (the bundled-SQLite fix) declares 1.89, and the rest of the tree (darling
+  # 0.23 → 1.88, icu 2.2 → 1.86, built → 1.87) sits just under it. Required
   # again (see the aggregate below) so the declared MSRV can't silently drift.
   msrv:
-    name: msrv (1.88)
+    name: msrv (1.89)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install Rust 1.88
-        uses: dtolnay/rust-toolchain@1.88
+      - name: Install Rust 1.89
+        uses: dtolnay/rust-toolchain@1.89
       - name: Cache cargo build
         uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
       - name: cargo check on MSRV
@@ -328,7 +329,7 @@ jobs:
             exit 1
           fi
           if [ "${{ needs.msrv.result }}" != "success" ]; then
-            echo "MSRV (1.88) check failed: ${{ needs.msrv.result }}"
+            echo "MSRV (1.89) check failed: ${{ needs.msrv.result }}"
             exit 1
           fi
           if [ "${{ needs.audit.result }}" != "success" ]; then

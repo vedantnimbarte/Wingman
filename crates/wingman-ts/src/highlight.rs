@@ -39,31 +39,34 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
+/// Kotlin highlights, written against `tree-sitter-kotlin-ng`'s node types.
+const KOTLIN_HIGHLIGHTS: &str = include_str!("../queries/kotlin-highlights.scm");
+
 fn config_for(lang: Language) -> Option<HighlightConfiguration> {
     let (ts_lang, highlights, injections, locals) = match lang {
         Language::Rust => (
-            tree_sitter_rust::language(),
+            tree_sitter_rust::LANGUAGE.into(),
             tree_sitter_rust::HIGHLIGHTS_QUERY,
             tree_sitter_rust::INJECTIONS_QUERY,
             "",
         ),
         Language::Python => (
-            tree_sitter_python::language(),
+            tree_sitter_python::LANGUAGE.into(),
             tree_sitter_python::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
         Language::JavaScript => (
-            tree_sitter_javascript::language(),
+            tree_sitter_javascript::LANGUAGE.into(),
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::INJECTIONS_QUERY,
             tree_sitter_javascript::LOCALS_QUERY,
         ),
         Language::TypeScript | Language::Tsx => {
             let ts = if matches!(lang, Language::Tsx) {
-                tree_sitter_typescript::language_tsx()
+                tree_sitter_typescript::LANGUAGE_TSX.into()
             } else {
-                tree_sitter_typescript::language_typescript()
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
             };
             (
                 ts,
@@ -73,26 +76,27 @@ fn config_for(lang: Language) -> Option<HighlightConfiguration> {
             )
         }
         Language::Go => (
-            tree_sitter_go::language(),
+            tree_sitter_go::LANGUAGE.into(),
             tree_sitter_go::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
         Language::Cpp => (
-            tree_sitter_cpp::language(),
+            tree_sitter_cpp::LANGUAGE.into(),
             tree_sitter_cpp::HIGHLIGHT_QUERY,
             "",
             "",
         ),
         Language::Java => (
-            tree_sitter_java::language(),
+            tree_sitter_java::LANGUAGE.into(),
             tree_sitter_java::HIGHLIGHTS_QUERY,
             "",
             "",
         ),
         Language::Kotlin => (
-            tree_sitter_kotlin::language(),
-            tree_sitter_kotlin::HIGHLIGHTS_QUERY,
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+            // The -ng grammar ships no queries; this one is ours.
+            KOTLIN_HIGHLIGHTS,
             "",
             "",
         ),
@@ -176,12 +180,8 @@ pub fn highlight_html(lang: Language, src: &str) -> Option<String> {
         .ok()?;
     let mut renderer = HtmlRenderer::new();
     renderer
-        .render(events, src.as_bytes(), &|attr| {
-            let class = format!("class=\"ts-{}\"", HIGHLIGHT_NAMES[attr.0]);
-            // tree_sitter_highlight returns a `&[u8]` from the callback —
-            // we need a stable slice, so leak a small allocation per scope.
-            // In practice this fires once per scope name per call.
-            Box::leak(class.into_boxed_str()).as_bytes()
+        .render(events, src.as_bytes(), &|attr, out| {
+            out.extend_from_slice(format!("class=\"ts-{}\"", HIGHLIGHT_NAMES[attr.0]).as_bytes());
         })
         .ok()?;
     Some(String::from_utf8_lossy(&renderer.html).into_owned())
@@ -208,5 +208,33 @@ mod tests {
         }
         let spans = highlight(Language::Kotlin, "fun main() { val x = 1 }");
         assert!(spans.iter().any(|s| s.scope.is_some()));
+    }
+
+    /// Our hand-written Kotlin query, with the parse error shown if a grammar
+    /// bump renames a node it uses.
+    #[test]
+    fn kotlin_query_compiles_and_tags_the_basics() {
+        let cfg = HighlightConfiguration::new(
+            tree_sitter_kotlin_ng::LANGUAGE.into(),
+            "kotlin",
+            KOTLIN_HIGHLIGHTS,
+            "",
+            "",
+        );
+        assert!(cfg.is_ok(), "{:?}", cfg.err());
+
+        let src = "fun greet(name: String) { println(\"hi\") }";
+        let scope_of = |needle: &str| {
+            let at = src.find(needle).unwrap();
+            highlight(Language::Kotlin, src)
+                .into_iter()
+                .find(|s| s.start_byte <= at && at < s.end_byte && s.scope.is_some())
+                .and_then(|s| s.scope)
+                .map(|i| HIGHLIGHT_NAMES[i])
+        };
+        assert_eq!(scope_of("fun"), Some("keyword"));
+        assert_eq!(scope_of("greet"), Some("function"));
+        assert_eq!(scope_of("String"), Some("type"));
+        assert_eq!(scope_of("\"hi\""), Some("string"));
     }
 }
