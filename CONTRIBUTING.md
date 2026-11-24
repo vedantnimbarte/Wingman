@@ -6,7 +6,7 @@ the review bar is, and one policy that matters more than usual for this project.
 ## Building
 
 Wingman is a Rust workspace. You need the toolchain at or above the declared
-MSRV (`rust-version` in the root `Cargo.toml`, currently 1.88).
+MSRV (`rust-version` in the root `Cargo.toml`, currently 1.89).
 
 ```sh
 cargo build --workspace

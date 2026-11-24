@@ -70,23 +70,27 @@ a local-only tool.
 permissive licence, or keep the feature permanently local-only and never
 publish a binary built with it.
 
-## Tree-sitter grammars held at the 0.22 ABI
+## Tree-sitter on the `tree-sitter-language` shim
 
-**Status:** tracked; clears with the tree-sitter 0.23 migration.
+**Status:** migrated from 0.22. `tree-sitter` and `tree-sitter-highlight` are
+on 0.26; each grammar exports a `LANGUAGE` constant through the
+`tree-sitter-language` shim, so grammars no longer have to match the runtime's
+minor version. All are MIT and build their parser from bundled C through `cc`.
 
-`wingman-ts` is on `tree-sitter` 0.22, and every grammar crate has to link
-against that runtime, so each is pinned to its last release before the move to
-the `tree-sitter-language` shim: `tree-sitter-cpp` 0.22.3, `tree-sitter-java`
-0.21.0 and `tree-sitter-kotlin` 0.3.8 (alongside the older Rust, Python,
-JavaScript, TypeScript and Go grammars). All are MIT, all build their parser
-from bundled C through `cc` with no extra system dependency, and none declares a
-`rust-version` that conflicts with the workspace MSRV.
-
-`tree-sitter-kotlin` (fwcd's grammar) caps `tree-sitter` at `<0.23` and has no
-0.23 release, so the migration swaps it for `tree-sitter-kotlin-ng` rather than
-bumping it. The Kotlin grammar also declares no field names; `wingman-ts` finds
-declaration names by child kind instead, which is the part to re-check after
-that swap.
+- **Held at 0.26, not 0.27.** `tree-sitter` 0.27 declares Rust 1.90, above the
+  workspace MSRV (1.89). `tree-sitter-language` is likewise locked at 0.1.7,
+  because 0.1.8 and later declare 1.90. Move both when the MSRV does.
+- **Kotlin uses `tree-sitter-kotlin-ng`.** fwcd's `tree-sitter-kotlin` never
+  left the 0.22 ABI. The `-ng` grammar names declarations through a `name`
+  field (`type` for a type alias), which `wingman-ts` now reads, but it ships
+  no queries. The Kotlin highlight query is ours, in
+  `crates/wingman-ts/queries/kotlin-highlights.scm`, and a test checks that it
+  compiles and tags keywords, function names, types and strings.
+- **What the migration unblocked.** `tree-sitter-javascript` 0.21 pinned `cc`
+  to `~1.0.90`, which held back `ring` (RUSTSEC-2025-0009) and `rusqlite`'s
+  bundled SQLite (RUSTSEC-2026-0459). With it gone, `ring` is on 0.17.14 and
+  `rusqlite` on 0.43, and both advisory ignores are removed. `rusqlite` 0.41+
+  declares Rust 1.89, which is why the MSRV moved from 1.88.
 
 ## Advisories we currently tolerate
 
@@ -94,10 +98,8 @@ Each of these is an `[advisories].ignore` entry in `.cargo/audit.toml`.
 
 | Advisory | Crate | Why it stands | Clears when |
 | --- | --- | --- | --- |
-| RUSTSEC-2025-0009 | `ring` 0.17.9 | AES functions may panic under overflow checking. Fixed in ring ≥ 0.17.12, which needs `cc ^1.2.8`; we are held at `cc` 1.0.x by `tree-sitter-javascript` 0.21.4 (`cc = "~1.0.90"`). | The tree-sitter 0.22 → 0.23 migration lands. This is the real blocker, not ring. |
 | RUSTSEC-2024-0436 | `paste` 1.0.15 | Unmaintained proc-macro, pulled transitively by `tokenizers` → `fastembed`. No first-party code touches it. | `fastembed`/`tokenizers` drop it upstream. |
 | RUSTSEC-2026-0002, RUSTSEC-2026-0253 | `lru` 0.12.5 | Two unsoundness advisories (`IterMut` stacked-borrows; panic safety in `pop()`). Pinned by `ratatui` 0.29.0 for its internal line-wrap cache; we never call `lru` directly. | `ratatui` bumps its `lru` dependency. |
-| RUSTSEC-2026-0459 | `libsqlite3-sys` 0.28.0 | Bundled SQLite < 3.54 can return stale page-cache memory when a database is opened with a crafted `-wal` file whose page size differs. Local only; the victim must open files someone else wrote. Wingman opens only its own databases (board, learn, RAG index), but a project's `.wingman/` index could arrive in a cloned repo. Fixed in libsqlite3-sys 0.39 (`rusqlite` ≥ 0.41), which needs `cc` ≥ 1.2: the same `tree-sitter-javascript` pin as `ring`. | The tree-sitter 0.22 → 0.23 migration lands, then `rusqlite` moves to ≥ 0.41. |
 | RUSTSEC-2026-0192 | `ttf-parser` 0.25.1 | Unmaintained font parser, reached only through `pdf-extract` (glyph-to-character mapping during text extraction). No first-party code touches it. | `pdf-extract` moves to a maintained parser, or the `pdf` feature is dropped. |
 
 ## Policy

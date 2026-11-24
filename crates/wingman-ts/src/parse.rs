@@ -33,15 +33,15 @@ const DEFAULT_MAX_CHUNK_LINES: u32 = 400;
 
 fn ts_language(lang: Language) -> tree_sitter::Language {
     match lang {
-        Language::Rust => tree_sitter_rust::language(),
-        Language::Python => tree_sitter_python::language(),
-        Language::JavaScript => tree_sitter_javascript::language(),
-        Language::TypeScript => tree_sitter_typescript::language_typescript(),
-        Language::Tsx => tree_sitter_typescript::language_tsx(),
-        Language::Go => tree_sitter_go::language(),
-        Language::Cpp => tree_sitter_cpp::language(),
-        Language::Java => tree_sitter_java::language(),
-        Language::Kotlin => tree_sitter_kotlin::language(),
+        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
+        Language::Python => tree_sitter_python::LANGUAGE.into(),
+        Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+        Language::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        Language::Go => tree_sitter_go::LANGUAGE.into(),
+        Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+        Language::Java => tree_sitter_java::LANGUAGE.into(),
+        Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
     }
 }
 
@@ -410,12 +410,12 @@ fn java_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
 }
 
 fn kotlin_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
-    // The Kotlin grammar declares no field names, so a declaration's name is
-    // its first child of the identifier kind.
-    let (name_kind, kind) = match node.kind() {
-        "function_declaration" => ("simple_identifier", SymbolKind::Function),
-        "object_declaration" => ("type_identifier", SymbolKind::Class),
-        "type_alias" => ("type_identifier", SymbolKind::TypeAlias),
+    // tree-sitter-kotlin-ng puts a declaration's name in a field: `name`,
+    // except a type alias, whose new name is its `type` field.
+    let (field, kind) = match node.kind() {
+        "function_declaration" => ("name", SymbolKind::Function),
+        "object_declaration" => ("name", SymbolKind::Class),
+        "type_alias" => ("type", SymbolKind::TypeAlias),
         "class_declaration" => {
             let kind = if kotlin_child(node, "interface").is_some() {
                 SymbolKind::Interface
@@ -424,15 +424,11 @@ fn kotlin_symbol(src: &str, node: &Node) -> Option<(String, SymbolKind)> {
             } else {
                 SymbolKind::Class
             };
-            ("type_identifier", kind)
+            ("name", kind)
         }
         _ => return None,
     };
-    let name = kotlin_child(node, name_kind)?;
-    Some((
-        src.get(name.start_byte()..name.end_byte())?.to_string(),
-        kind,
-    ))
+    Some((child_text(src, node, field)?.to_string(), kind))
 }
 
 fn kotlin_child<'t>(node: &Node<'t>, kind: &str) -> Option<Node<'t>> {
