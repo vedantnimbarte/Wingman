@@ -106,12 +106,27 @@ fn parse(args: Value) -> Result<Action, String> {
 /// - http(s) only: `file://` would read any file on disk past path
 ///   containment, and `javascript:` / `chrome://` are not pages.
 /// - Under `local_only`, loopback only — the dev-server case.
-/// - Never the link-local range, which holds the cloud metadata endpoint
-///   `web_fetch` also refuses. Unlike `web_fetch`, loopback and private
+/// - Never link-local (169.254/16, fe80::/10 — the cloud metadata range) or
+///   CGNAT (100.64/10, where some clouds put theirs), by literal *or* by a
+///   name that resolves there. Unlike `web_fetch`, loopback and private
 ///   addresses are allowed: a dev server is the point of this tool.
-///   ponytail: IP literals only; a DNS name resolving to 169.254.x.x is not
-///   caught. Resolve and check like `web_fetch` if that matters.
+///
+/// ponytail: resolved here, not by Chrome's resolver, so a rebinding name
+/// can still flip between this check and Chrome's lookup. Every action
+/// re-checks the page's final URL (`guard_current_page`), which catches
+/// redirects but not that race; a Chrome-side resolver rule closes it.
 fn check_url(url: &str, local_only: bool) -> Result<(), String> {
+    check_url_with(url, local_only, |host, port| {
+        use std::net::ToSocketAddrs;
+        Ok((host, port).to_socket_addrs()?.map(|sa| sa.ip()).collect())
+    })
+}
+
+fn check_url_with(
+    url: &str,
+    local_only: bool,
+    resolve: impl Fn(&str, u16) -> std::io::Result<Vec<IpAddr>>,
+) -> Result<(), String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("invalid URL: {e}"))?;
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("browser only opens http:// or https:// URLs".into());
@@ -120,34 +135,61 @@ fn check_url(url: &str, local_only: bool) -> Result<(), String> {
         .host_str()
         .ok_or_else(|| "URL has no host".to_string())?;
     // IPv6 hosts come back bracketed.
-    let Ok(host) = raw
+    if let Ok(ip) = raw
         .trim_start_matches('[')
         .trim_end_matches(']')
         .parse::<IpAddr>()
-    else {
-        let d = raw.trim_end_matches('.').to_ascii_lowercase();
-        if local_only && d != "localhost" && !d.ends_with(".localhost") {
+    {
+        if let Some(why) = blocked(ip) {
+            return Err(format!("refusing to open {why} address {ip}"));
+        }
+        if local_only && !ip.is_loopback() && !unmap(ip).is_loopback() {
             return Err(local_only_refusal(url));
         }
         return Ok(());
-    };
-    let host = match host {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(host),
-        v4 => v4,
-    };
-    let link_local = match host {
-        IpAddr::V4(v4) => v4.is_link_local(),
-        IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
-    };
-    if link_local {
-        return Err(format!(
-            "refusing to open link-local address {host} (cloud metadata range)"
-        ));
     }
-    if local_only && !host.is_loopback() {
+    let d = raw.trim_end_matches('.').to_ascii_lowercase();
+    if d == "localhost" || d.ends_with(".localhost") {
+        return Ok(());
+    }
+    if local_only {
         return Err(local_only_refusal(url));
     }
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    let ips = resolve(raw, port).map_err(|e| format!("DNS resolution failed for {raw}: {e}"))?;
+    if ips.is_empty() {
+        return Err(format!("no addresses resolved for {raw}"));
+    }
+    for ip in ips {
+        if let Some(why) = blocked(ip) {
+            return Err(format!(
+                "refusing to open {raw}: it resolves to {why} address {ip}"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// IPv4-mapped IPv6 (`::ffff:a.b.c.d`) checked as the IPv4 it is.
+fn unmap(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(ip),
+        v4 => v4,
+    }
+}
+
+/// Why the browser may never reach `ip`, if it may not.
+fn blocked(ip: IpAddr) -> Option<&'static str> {
+    match unmap(ip) {
+        IpAddr::V4(v4) if v4.is_link_local() => Some("link-local (cloud metadata range)"),
+        IpAddr::V4(v4) if v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 0x40 => {
+            Some("CGNAT (cloud metadata range)")
+        }
+        IpAddr::V6(v6) if (v6.segments()[0] & 0xffc0) == 0xfe80 => {
+            Some("link-local (cloud metadata range)")
+        }
+        _ => None,
+    }
 }
 
 fn local_only_refusal(url: &str) -> String {
@@ -214,8 +256,12 @@ impl Tool for Browser {
             Err(e) => return ToolOutcome::err(e),
         };
         if let Action::Navigate(url) = &action {
-            if let Err(e) = check_url(url, self.local_only) {
-                return ToolOutcome::err(e);
+            // May resolve DNS, which blocks; keep it off the reactor.
+            let (url, local_only) = (url.clone(), self.local_only);
+            match tokio::task::spawn_blocking(move || check_url(&url, local_only)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return ToolOutcome::err(e),
+                Err(e) => return ToolOutcome::err(format!("browser task failed: {e}")),
             }
         }
         self.drive(action, ctx).await
@@ -354,6 +400,43 @@ fn guard_current_page(s: &wingman_browser::Session, local_only: bool) -> Result<
 mod tests {
     use super::*;
 
+    /// A resolver with no network: the names these tests use, nothing else.
+    fn check(url: &str, local_only: bool) -> Result<(), String> {
+        check_url_with(url, local_only, |host, _| {
+            let ips: &[&str] = match host {
+                "example.com" => &["93.184.215.14"],
+                "metadata.google.internal" => &["169.254.169.254"],
+                "rebind.test" => &["93.184.215.14", "169.254.169.254"],
+                "alibaba.test" => &["100.100.100.200"],
+                "v6meta.test" => &["fe80::1"],
+                "devbox.test" => &["192.168.1.10"],
+                _ => return Err(std::io::Error::other("no such host")),
+            };
+            Ok(ips.iter().map(|ip| ip.parse().unwrap()).collect())
+        })
+    }
+
+    #[test]
+    fn names_resolving_to_metadata_ranges_are_refused() {
+        for lo in [false, true] {
+            for u in [
+                "http://metadata.google.internal/computeMetadata/v1/",
+                "http://rebind.test/",
+                "http://alibaba.test/",
+                "http://v6meta.test/",
+                "http://100.100.100.200/",
+            ] {
+                assert!(check(u, lo).is_err(), "{u} local_only={lo}");
+            }
+        }
+        let err = check("http://metadata.google.internal/", false).unwrap_err();
+        assert!(err.contains("169.254.169.254"), "{err}");
+        assert!(check("http://devbox.test:3000/", false).is_ok());
+        assert!(check("http://nowhere.test/", false)
+            .unwrap_err()
+            .contains("DNS resolution failed"));
+    }
+
     #[test]
     fn url_policy_allows_dev_servers_and_public_pages() {
         for u in [
@@ -362,11 +445,11 @@ mod tests {
             "http://[::1]:8080/",
             "http://app.localhost/",
         ] {
-            assert!(check_url(u, true).is_ok(), "{u} under local_only");
-            assert!(check_url(u, false).is_ok(), "{u}");
+            assert!(check(u, true).is_ok(), "{u} under local_only");
+            assert!(check(u, false).is_ok(), "{u}");
         }
-        assert!(check_url("https://example.com/", false).is_ok());
-        assert!(check_url("http://192.168.1.20:3000/", false).is_ok());
+        assert!(check("https://example.com/", false).is_ok());
+        assert!(check("http://192.168.1.20:3000/", false).is_ok());
     }
 
     #[test]
@@ -380,7 +463,7 @@ mod tests {
             "http://[::ffff:169.254.169.254]/",
             "not a url",
         ] {
-            assert!(check_url(u, false).is_err(), "{u}");
+            assert!(check(u, false).is_err(), "{u}");
         }
     }
 
@@ -395,7 +478,7 @@ mod tests {
             "http://127.0.0.1.evil.com/",
             "http://localhost.evil.com/",
         ] {
-            let err = check_url(u, true).unwrap_err();
+            let err = check(u, true).unwrap_err();
             assert!(err.contains("local_only"), "{u}: {err}");
         }
     }

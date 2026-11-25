@@ -256,9 +256,9 @@ name, value and ANSI-stripped traceback, tail-clipped to 4 KiB), then
   (`pip install nbconvert ipykernel`). `wingman doctor` reports it.
 - nbconvert itself fails (no kernel, timeout, invalid notebook): the tail of
   its output; the notebook is not updated.
-- On Windows, a file name containing a space or a cmd.exe metacharacter is
-  refused, because `run_shell`'s `cmd /C` path cannot pass a quoted argument.
-  Rename the notebook or call jupyter via `run_shell`.
+- On Windows the path is double-quoted for cmd.exe, so spaces and `&|<>()^`
+  are fine. A name containing `"` or `%` is refused: cmd has no escape for the
+  first inside quotes and expands `%VAR%` even there.
 
 **Not validated live:** tested at the argv and output-parsing level only; no
 test executes a real Jupyter kernel.
@@ -655,7 +655,11 @@ background job started, click through it, read what broke. One tool with an
   `[tools].allow_network` alone is not enough in read-only mode.
 - http(s) URLs only (`file://` would read past path containment). Unlike
   `web_fetch`, localhost and private addresses are allowed — a dev server is
-  the point. Link-local IP literals (the cloud metadata endpoint) are refused.
+  the point. Link-local (169.254/16, fe80::/10) and CGNAT (100.64/10) — the
+  cloud metadata ranges — are refused, whether given as an IP literal or as a
+  hostname that resolves there (`metadata.google.internal`). The check resolves
+  the name itself; Chrome resolves it again, so a DNS-rebinding name could still
+  race the two.
   After every action the tab's actual URL is re-checked, so a click or redirect
   onto a refused URL blanks the page instead of returning it.
 - Under `[privacy].local_only` only `localhost`, `127.0.0.1` and `[::1]` open,

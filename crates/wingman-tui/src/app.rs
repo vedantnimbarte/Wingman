@@ -626,11 +626,31 @@ async fn run_inner(
                                 if exp.attached == 1 { "" } else { "s" }
                             )));
                         }
+                        // Images ride along as content blocks; the prompt
+                        // keeps its `[IMAGE: name]` placeholders so the model
+                        // can refer to each by name. A provider without
+                        // vision gets none of them, and the user is told.
+                        let mut images = Vec::new();
                         if !exp.images.is_empty() {
-                            ui.transcript.push(TranscriptItem::System(format!(
-                                "Vision: {} image(s) attached. Full image content requires provider vision support.",
-                                exp.images.len()
-                            )));
+                            let n = exp.images.len();
+                            let s = if n == 1 { "" } else { "s" };
+                            if a.provider_supports_vision() {
+                                ui.transcript
+                                    .push(TranscriptItem::System(format!("attached {n} image{s}")));
+                                images = exp
+                                    .images
+                                    .into_iter()
+                                    .map(|i| wingman_core::ContentBlock::Image {
+                                        data: i.base64,
+                                        media_type: i.media_type,
+                                    })
+                                    .collect();
+                            } else {
+                                ui.transcript.push(TranscriptItem::Error(format!(
+                                    "provider {} has no vision support; {n} image{s} not sent",
+                                    a.provider_id()
+                                )));
+                            }
                         }
                         // If a skill was queued, prepend its body and clear
                         // the slot — skills are one-shot.
@@ -656,7 +676,9 @@ async fn run_inner(
                             a,
                             &mut events,
                             &mut ui,
-                            final_prompt,
+                            std::iter::once(wingman_core::ContentBlock::text(final_prompt))
+                                .chain(images)
+                                .collect(),
                             steer.clone(),
                         )
                         .await?;
@@ -1702,7 +1724,7 @@ async fn run_turn(
     agent: &mut AgentLoop,
     events: &mut EventStream,
     ui: &mut UiState,
-    prompt: String,
+    content: Vec<wingman_core::ContentBlock>,
     steer: Option<std::sync::Arc<wingman_core::SteerInbox>>,
 ) -> Result<Vec<bool>> {
     // Persistence is the agent loop's job now — it is the only place that
@@ -1710,7 +1732,7 @@ async fn run_turn(
     // It does hand back the turn's verification-gate results, for routing.
     let mut assistant_text = String::new();
     let mut gates = Vec::new();
-    let mut stream = agent.run(prompt.clone());
+    let mut stream = agent.run_blocks(content);
     loop {
         let mut done = false;
         tokio::select! {
